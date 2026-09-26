@@ -30,6 +30,8 @@ private:
     TileMipLayout mip{};
     std::uint32_t elementBytes = 0;
     std::uint32_t layers = 1;
+    bool volume = false;
+    bool thick = false;
     std::uint64_t sliceBytes = 0;
     std::uint64_t guestBase = 0;
     std::vector<std::byte> tiled;

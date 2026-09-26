@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
@@ -65,9 +66,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         trim();
         return texture;
     }
-    const auto mips = ComputeMipLayout(resource.tileMode, resource.format, resource.width, resource.height, resource.mipCount);
-    const auto layers = resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::kCube ? resource.depthOrLastArray + 1u : 1u;
-    const auto bytes = ComputeSurfaceSize(mips, layers);
+    const auto bytes = GuestTextureBytes(resource);
     Require(bytes != 0 && bytes <= std::numeric_limits<std::size_t>::max(), "texture cache surface size overflow");
     std::vector<std::byte> snapshot(static_cast<std::size_t>(bytes));
     GuestMemory::Read(resource.baseAddress, snapshot, 1);

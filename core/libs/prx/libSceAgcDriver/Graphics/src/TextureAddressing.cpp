@@ -1,4 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include <bit>
+#include <limits>
 #include <stdexcept>
 
 namespace AgcDriver::Graphics {
@@ -71,6 +74,53 @@ std::uint32_t depthOffset(std::uint32_t x, std::uint32_t y, std::uint32_t elemen
     }
 }
 
+std::uint32_t standard4KBVolumeOffset(std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t elementBytes) {
+    switch (elementBytes) {
+        case 1:
+            return (x & 0x3u) ^ ((x << 4u) & 0x40u) ^ ((x << 6u) & 0x200u) ^ ((y << 3u) & 0x8u) ^ ((y << 4u) & 0x20u) ^ ((y << 6u) & 0x100u) ^ ((y << 8u) & 0x800u)
+                ^ ((z << 2u) & 0x4u) ^ ((z << 3u) & 0x10u) ^ ((z << 5u) & 0x80u) ^ ((z << 7u) & 0x400u);
+        case 2:
+            return ((x << 1u) & 0x2u) ^ ((x << 5u) & 0x40u) ^ ((x << 7u) & 0x200u) ^ ((y << 3u) & 0x8u) ^ ((y << 4u) & 0x20u) ^ ((y << 6u) & 0x100u) ^ ((y << 8u) & 0x800u)
+                ^ ((z << 2u) & 0x4u) ^ ((z << 3u) & 0x10u) ^ ((z << 5u) & 0x80u) ^ ((z << 7u) & 0x400u);
+        case 4:
+            return ((x << 2u) & 0x4u) ^ ((x << 5u) & 0x40u) ^ ((x << 7u) & 0x200u) ^ ((y << 3u) & 0x8u) ^ ((y << 4u) & 0x20u) ^ ((y << 6u) & 0x100u) ^ ((y << 8u) & 0x800u)
+                ^ ((z << 4u) & 0x10u) ^ ((z << 6u) & 0x80u) ^ ((z << 8u) & 0x400u);
+        case 8:
+            return ((x << 3u) & 0x8u) ^ ((x << 5u) & 0x40u) ^ ((x << 7u) & 0x200u) ^ ((y << 5u) & 0x20u) ^ ((y << 7u) & 0x100u) ^ ((y << 9u) & 0x800u)
+                ^ ((z << 4u) & 0x10u) ^ ((z << 6u) & 0x80u) ^ ((z << 8u) & 0x400u);
+        default:
+            return ((x << 6u) & 0x40u) ^ ((x << 8u) & 0x200u) ^ ((y << 5u) & 0x20u) ^ ((y << 7u) & 0x100u) ^ ((y << 9u) & 0x800u)
+                ^ ((z << 4u) & 0x10u) ^ ((z << 6u) & 0x80u) ^ ((z << 8u) & 0x400u);
+    }
+}
+
+std::uint32_t bit(std::uint32_t value, std::uint32_t source, std::uint32_t destination) {
+    return ((value >> source) & 1u) << destination;
+}
+
+std::uint32_t standard64KBVolumeOffset(std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint32_t elementBytes) {
+    static constexpr std::uint8_t sources[5][4] = {{4, 4, 4, 5}, {3, 4, 4, 4}, {3, 3, 4, 4}, {3, 3, 3, 4}, {2, 3, 3, 3}};
+    const auto* bits = sources[std::countr_zero(elementBytes)];
+    return standard4KBVolumeOffset(x, y, z, elementBytes) ^ bit(x, bits[0], 12) ^ bit(z, bits[1], 13) ^ bit(y, bits[2], 14) ^ bit(x, bits[3], 15);
+}
+
+struct ThickBlock {
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t depth;
+    std::uint32_t bytes;
+};
+
+ThickBlock thickBlock(TextureTileMode mode, std::uint32_t elementBytes) {
+    struct Log2 { std::uint8_t width, height, depth; };
+    static constexpr Log2 thick4KB[5] = {{4, 4, 4}, {3, 4, 4}, {3, 4, 3}, {3, 3, 3}, {2, 3, 3}};
+    static constexpr Log2 thick64KB[5] = {{6, 5, 5}, {5, 5, 5}, {5, 5, 4}, {5, 4, 4}, {4, 4, 4}};
+    if (elementBytes == 0 || elementBytes > 16 || (elementBytes & (elementBytes - 1u)) != 0) throw std::runtime_error("AGC graphics: unsupported thick volume element size");
+    const auto index = static_cast<std::size_t>(std::countr_zero(elementBytes));
+    const auto& shape = mode == TextureTileMode::kStandard4KB ? thick4KB[index] : thick64KB[index];
+    return {1u << shape.width, 1u << shape.height, 1u << shape.depth, mode == TextureTileMode::kStandard4KB ? 4096u : 65536u};
+}
+
 std::uint32_t blockBytes(TextureTileMode mode) {
     switch (mode) {
         case TextureTileMode::kStandard256B: return 256u;
@@ -110,6 +160,32 @@ std::uint64_t TexelOffset(TextureTileMode mode, std::uint32_t elementBytes, cons
         inner &= bytes - 1u;
     }
     return mip.tiledOffset + block * bytes + inner;
+}
+
+bool IsThickVolume(const GuestTextureResource& resource) {
+    return resource.dimension == TextureDimension::k3D && (resource.tileMode == TextureTileMode::kStandard4KB || resource.tileMode == TextureTileMode::kStandard64KB);
+}
+
+std::uint64_t ThickVolumeOffset(TextureTileMode mode, std::uint32_t elementBytes, std::uint32_t width, std::uint32_t height, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+    const auto block = thickBlock(mode, elementBytes);
+    const auto columns = static_cast<std::uint64_t>((width + block.width - 1u) / block.width);
+    const auto rows = static_cast<std::uint64_t>((height + block.height - 1u) / block.height);
+    const auto index = (static_cast<std::uint64_t>(z / block.depth) * rows + y / block.height) * columns + x / block.width;
+    const auto inner = mode == TextureTileMode::kStandard4KB ? standard4KBVolumeOffset(x % block.width, y % block.height, z % block.depth, elementBytes) : standard64KBVolumeOffset(x % block.width, y % block.height, z % block.depth, elementBytes);
+    return index * block.bytes + inner;
+}
+
+std::uint64_t GuestTextureBytes(const GuestTextureResource& resource) {
+    const auto slices = resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::kCube || resource.dimension == TextureDimension::k3D ? resource.depthOrLastArray + 1u : 1u;
+    if (IsThickVolume(resource)) {
+        const auto block = thickBlock(resource.tileMode, BytesPerElement(resource.format));
+        const auto columns = static_cast<std::uint64_t>((resource.width + block.width - 1u) / block.width);
+        const auto rows = static_cast<std::uint64_t>((resource.height + block.height - 1u) / block.height);
+        const auto depth = static_cast<std::uint64_t>((slices + block.depth - 1u) / block.depth);
+        return columns * rows * depth * block.bytes;
+    }
+    const auto mips = ComputeMipLayout(resource.tileMode, resource.format, resource.width, resource.height, resource.mipCount);
+    return ComputeSurfaceSize(mips, slices);
 }
 
 }

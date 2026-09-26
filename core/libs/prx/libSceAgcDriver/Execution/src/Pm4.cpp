@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -104,9 +105,10 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         case 0x81: case 0x83: case 0x9f: return {};
         case 0x24: case 0x25: case 0x2c: case 0x38: case 0x3a: case 0x8d:
             return "graphics draw, shader stages and guest render-target materialization are not implemented";
-        case 0x20: return "GPU query predication is not implemented";
+        case 0x20: return {};
         case 0x22: return "conditional command execution and conditional flip reservation are not implemented";
-        case 0x33: case 0x3f: return "nested command buffers, branching and nested flip reservation are not implemented";
+        case 0x3f: return {};
+        case 0x33: return "command-buffer branching is not implemented";
         case 0x3c: case 0x93: return {};
         case 0x39: case 0x59:
             return "cooperative command-queue waits are not implemented";
@@ -156,8 +158,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         }
         return;
     }
-    // Bit 0 is PREDICATE; SET_PREDICATION is rejected, so predication is never active and predicated
-    // packets execute unconditionally, as they do on hardware with predication disabled.
+    // Bit 0 is PREDICATE: the executor skips such packets while SET_PREDICATION's predicate is set.
     if ((header & 0xfeu) != 0 && !(opcode == 0x11 && (header & 0xfeu) == 2))
         throw std::runtime_error("PM4 header flags are not implemented for " + Name(header) + " (header 0x" + [&] { char text[12]{}; std::snprintf(text, sizeof(text), "%08x", header); return std::string(text); }() + ")");
     switch (opcode) {
@@ -193,6 +194,19 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             require((packet.back() & ~0x8000u) == 0x41u, "indirect dispatch modifiers are not implemented");
             break;
         case 0x42: size(2); require(packet[1] == 0, "unsupported PFP_SYNC_ME payload"); break;
+        case 0x20: {
+            size(4);
+            require((packet[1] & ~0x00071100u) == 0, "unsupported SET_PREDICATION fields");
+            const auto operation = (packet[1] >> 16u) & 7u;
+            require(operation == 0 || operation == 1 || operation == 3, "only clear, occlusion and boolean predication are implemented");
+            require(operation == 0 || ((packet[2] & 0xfu) == 0 && (packet[2] != 0 || packet[3] != 0)), "predication requires an aligned address");
+            break;
+        }
+        case 0x3f:
+            size(4);
+            require((packet[1] & 3u) == 0, "misaligned nested command buffer");
+            require((packet[3] & 0x0fe00000u) == 0x0f200000u, "unsupported INDIRECT_BUFFER control fields");
+            break;
         case 0x3c: case 0x93: {
             size(opcode == 0x3c ? 7 : 9);
             require((packet[1] & ~0x060003f7u) == 0, "unsupported WAIT_REG_MEM control fields");
@@ -358,7 +372,7 @@ std::uint64_t GpuClock() {
 
 bool AccessesMemory(std::uint32_t header) {
     switch ((header >> 8u) & 0xffu) {
-        case 0x16: case 0x27: case 0x2d: case 0x35: case 0x37: case 0x3c: case 0x40: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
+        case 0x16: case 0x20: case 0x27: case 0x2d: case 0x35: case 0x37: case 0x3c: case 0x40: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
         default: return false;
     }
 }
@@ -446,6 +460,33 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             return;
         case 0x12:
             queue.ClearContext(); return;
+        case 0x20: {
+            // Predicate semantics follow KytyPS5: condition 0 skips when the value is non-zero,
+            // condition 1 when it is zero.
+            const auto flags = packet[1];
+            const auto operation = (flags >> 16u) & 7u;
+            if (operation == 0) {
+                queue.predicateSkip = false;
+                return;
+            }
+            const auto source = address(packet[2] & ~0xfu, packet[3]);
+            std::uint64_t value = 0;
+            if (operation == 3) {
+                GuestMemory::Read(source, std::as_writable_bytes(std::span(&value, 1)), 8);
+            } else {
+                // Occlusion: one begin/end pair of ZPASS counters per depth block, each marked
+                // ready by bit 63.
+                std::array<std::uint64_t, 32> counters{};
+                GuestMemory::Read(source, std::as_writable_bytes(std::span(counters)), 8);
+                constexpr std::uint64_t ready = 1ull << 63u;
+                for (std::size_t block = 0; block < 16; ++block) {
+                    require((counters[block * 2] & counters[block * 2 + 1] & ready) != 0, "occlusion predication results are not available (occlusion queries are not implemented)");
+                    value += (counters[block * 2 + 1] & ~ready) - (counters[block * 2] & ~ready);
+                }
+            }
+            queue.predicateSkip = ((flags >> 8u) & 1u) == 0 ? value != 0 : value == 0;
+            return;
+        }
         case 0x13: queue.indexBufferSize = packet[1]; return;
         case 0x26: queue.indexBase = address(packet[1], packet[2]); return;
         case 0x2a: queue.indexType = packet[1]; return;

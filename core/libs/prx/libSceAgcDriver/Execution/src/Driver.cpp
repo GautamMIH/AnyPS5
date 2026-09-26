@@ -332,6 +332,47 @@ private:
         }
     }
 
+    // INDIRECT_BUFFER: the nested command buffer is read when execution reaches it and replaces the
+    // packet (call) or the rest of the submission (chain, bit 20).
+    static void spliceIndirectBuffer(Submission& submission, std::size_t cursor) {
+        constexpr std::size_t packetDwords = 4;
+        constexpr std::size_t maximumDwords = 64u * 1024u * 1024u;
+        const auto* packet = submission.commands.data() + cursor;
+        const auto address = (static_cast<std::uint64_t>(packet[2]) << 32u) | (packet[1] & ~3u);
+        const auto dwords = static_cast<std::size_t>(packet[3] & 0xfffffu);
+        const bool chain = (packet[3] & (1u << 20u)) != 0;
+        std::vector<std::uint32_t> nested;
+        if (dwords != 0) {
+            require(address != 0, "nested command buffer has a null address");
+            const auto* source = reinterpret_cast<const std::uint32_t*>(address);
+            GuestMemory::CheckRange(source, dwords * sizeof(std::uint32_t), alignof(std::uint32_t));
+            nested.assign(source, source + dwords);
+            validate(nested, submission.queue);
+            for (std::size_t offset = 0; offset < nested.size(); offset += ((nested[offset] >> 16u) & 0x3fffu) + 2u) {
+                require(nested[offset] != FlipPacketHeader && nested[offset] != RenderingWaitPacketHeader, "flips and rendering waits inside nested command buffers are not implemented");
+            }
+        }
+        require(submission.commands.size() - packetDwords + nested.size() <= maximumDwords, "nested command buffers exceed the submission limit");
+        const auto after = cursor + packetDwords;
+        const auto shift = [&](auto& byOffset) {
+            std::remove_reference_t<decltype(byOffset)> moved;
+            for (auto& [offset, value] : byOffset) {
+                if (offset < after) moved.emplace(offset, std::move(value));
+                else {
+                    require(!chain, "packets after a chained command buffer are not executed");
+                    moved.emplace(offset - packetDwords + nested.size(), std::move(value));
+                }
+            }
+            byOffset = std::move(moved);
+        };
+        shift(submission.flips);
+        shift(submission.renderingWaits);
+        auto& commands = submission.commands;
+        const auto tail = chain ? commands.end() : commands.begin() + static_cast<std::ptrdiff_t>(after);
+        commands.erase(commands.begin() + static_cast<std::ptrdiff_t>(cursor), tail);
+        commands.insert(commands.begin() + static_cast<std::ptrdiff_t>(cursor), nested.begin(), nested.end());
+    }
+
     static void validate(std::span<const std::uint32_t> commands, std::uint32_t queue) {
         for (std::size_t cursor = 0; cursor < commands.size();) {
             const auto header = commands[cursor];
@@ -604,6 +645,14 @@ private:
             const auto count = static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2;
             const auto packet = std::span(submission.commands).subspan(cursor, count);
             const auto opcode = (header >> 8u) & 0xffu;
+            if ((header & 1u) != 0 && queue.predicateSkip) {
+                cursor += count;
+                continue;
+            }
+            if (opcode == 0x3f) {
+                spliceIndirectBuffer(submission, cursor);
+                continue;
+            }
             {
                 PerformanceContext timingContext(frameTiming.get());
                 PerformanceTimer timing("Driver.Packet");

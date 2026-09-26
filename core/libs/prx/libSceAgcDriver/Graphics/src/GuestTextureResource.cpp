@@ -27,6 +27,7 @@ TextureDimension resolveDimension(std::uint32_t raw) {
     switch (raw) {
         case 8: return TextureDimension::k1D;
         case 9: return TextureDimension::k2D;
+        case 10: return TextureDimension::k3D;
         case 11: return TextureDimension::kCube;
         case 13: return TextureDimension::k2DArray;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported image type " + std::to_string(raw));
@@ -110,6 +111,13 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
         case TextureDimension::k2DArray:
             Require(baseArray <= depth, "guest 2D array texture descriptor has a base array past its last array slice");
             break;
+        case TextureDimension::k3D:
+            // Thin tilings store a volume's slices like array layers and standard tilings use
+            // thick blocks (KytyPS5); mip chains, whose depth shrinks per level, are not modelled.
+            Require(baseArray == 0, "guest 3D texture descriptor has a nonzero base slice");
+            Require(tileMode != TextureTileMode::kStandard256B && tileMode != TextureTileMode::Depth64KB, "3D textures in 256-byte or depth tiling are invalid");
+            Require(maxMip == 0, "mipmapped 3D textures are not implemented");
+            break;
         case TextureDimension::kCube:
             Require(width == height, "guest cube texture descriptor is not square");
             Require(baseArray <= depth, "guest cube texture descriptor has a base array past its last array slice");
@@ -143,7 +151,7 @@ bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, Texture
         // A cube's faces are addressable as 2D array layers.
         case ShaderRecompiler::DescriptorImageShape::Image2DArray: return dimension == TextureDimension::k2DArray || dimension == TextureDimension::kCube;
         case ShaderRecompiler::DescriptorImageShape::ImageCube: return dimension == TextureDimension::kCube;
-        case ShaderRecompiler::DescriptorImageShape::Image3D: return false;
+        case ShaderRecompiler::DescriptorImageShape::Image3D: return dimension == TextureDimension::k3D;
     }
     throw std::runtime_error("AGC graphics: MatchesGuestDimension encountered an unknown descriptor image shape");
 }

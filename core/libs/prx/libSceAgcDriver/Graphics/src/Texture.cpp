@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
@@ -20,13 +21,14 @@ std::uint32_t FullArrayLayers(const GuestTextureResource& descriptor) {
         case TextureDimension::k1D:
         case TextureDimension::k2D: return 1u;
         case TextureDimension::k2DArray:
-        case TextureDimension::kCube: return descriptor.depthOrLastArray + 1u;
+        case TextureDimension::kCube:
+        case TextureDimension::k3D: return descriptor.depthOrLastArray + 1u;
     }
     throw std::runtime_error("AGC graphics: Texture encountered an unknown guest texture dimension");
 }
 
 VkImageType ImageTypeFor(TextureDimension dimension) {
-    return dimension == TextureDimension::k1D ? VK_IMAGE_TYPE_1D : VK_IMAGE_TYPE_2D;
+    return dimension == TextureDimension::k1D ? VK_IMAGE_TYPE_1D : dimension == TextureDimension::k3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
 }
 
 VkImageViewType ViewTypeFor(TextureDimension dimension, std::uint32_t viewLayerCount) {
@@ -35,6 +37,7 @@ VkImageViewType ViewTypeFor(TextureDimension dimension, std::uint32_t viewLayerC
         case TextureDimension::k2D: return VK_IMAGE_VIEW_TYPE_2D;
         case TextureDimension::k2DArray: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
         case TextureDimension::kCube: return viewLayerCount == 6u ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+        case TextureDimension::k3D: return VK_IMAGE_VIEW_TYPE_3D;
     }
     throw std::runtime_error("AGC graphics: Texture encountered an unknown guest texture dimension");
 }
@@ -58,7 +61,8 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         const auto arrayLayers = FullArrayLayers(descriptor);
         const auto elementBytes = BytesPerElement(descriptor.format);
 
-        const auto guestBytes = ComputeSurfaceSize(mips, arrayLayers);
+        const auto guestBytes = GuestTextureBytes(descriptor);
+        const bool thick = IsThickVolume(descriptor);
         const auto guestSliceBytes = guestBytes / arrayLayers;
         Require(snapshot.size() == guestBytes, "texture snapshot size mismatch");
 
@@ -70,9 +74,12 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         imageInfo.flags = descriptor.dimension == TextureDimension::kCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0u;
         imageInfo.imageType = ImageTypeFor(descriptor.dimension);
         imageInfo.format = vkFormat;
-        imageInfo.extent = {descriptor.width, descriptor.height, 1u};
+        // A volume's slices are detiled like layers but become depth of a single 3D image layer.
+        const bool volume = descriptor.dimension == TextureDimension::k3D;
+        const auto imageLayers = volume ? 1u : arrayLayers;
+        imageInfo.extent = {descriptor.width, descriptor.height, volume ? arrayLayers : 1u};
         imageInfo.mipLevels = descriptor.mipCount;
-        imageInfo.arrayLayers = arrayLayers;
+        imageInfo.arrayLayers = imageLayers;
         imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -120,11 +127,25 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             const VkBufferMemoryBarrier preBarriers[] = {stagingReadBarrier, linearWriteBarrier};
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 2, preBarriers, 0, nullptr);
 
-            for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
-                const auto guestLayerOffset = static_cast<std::uint64_t>(layer) * guestSliceBytes;
-                const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
-                for (const auto& mip : mips) {
-                    detiler.Dispatch(commands, descriptor.tileMode, elementBytes, staging.Handle(), guestLayerOffset + mip.tiledOffset, linear.Handle(), linearLayerOffset + mip.linearOffset, mip, layer);
+            if (thick) {
+                // Thick blocks span slices, which the 2D detile shader cannot address.
+                const auto& mip = mips.front();
+                auto destination = linear.Bytes();
+                for (std::uint32_t z = 0; z < arrayLayers; ++z) {
+                    for (std::uint32_t y = 0; y < mip.height; ++y) {
+                        for (std::uint32_t x = 0; x < mip.width; ++x) {
+                            const auto source = ThickVolumeOffset(descriptor.tileMode, elementBytes, descriptor.width, descriptor.height, x, y, z);
+                            std::memcpy(destination.data() + z * sliceLinearBytes + mip.linearOffset + (static_cast<std::size_t>(y) * mip.width + x) * elementBytes, snapshot.data() + source, elementBytes);
+                        }
+                    }
+                }
+            } else {
+                for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
+                    const auto guestLayerOffset = static_cast<std::uint64_t>(layer) * guestSliceBytes;
+                    const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
+                    for (const auto& mip : mips) {
+                        detiler.Dispatch(commands, descriptor.tileMode, elementBytes, staging.Handle(), guestLayerOffset + mip.tiledOffset, linear.Handle(), linearLayerOffset + mip.linearOffset, mip, layer);
+                    }
                 }
             }
 
@@ -145,7 +166,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             toTransferDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransferDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransferDst.image = image;
-            toTransferDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, descriptor.mipCount, 0, arrayLayers};
+            toTransferDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, descriptor.mipCount, 0, imageLayers};
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &linearReadBarrier, 1, &toTransferDst);
 
             std::vector<VkBufferImageCopy> regions;
@@ -158,7 +179,8 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                     region.bufferOffset = linearLayerOffset + mip.linearOffset;
                     region.bufferRowLength = mip.pitchBytes / elementBytes * BlockWidth(descriptor.format);
                     region.bufferImageHeight = 0;
-                    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1};
+                    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, volume ? 0u : layer, 1};
+                    if (volume) region.imageOffset.z = static_cast<std::int32_t>(layer);
                     region.imageOffset = {0, 0, 0};
                     region.imageExtent = {std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1u};
                     regions.push_back(region);
@@ -181,7 +203,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         }
 
         const auto viewLevelCount = descriptor.lastLevel - descriptor.baseLevel + 1u;
-        const auto viewLayerCount = arrayLayers - descriptor.baseArray;
+        const auto viewLayerCount = volume ? 1u : arrayLayers - descriptor.baseArray;
         if (descriptor.dimension == TextureDimension::kCube) {
             Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
         }

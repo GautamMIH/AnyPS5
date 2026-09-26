@@ -19,14 +19,14 @@ void* APS5_VABI sceAgcDcbA_zARR5aCmkoY(void) {
 }
 
 
+// INDIRECT_BUFFER: executes another command buffer; mode 1 chains to it (no return), mode 0
+// calls it (layout as in KytyPS5).
 uint32_t* APS5_VABI sceAgcDcbJump(CommandBuffer* buf, uint8_t mode, uint8_t cache_policy, const uint32_t* target, uint32_t size_in_dwords) {
- (void)buf;
- (void)mode;
- (void)cache_policy;
- (void)target;
- (void)size_in_dwords;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    Agc::Command::Require(mode <= 1 && cache_policy <= 3 && size_in_dwords <= 0xfffffu, __func__, "invalid jump fields");
+    const auto address = reinterpret_cast<std::uint64_t>(target);
+    Agc::Command::CheckGpuAddress(address, 4, __func__);
+    const auto control = 0x0f200000u | (static_cast<std::uint32_t>(cache_policy) << 28u) | (static_cast<std::uint32_t>(mode) << 20u) | size_in_dwords;
+    return Agc::Command::Emit(buf, 0x3fu, {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), control}, __func__);
 }
 
 std::uint32_t APS5_VABI sceAgcDcbJumpGetSize() {

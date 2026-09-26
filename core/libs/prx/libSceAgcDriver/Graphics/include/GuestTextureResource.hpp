@@ -21,7 +21,9 @@ enum class TextureDimension {
     k1D,
     k2D,
     k2DArray,
-    kCube
+    kCube,
+    // Volume; its slices are addressed like array layers (thin tilings only).
+    k3D
 };
 
 struct GuestTextureResource {

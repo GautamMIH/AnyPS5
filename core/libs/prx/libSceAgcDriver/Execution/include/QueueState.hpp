@@ -55,6 +55,8 @@ struct QueueState {
     std::uint32_t indexBufferSize = 0;
     std::uint32_t indexType = 0;
     std::uint32_t instanceCount = 1;
+    // Set by SET_PREDICATION; packets with the PREDICATE header bit are skipped while it is true.
+    bool predicateSkip = false;
     std::vector<std::string> markers;
 
     void ClearContext() {
