@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cerrno>
 #include <csignal>
+#include <cstdio>
+#include <dlfcn.h>
 #include <exception>
 #include <fstream>
 #include <sstream>
@@ -17,6 +19,19 @@ namespace {
 FaultHandler faultHandler = nullptr;
 struct sigaction previousAction{};
 
+void reportUnhandledFault(const siginfo_t* info, const ucontext_t* native) {
+    const auto instruction = static_cast<std::uintptr_t>(native->uc_mcontext.gregs[REG_RIP]);
+    Dl_info module{};
+    const bool located = dladdr(reinterpret_cast<void*>(instruction), &module) != 0 && module.dli_fname != nullptr;
+    char message[512];
+    const int length = std::snprintf(message, sizeof(message), "[AnyPS5] unhandled SIGSEGV: address %p, rip %p in %s+0x%lx (%s)\n",
+        info->si_addr, reinterpret_cast<void*>(instruction),
+        located ? module.dli_fname : "unknown",
+        located ? static_cast<unsigned long>(instruction - reinterpret_cast<std::uintptr_t>(module.dli_fbase)) : 0ul,
+        located && module.dli_sname != nullptr ? module.dli_sname : "no symbol");
+    if (length > 0) static_cast<void>(write(STDERR_FILENO, message, static_cast<std::size_t>(std::min<int>(length, sizeof(message) - 1))));
+}
+
 void handleFault(int signal, siginfo_t* info, void* context) {
     const auto* native = static_cast<const ucontext_t*>(context);
     const auto error = native->uc_mcontext.gregs[REG_ERR];
@@ -28,6 +43,7 @@ void handleFault(int signal, siginfo_t* info, void* context) {
         }
     }
     if (previousAction.sa_handler == SIG_DFL || previousAction.sa_handler == SIG_IGN) {
+        reportUnhandledFault(info, native);
         if (sigaction(signal, &previousAction, nullptr) != 0) std::terminate();
         if (raise(signal) != 0) std::terminate();
         return;
