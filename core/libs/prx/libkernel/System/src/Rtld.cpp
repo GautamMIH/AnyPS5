@@ -6,6 +6,20 @@
 
 extern "C" {
 
+#if defined(__linux__)
+void* __tls_get_addr(void* index);
+#endif
+
+void* APS5_VABI __tls_get_addr_nid_postfix(void* index) {
+#if defined(__linux__)
+    return __tls_get_addr(index);
+#else
+    (void)index;
+    NotImplemented_nid_no_patch(__func__);
+    return nullptr;
+#endif
+}
+
 void APS5_VABI sceKernelRtldSetApplicationHeapAPI(void* api[]) {
     ApplicationHeapRegister_nid_no_patch(api);
 }
