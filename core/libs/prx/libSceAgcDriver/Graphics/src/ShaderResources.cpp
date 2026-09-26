@@ -131,6 +131,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
         if (storageBuffers != 0) sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, static_cast<std::uint32_t>(storageBuffers)});
         if (!textures.empty()) sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, static_cast<std::uint32_t>(textures.size())});
         if (!samplers.empty()) sizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLER, static_cast<std::uint32_t>(samplers.size())});
+        if (!storageImages.empty()) sizes.push_back({VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, static_cast<std::uint32_t>(storageImages.size())});
         if (!context.descriptorCache) context.descriptorCache = std::make_shared<DescriptorCache>();
         descriptors = context.descriptorCache->Take(layoutKey);
         if (!descriptors) descriptors = std::make_unique<DescriptorAllocation>(context, layoutKey, description, sizes);
@@ -141,7 +142,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
         std::vector<VkDescriptorImageInfo> images;
         std::vector<VkWriteDescriptorSet> writes;
         buffers.reserve(allocations.size());
-        images.reserve(textures.size() + samplers.size());
+        images.reserve(textures.size() + samplers.size() + storageImages.size());
         writes.reserve(bindings.size());
         for (const auto& binding : bindings) {
             const auto bufferOffset = buffers.size();
@@ -155,6 +156,10 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                 case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
                     for (const auto index : binding.allocations) buffers.push_back(descriptor(allocations[index]));
                     write.pBufferInfo = buffers.data() + bufferOffset;
+                    break;
+                case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
+                    for (const auto index : binding.imageAllocations) images.push_back({VK_NULL_HANDLE, storageImages[index]->View(), VK_IMAGE_LAYOUT_GENERAL});
+                    write.pImageInfo = images.data() + imageOffset;
                     break;
                 case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
                     for (const auto index : binding.imageAllocations) images.push_back({VK_NULL_HANDLE, textures[index]->View(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
@@ -220,9 +225,22 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
     Require(binding.count != 0, "empty descriptor binding");
     const bool sampledImage = binding.kind == ShaderRecompiler::DescriptorKind::SampledImage;
     const bool samplerKind = binding.kind == ShaderRecompiler::DescriptorKind::Sampler;
-    if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage && binding.guestDescriptor.size() >= 8) {
-        const auto resource = DecodeTextureResource(std::span<const std::uint32_t>(binding.guestDescriptor).first(8));
-        throw std::runtime_error("AGC graphics: storage images are not implemented (format " + std::to_string(resource.format) + ", tile mode " + std::to_string(static_cast<int>(resource.tileMode)) + ", " + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ", mips " + std::to_string(resource.mipCount) + ", base level " + std::to_string(resource.baseLevel) + ", count " + std::to_string(binding.count) + ", stages 0x" + std::to_string(flags) + ")");
+    if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) {
+        Require(binding.role == ShaderRecompiler::DescriptorRole::GuestImages, "storage image descriptor role disagrees with its kind");
+        Require(binding.guestDescriptor.size() == static_cast<std::size_t>(binding.count) * 8, "guest storage image descriptor must contain 8 dwords per element");
+        Require(binding.imageShape.has_value(), "guest storage image binding is missing an image shape");
+        Require(binding.count <= context.limits.maxPerStageDescriptorStorageImages, "shader storage-image descriptors exceed per-stage limits");
+        Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, binding.count, flags, nullptr}, {}, {}};
+        for (std::uint32_t element = 0; element < binding.count; ++element) {
+            auto resource = DecodeTextureResource(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 8, 8));
+            Require(MatchesGuestDimension(*binding.imageShape, resource.dimension), "guest storage image dimension disagrees with the shader's declared image shape");
+            if (*binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2DArray) resource.dimension = TextureDimension::k2DArray;
+            storageImages.push_back(std::make_unique<StorageImage>(context, resource));
+            item.imageAllocations.push_back(storageImages.size() - 1);
+        }
+        Require(storageImages.size() <= context.limits.maxDescriptorSetStorageImages, "pipeline storage-image descriptors exceed device limits");
+        bindings.push_back(std::move(item));
+        return;
     }
     Require(sampledImage || samplerKind, std::string("unsupported descriptor kind ") + kindName(binding.kind) + " for role " + roleName(binding.role));
     Require((sampledImage && binding.role == ShaderRecompiler::DescriptorRole::GuestImages) || (samplerKind && binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers), "guest image descriptor role disagrees with its kind");
@@ -285,9 +303,26 @@ void ShaderResources::Bind(VkCommandBuffer commands, VkPipelineBindPoint bindPoi
     context.Function<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(commands, bindPoint, layout, 0, 1, &_set, 0, nullptr);
 }
 
+void ShaderResources::RecordUploads(VkCommandBuffer commands) const {
+    for (const auto& image : storageImages) image->RecordUpload(commands);
+}
+
+void ShaderResources::RecordDownloads(VkCommandBuffer commands) const {
+    for (const auto& image : storageImages) image->RecordDownload(commands);
+}
+
 void ShaderResources::WriteBack() {
     if (bda) bda->CheckFault();
     guestMemory.WriteBack();
+    for (const auto& image : storageImages) image->WriteBack();
+}
+
+bool ShaderResources::WritesOverlap(std::uint64_t address, std::size_t bytes) const {
+    if (guestMemory.WritesOverlap(address, bytes)) return true;
+    for (const auto& image : storageImages) {
+        if (image->Overlaps(address, bytes)) return true;
+    }
+    return false;
 }
 
 }

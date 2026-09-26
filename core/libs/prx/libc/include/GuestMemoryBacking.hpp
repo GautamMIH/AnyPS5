@@ -12,6 +12,10 @@ void GuestMemoryBackingUnmap_nid_postfix(void* address, std::size_t bytes);
 void GuestMemoryBackingCarve_nid_postfix(void* address, std::size_t bytes);
 void GuestMemoryBackingRequire_nid_postfix(std::uint64_t address, std::size_t bytes);
 void GuestMemoryBackingWrite_nid_postfix(std::uint64_t address, const void* source, std::size_t bytes);
+// Changes whenever guest mappings are added, removed or re-protected, so callers can cache
+// host mapping queries.
+std::uint64_t GuestMemoryBackingGeneration_nid_postfix();
+void GuestMemoryBackingNoteChange_nid_postfix();
 }
 
 }

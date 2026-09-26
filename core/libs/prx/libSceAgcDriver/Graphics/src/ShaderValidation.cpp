@@ -129,7 +129,7 @@ struct Module {
     }
 };
 
-Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool imageGatherExtended) {
+Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, const ShaderDeviceFeatures& features) {
     using Stage = ShaderRecompiler::ShaderStage;
     Require(compiled.program != nullptr, "missing compiled shader");
     const auto& shader = *compiled.program;
@@ -200,7 +200,9 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     capability == spv::CapabilityImageBuffer ||
                     capability == spv::CapabilityImageQuery ||
                     capability == spv::CapabilityDerivativeControl ||
-                    (imageGatherExtended && capability == spv::CapabilityImageGatherExtended);
+                    (features.imageGatherExtended && capability == spv::CapabilityImageGatherExtended) ||
+                    (features.storageImageReadWithoutFormat && capability == spv::CapabilityStorageImageReadWithoutFormat) ||
+                    (features.storageImageWriteWithoutFormat && capability == spv::CapabilityStorageImageWriteWithoutFormat);
 
                 const bool isBdaCapability =
                     shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version &&
@@ -432,7 +434,6 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             const auto binding = std::find_if(shader.bindings.begin(), shader.bindings.end(), [&](const auto& item) { return item.descriptorSet == key.first && item.binding == key.second; });
             Require(binding != shader.bindings.end(), "SPIR-V resource is absent from recompiler binding metadata");
             Require(binding->kind == ShaderRecompiler::DescriptorKind::Sampler || binding->kind == ShaderRecompiler::DescriptorKind::SampledImage || binding->kind == ShaderRecompiler::DescriptorKind::StorageImage, "SPIR-V descriptor type disagrees with recompiler binding metadata");
-            Require(binding->kind != ShaderRecompiler::DescriptorKind::StorageImage, "storage image resources are not implemented");
         } else {
             Require(variable.storage == spv::StorageClassStorageBuffer && decoration.set && decoration.binding, "unsupported or unbound shader resource");
             const auto key = std::make_pair(*decoration.set, *decoration.binding);
@@ -488,7 +489,7 @@ struct ValidatedInterface {
     std::map<std::uint32_t, std::string> outputs;
 };
 
-std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool imageGatherExtended) {
+std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, const ShaderDeviceFeatures& features) {
     PerformanceTimer timing("Graphics.ShaderValidation");
     Require(compiled.program != nullptr, "missing compiled shader");
     const auto& shader = *compiled.program;
@@ -513,7 +514,9 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
     append(subgroup.supportedStages);
     append(subgroup.supportedOperations);
     append(fragmentShaderBarycentric);
-    append(imageGatherExtended);
+    append(features.imageGatherExtended);
+    append(features.storageImageReadWithoutFormat);
+    append(features.storageImageWriteWithoutFormat);
     append(shader.bdaAbiVersion);
     append(shader.pushConstants.empty());
     append(shader.bindings.size());
@@ -542,7 +545,7 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
         timing.Mark("hit");
         return found->second;
     }
-    auto module = Inspect(compiled, state, subgroup, fragmentShaderBarycentric, imageGatherExtended);
+    auto module = Inspect(compiled, state, subgroup, fragmentShaderBarycentric, features);
     auto result = std::make_shared<const ValidatedInterface>(ValidatedInterface{std::move(module.inputs), std::move(module.outputs)});
     if (cache.size() >= 128) cache.clear();
     cache.emplace(std::move(key), result);
@@ -552,7 +555,7 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
 
 }
 
-void ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool imageGatherExtended) {
+void ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, const ShaderDeviceFeatures& features) {
     using Stage = ShaderRecompiler::ShaderStage;
     const bool tessellation = state.stages.path == ShaderPath::Tessellation;
     const bool mesh = state.stages.path == ShaderPath::Geometry;
@@ -570,7 +573,7 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         for (const auto& binding : shaders[i].program->bindings) Require(binding.descriptorSet == 0, "graphics resource uses a descriptor set other than zero");
         std::shared_ptr<const ValidatedInterface> current;
         try {
-            current = inspectCached(shaders[i], state, subgroup, fragmentShaderBarycentric, imageGatherExtended);
+            current = inspectCached(shaders[i], state, subgroup, fragmentShaderBarycentric, features);
         } catch (const std::runtime_error& error) {
             throw std::runtime_error(std::string(error.what()) + " in graphics stage " + std::to_string(i) + " (shader stage " + std::to_string(static_cast<int>(shaders[i].stage)) + ")");
         }

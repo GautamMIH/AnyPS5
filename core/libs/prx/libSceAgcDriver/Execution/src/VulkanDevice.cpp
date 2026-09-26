@@ -87,6 +87,8 @@ struct VulkanDevice::State {
     bool depthBounds = false;
     bool depthBiasClamp = false;
     bool imageGatherExtended = false;
+    bool storageImageReadWithoutFormat = false;
+    bool storageImageWriteWithoutFormat = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
     std::unique_ptr<Graphics::TextureDetiler> detiler;
@@ -413,6 +415,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->depthBiasClamp = enabled.depthBiasClamp == VK_TRUE;
     enabled.shaderImageGatherExtended = available.shaderImageGatherExtended;
     state->imageGatherExtended = enabled.shaderImageGatherExtended == VK_TRUE;
+    enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
+    enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
+    state->storageImageReadWithoutFormat = enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
+    state->storageImageWriteWithoutFormat = enabled.shaderStorageImageWriteWithoutFormat == VK_TRUE;
     state->samplerAnisotropy = true;
     state->textureCompressionBC = true;
     deviceInfo.pEnabledFeatures = &enabled;
@@ -800,6 +806,8 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.depthBounds = state->depthBounds;
     context.depthBiasClamp = state->depthBiasClamp;
     context.imageGatherExtended = state->imageGatherExtended;
+    context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
+    context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
     return context;
 }
 
@@ -900,12 +908,14 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
         upload.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &upload, 0, nullptr, 0, nullptr);
+        resources.RecordUploads(commands);
         state->DeviceFunction<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         resources.Bind(commands, VK_PIPELINE_BIND_POINT_COMPUTE, layout);
         if (pushStages != 0) {
             state->DeviceFunction<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes, pushBytes.data());
         }
         state->DeviceFunction<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, x, y, z);
+        resources.RecordDownloads(commands);
         VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         download.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         download.dstAccessMask = VK_ACCESS_HOST_READ_BIT;

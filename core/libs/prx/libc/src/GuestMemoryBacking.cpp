@@ -2,6 +2,7 @@
 #include "prx/libc/include/MemoryBackingPlatform.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -56,6 +57,16 @@ Allocation& find(std::uint64_t address, std::size_t bytes) {
     return allocation;
 }
 
+std::atomic<std::uint64_t> mappingGeneration{0};
+
+}
+
+std::uint64_t GuestMemoryBackingGeneration_nid_postfix() {
+    return mappingGeneration.load(std::memory_order_acquire);
+}
+
+void GuestMemoryBackingNoteChange_nid_postfix() {
+    mappingGeneration.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection) {
@@ -63,6 +74,7 @@ void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::s
     if (bytes == 0 || bytes % pageSize != 0 || alignment < pageSize || (alignment & (alignment - 1)) != 0 || (protection & ~7) != 0) throw std::invalid_argument("invalid shared guest memory mapping");
     if (address != nullptr && reinterpret_cast<std::uintptr_t>(address) % alignment != 0) throw std::invalid_argument("misaligned fixed guest memory mapping");
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    GuestMemoryBackingNoteChange_nid_postfix();
     const auto mapping = Platform::Map(address, bytes, alignment, protection);
     try {
         if (mapping.bytes > std::numeric_limits<std::uint64_t>::max() - mapping.address) throw std::overflow_error("guest backing mapping overflow");
@@ -88,6 +100,7 @@ void GuestMemoryBackingUnmap_nid_postfix(void* pointer, std::size_t bytes) {
     if (address == 0 || bytes == 0 || address % pageSize != 0 || bytes % pageSize != 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) throw std::invalid_argument("misaligned guest backing unmap");
     const auto last = address + bytes;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    GuestMemoryBackingNoteChange_nid_postfix();
     // Like munmap, the range may cover several allocations and already-unmapped gaps; every mapped
     // piece inside it is removed, and an allocation with no mapped pieces left is released.
     bool unmapped = false;
@@ -120,6 +133,7 @@ void GuestMemoryBackingCarve_nid_postfix(void* pointer, std::size_t bytes) {
     if (first == 0 || bytes == 0 || first % pageSize != 0 || bytes % pageSize != 0 || bytes > std::numeric_limits<std::uint64_t>::max() - first) throw std::invalid_argument("invalid guest backing carve range");
     const auto last = first + bytes;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    GuestMemoryBackingNoteChange_nid_postfix();
     GuestMemoryTracking::GuestMemoryTrackingInvalidate_nid_postfix(first, bytes);
     for (auto it = allocations().begin(); it != allocations().end();) {
         auto& allocation = it->second;

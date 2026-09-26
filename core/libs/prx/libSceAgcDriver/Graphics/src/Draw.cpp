@@ -47,7 +47,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     };
     Require(!draw.indexed || !aliasesTargets(draw.indexAddress, indexBytes), "index buffer aliases a render target");
     if (state.rectList) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
-    ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, context.imageGatherExtended);
+    ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, ShaderDeviceFeatures::Of(context));
     const auto shaderStages = PipelineStages(shaders);
     std::uint32_t meshGroups = 0;
     if (state.stages.mesh) {
@@ -118,6 +118,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
     upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
+    resources->RecordUploads(commands);
     if (storage->color) storage->color->Begin(commands);
     if (storage->depth) storage->depth->Begin(commands);
     pipeline.Begin(commands, state.renderExtent);
@@ -144,6 +145,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         }
     }
     context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(commands);
+    resources->RecordDownloads(commands);
     VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     download.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     download.dstAccessMask = VK_ACCESS_HOST_READ_BIT;

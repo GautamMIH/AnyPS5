@@ -188,11 +188,13 @@ int DoMprotect(const void* addr, size_t len, int prot) {
     // Other loaded modules are not tracked as guest allocations; protect them directly.
     GuestAllocations::Range overlapping{};
     if (!mutation.Query(pointer, true, &overlapping) || overlapping.address >= end) {
+        GuestMemoryBacking::GuestMemoryBackingNoteChange_nid_postfix();
         if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
         return 0;
     }
 #endif
     mutation.Protect(pointer, bytes, GuestReadable(prot), GuestWritable(prot), [&] {
+        GuestMemoryBacking::GuestMemoryBackingNoteChange_nid_postfix();
         if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
     });
     return 0;

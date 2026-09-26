@@ -67,6 +67,8 @@ struct Context {
     bool depthBounds = false;
     bool depthBiasClamp = false;
     bool imageGatherExtended = false;
+    bool storageImageReadWithoutFormat = false;
+    bool storageImageWriteWithoutFormat = false;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {

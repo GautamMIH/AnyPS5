@@ -14,8 +14,11 @@
 #endif
 #include <windows.h>
 #else
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <fstream>
+#include <mutex>
 #include <sstream>
+#include <vector>
 #endif
 
 namespace AgcDriver::GuestMemory {
@@ -23,6 +26,57 @@ namespace {
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("AGC driver: ") + reason);
 }
+
+#ifndef _WIN32
+// /proc/self/maps is too slow to parse for every check (draws make hundreds of thousands per
+// frame), so a snapshot is reused until guest mappings change or a range is not covered by it.
+struct MappingEntry {
+    std::uintptr_t first;
+    std::uintptr_t last;
+    std::string permissions;
+};
+
+struct MappingCache {
+    std::mutex mutex;
+    std::uint64_t generation = std::numeric_limits<std::uint64_t>::max();
+    std::vector<MappingEntry> entries;
+};
+
+MappingCache& mappingCache() {
+    static MappingCache cache;
+    return cache;
+}
+
+void loadMappings(std::vector<MappingEntry>& entries) {
+    entries.clear();
+    std::ifstream maps("/proc/self/maps");
+    require(maps.is_open(), "cannot query guest memory maps");
+    std::string line;
+    while (std::getline(maps, line)) {
+        std::istringstream fields(line);
+        MappingEntry entry{};
+        char separator = 0;
+        require(static_cast<bool>(fields >> std::hex >> entry.first >> separator >> entry.last >> entry.permissions) && separator == '-' && entry.first < entry.last && !entry.permissions.empty(), "invalid guest memory map entry");
+        entries.push_back(std::move(entry));
+    }
+}
+
+// Empty when [address, end) is mapped readable (and writable if requested); otherwise the failure.
+std::string checkMappings(const std::vector<MappingEntry>& entries, std::uintptr_t address, std::uintptr_t end, bool writable) {
+    auto it = std::upper_bound(entries.begin(), entries.end(), address, [](std::uintptr_t value, const MappingEntry& entry) { return value < entry.last; });
+    auto cursor = address;
+    for (; cursor < end && it != entries.end(); ++it) {
+        if (!(it->first <= cursor && it->permissions[0] == 'r')) {
+            char detail[160]{};
+            std::snprintf(detail, sizeof(detail), "guest memory is not readable (range 0x%llx+0x%llx, at 0x%llx: mapping 0x%llx-0x%llx %s)", static_cast<unsigned long long>(address), static_cast<unsigned long long>(end - address), static_cast<unsigned long long>(cursor), static_cast<unsigned long long>(it->first), static_cast<unsigned long long>(it->last), it->permissions.c_str());
+            return detail;
+        }
+        if (writable && !(it->permissions.size() > 1 && it->permissions[1] == 'w')) return "guest memory has no write permission";
+        cursor = std::min(end, it->last);
+    }
+    return cursor == end ? std::string() : std::string("guest address range is not mapped");
+}
+#endif
 }
 
 void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
@@ -51,26 +105,14 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         cursor = std::min(end, base + memory.RegionSize);
     }
 #else
-    std::ifstream maps("/proc/self/maps");
-    require(maps.is_open(), "cannot query guest memory maps");
-    std::string line;
-    while (cursor < end && std::getline(maps, line)) {
-        std::istringstream fields(line);
-        std::uintptr_t first = 0;
-        std::uintptr_t last = 0;
-        char separator = 0;
-        std::string permissions;
-        require(static_cast<bool>(fields >> std::hex >> first >> separator >> last >> permissions) && separator == '-' && first < last && !permissions.empty(), "invalid guest memory map entry");
-        if (last <= cursor) continue;
-        if (!(first <= cursor && permissions[0] == 'r')) {
-            char detail[160]{};
-            std::snprintf(detail, sizeof(detail), "guest memory is not readable (range 0x%llx+0x%zx, at 0x%llx: mapping 0x%llx-0x%llx %s)", static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(cursor), static_cast<unsigned long long>(first), static_cast<unsigned long long>(last), permissions.c_str());
-            require(false, detail);
-        }
-        require(!writable || (permissions.size() > 1 && permissions[1] == 'w'), "guest memory has no write permission");
-        cursor = std::min(end, last);
-    }
-    require(cursor == end, "guest address range is not mapped");
+    auto& cache = mappingCache();
+    const std::lock_guard lock(cache.mutex);
+    const auto generation = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
+    if (cache.generation == generation && checkMappings(cache.entries, cursor, end, writable).empty()) return;
+    loadMappings(cache.entries);
+    cache.generation = generation;
+    const auto failure = checkMappings(cache.entries, cursor, end, writable);
+    require(failure.empty(), failure.c_str());
 #endif
 }
 

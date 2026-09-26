@@ -26,7 +26,18 @@ private:
 };
 
 void ValidateShaderPair(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment);
-void ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool imageGatherExtended = false);
+// Optional device features that unlock SPIR-V capabilities.
+struct ShaderDeviceFeatures {
+    bool imageGatherExtended = false;
+    bool storageImageReadWithoutFormat = false;
+    bool storageImageWriteWithoutFormat = false;
+
+    static ShaderDeviceFeatures Of(const Context& context) {
+        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat};
+    }
+};
+
+void ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, const ShaderDeviceFeatures& features = {});
 
 }
 

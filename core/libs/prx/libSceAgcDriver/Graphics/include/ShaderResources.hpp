@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/BdaResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Sampler.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/StorageImage.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DescriptorCache.hpp"
 #include "Recompiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
@@ -24,8 +25,12 @@ public:
     ShaderResources& operator=(const ShaderResources&) = delete;
     VkDescriptorSetLayout Layout() const;
     void Bind(VkCommandBuffer commands, VkPipelineBindPoint bindPoint, VkPipelineLayout layout) const;
+    // Storage images move between guest memory and host images around the draw or dispatch:
+    // uploads are recorded before it (outside any render pass) and downloads after it.
+    void RecordUploads(VkCommandBuffer commands) const;
+    void RecordDownloads(VkCommandBuffer commands) const;
     void WriteBack();
-    bool WritesOverlap(std::uint64_t address, std::size_t bytes) const { return guestMemory.WritesOverlap(address, bytes); }
+    bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
 
 private:
@@ -62,6 +67,7 @@ private:
     std::vector<Allocation> allocations;
     std::vector<std::shared_ptr<Texture>> textures;
     std::vector<std::shared_ptr<Sampler>> samplers;
+    std::vector<std::unique_ptr<StorageImage>> storageImages;
 };
 
 }
