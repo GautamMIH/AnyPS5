@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
 
@@ -19,6 +20,7 @@ enum class MutexType : std::uint32_t {
 
 struct PthreadMutexattrPrivate {
     MutexType type;
+    int protocol = 0;
 };
 
 struct PthreadMutexPrivate {
@@ -37,6 +39,16 @@ struct PthreadCondattrPrivate {
 
 struct PthreadCondPrivate {
     std::condition_variable_any _cv;
+    int _clockid = 0;
+};
+
+struct PthreadRwlockattrPrivate {
+    int type = 0;
+};
+
+struct PthreadRwlockPrivate {
+    std::shared_timed_mutex lock;
+    std::atomic<std::thread::id> writer;
 };
 
 struct PthreadAttrPrivate {

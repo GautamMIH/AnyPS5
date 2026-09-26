@@ -38,12 +38,19 @@ static void FinishThread(PthreadPrivate* self, void* retval) {
     self->_join_cv.notify_all();
 }
 
+#ifndef _WIN32
+static thread_local PthreadPrivate* currentLinuxThread = nullptr;
+#endif
+
 static void RunThread(std::unique_ptr<ThreadArgs> args) {
     APS5_LOG_OUT("RunThread entry=0x%llx arg=%p self=%p", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(args->entry)), args->arg, static_cast<void*>(args->self));
     const auto entry = args->entry;
     void* arg = args->arg;
     PthreadPrivate* self = args->self;
     args.reset();
+#ifndef _WIN32
+    currentLinuxThread = self;
+#endif
     FinishThread(self, entry(arg));
 }
 
@@ -192,6 +199,8 @@ void APS5_VABI scePthreadExit(void* retval) {
     ReleaseThread(self);
     _endthreadex(0);
 #else
+    if (currentLinuxThread)
+        FinishThread(currentLinuxThread, retval);
     pthread_exit(retval);
 #endif
     __builtin_unreachable();
@@ -201,7 +210,12 @@ Pthread APS5_VABI scePthreadSelf() {
 #ifdef _WIN32
     return currentThread;
 #else
-    return nullptr;
+    if (!currentLinuxThread) {
+        auto* initial = new PthreadPrivate();
+        initial->_detached = true;
+        currentLinuxThread = initial;
+    }
+    return currentLinuxThread;
 #endif
 }
 

@@ -16,6 +16,8 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Tsd.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Rwlock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Sem.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Sync.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/CxxThreads.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Attr.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Cond.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Mutex.cpp
@@ -37,7 +39,19 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/AppMetadata/src/ParamJsonParser.cpp
 )
 
-target_include_directories(libkernel PRIVATE ${LIBS_INCLUDE_DIR})
+target_sources(libkernel PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../nid/src/Sha1.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../nid/src/NidCompute.cpp
+)
+if(NOT MSVC)
+    set_source_files_properties(
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../nid/src/Sha1.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/../../nid/src/NidCompute.cpp
+            PROPERTIES COMPILE_OPTIONS "-fvisibility=hidden"
+    )
+endif()
+
+target_include_directories(libkernel PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../../nid/include)
 target_link_libraries(libkernel PRIVATE libc)
 if(WIN32)
     target_compile_definitions(libkernel PRIVATE _WIN32_WINNT=0x0602)
