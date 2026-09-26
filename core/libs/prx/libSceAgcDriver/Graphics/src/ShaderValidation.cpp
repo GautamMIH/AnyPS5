@@ -74,7 +74,9 @@ struct Module {
             for (std::uint32_t i = 0; i < count->second; ++i) location = AddLocations(locations, location, type[2], patch, depth + 1);
             return location;
         }
-        Require(locations.emplace(location | (patch ? 0x10000u : 0u), std::string(patch ? "patch:" : "vertex:") + Signature(typeId)).second, "duplicate shader interface location");
+        const auto signature = std::string(patch ? "patch:" : "vertex:") + Signature(typeId);
+        const auto [existing, inserted] = locations.emplace(location | (patch ? 0x10000u : 0u), signature);
+        Require(inserted, "duplicate shader interface location " + std::to_string(location) + " (" + existing->second + " and " + signature + ")");
         return location + 1;
     }
 
@@ -557,7 +559,12 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         Require(shaders[i].program != nullptr, "missing compiled shader");
         Require(shaders[i].stage == expected, "graphics stage order disagrees");
         for (const auto& binding : shaders[i].program->bindings) Require(binding.descriptorSet == 0, "graphics resource uses a descriptor set other than zero");
-        const auto current = inspectCached(shaders[i], state, subgroup, fragmentShaderBarycentric);
+        std::shared_ptr<const ValidatedInterface> current;
+        try {
+            current = inspectCached(shaders[i], state, subgroup, fragmentShaderBarycentric);
+        } catch (const std::runtime_error& error) {
+            throw std::runtime_error(std::string(error.what()) + " in graphics stage " + std::to_string(i) + " (shader stage " + std::to_string(static_cast<int>(shaders[i].stage)) + ")");
+        }
         if (i != 0) {
             for (const auto& [location, signature] : current->inputs) {
                 const auto output = previous->outputs.find(location);

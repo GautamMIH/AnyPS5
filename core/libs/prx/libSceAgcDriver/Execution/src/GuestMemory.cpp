@@ -62,7 +62,11 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         std::string permissions;
         require(static_cast<bool>(fields >> std::hex >> first >> separator >> last >> permissions) && separator == '-' && first < last && !permissions.empty(), "invalid guest memory map entry");
         if (last <= cursor) continue;
-        require(first <= cursor && permissions[0] == 'r', "guest memory is not readable");
+        if (!(first <= cursor && permissions[0] == 'r')) {
+            char detail[160]{};
+            std::snprintf(detail, sizeof(detail), "guest memory is not readable (range 0x%llx+0x%zx, at 0x%llx: mapping 0x%llx-0x%llx %s)", static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(cursor), static_cast<unsigned long long>(first), static_cast<unsigned long long>(last), permissions.c_str());
+            require(false, detail);
+        }
         require(!writable || (permissions.size() > 1 && permissions[1] == 'w'), "guest memory has no write permission");
         cursor = std::min(end, last);
     }
