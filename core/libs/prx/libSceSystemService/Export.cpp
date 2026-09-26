@@ -25,9 +25,11 @@ int APS5_VABI sceSystemServiceDisableNoticeScreenSkipFlagAutoSet(void) {
 }
 
 int APS5_VABI sceSystemServiceGetDisplaySafeAreaInfo(SystemServiceDisplaySafeAreaInfo* info) {
- (void)info;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (info == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
+ *info = SystemServiceDisplaySafeAreaInfo{};
+ // The host window shows the full frame.
+ info->ratio = 1.0f;
+ return SYSTEM_SERVICE_OK;
 }
 
 int APS5_VABI sceSystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLuminance* luminance) {
@@ -39,9 +41,9 @@ int APS5_VABI sceSystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLumi
 }
 
 int APS5_VABI sceSystemServiceGetNoticeScreenSkipFlag(bool* value) {
- (void)value;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (value == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
+ *value = false;
+ return SYSTEM_SERVICE_OK;
 }
 
 int APS5_VABI sceSystemServiceGetStatus(SystemServiceStatus* status) {
