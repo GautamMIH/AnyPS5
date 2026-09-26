@@ -3,6 +3,11 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
+static constexpr int NP_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80550003);
+static constexpr int NP_ERROR_SIGNED_OUT = static_cast<int>(0x80550006);
+static constexpr uint32_t NP_STATE_SIGNED_OUT = 1;
+static constexpr uint32_t NP_REACHABILITY_STATE_UNAVAILABLE = 0;
+
 extern "C" {
 
 int APS5_VABI sceNpAbortRequest(int req_id) {
@@ -67,15 +72,14 @@ int APS5_VABI sceNpGetAccountAge(int req_id, int user_id, uint8_t* age) {
 int APS5_VABI sceNpGetAccountCountryA(int user_id, void* country_code) {
  (void)user_id;
  (void)country_code;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return NP_ERROR_SIGNED_OUT;
 }
 
 int APS5_VABI sceNpGetAccountIdA(int user_id, uint64_t* account_id) {
  (void)user_id;
- (void)account_id;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!account_id) return NP_ERROR_INVALID_ARGUMENT;
+ *account_id = 0;
+ return NP_ERROR_SIGNED_OUT;
 }
 
 int APS5_VABI sceNpGetNpId(int user_id, NpId* np_id) {
@@ -87,8 +91,8 @@ int APS5_VABI sceNpGetNpId(int user_id, NpId* np_id) {
 
 int APS5_VABI sceNpGetNpReachabilityState(int user_id, uint32_t* state) {
  (void)user_id;
- (void)state;
- NotImplemented_nid_no_patch(__func__);
+ if (!state) return NP_ERROR_INVALID_ARGUMENT;
+ *state = NP_REACHABILITY_STATE_UNAVAILABLE;
  return 0;
 }
 
@@ -101,8 +105,8 @@ int APS5_VABI sceNpGetOnlineId(int user_id, NpOnlineId* online_id) {
 
 int APS5_VABI sceNpGetState(int user_id, uint32_t* state) {
  (void)user_id;
- (void)state;
- NotImplemented_nid_no_patch(__func__);
+ if (!state) return NP_ERROR_INVALID_ARGUMENT;
+ *state = NP_STATE_SIGNED_OUT;
  return 0;
 }
 

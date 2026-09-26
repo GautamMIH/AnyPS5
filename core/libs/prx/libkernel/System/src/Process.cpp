@@ -1,3 +1,4 @@
+#include <random>
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -57,8 +58,12 @@ void* APS5_VABI sceKernelGetProcParam(void) {
 }
 
 int APS5_VABI sceKernelUuidCreate(uint32_t* uuid) {
- (void)uuid;
- NotImplemented_nid_no_patch(__func__);
+ if (!uuid) return static_cast<int>(0x80020016);
+ std::random_device device;
+ for (int index = 0; index < 4; ++index) uuid[index] = device();
+ auto* bytes = reinterpret_cast<std::uint8_t*>(uuid);
+ bytes[6] = static_cast<std::uint8_t>((bytes[6] & 0x0f) | 0x40);
+ bytes[8] = static_cast<std::uint8_t>((bytes[8] & 0x3f) | 0x80);
  return 0;
 }
 

@@ -8,5 +8,8 @@ constexpr int USER_SERVICE_ERROR_INVALID_ARGUMENT = -2137653246;
 constexpr int USER_SERVICE_ERROR_NO_EVENT = -2137653241;
 constexpr int USER_SERVICE_USER_ID_INVALID = -1;
 constexpr int USER_SERVICE_INITIAL_USER_ID = 0x10000000;
+constexpr std::uint32_t USER_SERVICE_ADULT_AGE_LEVEL = 18;
+constexpr char USER_SERVICE_NAME_VARIABLE[] = "USER";
+constexpr char USER_SERVICE_DEFAULT_NAME[] = "Player";
 
 #endif

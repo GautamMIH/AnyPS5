@@ -10,6 +10,8 @@
 #include "prx/libScePad/include/Pad.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 
+static constexpr int PAD_EXTENDED_ERROR_INVALID_ARG = static_cast<int>(0x80920001);
+
 extern "C" {
 
 int APS5_VABI scePadClose_nid_postfix(int handle) {
@@ -21,8 +23,9 @@ int APS5_VABI scePadClose_nid_postfix(int handle) {
 
 int APS5_VABI scePadDeviceClassGetExtendedInformation(int handle, PadDeviceClassExtendedInformation* info) {
  (void)handle;
- (void)info;
- NotImplemented_nid_no_patch(__func__);
+ if (!info) return PAD_EXTENDED_ERROR_INVALID_ARG;
+ *info = PadDeviceClassExtendedInformation{};
+ info->deviceClass = PAD_DEVICE_CLASS_STANDARD;
  return 0;
 }
 
