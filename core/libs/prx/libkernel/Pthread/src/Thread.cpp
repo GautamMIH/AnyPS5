@@ -59,9 +59,15 @@ static void RunThread(std::unique_ptr<ThreadArgs> args) {
     args.reset();
 #ifndef _WIN32
     currentLinuxThread = self;
+    self->hostThread = pthread_self();
+    self->hostRunning = true;
     PthreadStacks::RegisterCurrent();
 #endif
-    FinishThread(self, entry(arg));
+    void* result = entry(arg);
+#ifndef _WIN32
+    self->hostRunning = false;
+#endif
+    FinishThread(self, result);
 #ifndef _WIN32
     PthreadStacks::UnregisterCurrent();
 #endif
@@ -218,8 +224,10 @@ void APS5_VABI scePthreadExit(void* retval) {
     ReleaseThread(self);
     _endthreadex(0);
 #else
-    if (currentLinuxThread)
+    if (currentLinuxThread) {
+        currentLinuxThread->hostRunning = false;
         FinishThread(currentLinuxThread, retval);
+    }
     pthread_exit(retval);
 #endif
     __builtin_unreachable();
@@ -232,6 +240,8 @@ Pthread APS5_VABI scePthreadSelf() {
     if (!currentLinuxThread) {
         auto* initial = new PthreadPrivate();
         initial->_detached = true;
+        initial->hostThread = pthread_self();
+        initial->hostRunning = true;
         currentLinuxThread = initial;
     }
     return currentLinuxThread;

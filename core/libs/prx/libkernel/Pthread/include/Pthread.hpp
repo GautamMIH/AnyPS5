@@ -11,6 +11,9 @@
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 enum class MutexType : std::uint32_t {
     ErrorCheck = 1,
@@ -73,6 +76,9 @@ struct PthreadPrivate {
     std::atomic<unsigned> references{2};
 #else
     std::thread _thr;
+    // Host thread running this guest thread, valid while hostRunning is set (signal delivery).
+    pthread_t hostThread{};
+    std::atomic<bool> hostRunning{false};
 #endif
     void* stackAddress = nullptr;
     std::size_t stackSize = 0;

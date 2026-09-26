@@ -197,8 +197,11 @@ int DoMprotect(const void* addr, size_t len, int prot) {
 int DoMunmap(void* addr, size_t len) {
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0 || !addr) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
+    bool released = false;
     mutation.Unmap(addr, len, [&](const void*, bool) {
+        if (released) return;
         Unmap(addr, len);
+        released = true;
     });
     return 0;
 }

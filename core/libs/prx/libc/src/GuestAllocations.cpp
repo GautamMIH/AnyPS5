@@ -173,18 +173,39 @@ void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, st
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply) {
     GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, bytes);
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
-    const auto found = registry().ranges.upper_bound(address);
-    require(found != registry().ranges.begin(), "unmap address is not registered");
-    const auto& range = *std::prev(found)->second;
-    require(range.releasable, "guest image memory cannot be unmapped");
-    require(address >= range.address && address - range.allocationAddress <= range.allocationBytes && bytes <= range.allocationBytes - (address - range.allocationAddress), "unmap crosses allocation boundaries");
-    auto replacement = replaceRange(pointer, bytes, true, false, false);
-    bool last = true;
-    for (const auto& [base, entry] : replacement) {
-        if (entry->allocationAddress == range.allocationAddress) last = false;
+    require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "unmap range overflow");
+    const auto end = address + bytes;
+    // Like munmap, the range may span several allocations and unmapped gaps. Every registered piece
+    // is checked first, then released on its own; apply reports each piece's allocation and whether
+    // that allocation has no registered pieces left.
+    const auto overlapping = [&](std::uintptr_t cursor) {
+        auto& ranges = registry().ranges;
+        auto it = ranges.upper_bound(cursor);
+        if (it != ranges.begin() && std::prev(it)->first + std::prev(it)->second->bytes > cursor) --it;
+        return it;
+    };
+    bool any = false;
+    for (auto it = overlapping(address); it != registry().ranges.end() && it->first < end; ++it) {
+        require(it->second->releasable, "guest image memory cannot be unmapped");
+        any = true;
     }
-    apply(reinterpret_cast<const void*>(range.allocationAddress), last);
-    registry().ranges.swap(replacement);
+    require(any, "unmap address is not registered");
+    for (auto cursor = address; cursor < end;) {
+        const auto it = overlapping(cursor);
+        if (it == registry().ranges.end() || it->first >= end) break;
+        const auto& range = *it->second;
+        const auto pieceBegin = std::max(cursor, range.address);
+        const auto pieceEnd = std::min(end, range.address + range.bytes);
+        const auto allocation = range.allocationAddress;
+        auto replacement = replaceRange(reinterpret_cast<const void*>(pieceBegin), pieceEnd - pieceBegin, true, false, false);
+        bool last = true;
+        for (const auto& [base, entry] : replacement) {
+            if (entry->allocationAddress == allocation) last = false;
+        }
+        apply(reinterpret_cast<const void*>(allocation), last);
+        registry().ranges.swap(replacement);
+        cursor = pieceEnd;
+    }
 }
 
 bool GuestAllocationsQuery_nid_postfix(void*, const void* pointer, bool findNext, Range* result) {

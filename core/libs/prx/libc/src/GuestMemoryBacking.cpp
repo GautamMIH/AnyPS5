@@ -85,24 +85,33 @@ void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::s
 void GuestMemoryBackingUnmap_nid_postfix(void* pointer, std::size_t bytes) {
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
-    if (address % pageSize != 0 || bytes % pageSize != 0) throw std::invalid_argument("misaligned guest backing unmap");
+    if (address == 0 || bytes == 0 || address % pageSize != 0 || bytes % pageSize != 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) throw std::invalid_argument("misaligned guest backing unmap");
+    const auto last = address + bytes;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
-    auto& allocation = find(address, bytes);
-    auto replacement = allocation.ranges;
-    const auto found = std::prev(replacement.upper_bound(address));
-    const auto first = found->first;
-    const auto last = found->second;
-    replacement.erase(found);
-    if (first < address) replacement.emplace(first, address);
-    if (address + bytes < last) replacement.emplace(address + bytes, last);
+    // Like munmap, the range may cover several allocations and already-unmapped gaps; every mapped
+    // piece inside it is removed, and an allocation with no mapped pieces left is released.
+    bool unmapped = false;
     GuestMemoryTracking::GuestMemoryTrackingInvalidate_nid_postfix(address, bytes);
-    if (replacement.empty()) {
-        releaseAllocation(allocation);
-        std::erase_if(allocations(), [&allocation](const auto& entry) { return &entry.second == &allocation; });
-    } else {
-        Platform::Deactivate(address, bytes);
-        allocation.ranges.swap(replacement);
+    for (auto it = allocations().begin(); it != allocations().end();) {
+        auto& allocation = it->second;
+        std::map<std::uint64_t, std::uint64_t> removed;
+        auto remaining = removeInterval(allocation.ranges, address, last, &removed);
+        if (removed.empty()) {
+            ++it;
+            continue;
+        }
+        unmapped = true;
+        if (remaining.empty()) {
+            releaseAllocation(allocation);
+            it = allocations().erase(it);
+            continue;
+        }
+        for (const auto& [begin, end] : removed)
+            Platform::Deactivate(begin, static_cast<std::size_t>(end - begin));
+        allocation.ranges.swap(remaining);
+        ++it;
     }
+    if (!unmapped) throw std::runtime_error("guest memory backing range is unmapped");
 }
 
 void GuestMemoryBackingCarve_nid_postfix(void* pointer, std::size_t bytes) {
