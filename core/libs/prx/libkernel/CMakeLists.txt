@@ -17,6 +17,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Rwlock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Sem.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Sync.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/Stacks.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/src/CxxThreads.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Attr.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Cond.cpp

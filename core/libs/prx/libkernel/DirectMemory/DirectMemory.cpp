@@ -181,6 +181,12 @@ int DoMprotect(const void* addr, size_t len, int prot) {
         if (memory.AllocationBase != GetModuleHandleW(nullptr)) throw std::invalid_argument("Memory protection of a foreign image is not supported");
         mutation.RegisterMainImage();
     }
+#else
+    GuestAllocations::Range overlapping{};
+    if (!mutation.Query(pointer, true, &overlapping) || overlapping.address >= end) {
+        if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
+        return 0;
+    }
 #endif
     mutation.Protect(pointer, bytes, GuestReadable(prot), GuestWritable(prot), [&] {
         if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");

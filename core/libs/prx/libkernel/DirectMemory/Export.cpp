@@ -5,6 +5,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "DirectMemory.hpp"
+#include "prx/libkernel/Pthread/include/PthreadStacks.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <map>
 #include <mutex>
@@ -160,9 +161,8 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
 // ---------------------------------------------------------------------------
 
 int APS5_VABI sceKernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
- (void)start;
- (void)len;
- NotImplemented_nid_no_patch(__func__);
+ if (start < 0 || len == 0 || (static_cast<uint64_t>(start) & (PS5_PAGE_SIZE - 1)) != 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
+ DirectMemoryFree(start, len);
  return 0;
 }
 
@@ -185,10 +185,10 @@ int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** en
 }
 
 int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
- (void)addr;
- (void)start;
- (void)end;
- NotImplemented_nid_no_patch(__func__);
+ if (!PthreadStacks::Find(reinterpret_cast<std::uintptr_t>(addr), start, end)) {
+  if (start) *start = nullptr;
+  if (end) *end = nullptr;
+ }
  return 0;
 }
 

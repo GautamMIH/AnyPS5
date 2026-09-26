@@ -1,5 +1,6 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include <cstdio>
 #include <limits>
 #include <iterator>
 #include <map>
@@ -152,7 +153,11 @@ std::map<std::uint64_t, std::shared_ptr<const Range>> replaceRange(const void* p
         insert(std::min(finish, end), finish, range.readable, range.writable);
         cursor = std::min(finish, end);
     }
-    require(cursor == end, "guest protection or unmap range is not registered");
+    if (cursor != end) {
+        char message[128];
+        std::snprintf(message, sizeof(message), "guest protection or unmap range is not registered (%#llx+%#zx, first gap %#llx)", static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(cursor));
+        throw std::runtime_error(message);
+    }
     return replacement;
 }
 

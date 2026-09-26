@@ -1,5 +1,6 @@
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
+#include "../include/PthreadStacks.hpp"
 #include <algorithm>
 #include <cstring>
 #include "prx/libc/include/General.hpp"
@@ -58,8 +59,12 @@ static void RunThread(std::unique_ptr<ThreadArgs> args) {
     args.reset();
 #ifndef _WIN32
     currentLinuxThread = self;
+    PthreadStacks::RegisterCurrent();
 #endif
     FinishThread(self, entry(arg));
+#ifndef _WIN32
+    PthreadStacks::UnregisterCurrent();
+#endif
 }
 
 #ifdef _WIN32
