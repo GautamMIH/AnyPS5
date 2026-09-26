@@ -58,6 +58,15 @@ bool currentBounds(std::uintptr_t& start, std::uintptr_t& end) {
 
 }
 
+void CurrentBounds(void** lowest, std::size_t* size) {
+    std::uintptr_t start = 0;
+    std::uintptr_t end = 0;
+    if (!currentBounds(start, end))
+        throw std::runtime_error("cannot determine the current thread stack");
+    *lowest = reinterpret_cast<void*>(start);
+    *size = end - start;
+}
+
 void RegisterCurrent() {
     if (current.start != 0)
         return;

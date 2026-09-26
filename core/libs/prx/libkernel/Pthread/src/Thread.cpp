@@ -61,6 +61,8 @@ static void RunThread(std::unique_ptr<ThreadArgs> args) {
     currentLinuxThread = self;
     self->hostThread = pthread_self();
     self->hostRunning = true;
+    // Garbage collectors scan [stackaddr, stackaddr + stacksize) from scePthreadAttrGet.
+    PthreadStacks::CurrentBounds(&self->stackAddress, &self->stackSize);
     PthreadStacks::RegisterCurrent();
 #endif
     void* result = entry(arg);
@@ -242,6 +244,7 @@ Pthread APS5_VABI scePthreadSelf() {
         initial->_detached = true;
         initial->hostThread = pthread_self();
         initial->hostRunning = true;
+        PthreadStacks::CurrentBounds(&initial->stackAddress, &initial->stackSize);
         currentLinuxThread = initial;
     }
     return currentLinuxThread;

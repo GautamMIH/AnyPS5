@@ -28,12 +28,19 @@ int APS5_VABI scePadDeviceClassGetExtendedInformation(int handle, PadDeviceClass
  return 0;
 }
 
+// The emulated controller is a standard pad, so samples carry no device-class payload
+// (special controllers such as wheels would report theirs here).
 int APS5_VABI scePadDeviceClassParseData(int handle, const PadData* data, PadDeviceClassData* class_data) {
- (void)handle;
- (void)data;
- (void)class_data;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (handle != PAD_HANDLE) {
+  return PAD_ERROR_INVALID_HANDLE;
+ }
+ if (data == nullptr || class_data == nullptr) {
+  return PAD_ERROR_INVALID_ARG;
+ }
+ *class_data = PadDeviceClassData{};
+ class_data->deviceClass = PAD_DEVICE_CLASS_STANDARD;
+ class_data->dataValid = data->connected;
+ return PAD_OK;
 }
 
 int APS5_VABI scePadGetControllerInformation(int handle, PadControllerInformation* info) {
@@ -115,10 +122,12 @@ int APS5_VABI scePadResetLightBar(int handle) {
  return 0;
 }
 
+// The emulated pad reports a fixed orientation, so there is no reference to reset.
 int APS5_VABI scePadResetOrientation(int handle) {
- (void)handle;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (handle != PAD_HANDLE) {
+  return PAD_ERROR_INVALID_HANDLE;
+ }
+ return PAD_OK;
 }
 
 int APS5_VABI scePadSetAngularVelocityDeadbandState(int handle, bool enable) {
@@ -165,11 +174,13 @@ int APS5_VABI scePadSetVibration(int handle, const PadVibrationParam* param) {
  return 0;
 }
 
+// Selects compatible rumble or advanced haptics; the emulated pad has neither, as in KytyPS5.
 int APS5_VABI scePadSetVibrationMode(int handle, int mode) {
- (void)handle;
  (void)mode;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (handle != PAD_HANDLE) {
+  return PAD_ERROR_INVALID_HANDLE;
+ }
+ return PAD_OK;
 }
 
 int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool enabled) {
