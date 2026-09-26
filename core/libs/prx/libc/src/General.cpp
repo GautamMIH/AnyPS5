@@ -8,6 +8,22 @@
 #include <set>
 
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/AmprContainer.hpp"
+
+namespace {
+
+// The title's AMPR asset container, if it ships one, serves /app0 files that are not on disk.
+AmprContainer::Container* appContainer() {
+    static std::once_flag once;
+    static std::unique_ptr<AmprContainer::Container> container;
+    std::call_once(once, [] {
+        const auto root = std::filesystem::current_path();
+        container = AmprContainer::Container::Open(root / "app0", root / "ampr_cache");
+    });
+    return container.get();
+}
+
+}
 
 extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {
     if (path == nullptr) {
@@ -30,7 +46,14 @@ extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {
     }
 #endif
     std::filesystem::path result = std::filesystem::current_path() / std::filesystem::path(relative);
-    return result.make_preferred();
+    result.make_preferred();
+    std::error_code error;
+    if (AmprContainer::NormalisePath(relative).rfind("app0/", 0) == 0 && !std::filesystem::exists(result, error)) {
+        if (auto* container = appContainer()) {
+            if (auto packed = container->Resolve("/" + relative)) return packed->make_preferred();
+        }
+    }
+    return result;
 }
 
 namespace {

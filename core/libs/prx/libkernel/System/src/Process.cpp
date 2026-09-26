@@ -83,4 +83,10 @@ int APS5_VABI sched_get_priority_min_nid_postfix(int policy) {
  return 0;
 }
 
+
+// AnyPS5 presents a base PS5; PS5 Pro ("Trinity") rendering paths stay disabled.
+int APS5_VABI sceKernelIsTrinityMode(void) {
+    return 0;
+}
+
 }
