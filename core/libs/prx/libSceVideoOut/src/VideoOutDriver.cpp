@@ -64,9 +64,26 @@ public:
         request->flipRate = cfg->flipRate;
         ++queue->reservations;
         ++cfg->flipStatus.flipPendingNum;
-        if (info.index >= 0) ++cfg->bufferPending[info.index];
+        if (info.index >= 0) {
+            ++cfg->bufferPending[info.index];
+            ++cfg->bufferReserved[info.index];
+        }
         request->reserved = true;
         return request;
+    }
+
+    std::function<void()> ReserveBufferWait(std::uint32_t index) override {
+        require(index < VIDEO_OUT_BUFFER_NUM_MAX, "invalid wait buffer index");
+        std::lock_guard lock(cfg->mutex);
+        checkConfig(*cfg);
+        const auto target = cfg->bufferReserved[index];
+        return [config = cfg, index, target] {
+            std::unique_lock lock(config->mutex);
+            config->vblankCond.wait(lock, [&] {
+                return config->failure != nullptr || config->closing || config->bufferReserved[index] - config->bufferPending[index] >= target;
+            });
+            if (config->failure) std::rethrow_exception(config->failure);
+        };
     }
 
     void Fail(std::exception_ptr error) noexcept override {

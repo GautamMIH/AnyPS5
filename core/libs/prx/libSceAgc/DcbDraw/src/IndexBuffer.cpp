@@ -5,11 +5,12 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/general/ExportMacros.hpp"
 
 extern "C" {
 
 std::uint32_t* APS5_VABI sceAgcDcbSetIndexBuffer(CommandBuffer* buf, std::uint64_t indexAddress) {
-    Agc::Command::CheckAddress(indexAddress, 2, __func__);
+    Agc::Command::CheckGpuAddress(indexAddress, 2, __func__);
     return Agc::Command::Emit(buf, 0x26u, {static_cast<std::uint32_t>(indexAddress), static_cast<std::uint32_t>(indexAddress >> 32u)}, __func__);
 }
 
@@ -35,6 +36,14 @@ std::uint32_t* APS5_VABI sceAgcDcbSetIndexSize(CommandBuffer* buf, std::uint8_t 
     Agc::Command::CheckBits(cachePolicy, 3, __func__);
     return Agc::Command::Emit(buf, 0x7au, {0x20000243u, 0x400u | indexSize | (static_cast<std::uint32_t>(cachePolicy) << 6u)}, __func__);
 }
+
+// Newer SDKs import the index-size setter under this NID (name unknown) with a trailing argument that
+// games observed so far always pass as zero; the first three arguments match sceAgcDcbSetIndexSize.
+std::uint32_t* APS5_VABI AgcDcbSetIndexSizeExtended(CommandBuffer* buf, std::uint8_t indexSize, std::uint8_t cachePolicy, std::uint32_t reserved) {
+    Agc::Command::Require(reserved == 0, __func__, "nonzero trailing index-size argument is not implemented");
+    return sceAgcDcbSetIndexSize(buf, indexSize, cachePolicy);
+}
+APS5_EXPORT("-KRzWekV120", AgcDcbSetIndexSizeExtended);
 
 std::uint32_t APS5_VABI sceAgcDcbSetIndexSizeGetSize() {
     NotImplemented_nid_no_patch(__func__);

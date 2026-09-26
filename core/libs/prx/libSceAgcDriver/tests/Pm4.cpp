@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
+#include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include <cstdio>
 #include <limits>
@@ -150,7 +151,8 @@ void testAutoDraw() {
     }
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2, 0}), 0); }, "packet size");
-    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2}, 1), 0); }, "header flags");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2}, 4), 0); }, "header flags");
+    AgcDriver::Pm4::Validate(makePacket(0x2d, {3, 2}, 1), 0);
     state.userConfig[0x24a] = std::numeric_limits<std::uint32_t>::max();
     check(AgcDriver::Pm4::ResolveDraw(makePacket(0x2d, {1, 2}), state).firstVertex == std::numeric_limits<std::uint32_t>::max(), "last vertex rejected");
     expectFailure([&] { AgcDriver::Pm4::ResolveDraw(makePacket(0x2d, {2, 2}), state); }, "vertex range overflow");
@@ -201,6 +203,25 @@ void testMemory() {
     check(data[0] == 31 && data[1] == 32, "constant RAM round trip failed");
     expectFailure([&] { execute(state, makePacket(0x81, {0xbffc, 1, 2})); }, "overflow");
     expectFailure([&] { execute(state, makePacket(0x40, {0x10105, 0, 0, low(data.data()), high(data.data())})); }, "64-bit immediate");
+}
+
+void testReleaseMem() {
+    AgcDriver::QueueState state;
+    std::array<std::uint64_t, 2> labels{0, 0};
+    const auto destination = reinterpret_cast<std::uint32_t*>(labels.data());
+    execute(state, makePacket(0x49, {0x52f, 1u << 29u, low(destination), high(destination), 0x12345678, 0, 0}));
+    check(labels[0] == 0x12345678, "RELEASE_MEM 32-bit data write failed");
+    execute(state, makePacket(0x49, {0x52f, 2u << 29u, low(destination), high(destination), 0x9abcdef0, 0x11, 0}));
+    check(labels[0] == 0x119abcdef0ull, "RELEASE_MEM 64-bit data write failed");
+    execute(state, makePacket(0x49, {0x52f, 3u << 29u, low(destination + 2), high(destination + 2), 0, 0, 0}));
+    check(labels[1] != 0, "RELEASE_MEM timestamp write failed");
+    execute(state, makePacket(0x49, {0x52f, 4u << 24u, 0, 0, 0, 0, 7}));
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x49, {0x52f, 5u << 29u, low(destination), high(destination), 0, 0, 0}), 0); }, "GDS");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x49, {0x22f, 0, 0, 0, 0, 0, 0}), 0); }, "event index");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x49, {0x52f, 2u << 29u, low(destination) + 4, high(destination), 0, 0, 0}), 0); }, "misaligned");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x49, {0x52f, 0, 0, 0, 0, 0}), 0); }, "packet size");
+    AgcDriver::Pm4::Validate(makePacket(0x10, {7, 0}, 0x06u << 2u), 0);
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x10, {7}, 0x06u << 2u), 0); }, "packet size");
 }
 
 void testCopies() {
@@ -292,7 +313,7 @@ void testEventWrite() {
     for (const auto bit : {0x40u, 0x80u, 0x800u, 0x80000000u}) {
         expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410u | bit}), 0); }, "reserved bits");
     }
-    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410}, 1), 0); }, "header flags");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410}, 4), 0); }, "header flags");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x410, 0, 0}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x139, 0, 0}), 0); }, "event type 57");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x0d}), 0); }, "event type 13");
@@ -325,7 +346,7 @@ void testAcquireMem() {
         packet[index] = value;
         expectFailure([&] { AgcDriver::Pm4::Validate(packet, 0); }, reason);
     };
-    invalidWord(0, captured[0] | 1u, "header flags");
+    invalidWord(0, captured[0] | 4u, "header flags");
     invalidWord(1, 4, "control flags");
     invalidWord(1, 0x00800000, "control flags");
     invalidWord(3, 1, "above 40 bits");
@@ -336,6 +357,43 @@ void testAcquireMem() {
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 2, 0, 0xffffffff, 0, 0, 0}), 0); }, "range exceeds");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 0, 0, 0, 0}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 0, 0, 0, 0, 0, 0, 0}), 0); }, "packet size");
+}
+
+void testMemoryWaits() {
+    alignas(8) std::array<std::uint32_t, 4> labels{0, 0, 0, 0};
+    const auto wait = [&](std::uint32_t function, std::uint32_t reference, std::uint32_t mask) {
+        return makePacket(0x3c, {0x10u | function, low(labels.data()), high(labels.data()), reference, mask, 10});
+    };
+    AgcDriver::Pm4::Validate(wait(3, 1, 0xffffffff), 0);
+    AgcDriver::Pm4::Validate(wait(3, 1, 0xffffffff), 0x20);
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x3c, {0x03, low(labels.data()), high(labels.data()), 1, 0xffffffff, 10}), 0); }, "register WAIT_REG_MEM");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x3c, {0x53, low(labels.data()), high(labels.data()), 1, 0xffffffff, 10}), 0); }, "write operations");
+    expectFailure([&] { AgcDriver::Pm4::Validate(wait(7, 1, 0xffffffff), 0); }, "comparison");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x3c, {0x13, low(labels.data()) + 2, high(labels.data()), 1, 0xffffffff, 10}), 0); }, "misaligned");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x3c, {0x13, 0, 0, 1, 0xffffffff, 10}), 0); }, "null");
+    labels[0] = 0x15;
+    check(AgcDriver::Pm4::WaitSatisfied(wait(3, 5, 0xf)), "masked equality wait failed");
+    check(!AgcDriver::Pm4::WaitSatisfied(wait(3, 0x15, 0xf)), "masked equality ignored mask");
+    check(AgcDriver::Pm4::WaitSatisfied(wait(5, 0x15, 0xff)) && !AgcDriver::Pm4::WaitSatisfied(wait(6, 0x15, 0xff)), "ordered comparisons failed");
+    check(AgcDriver::Pm4::WaitSatisfied(wait(0, 0, 0)), "always comparison failed");
+    labels[2] = 1;
+    labels[3] = 2;
+    const auto wide = makePacket(0x93, {0x13, low(labels.data() + 2), high(labels.data() + 2), 1, 2, 0xffffffff, 0xffffffff, 10});
+    check(AgcDriver::Pm4::WaitSatisfied(wide), "64-bit wait failed");
+
+    // A compute queue waiting on a label written by a later graphics submission must not deadlock
+    // the worker, and work queued behind the wait on the same queue must stay ordered after it.
+    labels = {0, 0, 0, 0};
+    std::vector<std::uint32_t> computeCommands;
+    for (const auto& packet : {wait(3, 7, 0xffffffff), makePacket(0x37, {0x100, low(labels.data() + 1), high(labels.data() + 1), 9})})
+        computeCommands.insert(computeCommands.end(), packet.begin(), packet.end());
+    Packet compute{computeCommands.data(), static_cast<std::uint32_t>(computeCommands.size()), 0, {}};
+    check(sceAgcDriverSubmitAcb(0x20, &compute) == 0, "waiting compute submission failed");
+    auto graphicsCommands = makePacket(0x37, {0x100, low(labels.data()), high(labels.data()), 7});
+    Packet graphics{graphicsCommands.data(), static_cast<std::uint32_t>(graphicsCommands.size()), 0, {}};
+    check(sceAgcDriverSubmitDcb(&graphics) == 0, "releasing graphics submission failed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(labels[0] == 7 && labels[1] == 9, "cross-queue memory wait did not resume");
 }
 
 void testDriverSubmission() {
@@ -411,10 +469,12 @@ int main(int argc, char** argv) {
         testIndexedDraw();
         testAutoDraw();
         testMemory();
+        testReleaseMem();
         testCopies();
         testMemorySynchronization();
         testEventWrite();
         testAcquireMem();
+        testMemoryWaits();
         testDriverSubmission();
         LibcRunShutdown_nid_postfix();
         std::puts("PM4 catalog, registers, state, memory and submission tests passed");

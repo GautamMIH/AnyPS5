@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 
 namespace AgcDriver {
@@ -11,6 +12,8 @@ class FrameTiming;
 
 inline constexpr std::uint32_t FlipPacketHeader = 0xc004105cu;
 inline constexpr std::uint32_t FlipPacketWords = 6;
+inline constexpr std::uint32_t WaitFlipDonePacketHeader = 0xc0011018u;
+inline constexpr std::uint32_t WaitFlipDonePacketWords = 3;
 
 struct FlipInfo {
     std::uint32_t handle;
@@ -30,6 +33,8 @@ class IVideoOutput {
 public:
     virtual ~IVideoOutput() = default;
     virtual std::shared_ptr<IFlipRequest> Reserve(const FlipInfo& info) = 0;
+    // Returns a blocking wait that completes once every flip of the buffer reserved before this call has left the display.
+    virtual std::function<void()> ReserveBufferWait(std::uint32_t index) = 0;
     virtual void Fail(std::exception_ptr error) noexcept = 0;
 };
 

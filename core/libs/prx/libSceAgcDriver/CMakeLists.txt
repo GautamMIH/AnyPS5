@@ -102,6 +102,7 @@ target_link_libraries(libSceAgcDriver PRIVATE
         shader_recompiler_agc_driver
         SDL2-static
         libc
+        libkernel
 )
 
 set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)

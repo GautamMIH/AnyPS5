@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -91,8 +92,7 @@ std::string_view UnsupportedReason(std::uint32_t header) {
     const auto opcode = (header >> 8u) & 0xffu;
     if (opcode == 0x10) {
         switch ((header >> 2u) & 0x3fu) {
-            case 0: case 0x09: case 0x0b: case 0x0c: case 0x17: case 0x1a: return {};
-            case 0x06: return "VideoOut buffer-completion wait interface is not implemented";
+            case 0: case 0x06: case 0x09: case 0x0b: case 0x0c: case 0x17: case 0x1a: return {};
             case 0x14: case 0x18: return "guest cache actions and GPU release events are not implemented";
             default: return "custom packet has no implemented contract in the reference dispatch table";
         }
@@ -107,11 +107,13 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         case 0x20: return "GPU query predication is not implemented";
         case 0x22: return "conditional command execution and conditional flip reservation are not implemented";
         case 0x33: case 0x3f: return "nested command buffers, branching and nested flip reservation are not implemented";
-        case 0x39: case 0x3c: case 0x59: case 0x93:
+        case 0x3c: case 0x93: return {};
+        case 0x39: case 0x59:
             return "cooperative command-queue waits are not implemented";
         case 0x84: case 0x85: case 0x86: case 0x88:
             return "separate CE/DE execution and counter synchronization are not implemented";
-        case 0x43: case 0x47: case 0x48: case 0x49:
+        case 0x49: return {};
+        case 0x43: case 0x47: case 0x48:
             return "guest cache actions, GPU events and interrupt delivery are not implemented";
         case 0x8e: return "GPU LOD statistics are not implemented; synthetic results are forbidden";
         case 0x28: case 0x41: case 0x68: case 0x78:
@@ -136,6 +138,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             case 0:
                 require((packet[1] & 0xffff0000u) != 0x68750000u, "typed user-data and legacy flip markers are not implemented");
                 break;
+            case 0x06: size(3); break;
             case 0x09: size(2); break;
             case 0x0b: {
                 const auto data = std::as_bytes(packet.subspan(1));
@@ -153,7 +156,10 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         }
         return;
     }
-    require((header & 0xffu) == 0 || (opcode == 0x11 && (header & 0xffu) == 2), "PM4 header flags are not implemented");
+    // Bit 0 is PREDICATE; SET_PREDICATION is rejected, so predication is never active and predicated
+    // packets execute unconditionally, as they do on hardware with predication disabled.
+    if ((header & 0xfeu) != 0 && !(opcode == 0x11 && (header & 0xfeu) == 2))
+        throw std::runtime_error("PM4 header flags are not implemented for " + Name(header) + " (header 0x" + [&] { char text[12]{}; std::snprintf(text, sizeof(text), "%08x", header); return std::string(text); }() + ")");
     switch (opcode) {
         case 0x11:
             size(4);
@@ -181,6 +187,31 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             require((packet.back() & ~0x8000u) == 0x41u, "indirect dispatch modifiers are not implemented");
             break;
         case 0x42: size(2); require(packet[1] == 0, "unsupported PFP_SYNC_ME payload"); break;
+        case 0x3c: case 0x93: {
+            size(opcode == 0x3c ? 7 : 9);
+            require((packet[1] & ~0x060003f7u) == 0, "unsupported WAIT_REG_MEM control fields");
+            require((packet[1] & 0x30u) == 0x10u, "register WAIT_REG_MEM is not implemented");
+            require((packet[1] & 0xc0u) == 0, "WAIT_REG_MEM write operations are not implemented");
+            require((packet[1] & 7u) <= 6, "invalid WAIT_REG_MEM comparison");
+            const auto target = address(packet[2], packet[3]);
+            require(target != 0 && (target & (opcode == 0x3c ? 3u : 7u)) == 0, "null or misaligned WAIT_REG_MEM address");
+            require(packet.back() <= 0xffffu, "invalid WAIT_REG_MEM poll interval");
+            break;
+        }
+        case 0x49: {
+            size(8);
+            require((packet[1] & ~0x07fff73fu) == 0, "unsupported RELEASE_MEM event fields");
+            const auto eventIndex = (packet[1] >> 8u) & 7u;
+            require(eventIndex == 5 || eventIndex == 6, "invalid RELEASE_MEM event index");
+            require((packet[2] & ~0xe7030000u) == 0, "unsupported RELEASE_MEM control fields");
+            const auto interrupt = (packet[2] >> 24u) & 7u;
+            const auto dataSelect = packet[2] >> 29u;
+            require(interrupt <= 4, "invalid RELEASE_MEM interrupt selector");
+            require(dataSelect <= 3, "GDS and system-clock RELEASE_MEM data sources are not implemented");
+            require(packet[7] <= 0x7ffffffu, "invalid RELEASE_MEM interrupt context");
+            if (dataSelect != 0) require((address(packet[3], packet[4]) & (dataSelect == 1 ? 3u : 7u)) == 0, "misaligned RELEASE_MEM destination");
+            break;
+        }
         case 0x46: {
             require((packet[1] & ~0x73fu) == 0, "unsupported EVENT_WRITE flags or reserved bits");
             const auto eventType = packet[1] & 0x3fu;
@@ -272,9 +303,48 @@ bool UsesGpuCacheBarrier(std::span<const std::uint32_t> packet) {
     return packet.size() == 8 && (packet[7] & 0xfc00u) == 0;
 }
 
+bool WaitSatisfied(std::span<const std::uint32_t> packet) {
+    Validate(packet, 0x20);
+    const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93;
+    const auto target = address(packet[2], packet[3]);
+    std::uint64_t value = 0;
+    GuestMemory::Read(target, std::as_writable_bytes(std::span(&value, 1)).first(wide ? 8 : 4), wide ? 8 : 4);
+    const auto reference = wide ? address(packet[4], packet[5]) : packet[4];
+    const auto mask = wide ? address(packet[6], packet[7]) : packet[5];
+    const auto masked = value & mask;
+    switch (packet[1] & 7u) {
+        case 0: return true;
+        case 1: return masked < reference;
+        case 2: return masked <= reference;
+        case 3: return masked == reference;
+        case 4: return masked != reference;
+        case 5: return masked >= reference;
+        default: return masked > reference;
+    }
+}
+
+std::string DescribeWait(std::span<const std::uint32_t> packet) {
+    const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93;
+    const auto target = address(packet[2], packet[3]);
+    std::uint64_t value = 0;
+    GuestMemory::Read(target, std::as_writable_bytes(std::span(&value, 1)).first(wide ? 8 : 4), wide ? 8 : 4);
+    static constexpr const char* comparisons[] = {"always", "<", "<=", "==", "!=", ">=", ">"};
+    char text[160]{};
+    std::snprintf(text, sizeof(text), "(value 0x%llx at 0x%llx) & 0x%llx %s 0x%llx",
+        static_cast<unsigned long long>(value), static_cast<unsigned long long>(target),
+        static_cast<unsigned long long>(wide ? address(packet[6], packet[7]) : packet[5]), comparisons[packet[1] & 7u],
+        static_cast<unsigned long long>(wide ? address(packet[4], packet[5]) : packet[4]));
+    return text;
+}
+
+std::uint64_t GpuClock() {
+    const auto elapsed = std::chrono::steady_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count() / 10);
+}
+
 bool AccessesMemory(std::uint32_t header) {
     switch ((header >> 8u) & 0xffu) {
-        case 0x16: case 0x2d: case 0x35: case 0x37: case 0x40: case 0x50: case 0x63: case 0x64: case 0x83: case 0x9f: return true;
+        case 0x16: case 0x2d: case 0x35: case 0x37: case 0x3c: case 0x40: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
         default: return false;
     }
 }
@@ -385,6 +455,16 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         case 0x50:
             copyMemory(address(packet[2], packet[3]), address(packet[4], packet[5]), packet[6] & 0x3ffffffu, dmaSource(packet) == 2);
             return;
+        case 0x49: {
+            const auto dataSelect = packet[2] >> 29u;
+            const auto destination = address(packet[3], packet[4]);
+            if (dataSelect == 1) GuestMemory::Write(destination, std::as_bytes(packet.subspan(5, 1)), 4);
+            else if (dataSelect == 2 || dataSelect == 3) {
+                const std::uint64_t value = dataSelect == 3 ? GpuClock() : address(packet[5], packet[6]);
+                GuestMemory::Write(destination, std::as_bytes(std::span(&value, 1)), 8);
+            }
+            return;
+        }
         default: throw std::runtime_error("packet requires driver execution");
     }
 }

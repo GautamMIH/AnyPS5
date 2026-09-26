@@ -57,7 +57,7 @@ std::uint32_t* WriteWait(CommandBuffer* buffer, std::uint8_t size, std::uint8_t 
         CheckBits(mask, 0xffffffffu, function);
     }
     const auto guestAddress = reinterpret_cast<std::uintptr_t>(address);
-    CheckAddress(guestAddress, size == 0 ? 4 : 8, function);
+    CheckGpuAddress(guestAddress, size == 0 ? 4 : 8, function);
     CheckBits(guestAddress, 0xffffffffffffull, function);
     const auto waitSize = size == 0 ? 7u : 9u;
     auto* packet = Allocate(buffer, waitSize + 7u, function);

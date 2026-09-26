@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
+#include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
@@ -15,9 +16,12 @@
 #include <array>
 #include <condition_variable>
 #include <cstring>
+#include <chrono>
 #include <deque>
+#include <set>
 #include <exception>
 #include <limits>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <optional>
@@ -50,7 +54,10 @@ struct Submission {
     std::vector<std::uint32_t> commands;
     std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>> shaders;
     std::map<std::size_t, std::shared_ptr<IFlipRequest>> flips;
+    std::map<std::size_t, std::function<void()>> flipWaits;
     bool suspend = false;
+    std::size_t cursor = 0;
+    bool started = false;
     FrameTiming::Clock::time_point received;
     FrameTiming::Clock::time_point copied;
     FrameTiming::Clock::time_point validated;
@@ -126,6 +133,12 @@ public:
                     auto request = output->second->Reserve(info);
                     require(request != nullptr, "video output returned a null flip reservation");
                     submission.flips.emplace(cursor, std::move(request));
+                } else if (words[0] == WaitFlipDonePacketHeader) {
+                    const auto output = outputs.find(words[1]);
+                    require(output != outputs.end(), "flip wait references an unregistered video output");
+                    auto wait = output->second->ReserveBufferWait(words[2]);
+                    require(static_cast<bool>(wait), "video output returned an empty flip wait");
+                    submission.flipWaits.emplace(cursor, std::move(wait));
                 }
                 cursor += static_cast<std::size_t>((words[0] >> 16u) & 0x3fffu) + 2;
             }
@@ -254,18 +267,22 @@ public:
 
     void RegisterShader(const Shader* shader) {
         CheckFailure();
-        GuestMemory::CheckRange(shader, sizeof(Shader), alignof(Shader));
-        require(shader->file_header == 0x34333231u && shader->version == 0x18u, "invalid shader header");
-        require(shader->header_size >= sizeof(Shader), "shader header is smaller than its fixed fields");
-        require(shader->shader_size != 0 && (shader->shader_size & 3u) == 0, "invalid shader size");
-        GuestMemory::CheckRange(shader, shader->header_size, alignof(Shader));
-        const auto* code = const_cast<const void*>(shader->code);
-        GuestMemory::CheckRange(code, shader->shader_size, 256);
-        ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(code), reinterpret_cast<std::uintptr_t>(shader), shader->type, {}, {}};
-        snapshot.code.resize(shader->shader_size / sizeof(std::uint32_t));
-        std::memcpy(snapshot.code.data(), code, shader->shader_size);
-        snapshot.header.resize(shader->header_size);
-        std::memcpy(snapshot.header.data(), shader, shader->header_size);
+        // Shader binaries embedded in game data are only guaranteed 4-byte alignment, so the fixed
+        // fields are read through a copy rather than through the guest pointer.
+        GuestMemory::CheckRange(shader, sizeof(Shader), alignof(std::uint32_t));
+        Shader fixed;
+        std::memcpy(&fixed, shader, sizeof(Shader));
+        require(fixed.file_header == 0x34333231u && fixed.version == 0x18u, "invalid shader header");
+        require(fixed.header_size >= sizeof(Shader), "shader header is smaller than its fixed fields");
+        require(fixed.shader_size != 0 && (fixed.shader_size & 3u) == 0, "invalid shader size");
+        GuestMemory::CheckRange(shader, fixed.header_size, alignof(std::uint32_t));
+        const auto* code = const_cast<const void*>(fixed.code);
+        GuestMemory::CheckRange(code, fixed.shader_size, 256);
+        ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(code), reinterpret_cast<std::uintptr_t>(shader), fixed.type, {}, {}};
+        snapshot.code.resize(fixed.shader_size / sizeof(std::uint32_t));
+        std::memcpy(snapshot.code.data(), code, fixed.shader_size);
+        snapshot.header.resize(fixed.header_size);
+        std::memcpy(snapshot.header.data(), shader, fixed.header_size);
         std::lock_guard lock(mutex);
         rethrowFailure();
         const auto address = snapshot.codeAddress;
@@ -284,6 +301,9 @@ private:
     std::shared_ptr<VulkanDevice> device;
     std::uint64_t accepted = 0;
     std::uint64_t completed = 0;
+    std::set<std::uint64_t> finishedOutOfOrder;
+    std::deque<Submission> active;
+    std::string blockedWait;
     std::exception_ptr failure;
     bool stopping = false;
     bool resetGraphics = false;
@@ -534,8 +554,14 @@ private:
         }
     }
 
-    void execute(const Submission& submission) {
-        includeSubmission(submission, true);
+    // Runs the submission from its cursor. Returns false when a WAIT_REG_MEM is not yet satisfied; the
+    // cursor then points at that packet so the worker can resume it after other queues make progress.
+    bool execute(Submission& submission) {
+        const auto resumed = submission.started;
+        if (!resumed) {
+            submission.started = true;
+            includeSubmission(submission, true);
+        }
         if (submission.suspend) {
             PerformanceContext timingContext(frameTiming.get());
             PerformanceTimer timing("Driver.Suspend");
@@ -544,14 +570,14 @@ private:
             if (device != nullptr) device->WaitIdle();
             timing.Mark("device_idle_wait");
             resetGraphics = true;
-            return;
+            return true;
         }
-        if (submission.queue == 0 && resetGraphics) {
+        if (!resumed && submission.queue == 0 && resetGraphics) {
             queues.erase(0);
             resetGraphics = false;
         }
         auto& queue = queues[submission.queue];
-        for (std::size_t cursor = 0; cursor < submission.commands.size();) {
+        for (auto& cursor = submission.cursor; cursor < submission.commands.size();) {
             if (frameTiming == nullptr) includeSubmission(submission, false);
             const auto header = submission.commands[cursor];
             const auto count = static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2;
@@ -562,7 +588,21 @@ private:
                 PerformanceTimer timing("Driver.Packet");
                 CheckFailure();
                 timing.Mark("failure_check");
-                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x58 || header == FlipPacketHeader) {
+                if (opcode == 0x3c || opcode == 0x93) {
+                    std::lock_guard gpuLock(gpuMutex);
+                    if (device != nullptr) device->WaitIdle();
+                    const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+                        if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+                    });
+                    if (!Pm4::WaitSatisfied(packet)) {
+                        blockedWait = Pm4::DescribeWait(packet);
+                        return false;
+                    }
+                    timing.Mark("memory_wait");
+                    cursor += count;
+                    continue;
+                }
+                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x49 || opcode == 0x58 || header == FlipPacketHeader) {
                     std::lock_guard gpuLock(gpuMutex);
                     timing.Mark("gpu_mutex_wait");
                     const auto eventType = opcode == 0x46 ? packet[1] & 0x3fu : 0u;
@@ -573,7 +613,7 @@ private:
                         if (gpuCacheBarrier) device->AcquireGpuMemory();
                         else if (waitDraws) device->WaitDraws();
                         else {
-                            const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : opcode == 0x58 ? "Driver.AcquireMemoryWait" : "Driver.CacheEventWait";
+                            const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : opcode == 0x58 ? "Driver.AcquireMemoryWait" : opcode == 0x49 ? "Driver.ReleaseMemoryWait" : "Driver.CacheEventWait";
                             PerformanceTimer waitTiming(scope);
                             device->WaitIdle();
                         }
@@ -583,6 +623,9 @@ private:
                 if (header == FlipPacketHeader) {
                     CheckFailure();
                     timing.Mark("flip_prepare");
+                } else if (header == WaitFlipDonePacketHeader) {
+                    submission.flipWaits.at(cursor)();
+                    timing.Mark("flip_done_wait");
                 } else if (opcode == 0x15) {
                     dispatch(queue, packet, submission);
                 } else if (opcode == 0x16) {
@@ -605,6 +648,10 @@ private:
                     Pm4::Execute(packet, queue);
                     timing.Mark("pm4_execute");
                 }
+                if (opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0) {
+                    AgcDriverTriggerEqEvent_nid_postfix(static_cast<int>(submission.queue), packet[7]);
+                    timing.Mark("release_interrupt");
+                }
             }
             if (header == FlipPacketHeader) {
                 frameTiming->SetFlip(submission.serial, cursor, submission.received, FrameTiming::Clock::now());
@@ -613,51 +660,98 @@ private:
             }
             cursor += count;
         }
+        return true;
+    }
+
+    // Serials can finish out of order once queues interleave; waiters see the contiguous prefix.
+    void markCompleted(std::uint64_t serial) {
+        finishedOutOfOrder.insert(serial);
+        while (!finishedOutOfOrder.empty() && *finishedOutOfOrder.begin() == completed + 1) {
+            completed = *finishedOutOfOrder.begin();
+            finishedOutOfOrder.erase(finishedOutOfOrder.begin());
+        }
+    }
+
+    // A submission may run once every earlier active submission on its queue has finished; suspend
+    // boundaries order against everything.
+    bool runnable(std::size_t index) const {
+        const auto& candidate = active[index];
+        for (std::size_t earlier = 0; earlier < index; ++earlier) {
+            const auto& other = active[earlier];
+            if (other.suspend || candidate.suspend || other.queue == candidate.queue) return false;
+        }
+        return true;
     }
 
     void run() noexcept {
-        Submission submission;
+        // Memory waits normally resolve within microseconds; one that stays blocked this long with no
+        // other work able to run is a synchronization the emulation cannot satisfy.
+        constexpr auto stallLimit = std::chrono::seconds(10);
+        auto lastProgress = std::chrono::steady_clock::now();
         try {
             for (;;) {
                 {
                     PerformanceContext timingContext(frameTiming.get());
                     PerformanceTimer timing("Driver.Worker");
-                    submission = Submission{};
-                    timing.Mark("submission_release");
                     std::unique_lock lock(mutex);
                     timing.Mark("queue_mutex_wait");
-                    changed.wait(lock, [&] { return failure || stopping || !pending.empty(); });
+                    if (active.empty()) changed.wait(lock, [&] { return failure || stopping || !pending.empty(); });
                     timing.Mark("wait_for_submission");
                     rethrowFailure();
-                    if (pending.empty()) {
+                    while (!pending.empty()) {
+                        active.push_back(std::move(pending.front()));
+                        pending.pop_front();
+                        active.back().dequeued = FrameTiming::Clock::now();
+                    }
+                    if (active.empty()) {
                         break;
                     }
-                    submission = std::move(pending.front());
-                    pending.pop_front();
-                    submission.dequeued = FrameTiming::Clock::now();
                 }
-                execute(submission);
-                {
-                    PerformanceContext timingContext(frameTiming.get());
-                    PerformanceTimer timing("Driver.SubmissionCompletion");
-                    std::lock_guard gpuLock(gpuMutex);
-                    if (device) device->WaitIdle();
+                bool progressed = false;
+                for (std::size_t index = 0; index < active.size();) {
+                    if (!runnable(index)) {
+                        ++index;
+                        continue;
+                    }
+                    const auto startCursor = active[index].cursor;
+                    const auto wasStarted = active[index].started;
+                    if (!execute(active[index])) {
+                        if (active[index].cursor != startCursor || !wasStarted) progressed = true;
+                        ++index;
+                        continue;
+                    }
+                    {
+                        PerformanceContext timingContext(frameTiming.get());
+                        PerformanceTimer timing("Driver.SubmissionCompletion");
+                        std::lock_guard gpuLock(gpuMutex);
+                        if (device) device->WaitIdle();
+                    }
+                    {
+                        PerformanceContext timingContext(frameTiming.get());
+                        PerformanceTimer timing("Driver.Completion");
+                        std::lock_guard lock(mutex);
+                        timing.Mark("mutex_wait");
+                        rethrowFailure();
+                        markCompleted(active[index].serial);
+                    }
+                    active.erase(active.begin() + static_cast<std::ptrdiff_t>(index));
+                    progressed = true;
+                    changed.notify_all();
                 }
-                {
-                    PerformanceContext timingContext(frameTiming.get());
-                    PerformanceTimer timing("Driver.Completion");
-                    std::lock_guard lock(mutex);
-                    timing.Mark("mutex_wait");
-                    rethrowFailure();
-                    completed = submission.serial;
+                if (progressed) {
+                    lastProgress = std::chrono::steady_clock::now();
+                    continue;
                 }
-                changed.notify_all();
+                require(std::chrono::steady_clock::now() - lastProgress < stallLimit, ("GPU memory wait never satisfied: " + blockedWait).c_str());
+                std::unique_lock lock(mutex);
+                changed.wait_for(lock, std::chrono::microseconds(200), [&] { return failure || !pending.empty(); });
             }
             std::lock_guard gpuLock(gpuMutex);
             device.reset();
         } catch (...) {
             const auto error = std::current_exception();
-            for (const auto& [offset, flip] : submission.flips) flip->Fail(error);
+            for (const auto& submission : active)
+                for (const auto& [offset, flip] : submission.flips) flip->Fail(error);
             ReportFailure(error);
             {
                 std::lock_guard gpuLock(gpuMutex);

@@ -2,6 +2,7 @@
 
 #include "prx/libSceAgc/Command/include/Memory.hpp"
 #include "prx/libSceAgc/Command/include/Packet.hpp"
+#include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -51,11 +52,11 @@ uint32_t APS5_VABI sceAgcDcbRewindGetSize(void) {
 }
 
 uint32_t* APS5_VABI sceAgcDcbWaitUntilSafeForRendering(CommandBuffer* buf, uint32_t video_out_handle, uint32_t display_buffer_index) {
- (void)buf;
- (void)video_out_handle;
- (void)display_buffer_index;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    auto* packet = Agc::Command::Allocate(buf, AgcDriver::WaitFlipDonePacketWords, __func__);
+    packet[0] = AgcDriver::WaitFlipDonePacketHeader;
+    packet[1] = video_out_handle;
+    packet[2] = display_buffer_index;
+    return packet;
 }
 
 }

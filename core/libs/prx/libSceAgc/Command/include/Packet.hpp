@@ -10,6 +10,8 @@ namespace Agc::Command {
 void Require(bool condition, const char* function, const char* reason);
 void CheckBits(std::uint64_t value, std::uint64_t mask, const char* function);
 void CheckAddress(std::uint64_t address, std::uint32_t alignment, const char* function);
+// Alignment-only check for addresses the GPU dereferences when it executes the packet.
+void CheckGpuAddress(std::uint64_t address, std::uint32_t alignment, const char* function);
 std::uint32_t Header(std::uint32_t opcode, std::uint32_t count, std::uint32_t flags = 0);
 void Reserve(CommandBuffer* buffer, std::uint32_t count, const char* function);
 std::uint32_t* Allocate(CommandBuffer* buffer, std::uint32_t count, const char* function);

@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -27,7 +28,11 @@ void require(bool condition, const char* reason) {
 void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
     require(alignment != 0, "zero guest memory alignment");
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
-    require(address != 0 && address % alignment == 0, "null or misaligned address");
+    if (address == 0 || address % alignment != 0) {
+        char detail[96]{};
+        std::snprintf(detail, sizeof(detail), " (address 0x%llx, %zu bytes, alignment %zu)", static_cast<unsigned long long>(address), bytes, alignment);
+        require(false, (std::string("null or misaligned address") + detail).c_str());
+    }
     require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "address range overflow");
     MemoryAccessScope::Resolve(address, bytes, writable);
     GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);

@@ -13,7 +13,7 @@ int APS5_VABI sceAgcWaitRegMemPatchAddress(std::uint32_t* cmd, const volatile vo
     auto* wait = Agc::Command::ValidateWait(cmd, __func__);
     const auto guestAddress = reinterpret_cast<std::uintptr_t>(address);
     const auto alignment = ((wait[0] >> 8u) & 0xffu) == 0x3cu ? 4u : 8u;
-    Agc::Command::CheckAddress(guestAddress, alignment, __func__);
+    Agc::Command::CheckGpuAddress(guestAddress, alignment, __func__);
     Agc::Command::CheckBits(guestAddress, 0xffffffffffffull, __func__);
     cmd[2] = (cmd[2] & 0xffff0000u) | static_cast<std::uint32_t>(guestAddress >> 32u);
     cmd[3] = static_cast<std::uint32_t>(guestAddress);

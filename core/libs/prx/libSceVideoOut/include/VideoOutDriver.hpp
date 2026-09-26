@@ -111,6 +111,7 @@ struct VideoOutConfig {
 
     std::array<VideoOutBuffer, VIDEO_OUT_BUFFER_NUM_MAX> buffers{};
     std::array<uint32_t, VIDEO_OUT_BUFFER_NUM_MAX> bufferPending{};
+    std::array<uint64_t, VIDEO_OUT_BUFFER_NUM_MAX> bufferReserved{};
     std::array<BufferAttributeGroup, VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX> groups{};
 
     void Check() const {

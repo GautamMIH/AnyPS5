@@ -1,5 +1,6 @@
 #include "prx/libSceAgc/Command/include/Packet.hpp"
 
+#include <cstdio>
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -15,11 +16,26 @@ void Require(bool condition, const char* function, const char* reason) {
 }
 
 void CheckBits(std::uint64_t value, std::uint64_t mask, const char* function) {
-    Require((value & ~mask) == 0, function, "reserved bits are set");
+    if ((value & ~mask) == 0) return;
+    char detail[96]{};
+    std::snprintf(detail, sizeof(detail), "reserved bits are set (value 0x%llx, allowed mask 0x%llx)", static_cast<unsigned long long>(value), static_cast<unsigned long long>(mask));
+    Require(false, function, detail);
 }
 
 void CheckAddress(std::uint64_t address, std::uint32_t alignment, const char* function) {
-    Require(address != 0 && (address & (alignment - 1u)) == 0, function, "null or misaligned address");
+    if (address != 0 && (address & (alignment - 1u)) == 0) return;
+    char detail[80]{};
+    std::snprintf(detail, sizeof(detail), "null or misaligned address 0x%llx (alignment %u)", static_cast<unsigned long long>(address), alignment);
+    Require(false, function, detail);
+}
+
+void CheckGpuAddress(std::uint64_t address, std::uint32_t alignment, const char* function) {
+    // Games encode packets with null GPU addresses into scratch buffers to measure packet layouts, so
+    // a null GPU address is only rejected when the GPU executes the packet.
+    if ((address & (alignment - 1u)) == 0) return;
+    char detail[80]{};
+    std::snprintf(detail, sizeof(detail), "misaligned GPU address 0x%llx (alignment %u)", static_cast<unsigned long long>(address), alignment);
+    Require(false, function, detail);
 }
 
 std::uint32_t Header(std::uint32_t opcode, std::uint32_t count, std::uint32_t flags) {
@@ -132,7 +148,7 @@ std::uint32_t* WriteRegisters(CommandBuffer* buffer, std::uint32_t opcode, const
 
 std::uint32_t* WriteIndirectRegisters(CommandBuffer* buffer, std::uint32_t opcode, const volatile ShaderRegister* registers, std::uint32_t count, const char* function) {
     const auto address = reinterpret_cast<std::uintptr_t>(registers);
-    CheckAddress(address, 4, function);
+    CheckGpuAddress(address, 4, function);
     CheckBits(count, 0x3fffu, function);
     return Emit(buffer, opcode, {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), 0x80000000u, count}, function);
 }
@@ -141,7 +157,7 @@ void PatchIndirectAddress(std::uint32_t* packet, std::uint32_t opcode, const vol
     ValidatePacket(packet, opcode, 5, function);
     Require(packet[3] == 0x80000000u && (packet[4] & ~0x3fffu) == 0, function, "invalid indirect register packet");
     const auto address = reinterpret_cast<std::uintptr_t>(registers);
-    CheckAddress(address, 4, function);
+    CheckGpuAddress(address, 4, function);
     packet[1] = static_cast<std::uint32_t>(address);
     packet[2] = static_cast<std::uint32_t>(address >> 32u);
 }

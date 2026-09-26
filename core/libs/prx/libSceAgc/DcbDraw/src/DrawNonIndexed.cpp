@@ -24,7 +24,7 @@ std::uint32_t* APS5_VABI sceAgcDcbDrawIndirectMulti(CommandBuffer* buf, std::uin
     Agc::Command::Require((dataOffsetInBytes & 3u) == 0 && (strideInBytes & 3u) == 0 && strideInBytes >= 16, __func__, "invalid indirect draw offset or stride");
     const auto address = reinterpret_cast<std::uintptr_t>(countAddress);
     if (countIndirect != 0) {
-        Agc::Command::CheckAddress(address, 4, __func__);
+        Agc::Command::CheckGpuAddress(address, 4, __func__);
     } else {
         Agc::Command::Require(address == 0, __func__, "count address supplied for a direct draw count");
     }

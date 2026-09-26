@@ -68,6 +68,7 @@ private:
 class Output final : public AgcDriver::IVideoOutput {
 public:
     void Fail(std::exception_ptr error) noexcept override { if (!error) std::terminate(); }
+    std::function<void()> ReserveBufferWait(std::uint32_t) override { return [] {}; }
     std::shared_ptr<State> state = std::make_shared<State>();
     std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo& info) override {
         std::lock_guard lock(state->mutex);
