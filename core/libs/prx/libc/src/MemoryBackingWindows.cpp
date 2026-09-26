@@ -69,4 +69,12 @@ void Deactivate(std::uint64_t address, std::size_t bytes) {
     check(VirtualProtect(reinterpret_cast<void*>(address), bytes, PAGE_NOACCESS, &previous) != FALSE, "VirtualProtect guest backing unmap");
 }
 
+void Release(std::uint64_t, std::size_t) {
+    throw std::runtime_error("replacing part of a guest memory mapping is not implemented on Windows");
+}
+
+void ReleaseAlias(const Mapping& mapping) {
+    check(UnmapViewOfFile(mapping.alias) != FALSE, "UnmapViewOfFile guest alias");
+}
+
 }

@@ -182,6 +182,57 @@ void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std:
     registry().ranges.swap(replacement);
 }
 
+bool GuestAllocationsQuery_nid_postfix(void*, const void* pointer, bool findNext, Range* result) {
+    require(result != nullptr, "null guest allocation query output");
+    const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+    auto& ranges = registry().ranges;
+    auto it = ranges.upper_bound(address);
+    if (it != ranges.begin() && std::prev(it)->first + std::prev(it)->second->bytes > address)
+        --it;
+    else if (!findNext || it == ranges.end())
+        return false;
+    Range merged = *it->second;
+    for (auto next = std::next(it); next != ranges.end(); ++next) {
+        const auto& candidate = *next->second;
+        if (candidate.address != merged.address + merged.bytes || candidate.readable != merged.readable || candidate.writable != merged.writable)
+            break;
+        merged.bytes += candidate.bytes;
+    }
+    for (auto previous = it; previous != ranges.begin();) {
+        --previous;
+        const auto& candidate = *previous->second;
+        if (candidate.address + candidate.bytes != merged.address || candidate.readable != merged.readable || candidate.writable != merged.writable)
+            break;
+        merged.address = candidate.address;
+        merged.bytes += candidate.bytes;
+    }
+    *result = merged;
+    return true;
+}
+
+void GuestAllocationsCarve_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void()>& apply) {
+    const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+    require(address != 0 && bytes != 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - address, "invalid fixed guest mapping");
+    GuestAllocationsRequireUnpinned_nid_postfix(mutation, pointer, bytes);
+    const auto end = address + bytes;
+    auto replacement = registry().ranges;
+    for (const auto& [base, entry] : registry().ranges) {
+        const auto& range = *entry;
+        const auto finish = base + range.bytes;
+        if (finish <= address) continue;
+        if (base >= end) break;
+        require(range.releasable, "fixed mapping overlaps guest image memory");
+        replacement.erase(base);
+        const auto insert = [&](std::uint64_t first, std::uint64_t last) {
+            if (first < last) replacement.emplace(first, std::make_shared<const Range>(Range{first, static_cast<std::size_t>(last - first), range.readable, range.writable, range.allocationAddress, range.allocationBytes, range.releasable}));
+        };
+        insert(base, std::min(finish, address));
+        insert(std::max(base, end), finish);
+    }
+    apply();
+    registry().ranges.swap(replacement);
+}
+
 Lease GuestAllocationsAcquire_nid_postfix() {
     std::lock_guard lock(registry().mutex);
     Lease result;

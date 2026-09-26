@@ -14,7 +14,32 @@ namespace {
 struct Allocation {
     Platform::Mapping mapping;
     std::map<std::uint64_t, std::uint64_t> ranges;
+    std::map<std::uint64_t, std::uint64_t> owned;
 };
+
+std::map<std::uint64_t, std::uint64_t> removeInterval(const std::map<std::uint64_t, std::uint64_t>& segments, std::uint64_t first, std::uint64_t last, std::map<std::uint64_t, std::uint64_t>* removed) {
+    std::map<std::uint64_t, std::uint64_t> result;
+    for (const auto& [begin, end] : segments) {
+        if (end <= first || begin >= last) {
+            result.emplace(begin, end);
+            continue;
+        }
+        if (begin < first) result.emplace(begin, first);
+        if (last < end) result.emplace(last, end);
+        if (removed != nullptr) removed->emplace(std::max(begin, first), std::min(end, last));
+    }
+    return result;
+}
+
+void releaseAllocation(const Allocation& allocation) {
+    if (allocation.owned.size() == 1 && allocation.owned.begin()->first == allocation.mapping.address && allocation.owned.begin()->second == allocation.mapping.address + allocation.mapping.bytes) {
+        Platform::Unmap(allocation.mapping);
+        return;
+    }
+    for (const auto& [begin, end] : allocation.owned)
+        Platform::Release(begin, static_cast<std::size_t>(end - begin));
+    Platform::ReleaseAlias(allocation.mapping);
+}
 
 std::map<std::uint64_t, Allocation>& allocations() {
     static auto* value = new std::map<std::uint64_t, Allocation>;
@@ -41,13 +66,14 @@ void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::s
     const auto mapping = Platform::Map(address, bytes, alignment, protection);
     try {
         if (mapping.bytes > std::numeric_limits<std::uint64_t>::max() - mapping.address) throw std::overflow_error("guest backing mapping overflow");
-        const auto next = allocations().lower_bound(mapping.address);
-        if (next != allocations().end() && next->first < mapping.address + bytes) throw std::runtime_error("overlapping guest backing mappings");
-        if (next != allocations().begin()) {
-            const auto& previous = std::prev(next)->second.mapping;
-            if (previous.address + previous.bytes > mapping.address) throw std::runtime_error("guest mapping overlaps a retained backing reservation");
+        const auto mappingEnd = mapping.address + bytes;
+        for (const auto& [base, existing] : allocations()) {
+            if (base >= mappingEnd)
+                break;
+            for (const auto& [begin, end] : existing.owned)
+                if (begin < mappingEnd && end > mapping.address) throw std::runtime_error("overlapping guest backing mappings");
         }
-        Allocation allocation{mapping, {{mapping.address, mapping.address + bytes}}};
+        Allocation allocation{mapping, {{mapping.address, mapping.address + bytes}}, {{mapping.address, mapping.address + bytes}}};
         if (!allocations().emplace(mapping.address, std::move(allocation)).second) throw std::runtime_error("duplicate guest backing mapping");
     } catch (...) {
         Platform::Unmap(mapping);
@@ -71,12 +97,43 @@ void GuestMemoryBackingUnmap_nid_postfix(void* pointer, std::size_t bytes) {
     if (address + bytes < last) replacement.emplace(address + bytes, last);
     GuestMemoryTracking::GuestMemoryTrackingInvalidate_nid_postfix(address, bytes);
     if (replacement.empty()) {
-        const auto base = allocation.mapping.address;
-        Platform::Unmap(allocation.mapping);
-        allocations().erase(base);
+        releaseAllocation(allocation);
+        std::erase_if(allocations(), [&allocation](const auto& entry) { return &entry.second == &allocation; });
     } else {
         Platform::Deactivate(address, bytes);
         allocation.ranges.swap(replacement);
+    }
+}
+
+void GuestMemoryBackingCarve_nid_postfix(void* pointer, std::size_t bytes) {
+    const auto first = reinterpret_cast<std::uintptr_t>(pointer);
+    const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
+    if (first == 0 || bytes == 0 || first % pageSize != 0 || bytes % pageSize != 0 || bytes > std::numeric_limits<std::uint64_t>::max() - first) throw std::invalid_argument("invalid guest backing carve range");
+    const auto last = first + bytes;
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    GuestMemoryTracking::GuestMemoryTrackingInvalidate_nid_postfix(first, bytes);
+    for (auto it = allocations().begin(); it != allocations().end();) {
+        auto& allocation = it->second;
+        std::map<std::uint64_t, std::uint64_t> released;
+        auto owned = removeInterval(allocation.owned, first, last, &released);
+        if (released.empty()) {
+            ++it;
+            continue;
+        }
+        for (const auto& [begin, end] : released)
+            Platform::Release(begin, static_cast<std::size_t>(end - begin));
+        allocation.owned.swap(owned);
+        allocation.ranges = removeInterval(allocation.ranges, first, last, nullptr);
+        if (allocation.owned.empty()) {
+            Platform::ReleaseAlias(allocation.mapping);
+            it = allocations().erase(it);
+        } else if (allocation.owned.begin()->first != it->first) {
+            auto node = allocations().extract(it++);
+            node.key() = node.mapped().owned.begin()->first;
+            allocations().insert(std::move(node));
+        } else {
+            ++it;
+        }
     }
 }
 

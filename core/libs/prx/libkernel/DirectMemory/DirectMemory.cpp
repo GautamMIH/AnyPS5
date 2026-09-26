@@ -2,6 +2,8 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <cerrno>
+#include <cstdio>
+#include <string>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
@@ -61,9 +63,13 @@ void ValidateRange(const void* addr, size_t len, size_t alignment) {
 }
 
 int LinuxProtFromSce(int prot) {
-    if ((prot & ~0x37) != 0) {
+    if ((prot & ~0xf7) != 0) {
         // return SCE_KERNEL_ERROR_EINVAL;
-        throw std::invalid_argument("Unsupported memory protection bits");
+        throw std::invalid_argument("Unsupported memory protection bits 0x" + [prot] {
+            char text[16];
+            std::snprintf(text, sizeof(text), "%x", static_cast<unsigned>(prot));
+            return std::string(text);
+        }());
     }
     int result = PROT_NONE;
     if (prot & 1) result |= PROT_READ;
@@ -80,11 +86,24 @@ void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) 
     ValidateLength(len);
     alignment = ValidateAlignment(alignment);
     constexpr int guestMapFixed = 0x10;
+    constexpr int guestMapNoOverwrite = 0x80;
     constexpr int guestMapNoCoalesce = 0x400000;
-    if ((flags & ~(guestMapFixed | guestMapNoCoalesce)) != 0) throw std::invalid_argument("Unsupported memory mapping flags");
+    if ((flags & ~(guestMapFixed | guestMapNoOverwrite | guestMapNoCoalesce)) != 0) throw std::invalid_argument("Unsupported memory mapping flags");
     if ((flags & guestMapFixed) != 0) ValidateRange(addr, len, alignment);
     else if (addr != nullptr) throw std::invalid_argument("Non-fixed mapping address hints are not implemented");
     return GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(addr, len, alignment, prot);
+}
+
+void PrepareFixedMapping(GuestAllocations::Mutation& mutation, void* addr, size_t len, int flags) {
+    constexpr int guestMapNoOverwrite = 0x80;
+    if (addr == nullptr) return;
+    if ((flags & guestMapNoOverwrite) != 0) {
+        mutation.RequireAvailable(addr, len);
+        return;
+    }
+    mutation.Carve(addr, len, [&] {
+        GuestMemoryBacking::GuestMemoryBackingCarve_nid_postfix(addr, len);
+    });
 }
 
 void ValidateOutput(void** addr) {
@@ -103,7 +122,7 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
         return SCE_KERNEL_ERROR_EINVAL;
     }
     GuestAllocations::Mutation mutation;
-    if (*addr != nullptr) mutation.RequireAvailable(*addr, len);
+    PrepareFixedMapping(mutation, *addr, len, flags);
     void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, alignment);
     try {
         mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0);
@@ -119,7 +138,7 @@ int DoMapAnon(void** addr, size_t len, int prot, int flags) {
     ValidateOutput(addr);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
-    if (*addr != nullptr) mutation.RequireAvailable(*addr, len);
+    PrepareFixedMapping(mutation, *addr, len, flags);
     void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, PS5_PAGE_SIZE);
     try {
         mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0);

@@ -9,6 +9,7 @@ namespace GuestMemoryBacking {
 extern "C" {
 void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection);
 void GuestMemoryBackingUnmap_nid_postfix(void* address, std::size_t bytes);
+void GuestMemoryBackingCarve_nid_postfix(void* address, std::size_t bytes);
 void GuestMemoryBackingRequire_nid_postfix(std::uint64_t address, std::size_t bytes);
 void GuestMemoryBackingWrite_nid_postfix(std::uint64_t address, const void* source, std::size_t bytes);
 }

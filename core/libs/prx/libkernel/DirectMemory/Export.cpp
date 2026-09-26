@@ -1,9 +1,52 @@
 #include <cstdint>
 #include <cstddef>
+#include <algorithm>
 #include <cstring>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "DirectMemory.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
+#include <map>
+#include <mutex>
+#include <string>
+
+namespace VirtualRangeNames {
+
+struct Range {
+    std::uint64_t Length;
+    std::string Name;
+};
+
+std::mutex& Mutex() {
+    static std::mutex instance;
+    return instance;
+}
+
+std::map<std::uintptr_t, Range>& Ranges() {
+    static std::map<std::uintptr_t, Range> instance;
+    return instance;
+}
+
+void Set(std::uintptr_t start, std::uint64_t length, const char* name) {
+    const std::lock_guard lock(Mutex());
+    Ranges()[start] = {length, name};
+}
+
+void Get(std::uintptr_t address, char* output, std::size_t outputSize) {
+    const std::lock_guard lock(Mutex());
+    auto& ranges = Ranges();
+    auto it = ranges.upper_bound(address);
+    if (it == ranges.begin())
+        return;
+    --it;
+    if (address - it->first >= it->second.Length || outputSize == 0)
+        return;
+    const std::size_t count = std::min(outputSize - 1, it->second.Name.size());
+    std::memcpy(output, it->second.Name.data(), count);
+    output[count] = '\0';
+}
+
+}
 
 extern "C" {
 
@@ -91,14 +134,24 @@ int APS5_VABI sceKernelReserveVirtualRange(void** addr, size_t len, int flags, s
 }
 
 int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
- (void)flags;
+ constexpr int kFindNext = 1;
+ constexpr int kProtectionCpuRead = 0x1;
+ constexpr int kProtectionCpuWrite = 0x2;
+ constexpr int kProtectionGpuRead = 0x10;
+ constexpr int kProtectionGpuWrite = 0x20;
  if (!info || info_size < sizeof(VirtualQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
+ GuestAllocations::Range range{};
+ {
+  GuestAllocations::Mutation mutation;
+  if (!mutation.Query(addr, (flags & kFindNext) != 0, &range)) return SCE_KERNEL_ERROR_EACCES;
+ }
  memset(info, 0, sizeof(VirtualQueryInfo));
- uintptr_t ptr = reinterpret_cast<uintptr_t>(addr);
- info->start = ptr & ~static_cast<uintptr_t>(PS5_PAGE_SIZE - 1);
- info->end = info->start + PS5_PAGE_SIZE;
- info->is_direct = 1;
- info->protection = 3;
+ info->start = range.address;
+ info->end = range.address + range.bytes;
+ info->protection = (range.readable ? kProtectionCpuRead | kProtectionGpuRead : 0) | (range.writable ? kProtectionCpuWrite | kProtectionGpuWrite : 0);
+ info->is_committed = range.readable || range.writable;
+ info->is_direct = info->is_committed;
+ VirtualRangeNames::Get(range.address, info->name, sizeof(info->name));
  return 0;
 }
 
@@ -152,10 +205,8 @@ int APS5_VABI sceKernelConfiguredFlexibleMemorySize(size_t* size) {
 }
 
 int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name) {
- (void)addr;
- (void)len;
- (void)name;
- NotImplemented_nid_no_patch(__func__);
+ if (!addr || len == 0 || !name) return SCE_KERNEL_ERROR_EINVAL;
+ VirtualRangeNames::Set(reinterpret_cast<std::uintptr_t>(addr), len, name);
  return 0;
 }
 
@@ -184,21 +235,46 @@ int APS5_VABI sceKernelSetPrtAperture(int index, void* addr, size_t len) {
  return 0;
 }
 
-int APS5_VABI sceKernelBatchMap(KernelBatchMapEntry* entries, int num_entries, int* num_entries_out) {
- (void)entries;
- (void)num_entries;
- (void)num_entries_out;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, int* num_entries_out, int flags) {
+ constexpr int kOperationMapDirect = 0;
+ constexpr int kOperationUnmap = 1;
+ constexpr int kOperationProtect = 2;
+ constexpr int kOperationMapFlexible = 3;
+ constexpr int kOperationTypeProtect = 4;
+ if (num_entries < 0 || (num_entries > 0 && !entries)) return SCE_KERNEL_ERROR_EINVAL;
+ int processed = 0;
+ int result = 0;
+ for (; processed < num_entries; ++processed) {
+  const auto& entry = entries[processed];
+  const int protection = static_cast<unsigned char>(entry.protection);
+  void* address = entry.start;
+  switch (entry.operation) {
+  case kOperationMapDirect:
+   result = DoMapDirect(&address, entry.length, protection, flags, static_cast<int64_t>(entry.offset), 0);
+   break;
+  case kOperationUnmap:
+   result = DoMunmap(address, entry.length);
+   break;
+  case kOperationProtect:
+  case kOperationTypeProtect:
+   result = DoMprotect(address, entry.length, protection);
+   break;
+  case kOperationMapFlexible:
+   result = DoMapAnon(&address, entry.length, protection, flags);
+   break;
+  default:
+   result = SCE_KERNEL_ERROR_EINVAL;
+   break;
+  }
+  if (result != 0) break;
+ }
+ if (num_entries_out) *num_entries_out = processed;
+ return result;
 }
 
-int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, int* num_entries_out, int flags) {
- (void)entries;
- (void)num_entries;
- (void)num_entries_out;
- (void)flags;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceKernelBatchMap(KernelBatchMapEntry* entries, int num_entries, int* num_entries_out) {
+ constexpr int kMapFixed = 0x10;
+ return sceKernelBatchMap2(entries, num_entries, num_entries_out, kMapFixed);
 }
 
 }

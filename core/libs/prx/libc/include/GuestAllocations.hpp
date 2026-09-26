@@ -35,6 +35,8 @@ Range GuestAllocationsFind_nid_postfix(void* mutation, const void* pointer);
 void GuestAllocationsRemove_nid_postfix(void* mutation, const void* pointer);
 void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, bool readable, bool writable, const std::function<void()>& apply);
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply);
+bool GuestAllocationsQuery_nid_postfix(void* mutation, const void* pointer, bool findNext, Range* result);
+void GuestAllocationsCarve_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void()>& apply);
 Lease GuestAllocationsAcquire_nid_postfix();
 }
 
@@ -54,6 +56,8 @@ public:
     void Remove(const void* pointer) { GuestAllocationsRemove_nid_postfix(handle, pointer); }
     void Unmap(const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply) { GuestAllocationsUnmap_nid_postfix(handle, pointer, bytes, apply); }
     void Protect(const void* pointer, std::size_t bytes, bool readable, bool writable, const std::function<void()>& apply) { GuestAllocationsProtect_nid_postfix(handle, pointer, bytes, readable, writable, apply); }
+    void Carve(const void* pointer, std::size_t bytes, const std::function<void()>& apply) { GuestAllocationsCarve_nid_postfix(handle, pointer, bytes, apply); }
+    bool Query(const void* pointer, bool findNext, Range* result) const { return GuestAllocationsQuery_nid_postfix(handle, pointer, findNext, result); }
 
 private:
     void* handle;
