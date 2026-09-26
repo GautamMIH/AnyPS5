@@ -37,6 +37,7 @@ add_library(libSceAgc SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Patch/src/Jump.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Patch/src/Nop.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Patch/src/QueueEndOfPipeAction.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Patch/src/WriteData.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Patch/src/Rewind.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Patch/src/WaitRegMem.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Patch/src/Branch.cpp
