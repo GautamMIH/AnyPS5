@@ -8,9 +8,7 @@
 
 #if defined(__linux__) || defined(_WIN32)
 
-#ifdef _WIN32
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
-#endif
 
 namespace LibcUnwind {
 bool OwnPersonality(Word personality) {
@@ -23,9 +21,8 @@ bool OwnPersonality(Word personality) {
     }
 #endif
     if (personality == reinterpret_cast<Word>(__gxx_personality_v0_nid_postfix)) return true;
-#ifdef _WIN32
+    // This library's own frames reference its host-name personality (see Personality.cpp).
     if (personality == reinterpret_cast<Word>(__gxx_personality_v0)) return true;
-#endif
     return false;
 }
 struct Lookup { Word pc; const Byte* fde {}; Word text {}; Word data {}; };
