@@ -63,6 +63,8 @@ inline constexpr std::uint32_t PT_INTERP = 3;
 inline constexpr std::uint32_t PT_NOTE = 4;
 inline constexpr std::uint32_t PT_PHDR = 6;
 inline constexpr std::uint32_t PT_GNU_RELRO = 0x6474e552;
+inline constexpr std::uint32_t PT_GNU_STACK = 0x6474e551;
+inline constexpr std::uint64_t kGnuStackAlignment = 16;
 inline constexpr std::uint32_t PF_X = 0x1;
 inline constexpr std::uint32_t PF_W = 0x2;
 inline constexpr std::uint32_t PF_R = 0x4;
@@ -76,6 +78,10 @@ inline constexpr std::uint32_t PT_HIOS = 0x6fffffff;
 
 inline constexpr std::int64_t DT_NULL = 0;
 inline constexpr std::int64_t DT_NEEDED = 1;
+inline constexpr std::int64_t DT_HASH = 4;
+inline constexpr std::int64_t DT_INIT = 12;
+inline constexpr std::int64_t DT_FINI = 13;
+inline constexpr std::int64_t DT_SONAME = 14;
 inline constexpr std::int64_t DT_PLTRELSZ = 2;
 inline constexpr std::int64_t DT_PLTGOT = 3;
 inline constexpr std::int64_t DT_STRTAB = 5;
@@ -86,10 +92,14 @@ inline constexpr std::int64_t DT_RELAENT = 9;
 inline constexpr std::int64_t DT_STRSZ = 10;
 inline constexpr std::int64_t DT_SYMENT = 11;
 inline constexpr std::int64_t DT_PLTREL = 20;
+inline constexpr std::int64_t DT_DEBUG = 21;
 inline constexpr std::int64_t DT_JMPREL = 23;
 inline constexpr std::int64_t DT_RUNPATH = 29;
 inline constexpr std::int64_t DT_FLAGS = 30;
 inline constexpr std::uint64_t DF_BIND_NOW = 0x8;
+inline constexpr std::uint64_t DF_SYMBOLIC = 0x2;
+inline constexpr std::size_t kHashAlignment = 8;
+inline constexpr std::size_t kStubAlignment = 16;
 
 inline constexpr std::uint32_t SHT_NULL = 0;
 inline constexpr std::uint32_t SHT_PROGBITS = 1;
@@ -126,6 +136,13 @@ inline constexpr std::uint8_t kStubOpXorRsiRsi[] = {0x48, 0x31, 0xf6};
 inline constexpr std::uint8_t kStubOpCallRel32 = 0xe8;
 inline constexpr std::size_t kStubCallInstructionSize = 5;
 inline constexpr std::uint8_t kStubOpUd2[] = {0x0f, 0x0b};
+inline constexpr std::uint8_t kStubOpPushRbp = 0x55;
+inline constexpr std::uint8_t kStubOpMovRbpRsp[] = {0x48, 0x89, 0xe5};
+inline constexpr std::uint8_t kStubOpXorEdiEdi[] = {0x31, 0xff};
+inline constexpr std::uint8_t kStubOpXorEsiEsi[] = {0x31, 0xf6};
+inline constexpr std::uint8_t kStubOpXorEdxEdx[] = {0x31, 0xd2};
+inline constexpr std::uint8_t kStubOpPopRbp = 0x5d;
+inline constexpr std::uint8_t kStubOpRet = 0xc3;
 
 }
 

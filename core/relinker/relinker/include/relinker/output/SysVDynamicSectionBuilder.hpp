@@ -14,6 +14,11 @@ public:
         std::uint32_t originalJmprelCount
     ) override;
 
+    void AppendExportsAndHash(
+        SysVDynamicSection& section,
+        const std::vector<ExportedSymbol>& exports
+    ) override;
+
 private:
     static constexpr std::uint32_t STB_GLOBAL = 1;
     static constexpr std::uint32_t STT_FUNC = 2;
@@ -33,6 +38,13 @@ private:
     static constexpr std::int64_t DT_PLTREL = 20;
     static constexpr std::int64_t DT_SYMENT = 11;
     static constexpr std::int64_t DT_NULL = 0;
+
+    static constexpr std::uint16_t kDefinedSymbolSectionIndex = 5;
+    static constexpr std::size_t kSymbolEntrySize = 24;
+    static constexpr std::uint32_t kHashBucketPrimes[] = {1, 3, 17, 37, 67, 97, 131, 197, 263, 521, 1031, 2053, 4099, 8209, 16411, 32771, 65537};
+
+    [[nodiscard]] static std::uint32_t _sysvHash(const std::string& name);
+    [[nodiscard]] static std::string _readName(const std::vector<std::uint8_t>& strtab, std::uint32_t offset);
 
     void _appendU64(std::vector<std::uint8_t>& buf, std::uint64_t v) const;
     void _appendI64(std::vector<std::uint8_t>& buf, std::int64_t v) const;

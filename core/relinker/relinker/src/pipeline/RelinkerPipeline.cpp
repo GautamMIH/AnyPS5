@@ -4,6 +4,7 @@
 #include <sstream>
 #include <iostream>
 #include <cstring>
+#include <map>
 
 namespace Relinker {
 
@@ -31,6 +32,10 @@ std::string RelinkerPipeline::_relocationTypeName(std::uint32_t type) {
             return oss.str();
         }
     }
+}
+
+bool RelinkerPipeline::_isTlsRelocation(const std::uint32_t type) {
+    return type == R_X86_64_DTPMOD64 || type == R_X86_64_DTPOFF64 || type == R_X86_64_TPOFF64;
 }
 
 RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf) {
@@ -112,6 +117,21 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
     if (readAsSize(DT_OS_SYMENT, DT_SYMENT, "DT_SYMENT") != symEntSize)
         throw RelinkerException("Unsupported DT_SYMENT value");
 
+    std::uint64_t symbolCount = 0;
+    if (hasTag(DT_OS_SYMTABSZ)) {
+        symbolCount = getTagValue(DT_OS_SYMTABSZ) / symEntSize;
+    } else if (hasTag(DT_HASH)) {
+        const FileByteOffset hashOffset = _elfReader->TranslateVirtualAddress(getTagValue(DT_HASH));
+        const auto& hashBytes = _elfReader->GetRawBytes();
+        if (hashOffset + 8 > hashBytes.size())
+            throw RelinkerException("DT_HASH table out of bounds", hashOffset);
+        std::uint32_t chainCount = 0;
+        std::memcpy(&chainCount, hashBytes.data() + hashOffset + 4, 4);
+        symbolCount = chainCount;
+    } else {
+        throw RelinkerException("Cannot determine the dynamic symbol count: neither DT_SCE_SYMTABSZ nor DT_HASH is present");
+    }
+
     const std::int64_t jmprelType = requireExactlyOneOf(DT_OS_PLTREL, DT_PLTREL, "DT_PLTREL")
         ? getTagValue(DT_OS_PLTREL)
         : getTagValue(DT_PLTREL);
@@ -152,6 +172,53 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
         if (policy) policy->RegisterLibraryImport(snd);
     }
 
+    struct SymbolEntry {
+        std::uint32_t NameOffset;
+        std::uint8_t Info;
+        std::uint16_t SectionIndex;
+        std::uint64_t Value;
+        std::uint64_t Size;
+    };
+
+    auto readSymbol = [&](const std::uint64_t index) -> SymbolEntry {
+        if (index >= symbolCount)
+            throw RelinkerException("Symbol index exceeds the dynamic symbol table", index);
+        const FileByteOffset symOff = dynSymTabOffset + index * symEntSize;
+        if (symOff + symEntSize > raw.size())
+            throw RelinkerException("Symbol table entry out of bounds", symOff);
+        SymbolEntry entry{};
+        std::memcpy(&entry.NameOffset, raw.data() + symOff, 4);
+        entry.Info = raw[symOff + 4];
+        std::memcpy(&entry.SectionIndex, raw.data() + symOff + 6, 2);
+        std::memcpy(&entry.Value, raw.data() + symOff + 8, 8);
+        std::memcpy(&entry.Size, raw.data() + symOff + 16, 8);
+        return entry;
+    };
+
+    auto stripNidSuffix = [](const std::string& value) -> std::string {
+        const auto hashPos = value.find('#');
+        return hashPos == std::string::npos ? value : value.substr(0, hashPos);
+    };
+
+    std::vector<ExportedSymbol> exports;
+    std::map<std::string, std::uint64_t> exportValues;
+    for (std::uint64_t index = 1; index < symbolCount; ++index) {
+        const SymbolEntry symbol = readSymbol(index);
+        const std::uint8_t binding = symbol.Info >> 4;
+        if (symbol.SectionIndex == 0 || (binding != STB_GLOBAL && binding != STB_WEAK))
+            continue;
+        const std::string name = stripNidSuffix(readCStr(symbol.NameOffset));
+        if (name.empty())
+            continue;
+        const auto [existing, inserted] = exportValues.emplace(name, symbol.Value);
+        if (!inserted) {
+            if (existing->second != symbol.Value)
+                throw RelinkerException("Module exports " + name + " at two different addresses");
+            continue;
+        }
+        exports.push_back({name, symbol.Info, symbol.Value, symbol.Size});
+    }
+
     auto extractRela = [&](const FileByteOffset relaOff, const ByteCount relaSize) {
         for (ByteCount off = 0; off + relaEntSize <= relaSize; off += relaEntSize) {
             const FileByteOffset pos = relaOff + off;
@@ -173,14 +240,16 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
                 continue;
             }
 
-            const FileByteOffset symOff = dynSymTabOffset + static_cast<FileByteOffset>(symIdx) * symEntSize;
-            if (symOff + 4 > raw.size())
-                throw RelinkerException("Symbol table entry out of bounds", symOff);
+            if (symIdx == 0 && _isTlsRelocation(relType)) {
+                _validationPolicy->ValidateRelocationTypeSupported(relType, pos);
+                continue;
+            }
 
-            std::uint32_t nameOff = 0;
-            std::memcpy(&nameOff, raw.data() + symOff, 4);
+            const SymbolEntry symbol = readSymbol(symIdx);
+            if (symbol.SectionIndex != 0 && (symbol.Info >> 4) == STB_LOCAL)
+                throw RelinkerException("Relocation against a local defined symbol is not supported", pos);
 
-            nidRefs.push_back({readCStr(nameOff), {}, relType, pos, rOffset, rAddend});
+            nidRefs.push_back({readCStr(symbol.NameOffset), {}, relType, pos, rOffset, rAddend, symbol.Info});
         }
     };
 
@@ -263,13 +332,23 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
             std::memcpy(&rAddend, raw.data() + pos + 16, 8);
             const std::uint32_t symIdx = static_cast<std::uint32_t>(rInfo >> 32);
             const std::uint32_t relType = static_cast<std::uint32_t>(rInfo & 0xffffffff);
-            if (symIdx == 0 && relType == R_X86_64_RELATIVE)
-                appendRela(dynSection.RelaData, rOffset, static_cast<std::uint64_t>(R_X86_64_RELATIVE), rAddend);
+            if (symIdx == 0 && (relType == R_X86_64_RELATIVE || _isTlsRelocation(relType)))
+                appendRela(dynSection.RelaData, rOffset, static_cast<std::uint64_t>(relType), rAddend);
         }
     };
 
     extractRelative(dynRelaOffset, dynRelaSize);
     extractRelative(dynJmpRelOffset, dynJmpRelSize);
+
+    _dynamicSectionBuilder->AppendExportsAndHash(dynSection, exports);
+
+    ModuleLinkInfo linkInfo;
+    if (_elfReader->ReadHeader().Type == ET_SCE_DYNAMIC) {
+        linkInfo.Kind = ModuleKind::Library;
+        linkInfo.InitAddress = hasTag(DT_INIT) ? getTagValue(DT_INIT) : 0;
+        linkInfo.FiniAddress = hasTag(DT_FINI) ? getTagValue(DT_FINI) : 0;
+    }
+    std::cout << "Module kind: " << (linkInfo.Kind == ModuleKind::Library ? "library" : "executable") << "; exports=" << exports.size() << "\n";
 
     std::vector<CallRegistryEntry> entries;
     entries.reserve(nidRefs.size());
@@ -292,7 +371,7 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
         entries.push_back(std::move(entry));
     }
 
-    return RelinkResult{std::move(entries), std::move(programHeaders), std::move(dynSection), gotVAddr, std::move(patches)};
+    return RelinkResult{std::move(entries), std::move(programHeaders), std::move(dynSection), gotVAddr, std::move(patches), std::move(linkInfo)};
 }
 
 }

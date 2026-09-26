@@ -43,6 +43,9 @@ private:
     static constexpr std::int64_t DT_SYMENT = 0x0000000b;
     static constexpr std::int64_t DT_PLTREL = 0x00000014;
     static constexpr std::int64_t DT_JMPREL = 0x00000017;
+    static constexpr std::int64_t DT_HASH = 0x00000004;
+    static constexpr std::int64_t DT_INIT = 0x0000000c;
+    static constexpr std::int64_t DT_FINI = 0x0000000d;
 
     static constexpr std::int64_t DT_OS_PLTGOT = 0x61000027;
     static constexpr std::int64_t DT_OS_PLTREL = 0x6100002b;
@@ -56,6 +59,16 @@ private:
     static constexpr std::int64_t DT_OS_RELASZ = 0x61000031;
     static constexpr std::int64_t DT_OS_RELAENT = 0x61000033;
     static constexpr std::int64_t DT_OS_JMPREL = 0x61000029;
+
+    static constexpr std::uint16_t ET_SCE_DYNAMIC = 0xfe18;
+    static constexpr std::uint32_t R_X86_64_DTPMOD64 = 0x10;
+    static constexpr std::uint32_t R_X86_64_DTPOFF64 = 0x11;
+    static constexpr std::uint32_t R_X86_64_TPOFF64 = 0x12;
+    static constexpr std::uint8_t STB_LOCAL = 0;
+    static constexpr std::uint8_t STB_GLOBAL = 1;
+    static constexpr std::uint8_t STB_WEAK = 2;
+
+    static bool _isTlsRelocation(std::uint32_t type);
 
     static std::string _relocationTypeName(std::uint32_t type);
 };

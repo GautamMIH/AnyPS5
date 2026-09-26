@@ -14,6 +14,11 @@ public:
         std::uint64_t stubVaddr,
         std::uint64_t realEntryVaddr
     ) const = 0;
+
+    virtual std::vector<std::uint8_t> BuildNullArgumentCallStub(
+        std::uint64_t stubVaddr,
+        std::uint64_t targetVaddr
+    ) const = 0;
 };
 
 }

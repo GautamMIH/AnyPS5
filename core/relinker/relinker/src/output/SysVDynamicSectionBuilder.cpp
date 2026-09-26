@@ -128,8 +128,7 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
 
         const NidReference& ref = *slot;
         const std::uint32_t nameOff = _appendStr(result.DynStrData, stripHashSuffix(ref.Nid));
-        const auto info = static_cast<std::uint8_t>((STB_GLOBAL << 4) | STT_FUNC);
-        _appendElfSym(result.DynSymData, nameOff, info, STV_DEFAULT, 0, 0, 0);
+        _appendElfSym(result.DynSymData, nameOff, ref.SymbolInfo, STV_DEFAULT, 0, 0, 0);
 
         const std::uint64_t relaInfo = (static_cast<std::uint64_t>(symIdx) << 32) | R_X86_64_JUMP_SLOT;
         _appendRela(result.RelaPltData, ref.RelocationAddress, relaInfo, ref.Addend);
@@ -139,8 +138,7 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
     for (const NidReference* slotPtr : nonPltRefs) {
         const NidReference& ref = *slotPtr;
         const std::uint32_t nameOff = _appendStr(result.DynStrData, stripHashSuffix(ref.Nid));
-        const auto info = static_cast<std::uint8_t>((STB_GLOBAL << 4) | STT_FUNC);
-        _appendElfSym(result.DynSymData, nameOff, info, STV_DEFAULT, 0, 0, 0);
+        _appendElfSym(result.DynSymData, nameOff, ref.SymbolInfo, STV_DEFAULT, 0, 0, 0);
 
         const std::uint64_t relaInfo = (static_cast<std::uint64_t>(symIdx) << 32) | ref.RelocationTypeValue;
         _appendRela(result.RelaData, ref.RelocationAddress, relaInfo, ref.Addend);
@@ -151,6 +149,69 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
         _appendDynEntry(result.DynamicSegmentData, DT_NEEDED, off);
 
     return result;
+}
+
+std::uint32_t SysVDynamicSectionBuilder::_sysvHash(const std::string& name) {
+    std::uint32_t hash = 0;
+    for (const char c : name) {
+        hash = (hash << 4) + static_cast<std::uint8_t>(c);
+        const std::uint32_t high = hash & 0xf0000000u;
+        if (high != 0)
+            hash ^= high >> 24;
+        hash &= ~high;
+    }
+    return hash;
+}
+
+std::string SysVDynamicSectionBuilder::_readName(const std::vector<std::uint8_t>& strtab, const std::uint32_t offset) {
+    if (offset >= strtab.size())
+        throw RelinkerException("Dynamic symbol name offset is out of bounds", offset);
+    std::string name;
+    for (std::size_t pos = offset; pos < strtab.size() && strtab[pos] != 0; ++pos)
+        name.push_back(static_cast<char>(strtab[pos]));
+    return name;
+}
+
+void SysVDynamicSectionBuilder::AppendExportsAndHash(
+    SysVDynamicSection& section,
+    const std::vector<ExportedSymbol>& exports)
+{
+    if (section.DynSymData.empty() || section.DynSymData.size() % kSymbolEntrySize != 0)
+        throw RelinkerException("Dynamic symbol table must contain the null symbol before exports are appended");
+
+    for (const auto& symbol : exports) {
+        if (symbol.Name.empty())
+            throw RelinkerException("Exported symbol has an empty name");
+        const std::uint32_t nameOff = _appendStr(section.DynStrData, symbol.Name);
+        _appendElfSym(section.DynSymData, nameOff, symbol.Info, STV_DEFAULT, kDefinedSymbolSectionIndex, symbol.Value, symbol.Size);
+    }
+
+    const auto symbolCount = static_cast<std::uint32_t>(section.DynSymData.size() / kSymbolEntrySize);
+    std::uint32_t bucketCount = kHashBucketPrimes[0];
+    for (const std::uint32_t prime : kHashBucketPrimes)
+        if (prime <= symbolCount / 2 + 1)
+            bucketCount = prime;
+
+    std::vector<std::uint32_t> buckets(bucketCount, 0);
+    std::vector<std::uint32_t> chains(symbolCount, 0);
+    for (std::uint32_t index = 1; index < symbolCount; ++index) {
+        std::uint32_t nameOff = 0;
+        std::memcpy(&nameOff, section.DynSymData.data() + static_cast<std::size_t>(index) * kSymbolEntrySize, 4);
+        const std::uint32_t bucket = _sysvHash(_readName(section.DynStrData, nameOff)) % bucketCount;
+        chains[index] = buckets[bucket];
+        buckets[bucket] = index;
+    }
+
+    section.HashData.clear();
+    const auto appendU32 = [&section](const std::uint32_t value) {
+        const std::size_t pos = section.HashData.size();
+        section.HashData.resize(pos + 4);
+        std::memcpy(section.HashData.data() + pos, &value, 4);
+    };
+    appendU32(bucketCount);
+    appendU32(symbolCount);
+    for (const std::uint32_t value : buckets) appendU32(value);
+    for (const std::uint32_t value : chains) appendU32(value);
 }
 
 }

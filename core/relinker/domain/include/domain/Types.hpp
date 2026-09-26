@@ -14,6 +14,8 @@ using FileByteOffset = std::uint64_t;
 using VirtualAddress = std::uint64_t;
 using ByteCount = std::uint64_t;
 
+inline constexpr std::uint8_t kGlobalFunctionSymbolInfo = 0x12;
+
 struct ElfHeader {
     std::uint16_t Machine;
     std::uint16_t Type;
@@ -59,6 +61,26 @@ struct NidReference {
     FileByteOffset RelocationTableOffset;
     VirtualAddress RelocationAddress;
     std::int64_t Addend;
+    std::uint8_t SymbolInfo = kGlobalFunctionSymbolInfo;
+};
+
+struct ExportedSymbol {
+    std::string Name;
+    std::uint8_t Info;
+    std::uint64_t Value;
+    std::uint64_t Size;
+};
+
+enum class ModuleKind {
+    Executable,
+    Library
+};
+
+struct ModuleLinkInfo {
+    ModuleKind Kind = ModuleKind::Executable;
+    VirtualAddress InitAddress = 0;
+    VirtualAddress FiniAddress = 0;
+    std::string SoName;
 };
 
 struct CallSiteInfo {
@@ -92,6 +114,7 @@ struct SysVDynamicSection {
     std::vector<std::uint8_t> DynStrData;
     std::vector<std::uint8_t> RelaData;
     std::vector<std::uint8_t> RelaPltData;
+    std::vector<std::uint8_t> HashData;
 };
 
 struct CallRegistryEntry {

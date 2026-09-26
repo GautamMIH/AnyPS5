@@ -2,6 +2,8 @@ add_executable(relinker
         ${CMAKE_CURRENT_SOURCE_DIR}/main.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/cli/src/CliArgs.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/cli/src/Autorun.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/cli/src/RelinkModule.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/cli/src/GameRelinker.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/linux/LinuxElfPatcher.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/windows/WindowsPePatcher.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/elfpatcher/src/windows/WindowsPeFormat.cpp
@@ -29,6 +31,7 @@ add_executable(relinker
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/DecodedInstruction.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/codegen/src/x86/Amd64OnlyInstructionMatcher.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/parsing/ElfReader.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/parsing/SelfUnwrapper.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/SyscallScanner.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/CallSiteResolver.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/analysis/UnusedNidFilter.cpp
@@ -96,4 +99,15 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/include
     )
     add_test(NAME strict_nid_filter COMMAND strict_nid_filter_tests)
+
+    add_executable(module_relink_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/ModuleRelinkTests.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/parsing/SelfUnwrapper.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/src/output/SysVDynamicSectionBuilder.cpp
+    )
+    target_include_directories(module_relink_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/domain/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/relinker/include
+    )
+    add_test(NAME module_relink COMMAND module_relink_tests)
 endif()

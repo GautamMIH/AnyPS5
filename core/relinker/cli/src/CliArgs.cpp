@@ -27,6 +27,13 @@ Args ParseArgs(int argc, char* argv[]) {
             if (i + 1 >= argc)
                 throw std::runtime_error("--rpath requires a value");
             args.runPath = argv[++i];
+            args.runPathSpecified = true;
+        } else if (arg == "--libs") {
+            if (i + 1 >= argc)
+                throw std::runtime_error("--libs requires a value");
+            args.libsPath = argv[++i];
+        } else if (arg == "--game") {
+            args.gameMode = true;
         } else if (arg == "--windows") {
             args.toWindows = true;
         } else if (arg == "--lazy-binding") {
@@ -49,10 +56,16 @@ Args ParseArgs(int argc, char* argv[]) {
     if (args.windowsDiagnostics && !args.toWindows)
         throw std::runtime_error("--windows-diagnostics requires --windows");
 
+    if (args.gameMode && (args.toIntel || args.autorun || args.runPathSpecified))
+        throw std::runtime_error("--game cannot be combined with --to-intel, --autorun or --rpath");
+    if (!args.gameMode && !args.libsPath.empty())
+        throw std::runtime_error("--libs requires --game");
+
     if (args.inputPath.empty() || args.outputPath.empty())
         throw std::runtime_error(
-            "Usage: relinker [--windows] [--windows-diagnostics] [--skip-syscall-check] [--to-intel] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf> <output.elf>\n"
-            "Example: relinker input.elf output.elf"
+            "Usage: relinker [--windows] [--windows-diagnostics] [--skip-syscall-check] [--to-intel] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf|input.self> <output.elf>\n"
+            "       relinker --game [--libs <anyps5-prx-dir>] [--skip-syscall-check] [unused-filter=0|1|2] [--lazy-binding] <game-dump-dir> <output-dir>\n"
+            "Example: relinker eboot.bin game.elf"
         );
 
     return args;

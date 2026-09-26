@@ -1,6 +1,7 @@
 #include <elfpatcher/general/ProgramHeaderLayoutBuilder.hpp>
 #include <elfpatcher/general/ElfConstants.hpp>
 #include <domain/Types.hpp>
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
@@ -137,11 +138,15 @@ std::uint16_t ProgramHeaderLayoutBuilder::WriteLayout(
         keptCount++;
     }
 
-    const std::uint16_t neededPh = keptCount + kSyntheticProgramHeaderCount;
-    if (neededPh > request.PhNum)
+    const bool hasInterp = request.InterpSize != 0;
+    const std::uint16_t syntheticCount = hasInterp ? kSyntheticProgramHeaderCount : static_cast<std::uint16_t>(kSyntheticProgramHeaderCount - 1);
+    const std::uint16_t requiredPh = keptCount + syntheticCount;
+    if (requiredPh > request.PhNum || (request.RequireNonExecutableStack && requiredPh + 1 > request.PhNum))
         throw Domain::RelinkerException(
-            "Not enough program header slots: need " + std::to_string(neededPh) +
+            "Not enough program header slots: need " + std::to_string(requiredPh + (request.RequireNonExecutableStack ? 1 : 0)) +
             ", available " + std::to_string(request.PhNum));
+    const bool hasGnuStack = requiredPh + 1 <= request.PhNum;
+    const std::uint16_t neededPh = hasGnuStack ? static_cast<std::uint16_t>(requiredPh + 1) : requiredPh;
 
     const std::uint64_t headerBlockSize = request.PhOff + static_cast<std::uint64_t>(neededPh) * request.PhEntSize;
     const std::uint64_t headerBlockAlign = kDefaultLoadAlignment;
@@ -152,53 +157,56 @@ std::uint16_t ProgramHeaderLayoutBuilder::WriteLayout(
         throw Domain::RelinkerException("Dynamic segment offset lies before the extra block");
     if (request.DynamicSegmentOffset + request.DynamicSegmentSize > request.ExtraBlockOffset + request.ExtraBlockSize)
         throw Domain::RelinkerException("Dynamic segment does not fit within the extra block");
-    if (request.InterpOffset < request.ExtraBlockOffset)
+    if (hasInterp && request.InterpOffset < request.ExtraBlockOffset)
         throw Domain::RelinkerException("Interp offset lies before the extra block");
-    if (request.InterpOffset + request.InterpSize > request.ExtraBlockOffset + request.ExtraBlockSize)
+    if (hasInterp && request.InterpOffset + request.InterpSize > request.ExtraBlockOffset + request.ExtraBlockSize)
         throw Domain::RelinkerException("Interp data does not fit within the extra block");
 
     const std::uint64_t dynamicSegmentVaddr = request.ExtraBlockVaddr + (request.DynamicSegmentOffset - request.ExtraBlockOffset);
-    const std::uint64_t interpVaddr = request.ExtraBlockVaddr + (request.InterpOffset - request.ExtraBlockOffset);
+    const std::uint64_t interpVaddr = hasInterp ? request.ExtraBlockVaddr + (request.InterpOffset - request.ExtraBlockOffset) : 0;
 
-    std::uint16_t writtenPh = 0;
-
-    const std::size_t phdrEntOff = static_cast<std::size_t>(request.PhOff) + writtenPh * request.PhEntSize;
-    _writeProgramHeader(buf, phdrEntOff, _makePhdrHeader(request.PhOff, headerBlockVaddr + request.PhOff, static_cast<std::uint64_t>(neededPh) * request.PhEntSize));
-    writtenPh++;
-
-    const std::size_t headerLoadEntOff = static_cast<std::size_t>(request.PhOff) + writtenPh * request.PhEntSize;
-    _writeProgramHeader(buf, headerLoadEntOff, _makeHeaderBlockLoad(headerBlockVaddr, headerBlockSize, headerBlockAlign));
-    writtenPh++;
+    std::vector<Domain::ProgramHeader> headers;
+    headers.push_back(_makePhdrHeader(request.PhOff, headerBlockVaddr + request.PhOff, static_cast<std::uint64_t>(neededPh) * request.PhEntSize));
+    headers.push_back(_makeHeaderBlockLoad(headerBlockVaddr, headerBlockSize, headerBlockAlign));
 
     for (const auto& ph : request.OriginalHeaders) {
         if (_segmentFilter->ShouldSkip(ph))
             continue;
-        const std::size_t phEntOff = static_cast<std::size_t>(request.PhOff) + writtenPh * request.PhEntSize;
-        if (ph.Type == PT_LOAD) {
-            Domain::ProgramHeader fixed = ph;
-            fixed.Flags = _fixLoadFlags(ph.Flags);
-            _writeProgramHeader(buf, phEntOff, fixed);
-        } else {
-            _writeProgramHeader(buf, phEntOff, ph);
-        }
-        writtenPh++;
+        Domain::ProgramHeader kept = ph;
+        if (kept.Type == PT_LOAD)
+            kept.Flags = _fixLoadFlags(ph.Flags);
+        headers.push_back(kept);
     }
 
-    {
-        const std::size_t phEntOff = static_cast<std::size_t>(request.PhOff) + writtenPh * request.PhEntSize;
-        _writeProgramHeader(buf, phEntOff, _makeLoadHeader(request.ExtraBlockOffset, request.ExtraBlockVaddr, request.ExtraBlockSize));
-        writtenPh++;
+    headers.push_back(_makeLoadHeader(request.ExtraBlockOffset, request.ExtraBlockVaddr, request.ExtraBlockSize));
+    headers.push_back(_makeDynamicHeader(request.DynamicSegmentOffset, dynamicSegmentVaddr, request.DynamicSegmentSize));
+    if (hasInterp)
+        headers.push_back(_makeInterpHeader(request.InterpOffset, interpVaddr, request.InterpSize));
+    if (hasGnuStack) {
+        Domain::ProgramHeader stack{};
+        stack.Type = PT_GNU_STACK;
+        stack.Flags = PF_R | PF_W;
+        stack.Alignment = kGnuStackAlignment;
+        headers.push_back(stack);
     }
 
-    {
-        const std::size_t phEntOff = static_cast<std::size_t>(request.PhOff) + writtenPh * request.PhEntSize;
-        _writeProgramHeader(buf, phEntOff, _makeDynamicHeader(request.DynamicSegmentOffset, dynamicSegmentVaddr, request.DynamicSegmentSize));
-        writtenPh++;
+    std::vector<std::size_t> loadSlots;
+    std::vector<Domain::ProgramHeader> loads;
+    for (std::size_t index = 0; index < headers.size(); ++index) {
+        if (headers[index].Type != PT_LOAD)
+            continue;
+        loadSlots.push_back(index);
+        loads.push_back(headers[index]);
     }
+    std::stable_sort(loads.begin(), loads.end(), [](const Domain::ProgramHeader& left, const Domain::ProgramHeader& right) {
+        return left.MappedAddress < right.MappedAddress;
+    });
+    for (std::size_t index = 0; index < loadSlots.size(); ++index)
+        headers[loadSlots[index]] = loads[index];
 
-    {
-        const std::size_t phEntOff = static_cast<std::size_t>(request.PhOff) + writtenPh * request.PhEntSize;
-        _writeProgramHeader(buf, phEntOff, _makeInterpHeader(request.InterpOffset, interpVaddr, request.InterpSize));
+    std::uint16_t writtenPh = 0;
+    for (const auto& ph : headers) {
+        _writeProgramHeader(buf, static_cast<std::size_t>(request.PhOff) + static_cast<std::size_t>(writtenPh) * request.PhEntSize, ph);
         writtenPh++;
     }
 

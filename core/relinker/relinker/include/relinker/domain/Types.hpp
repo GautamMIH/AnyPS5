@@ -18,6 +18,9 @@ using DynamicTag = Domain::DynamicTag;
 using RelinkerException = Domain::RelinkerException;
 using SysVDynamicSection = Domain::SysVDynamicSection;
 using CallRegistryEntry = Domain::CallRegistryEntry;
+using ExportedSymbol = Domain::ExportedSymbol;
+using ModuleKind = Domain::ModuleKind;
+using ModuleLinkInfo = Domain::ModuleLinkInfo;
 
 }
 

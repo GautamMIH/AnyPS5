@@ -39,7 +39,9 @@ void writeGotStub(std::vector<PeSection>& sections, const std::uint32_t targetRv
 
 }
 
-std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t>& sourceElf, const std::vector<Domain::ProgramHeader>& originalHeaders, const Domain::SysVDynamicSection& dynamicSection, const std::uint64_t originalPltGotVaddr, const std::string& runPath, const bool lazyBinding, const bool dependencyDiagnostics) {
+std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t>& sourceElf, const std::vector<Domain::ProgramHeader>& originalHeaders, const Domain::SysVDynamicSection& dynamicSection, const std::uint64_t originalPltGotVaddr, const std::string& runPath, const bool lazyBinding, const bool dependencyDiagnostics, const Domain::ModuleLinkInfo& linkInfo) {
+    if (linkInfo.Kind == Domain::ModuleKind::Library)
+        throw Domain::RelinkerException("Converting SCE library modules to Windows DLLs is not implemented");
     WindowsLoadImage image(sourceElf, originalHeaders);
     if (originalPltGotVaddr != 0)
         image.GetRva(originalPltGotVaddr, 8);
