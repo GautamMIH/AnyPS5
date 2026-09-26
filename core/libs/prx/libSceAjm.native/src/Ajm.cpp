@@ -11,6 +11,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 
 // The batch buffer and its job records are private to this library: the guest only reserves the
@@ -458,9 +459,10 @@ int APS5_VABI sceAjmMemoryUnregister(uint32_t context, void* ptr) {
 int APS5_VABI sceAjmInstanceCreate(uint32_t context, uint32_t codec, uint64_t flags, uint32_t* instance) {
     (void)context;
     if (!instance) return SCE_AJM_ERROR_INVALID_PARAMETER;
-    static std::atomic<std::uint32_t> reportedCodecs{0};
-    if (codec != CODEC_AT9 && codec < 32 && (reportedCodecs.fetch_or(1u << codec) & (1u << codec)) == 0)
-        std::fprintf(stderr, "[ajm] codec %u has no decoder; its jobs report codec errors\n", codec);
+    // Only ATRAC9 decodes. Other codecs fail loudly; with ANYPS5_REPORT_UNIMPLEMENTED the instance is
+    // still created and its jobs report codec errors.
+    if (codec != CODEC_AT9)
+        NotImplemented_nid_no_patch(("sceAjmInstanceCreate codec " + std::to_string(codec)).c_str());
     auto created = std::make_unique<Instance>();
     created->codec = codec;
     created->flags = flags;
