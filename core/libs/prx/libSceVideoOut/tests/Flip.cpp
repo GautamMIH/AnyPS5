@@ -42,7 +42,6 @@ public:
         if (!changed.wait_for(lock, std::chrono::seconds(10), [&] { return released; })) throw std::runtime_error("test gate timed out");
     }
     void Fail(std::exception_ptr error) noexcept override { if (!error) std::terminate(); }
-    std::function<void()> ReserveBufferWait(std::uint32_t) override { return [] {}; }
     void Release() {
         std::lock_guard lock(mutex);
         released = true;

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 
 extern "C" {
 
@@ -17,8 +18,7 @@ const char** APS5_VABI getargv_nid_postfix(void) {
 }
 
 int APS5_VABI getpagesize_nid_postfix(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return PS5_PAGE_SIZE;
 }
 
 int APS5_VABI getpid_nid_postfix(void) {

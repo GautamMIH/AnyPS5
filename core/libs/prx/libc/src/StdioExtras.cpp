@@ -61,34 +61,6 @@ extern FileStream _Stdout_nid_postfix;
 extern FileStream _Stderr_nid_postfix;
 FileStream _Stdin_nid_postfix{stdin};
 
-int APS5_VABI fputc_nid_postfix(int character, FileStream* stream) {
-    return std::fputc(character, native(stream));
-}
-
-int APS5_VABI fgetc_nid_postfix(FileStream* stream) {
-    return std::fgetc(native(stream));
-}
-
-int APS5_VABI ungetc_nid_postfix(int character, FileStream* stream) {
-    return std::ungetc(character, native(stream));
-}
-
-char* APS5_VABI fgets_nid_postfix(char* buffer, int count, FileStream* stream) {
-    return std::fgets(buffer, count, native(stream));
-}
-
-int APS5_VABI feof_nid_postfix(FileStream* stream) {
-    return std::feof(native(stream));
-}
-
-int APS5_VABI fseeko_nid_postfix(FileStream* stream, std::int64_t offset, int origin) {
-    return fseeko(native(stream), static_cast<off_t>(offset), origin);
-}
-
-std::int64_t APS5_VABI ftello_nid_postfix(FileStream* stream) {
-    return static_cast<std::int64_t>(ftello(native(stream)));
-}
-
 int APS5_VABI fgetpos_nid_postfix(FileStream* stream, std::int64_t* position) {
     if (position == nullptr) {
         errno = kErrorInvalid;
@@ -108,25 +80,12 @@ int APS5_VABI fsetpos_nid_postfix(FileStream* stream, const std::int64_t* positi
     return fseeko(native(stream), static_cast<off_t>(*position), SEEK_SET);
 }
 
-int APS5_VABI setvbuf_nid_postfix(FileStream* stream, char* buffer, int mode, std::size_t size) {
-    return std::setvbuf(native(stream), buffer, mode, size);
-}
-
 void APS5_VABI _Lockfilelock_nid_postfix(FileStream* stream) {
     flockfile(native(stream));
 }
 
 void APS5_VABI _Unlockfilelock_nid_postfix(FileStream* stream) {
     funlockfile(native(stream));
-}
-
-FileStream* APS5_VABI freopen_nid_postfix(const char* path, const char* mode, FileStream* stream) {
-    if (mode == nullptr) {
-        errno = kErrorInvalid;
-        return nullptr;
-    }
-    std::FILE* reopened = path == nullptr ? std::freopen(nullptr, mode, native(stream)) : std::freopen(ResolvePath_nid_no_patch(path).string().c_str(), mode, native(stream));
-    return reopened == nullptr ? nullptr : stream;
 }
 
 FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode);
@@ -137,26 +96,7 @@ int APS5_VABI fopen_s_nid_postfix(FileStream** stream, const char* path, const c
     return *stream == nullptr ? errno : 0;
 }
 
-void APS5_VABI perror_nid_postfix(const char* prefix) {
-    if (prefix != nullptr && prefix[0] != '\0')
-        std::fprintf(stderr, "%s: %s\n", prefix, std::strerror(errno));
-    else
-        std::fprintf(stderr, "%s\n", std::strerror(errno));
-}
-
 #ifndef _WIN32
-
-int APS5_VABI fprintf_nid_postfix(FileStream* stream, const char* format, ...) {
-    std::va_list arguments;
-    va_start(arguments, format);
-    const int result = std::vfprintf(native(stream), format, arguments);
-    va_end(arguments);
-    return result;
-}
-
-int APS5_VABI vfprintf_nid_postfix(FileStream* stream, const char* format, std::va_list* arguments) {
-    return std::vfprintf(native(stream), format, *arguments);
-}
 
 int APS5_VABI snprintf_s_nid_postfix(char* buffer, std::size_t size, const char* format, ...) {
     if (buffer == nullptr || size == 0 || format == nullptr) return -1;
@@ -183,28 +123,7 @@ int APS5_VABI sprintf_s_nid_postfix(char* buffer, std::size_t size, const char* 
 #endif
 
 std::size_t APS5_VABI strspn_nid_postfix(const char* text, const char* accept) { return std::strspn(text, accept); }
-std::size_t APS5_VABI strcspn_nid_postfix(const char* text, const char* reject) { return std::strcspn(text, reject); }
-char* APS5_VABI strncat_nid_postfix(char* destination, const char* source, std::size_t count) { return std::strncat(destination, source, count); }
-std::size_t APS5_VABI strnlen_nid_postfix(const char* text, std::size_t count) { return strnlen(text, count); }
 int APS5_VABI bcmp_nid_postfix(const void* left, const void* right, std::size_t count) { return std::memcmp(left, right, count) == 0 ? 0 : 1; }
-
-char* APS5_VABI strtok_nid_postfix(char* text, const char* separators) {
-    return strtok_r(text, separators, &tokenState);
-}
-
-char* APS5_VABI strerror_nid_postfix(int error) {
-    return std::strerror(error);
-}
-
-int APS5_VABI strerror_r_nid_postfix(int error, char* buffer, std::size_t size) {
-    if (buffer == nullptr || size == 0) return kErrorRange;
-    const char* message = std::strerror(error);
-    const std::size_t length = std::strlen(message);
-    const std::size_t copy = std::min(length, size - 1);
-    std::memcpy(buffer, message, copy);
-    buffer[copy] = '\0';
-    return copy == length ? 0 : kErrorRange;
-}
 
 int APS5_VABI memcpy_s_nid_postfix(void* destination, std::size_t destinationSize, const void* source, std::size_t count) {
     if (destination == nullptr) return kErrorInvalid;
@@ -253,21 +172,6 @@ int APS5_VABI strncpy_s_nid_postfix(char* destination, std::size_t destinationSi
     return 0;
 }
 
-void* APS5_VABI bsearch_nid_postfix(const void* key, const void* base, std::size_t count, std::size_t size, CompareFunction compare) {
-    const auto* bytes = static_cast<const unsigned char*>(base);
-    std::size_t low = 0;
-    std::size_t high = count;
-    while (low < high) {
-        const std::size_t middle = low + (high - low) / 2;
-        const void* element = bytes + middle * size;
-        const int order = compare(key, element);
-        if (order == 0) return const_cast<void*>(element);
-        if (order < 0) high = middle;
-        else low = middle + 1;
-    }
-    return nullptr;
-}
-
 int APS5_VABI rand_nid_postfix() {
     return static_cast<int>(randomEngine()() & 0x7fffffffu);
 }
@@ -286,10 +190,6 @@ long APS5_VABI lrand48_nid_postfix() {
 
 std::div_t APS5_VABI div_nid_postfix(int numerator, int denominator) {
     return std::div(numerator, denominator);
-}
-
-double APS5_VABI atof_nid_postfix(const char* text) {
-    return std::atof(text);
 }
 
 long APS5_VABI clock_nid_postfix() {
@@ -316,10 +216,6 @@ std::lconv* APS5_VABI localeconv_nid_postfix() {
         return value;
     }();
     return &conventions;
-}
-
-[[noreturn]] void APS5_VABI _Exit_nid_postfix(int status) {
-    std::_Exit(status);
 }
 
 [[noreturn]] void APS5_VABI quick_exit_nid_postfix(int status) {

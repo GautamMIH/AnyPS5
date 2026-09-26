@@ -26,9 +26,33 @@ void checkConfig(const VideoOutConfig& cfg) {
     cfg.Check();
 }
 
+class RenderingWait final : public AgcDriver::IRenderingWait {
+    std::shared_ptr<VideoOutConfig> _config;
+    std::uint32_t _index;
+    std::uint64_t _ticket;
+public:
+    RenderingWait(std::shared_ptr<VideoOutConfig> config, std::uint32_t index, std::uint64_t ticket)
+        : _config(std::move(config)), _index(index), _ticket(ticket) {}
+    void Wait() override {
+        std::unique_lock lock(_config->mutex);
+        _config->vblankCond.wait(lock, [&] {
+            return _config->failure || _config->closing || !_config->opened ||
+                _config->bufferReuse[_index].IsComplete(_ticket);
+        });
+        checkConfig(*_config);
+    }
+};
+
 class VideoOutput final : public AgcDriver::IVideoOutput {
 public:
     VideoOutput(std::shared_ptr<VideoOutConfig> config, std::shared_ptr<FlipQueue> requests) : cfg(std::move(config)), queue(std::move(requests)) {}
+
+    std::shared_ptr<AgcDriver::IRenderingWait> CaptureRenderingWait(std::uint32_t index) override {
+        std::lock_guard lock(cfg->mutex);
+        checkConfig(*cfg);
+        require(index < VIDEO_OUT_BUFFER_NUM_MAX && cfg->buffers[index].Occupied(), "wait buffer is not registered");
+        return std::make_shared<RenderingWait>(cfg, index, cfg->bufferReuse[index].Capture());
+    }
 
     std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo& info) override {
         require(info.mode == VIDEO_OUT_FLIP_MODE_VSYNC, "unsupported flip mode");
@@ -62,28 +86,12 @@ public:
         }
         request->generation = cfg->generation;
         request->flipRate = cfg->flipRate;
+        if (info.index >= 0) request->reuseTicket = cfg->bufferReuse[info.index].Reserve();
         ++queue->reservations;
         ++cfg->flipStatus.flipPendingNum;
-        if (info.index >= 0) {
-            ++cfg->bufferPending[info.index];
-            ++cfg->bufferReserved[info.index];
-        }
+        if (info.index >= 0) ++cfg->bufferPending[info.index];
         request->reserved = true;
         return request;
-    }
-
-    std::function<void()> ReserveBufferWait(std::uint32_t index) override {
-        require(index < VIDEO_OUT_BUFFER_NUM_MAX, "invalid wait buffer index");
-        std::lock_guard lock(cfg->mutex);
-        checkConfig(*cfg);
-        const auto target = cfg->bufferReserved[index];
-        return [config = cfg, index, target] {
-            std::unique_lock lock(config->mutex);
-            config->vblankCond.wait(lock, [&] {
-                return config->failure != nullptr || config->closing || config->bufferReserved[index] - config->bufferPending[index] >= target;
-            });
-            if (config->failure) std::rethrow_exception(config->failure);
-        };
     }
 
     void Fail(std::exception_ptr error) noexcept override {
@@ -113,7 +121,10 @@ FlipRequest::~FlipRequest() {
     if (!terminal) {
         --cfg->flipStatus.flipPendingNum;
         --queue->reservations;
-        if (index >= 0) --cfg->bufferPending[index];
+        if (index >= 0) {
+            --cfg->bufferPending[index];
+            cfg->bufferReuse[index].Complete(reuseTicket);
+        }
         cfg->vblankCond.notify_all();
     }
 }
@@ -149,7 +160,10 @@ void FlipRequest::Fail(std::exception_ptr error) noexcept {
     if (reserved && !terminal) {
         --cfg->flipStatus.flipPendingNum;
         --queue->reservations;
-        if (index >= 0) --cfg->bufferPending[index];
+        if (index >= 0) {
+            --cfg->bufferPending[index];
+            cfg->bufferReuse[index].Complete(reuseTicket);
+        }
         terminal = true;
     }
     cfg->vblankCond.notify_all();
@@ -412,7 +426,10 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     req.cfg->height = req.height;
     --req.cfg->flipStatus.flipPendingNum;
     --req.queue->reservations;
-    if (req.index >= 0) --req.cfg->bufferPending[req.index];
+    if (req.index >= 0) {
+        --req.cfg->bufferPending[req.index];
+        req.cfg->bufferReuse[req.index].Complete(req.reuseTicket);
+    }
     req.terminal = true;
     req.cfg->vblankCond.notify_all();
     timing.Mark("notify_game");

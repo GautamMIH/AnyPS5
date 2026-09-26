@@ -66,10 +66,6 @@ int APS5_VABI scePthreadOnce(OnceControl* once, OnceRoutine routine) {
     return 0;
 }
 
-int APS5_VABI pthread_once_nid_postfix(OnceControl* once, OnceRoutine routine) {
-    return posixFromSce(scePthreadOnce(once, routine));
-}
-
 int APS5_VABI pthread_create_nid_postfix(Pthread* thread, const PthreadAttr* attr, pthread_entry_func_t entry, void* arg) {
     return posixFromSce(scePthreadCreate(thread, attr, reinterpret_cast<PthreadEntry>(entry), arg, nullptr));
 }

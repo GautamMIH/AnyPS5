@@ -1,59 +1,114 @@
 #include <stdexcept>
 #include <string>
 #include <filesystem>
+#include <mutex>
+#include <cerrno>
+#include <cstring>
+#include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestHeap.hpp"
+#include "prx/libc/include/AmprContainer.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <mutex>
+#include <memory>
 #include <set>
 
-#include "prx/libc/include/General.hpp"
-#include "prx/libc/include/AmprContainer.hpp"
-
 namespace {
-
-// The title's AMPR asset container, if it ships one, serves /app0 files that are not on disk.
-AmprContainer::Container* appContainer() {
-    static std::once_flag once;
-    static std::unique_ptr<AmprContainer::Container> container;
-    std::call_once(once, [] {
-        const auto root = std::filesystem::current_path();
-        container = AmprContainer::Container::Open(root / "app0", root / "ampr_cache");
-    });
-    return container.get();
+struct WorkingDirectory {
+    std::mutex mutex;
+    const std::filesystem::path root = std::filesystem::canonical(std::filesystem::current_path());
+    std::filesystem::path current = root;
+};
+WorkingDirectory& Directories() { static WorkingDirectory state; return state; }
+std::filesystem::path Resolve(WorkingDirectory& state, const char* path) {
+    std::string text(path);
+    for (auto& character : text) if (character == '\\') character = '/';
+    std::filesystem::path input(text);
+#ifdef _WIN32
+    // Preserve the existing ability to pass explicit native drive paths.
+    if (input.has_root_name()) return input;
+#endif
+    auto guest = (std::filesystem::path("/") / state.current.lexically_relative(state.root));
+    guest = (input.is_absolute() ? input : guest / input).lexically_normal();
+    return (state.root / guest.relative_path()).make_preferred();
+}
+int DirectoryFailure(const std::error_code& error) {
+    if (error == std::errc::permission_denied) return 13;
+    if (error == std::errc::not_a_directory) return 20;
+    if (error == std::errc::no_such_file_or_directory) return 2;
+    if (error == std::errc::filename_too_long) return 63;
+    if (error == std::errc::too_many_symbolic_link_levels) return 62;
+    return 5;
 }
 
+// The title's AMPR asset container, if it ships one, serves /app0 files that are not on disk.
+AmprContainer::Container* appContainer(const std::filesystem::path& root) {
+    static std::once_flag once;
+    static std::unique_ptr<AmprContainer::Container> container;
+    std::call_once(once, [&root] { container = AmprContainer::Container::Open(root / "app0", root / "ampr_cache"); });
+    return container.get();
+}
 }
 
 extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {
-    if (path == nullptr) {
-        APS5_INVALID_ARG_EX;
-    }
-    std::string s(path);
-    std::size_t start = 0;
-    while (start < s.size() && (s[start] == '/' || s[start] == '\\')) {
-        ++start;
-    }
-    std::size_t end = s.size();
-    while (end > start && (s[end - 1] == '/' || s[end - 1] == '\\')) {
-        --end;
-    }
-    const std::string relative = s.substr(start, end - start);
+    if (!path) { APS5_INVALID_ARG_EX; }
+    auto& state = Directories();
+    std::lock_guard lock(state.mutex);
+    auto result = Resolve(state, path);
+    const auto guest = "/" + result.lexically_relative(state.root).generic_string();
 #ifndef _WIN32
     // Character devices the guest kernel also provides map to the host's devices of the same name.
-    if (relative == "dev/random" || relative == "dev/urandom" || relative == "dev/null" || relative == "dev/zero") {
-        return std::filesystem::path("/") / relative;
+    if (guest == "/dev/random" || guest == "/dev/urandom" || guest == "/dev/null" || guest == "/dev/zero") {
+        return std::filesystem::path(guest);
     }
 #endif
-    std::filesystem::path result = std::filesystem::current_path() / std::filesystem::path(relative);
-    result.make_preferred();
     std::error_code error;
-    if (AmprContainer::NormalisePath(relative).rfind("app0/", 0) == 0 && !std::filesystem::exists(result, error)) {
-        if (auto* container = appContainer()) {
-            if (auto packed = container->Resolve("/" + relative)) return packed->make_preferred();
+    if (AmprContainer::NormalisePath(guest).rfind("/app0/", 0) == 0 && !std::filesystem::exists(result, error)) {
+        if (auto* container = appContainer(state.root)) {
+            if (auto packed = container->Resolve(guest)) return packed->make_preferred();
         }
     }
     return result;
+}
+
+extern "C" int APS5_VABI chdir_nid_postfix(const char* path) {
+    if (!path) { errno = 14; return -1; }
+    if (!*path) { errno = 2; return -1; }
+    try {
+        auto& state = Directories();
+        std::lock_guard lock(state.mutex);
+        std::error_code error;
+        const auto resolved = std::filesystem::canonical(Resolve(state, path), error);
+        if (error) { errno = DirectoryFailure(error); return -1; }
+        if (!std::filesystem::is_directory(resolved, error)) {
+            errno = error ? DirectoryFailure(error) : 20; return -1;
+        }
+        const auto relative = resolved.lexically_relative(state.root);
+        if (relative.empty() || *relative.begin() == "..") { errno = 45; return -1; }
+        state.current = resolved;
+        return 0;
+    } catch (const std::bad_alloc&) { errno = 12; return -1; }
+      catch (const std::filesystem::filesystem_error& error) { errno = DirectoryFailure(error.code()); return -1; }
+}
+
+extern "C" char* APS5_VABI getcwd_nid_postfix(char* buffer, std::size_t size) {
+    if (buffer && size == 0) { errno = 22; return nullptr; }
+    try {
+        auto& state = Directories();
+        std::lock_guard lock(state.mutex);
+        std::error_code error;
+        if (!std::filesystem::is_directory(state.current, error)) {
+            errno = error ? DirectoryFailure(error) : 2; return nullptr;
+        }
+        const auto relative = state.current.lexically_relative(state.root);
+        const auto path = relative == "." ? std::string("/") : "/" + relative.generic_string();
+        const auto required = path.size() + 1;
+        if ((buffer || size) && size < required) { errno = 34; return nullptr; }
+        if (!buffer) buffer = static_cast<char*>(GuestHeap::GuestHeapAllocate_nid_postfix(size ? size : required));
+        std::memcpy(buffer, path.c_str(), required);
+        return buffer;
+    } catch (const std::bad_alloc&) { errno = 12; return nullptr; }
+      catch (const std::filesystem::filesystem_error& error) { errno = DirectoryFailure(error.code()); return nullptr; }
 }
 
 namespace {

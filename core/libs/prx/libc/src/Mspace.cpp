@@ -1,266 +1,247 @@
+#include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libc/include/MallocStatistics.hpp"
 #include <algorithm>
-#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <map>
+#include <limits>
 #include <mutex>
-#include <new>
-#include <string>
-#include <vector>
 
-#include "prx/libc/include/General.hpp"
-#include "prx/libc/include/MallocStatistics.hpp"
+extern "C" int* APS5_VABI __error_nid_postfix();
 
 namespace {
-
-constexpr std::size_t kMinimumAlignment = 16;
-constexpr std::size_t kOwnedMemoryAlignment = 0x4000;
-constexpr int kErrorInvalid = 22;
-constexpr int kErrorNoMemory = 12;
-
-std::size_t alignUp(const std::size_t value, const std::size_t alignment) {
-    return (value + alignment - 1) & ~(alignment - 1);
-}
-
-bool isPowerOfTwo(const std::size_t value) {
-    return value != 0 && (value & (value - 1)) == 0;
-}
-
-struct Mspace {
-    std::mutex Mutex;
-    std::string Name;
-    std::uintptr_t Base = 0;
-    std::size_t Capacity = 0;
-    bool OwnsMemory = false;
-    std::map<std::uintptr_t, std::size_t> FreeBlocks;
-    std::map<std::uintptr_t, std::size_t> UsedBlocks;
-    std::size_t InUse = 0;
-    std::size_t MaxInUse = 0;
-
-    void* Allocate(std::size_t bytes, std::size_t alignment) {
-        const std::size_t size = alignUp(std::max<std::size_t>(bytes, 1), kMinimumAlignment);
-        alignment = std::max(alignment, kMinimumAlignment);
-        for (auto it = FreeBlocks.begin(); it != FreeBlocks.end(); ++it) {
-            const std::uintptr_t start = it->first;
-            const std::uintptr_t end = start + it->second;
-            const std::uintptr_t aligned = alignUp(start, alignment);
-            if (aligned < start || aligned > end || end - aligned < size)
-                continue;
-            FreeBlocks.erase(it);
-            if (aligned > start)
-                FreeBlocks.emplace(start, aligned - start);
-            if (end > aligned + size)
-                FreeBlocks.emplace(aligned + size, end - aligned - size);
-            UsedBlocks.emplace(aligned, size);
-            InUse += size;
-            MaxInUse = std::max(MaxInUse, InUse);
-            return reinterpret_cast<void*>(aligned);
-        }
-        return nullptr;
-    }
-
-    bool Release(void* pointer) {
-        const auto used = UsedBlocks.find(reinterpret_cast<std::uintptr_t>(pointer));
-        if (used == UsedBlocks.end())
-            return false;
-        std::uintptr_t start = used->first;
-        std::size_t size = used->second;
-        InUse -= size;
-        UsedBlocks.erase(used);
-        auto next = FreeBlocks.lower_bound(start);
-        if (next != FreeBlocks.end() && next->first == start + size) {
-            size += next->second;
-            next = FreeBlocks.erase(next);
-        }
-        if (next != FreeBlocks.begin()) {
-            const auto previous = std::prev(next);
-            if (previous->first + previous->second == start) {
-                start = previous->first;
-                size += previous->second;
-                FreeBlocks.erase(previous);
-            }
-        }
-        FreeBlocks.emplace(start, size);
-        return true;
-    }
-
-    std::size_t UsableSize(void* pointer) const {
-        const auto used = UsedBlocks.find(reinterpret_cast<std::uintptr_t>(pointer));
-        return used == UsedBlocks.end() ? 0 : used->second;
-    }
-
-    void* Reallocate(void* pointer, std::size_t bytes, std::size_t alignment) {
-        if (pointer == nullptr)
-            return Allocate(bytes, alignment);
-        const std::size_t previous = UsableSize(pointer);
-        if (previous == 0)
-            return nullptr;
-        void* replacement = Allocate(bytes, alignment);
-        if (replacement == nullptr)
-            return nullptr;
-        std::memcpy(replacement, pointer, std::min(previous, bytes));
-        Release(pointer);
-        return replacement;
-    }
-
-    void Fill(MallocStatistics::ManagedSize* statistics) const {
-        statistics->maxSystemSize = Capacity;
-        statistics->currentSystemSize = Capacity;
-        statistics->maxInuseSize = MaxInUse;
-        statistics->currentInuseSize = InUse;
-    }
+struct alignas(16) Block {
+    std::size_t capacity;
+    Block* next;
+    void* pointer;
+    std::size_t used;
 };
+// The arena header lives at the start of the caller's memory, as with dlmalloc's
+// create_mspace_with_base, so the handle is an address inside that memory.
+struct alignas(16) Arena {
+    Arena* next;
+    Block* first;
+    std::uintptr_t end;
+    std::size_t inUse;
+    std::size_t maxInUse;
+    bool ownsMemory;
+};
+std::mutex arenaMutex;
+Arena* arenas = nullptr;
 
-std::mutex& registryMutex() {
-    static std::mutex instance;
-    return instance;
-}
-
-std::vector<Mspace*>& registry() {
-    static std::vector<Mspace*> instance;
-    return instance;
-}
-
-Mspace* owner(void* pointer) {
-    const auto address = reinterpret_cast<std::uintptr_t>(pointer);
-    const std::lock_guard lock(registryMutex());
-    for (auto* space : registry())
-        if (address >= space->Base && address - space->Base < space->Capacity)
-            return space;
+void Error(int value) { *__error_nid_postfix() = value; }
+bool PowerOfTwo(std::size_t value) { return value != 0 && (value & (value - 1)) == 0; }
+Arena* Find(void* handle) {
+    for (auto* arena = arenas; arena; arena = arena->next)
+        if (arena == handle) return arena;
+    Error(22);
     return nullptr;
 }
-
-Mspace* validate(void* handle) {
-    if (handle == nullptr)
-        return nullptr;
-    const std::lock_guard lock(registryMutex());
-    const auto& spaces = registry();
-    return std::find(spaces.begin(), spaces.end(), handle) != spaces.end() ? static_cast<Mspace*>(handle) : nullptr;
+Block* FindBlock(Arena* arena, const void* pointer) {
+    if (arena && pointer)
+        for (auto* block = arena->first; block; block = block->next)
+            if (block->pointer == pointer) return block;
+    Error(22);
+    return nullptr;
 }
-
+void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
+    if (!arena) return nullptr;
+    size = std::max<std::size_t>(size, 1);
+    for (auto* block = arena->first; block; block = block->next) {
+        if (block->pointer) continue;
+        const auto start = reinterpret_cast<std::uintptr_t>(block + 1);
+        if (start > std::numeric_limits<std::uintptr_t>::max() - (alignment - 1)) continue;
+        const auto aligned = (start + alignment - 1) & ~(alignment - 1);
+        const auto padding = aligned - start;
+        if (padding > block->capacity || size > block->capacity - padding) continue;
+        auto consumed = padding + size;
+        // Splitting preserves header alignment and avoids small unusable fragments.
+        if (consumed <= std::numeric_limits<std::size_t>::max() - 15) {
+            const auto rounded = (consumed + 15) & ~std::size_t{15};
+            if (rounded <= block->capacity && block->capacity - rounded >= sizeof(Block) + 16) {
+                auto* tail = reinterpret_cast<Block*>(start + rounded);
+                *tail = {block->capacity - rounded - sizeof(Block), block->next, nullptr, 0};
+                block->capacity = rounded;
+                block->next = tail;
+            }
+        }
+        block->pointer = reinterpret_cast<void*>(aligned);
+        block->used = size;
+        arena->inUse += size;
+        arena->maxInUse = std::max(arena->maxInUse, arena->inUse);
+        return block->pointer;
+    }
+    Error(12);
+    return nullptr;
+}
+void Release(Arena* arena, Block* released) {
+    arena->inUse -= released->used;
+    released->pointer = nullptr;
+    released->used = 0;
+    for (auto* block = arena->first; block && block->next;) {
+        if (!block->pointer && !block->next->pointer) {
+            block->capacity += sizeof(Block) + block->next->capacity;
+            block->next = block->next->next;
+        } else block = block->next;
+    }
+}
+void* Reallocate(Arena* arena, void* pointer, std::size_t size, std::size_t alignment) {
+    if (!arena) return nullptr;
+    if (!pointer) return Allocate(arena, size, alignment);
+    auto* block = FindBlock(arena, pointer);
+    if (!block) return nullptr;
+    if (!size) { Release(arena, block); return nullptr; }
+    const auto address = reinterpret_cast<std::uintptr_t>(pointer);
+    const auto padding = address - reinterpret_cast<std::uintptr_t>(block + 1);
+    if ((address & (alignment - 1)) == 0 && size <= block->capacity - padding) {
+        arena->inUse = arena->inUse - block->used + size;
+        arena->maxInUse = std::max(arena->maxInUse, arena->inUse);
+        block->used = size;
+        return pointer;
+    }
+    void* result = Allocate(arena, size, alignment);
+    if (result) {
+        std::memcpy(result, pointer, std::min(block->used, size));
+        Release(arena, block);
+    }
+    return result;
+}
 }
 
 extern "C" {
-
-void* APS5_VABI sceLibcMspaceCreate_nid_postfix(const char* name, void* base, std::size_t capacity, unsigned int) {
-    if (capacity == 0)
+void* APS5_VABI sceLibcMspaceCreate_nid_postfix(const char* name, void* base,
+                                              std::size_t size, unsigned flags) {
+    (void)name;
+    if (size < sizeof(Arena) + sizeof(Block) + 16 || flags != 0) {
+        Error(22);
         return nullptr;
-    auto* space = new (std::nothrow) Mspace();
-    if (space == nullptr)
-        return nullptr;
-    if (base == nullptr) {
-        base = std::aligned_alloc(kOwnedMemoryAlignment, alignUp(capacity, kOwnedMemoryAlignment));
-        if (base == nullptr) {
-            delete space;
+    }
+    // A null base asks the library to provide the arena's memory.
+    const bool ownsMemory = base == nullptr;
+    if (ownsMemory) {
+        const auto rounded = (size + 15) & ~std::size_t{15};
+        if (rounded < size || !(base = std::aligned_alloc(16, rounded))) {
+            Error(12);
             return nullptr;
         }
-        space->OwnsMemory = true;
     }
-    space->Name = name != nullptr ? name : "";
-    space->Base = reinterpret_cast<std::uintptr_t>(base);
-    space->Capacity = capacity;
-    const std::uintptr_t first = alignUp(space->Base, kMinimumAlignment);
-    if (first - space->Base < capacity)
-        space->FreeBlocks.emplace(first, capacity - (first - space->Base));
-    const std::lock_guard lock(registryMutex());
-    registry().push_back(space);
-    return space;
+    const auto start = reinterpret_cast<std::uintptr_t>(base);
+    if ((start & 15) || size > std::numeric_limits<std::uintptr_t>::max() - start) {
+        if (ownsMemory) std::free(base);
+        Error(22);
+        return nullptr;
+    }
+    std::lock_guard lock(arenaMutex);
+    for (auto* arena = arenas; arena; arena = arena->next) {
+        if (start < arena->end && reinterpret_cast<std::uintptr_t>(arena) < start + size) {
+            if (ownsMemory) std::free(base);
+            Error(22);
+            return nullptr;
+        }
+    }
+    auto* arena = static_cast<Arena*>(base);
+    auto* block = reinterpret_cast<Block*>(arena + 1);
+    *block = {size - sizeof(Arena) - sizeof(Block), nullptr, nullptr, 0};
+    *arena = {arenas, block, start + size, 0, 0, ownsMemory};
+    arenas = arena;
+    return arena;
 }
 
 int APS5_VABI sceLibcMspaceDestroy_nid_postfix(void* handle) {
-    Mspace* space = validate(handle);
-    if (space == nullptr)
-        return kErrorInvalid;
-    {
-        const std::lock_guard lock(registryMutex());
-        std::erase(registry(), space);
+    std::lock_guard lock(arenaMutex);
+    for (auto** entry = &arenas; *entry; entry = &(*entry)->next) {
+        if (*entry == handle) {
+            auto* arena = *entry;
+            *entry = arena->next;
+            if (arena->ownsMemory) std::free(arena);
+            return 0;
+        }
     }
-    if (space->OwnsMemory)
-        std::free(reinterpret_cast<void*>(space->Base));
-    delete space;
-    return 0;
+    Error(22);
+    return -1;
 }
 
-void* APS5_VABI sceLibcMspaceMalloc_nid_postfix(void* handle, std::size_t bytes) {
-    Mspace* space = validate(handle);
-    if (space == nullptr)
-        return nullptr;
-    const std::lock_guard lock(space->Mutex);
-    return space->Allocate(bytes, kMinimumAlignment);
-}
-
-void* APS5_VABI sceLibcMspaceCalloc_nid_postfix(void* handle, std::size_t count, std::size_t bytes) {
-    if (bytes != 0 && count > SIZE_MAX / bytes)
-        return nullptr;
-    void* pointer = sceLibcMspaceMalloc_nid_postfix(handle, count * bytes);
-    if (pointer != nullptr)
-        std::memset(pointer, 0, count * bytes);
-    return pointer;
-}
-
-void* APS5_VABI sceLibcMspaceMemalign_nid_postfix(void* handle, std::size_t alignment, std::size_t bytes) {
-    Mspace* space = validate(handle);
-    if (space == nullptr || !isPowerOfTwo(alignment))
-        return nullptr;
-    const std::lock_guard lock(space->Mutex);
-    return space->Allocate(bytes, alignment);
-}
-
-int APS5_VABI sceLibcMspacePosixMemalign_nid_postfix(void* handle, void** pointer, std::size_t alignment, std::size_t bytes) {
-    if (pointer == nullptr || !isPowerOfTwo(alignment) || alignment < sizeof(void*))
-        return kErrorInvalid;
-    void* result = sceLibcMspaceMemalign_nid_postfix(handle, alignment, bytes);
-    if (result == nullptr)
-        return kErrorNoMemory;
-    *pointer = result;
-    return 0;
+void* APS5_VABI sceLibcMspaceMalloc_nid_postfix(void* handle, std::size_t size) {
+    std::lock_guard lock(arenaMutex);
+    return Allocate(Find(handle), size, 16);
 }
 
 int APS5_VABI sceLibcMspaceFree_nid_postfix(void* handle, void* pointer) {
-    if (pointer == nullptr)
-        return 0;
-    Mspace* space = validate(handle);
-    if (space == nullptr)
-        return kErrorInvalid;
-    const std::lock_guard lock(space->Mutex);
-    return space->Release(pointer) ? 0 : kErrorInvalid;
+    if (!pointer) return 0;
+    std::lock_guard lock(arenaMutex);
+    auto* arena = Find(handle);
+    auto* block = FindBlock(arena, pointer);
+    if (!block) return 22;
+    Release(arena, block);
+    return 0;
 }
 
-void* APS5_VABI sceLibcMspaceRealloc_nid_postfix(void* handle, void* pointer, std::size_t bytes) {
-    Mspace* space = validate(handle);
-    if (space == nullptr)
-        return nullptr;
-    const std::lock_guard lock(space->Mutex);
-    if (bytes == 0 && pointer != nullptr) {
-        space->Release(pointer);
+void* APS5_VABI sceLibcMspaceCalloc_nid_postfix(void* handle, std::size_t count, std::size_t size) {
+    if (size && count > std::numeric_limits<std::size_t>::max() / size) {
+        Error(12);
         return nullptr;
     }
-    return space->Reallocate(pointer, bytes, kMinimumAlignment);
+    std::lock_guard lock(arenaMutex);
+    void* result = Allocate(Find(handle), count * size, 16);
+    if (result) std::memset(result, 0, count * size);
+    return result;
 }
 
-void* APS5_VABI sceLibcMspaceReallocalign_nid_postfix(void* handle, void* pointer, std::size_t alignment, std::size_t bytes) {
-    Mspace* space = validate(handle);
-    if (space == nullptr || !isPowerOfTwo(alignment))
+void* APS5_VABI sceLibcMspaceRealloc_nid_postfix(void* handle, void* pointer, std::size_t size) {
+    std::lock_guard lock(arenaMutex);
+    return Reallocate(Find(handle), pointer, size, 16);
+}
+
+void* APS5_VABI sceLibcMspaceReallocalign_nid_postfix(void* handle, void* pointer, std::size_t alignment, std::size_t size) {
+    if (!PowerOfTwo(alignment)) {
+        Error(22);
         return nullptr;
-    const std::lock_guard lock(space->Mutex);
-    return space->Reallocate(pointer, bytes, alignment);
+    }
+    std::lock_guard lock(arenaMutex);
+    return Reallocate(Find(handle), pointer, size, std::max<std::size_t>(alignment, 16));
 }
 
-std::size_t APS5_VABI sceLibcMspaceMallocUsableSize_nid_postfix(void* pointer) {
-    Mspace* space = owner(pointer);
-    if (space == nullptr)
-        return 0;
-    const std::lock_guard lock(space->Mutex);
-    return space->UsableSize(pointer);
+void* APS5_VABI sceLibcMspaceMemalign_nid_postfix(void* handle, std::size_t alignment, std::size_t size) {
+    if (!PowerOfTwo(alignment)) {
+        Error(22);
+        return nullptr;
+    }
+    std::lock_guard lock(arenaMutex);
+    return Allocate(Find(handle), size, std::max<std::size_t>(alignment, 16));
+}
+
+int APS5_VABI sceLibcMspacePosixMemalign_nid_postfix(void* handle, void** result,
+                                                   std::size_t alignment, std::size_t size) {
+    if (!result || alignment < sizeof(void*) || (alignment & (alignment - 1))) return 22;
+    std::lock_guard lock(arenaMutex);
+    auto* arena = Find(handle);
+    if (!arena) return 22;
+    void* pointer = Allocate(arena, size, std::max<std::size_t>(alignment, 16));
+    if (!pointer) return 12;
+    *result = pointer;
+    return 0;
+}
+
+std::size_t APS5_VABI sceLibcMspaceMallocUsableSize_nid_postfix(const void* pointer) {
+    if (!pointer) return 0;
+    std::lock_guard lock(arenaMutex);
+    for (auto* arena = arenas; arena; arena = arena->next)
+        for (auto* block = arena->first; block; block = block->next)
+            if (block->pointer == pointer) return block->used;
+    Error(22);
+    return 0;
 }
 
 int APS5_VABI sceLibcMspaceMallocStats_nid_postfix(void* handle, MallocStatistics::ManagedSize* statistics) {
-    Mspace* space = validate(handle);
-    if (space == nullptr || statistics == nullptr)
-        return kErrorInvalid;
-    const std::lock_guard lock(space->Mutex);
-    space->Fill(statistics);
+    if (!statistics) return 22;
+    std::lock_guard lock(arenaMutex);
+    auto* arena = Find(handle);
+    if (!arena) return 22;
+    const auto capacity = static_cast<std::size_t>(arena->end - reinterpret_cast<std::uintptr_t>(arena));
+    statistics->maxSystemSize = capacity;
+    statistics->currentSystemSize = capacity;
+    statistics->maxInuseSize = arena->maxInUse;
+    statistics->currentInuseSize = arena->inUse;
     return 0;
 }
 
@@ -269,11 +250,11 @@ int APS5_VABI sceLibcMspaceMallocStatsFast_nid_postfix(void* handle, MallocStati
 }
 
 int APS5_VABI sceLibcMspaceIsHeapEmpty_nid_postfix(void* handle) {
-    Mspace* space = validate(handle);
-    if (space == nullptr)
-        return kErrorInvalid;
-    const std::lock_guard lock(space->Mutex);
-    return space->UsedBlocks.empty() ? 1 : 0;
+    std::lock_guard lock(arenaMutex);
+    auto* arena = Find(handle);
+    if (!arena) return 22;
+    for (auto* block = arena->first; block; block = block->next)
+        if (block->pointer) return 0;
+    return 1;
 }
-
 }

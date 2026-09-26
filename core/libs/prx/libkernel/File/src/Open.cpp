@@ -2,6 +2,7 @@
 #include "prx/libkernel/File/include/FileErrors.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/File/include/File.hpp"
 #include "SceTypes.hpp"
 
@@ -334,6 +335,7 @@ int APS5_VABI open_nid_postfix(const char* path, int flags, int mode) {
 }
 
 int APS5_VABI close_nid_postfix(int d) {
+    if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Close(d);
     return posixResult(NativeClose(d));
 }
 

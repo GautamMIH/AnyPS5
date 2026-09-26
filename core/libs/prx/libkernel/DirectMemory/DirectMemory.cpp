@@ -87,7 +87,7 @@ int LinuxProtFromSce(int prot) {
     int result = PROT_NONE;
     if (GuestReadable(prot)) result |= PROT_READ;
     if (GuestWritable(prot)) result |= PROT_WRITE;
-    if (prot & 4) result |= PROT_EXEC;
+    if (prot & 4) result |= PROT_READ | PROT_EXEC;
     return result;
 }
 
@@ -182,6 +182,8 @@ int DoMprotect(const void* addr, size_t len, int prot) {
         mutation.RegisterMainImage();
     }
 #else
+    mutation.RegisterMainImage();
+    // Other loaded modules are not tracked as guest allocations; protect them directly.
     GuestAllocations::Range overlapping{};
     if (!mutation.Query(pointer, true, &overlapping) || overlapping.address >= end) {
         if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");

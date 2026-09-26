@@ -25,7 +25,7 @@ int main(const int argc, char* argv[]) {
         Io::FileReader fileReader;
         Io::FileWriter fileWriter;
 
-        const auto inputBytes = fileReader.Read(args.inputPath);
+        auto inputBytes = fileReader.Read(args.inputPath);
         const std::string absPath = std::filesystem::absolute(args.outputPath).string();
 
         if (args.toIntel) {
@@ -34,13 +34,13 @@ int main(const int argc, char* argv[]) {
             auto sourceBytes = Relinker::SelfUnwrapper().Unwrap(inputBytes);
             const Relinker::ElfReader elfReader(sourceBytes);
             const auto converter = Codegen::MakeAmd64OnlyConverter();
-            auto result = converter->Convert(std::move(sourceBytes), elfReader.ReadCodeSegments());
 
-            fileWriter.Write(absPath, std::move(result.Bytes));
+            auto codeSegments = elfReader.ReadCodeSegments();
+            auto result = converter->Convert(std::move(sourceBytes), codeSegments);
+
             std::cout << "OK: " << result.ReplacedCount << " instructions replaced\n";
-
-            if (args.autorun) return Cli::Autorun(absPath, args.toWindows);
-            return 0;
+            // The converted image continues through the general relink pipeline.
+            inputBytes = std::move(result.Bytes);
         }
 
         Cli::RelinkModule(inputBytes, absPath, args);

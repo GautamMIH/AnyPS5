@@ -220,8 +220,8 @@ void testReleaseMem() {
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x49, {0x22f, 0, 0, 0, 0, 0, 0}), 0); }, "event index");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x49, {0x52f, 2u << 29u, low(destination) + 4, high(destination), 0, 0, 0}), 0); }, "misaligned");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x49, {0x52f, 0, 0, 0, 0, 0}), 0); }, "packet size");
-    AgcDriver::Pm4::Validate(makePacket(0x10, {7, 0}, 0x06u << 2u), 0);
-    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x10, {7}, 0x06u << 2u), 0); }, "packet size");
+    AgcDriver::Pm4::Validate(makePacket(0x10, {7, 0, 0}, 0x06u << 2u), 0);
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x10, {7, 0}, 0x06u << 2u), 0); }, "packet size");
 }
 
 void testCopies() {

@@ -52,10 +52,12 @@ std::uint32_t APS5_VABI sceAgcAcbRewindGetSize() {
 }
 
 std::uint32_t* APS5_VABI sceAgcAcbWaitUntilSafeForRendering(CommandBuffer* buf, std::uint32_t videoOutHandle, std::uint32_t displayBufferIndex) {
-    auto* packet = Agc::Command::Allocate(buf, AgcDriver::WaitFlipDonePacketWords, __func__);
-    packet[0] = AgcDriver::WaitFlipDonePacketHeader;
+    // Same packet sceAgcDriverWaitUntilSafeForRendering writes (mode 0).
+    auto* packet = Agc::Command::Allocate(buf, AgcDriver::RenderingWaitPacketWords, __func__);
+    packet[0] = AgcDriver::RenderingWaitPacketHeader;
     packet[1] = videoOutHandle;
     packet[2] = displayBufferIndex;
+    packet[3] = 0;
     return packet;
 }
 
