@@ -180,7 +180,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             batch.SubmitAndWait();
         }
 
-        const auto viewLevelCount = descriptor.mipCount - descriptor.baseLevel;
+        const auto viewLevelCount = descriptor.lastLevel - descriptor.baseLevel + 1u;
         const auto viewLayerCount = arrayLayers - descriptor.baseArray;
         if (descriptor.dimension == TextureDimension::kCube) {
             Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");

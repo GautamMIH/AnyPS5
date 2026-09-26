@@ -42,6 +42,10 @@ std::string makeKey(const Context& context, const State& state, const std::share
         append(key, depthState.minDepthBounds);
         append(key, depthState.maxDepthBounds);
         append(key, depthState.stencilTest);
+        append(key, depthState.depthBias);
+        append(key, depthState.depthBiasConstant);
+        append(key, depthState.depthBiasSlope);
+        append(key, depthState.depthBiasClamp);
         appendStencil(key, depthState.front);
         appendStencil(key, depthState.back);
     }

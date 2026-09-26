@@ -65,6 +65,7 @@ struct Context {
     mutable std::shared_ptr<DescriptorCache> descriptorCache;
     mutable std::shared_ptr<SamplerCache> samplerCache;
     bool depthBounds = false;
+    bool depthBiasClamp = false;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {

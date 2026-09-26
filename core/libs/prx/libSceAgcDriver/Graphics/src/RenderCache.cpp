@@ -28,7 +28,7 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
     if (!valid) {
         memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
         const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
-        transfer.Upload(color.address, color.extent.width, color.extent.height, color.tileMode);
+        transfer.Upload(color.address, color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
         transfer.Detile(commands);
         Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkBufferImageCopy copy{};
@@ -81,7 +81,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
             ++it;
             continue;
         }
-        if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode) return it->second;
+        if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode && previous.elementBytes == color.elementBytes && previous.tail == color.tail) return it->second;
         Resolve(previous.address, previous.bytes, true);
         it->second->ReleaseMemory();
         it = entries.erase(it);

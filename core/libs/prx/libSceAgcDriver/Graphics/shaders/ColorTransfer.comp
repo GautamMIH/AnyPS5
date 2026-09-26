@@ -8,21 +8,80 @@ layout(push_constant) uniform Parameters {
     uint height;
     uint blocksPerRow;
     uint mode;
+    uint elementBytes;
+    uint tailX;
+    uint tailY;
 } parameters;
+
+// SW_64KB_R_X in-block offsets per element size (ColorTargetLayout.cpp).
+uint renderTargetOffset(uint x, uint y, uint elementBytes) {
+    switch (elementBytes) {
+        case 1u:
+            return ((y << 2u) & 0x0008u) ^ ((y << 4u) & 0x0010u) ^ ((y << 3u) & 0x00a0u) ^ ((y << 5u) & 0x0f00u) ^ ((y << 6u) & 0x1000u) ^ ((y << 7u) & 0x4000u)
+                ^ (x & 0x0007u) ^ ((x << 3u) & 0x0040u) ^ ((x << 5u) & 0x0300u) ^ ((x << 4u) & 0x0400u) ^ ((x << 6u) & 0x0800u) ^ ((x << 7u) & 0x2000u) ^ ((x << 8u) & 0x8000u);
+        case 2u:
+            return ((y << 4u) & 0x0070u) ^ ((y << 5u) & 0x0f00u) ^ ((y << 8u) & 0x5000u)
+                ^ ((x << 1u) & 0x000eu) ^ ((x << 4u) & 0x0480u) ^ ((x << 5u) & 0x0300u) ^ ((x << 6u) & 0x0800u) ^ ((x << 7u) & 0x2000u) ^ ((x << 8u) & 0x8000u);
+        case 4u:
+            return ((y << 4u) & 0x0070u) ^ ((y << 5u) & 0x0f00u) ^ ((y << 9u) & 0x1000u) ^ ((y << 8u) & 0x4000u)
+                ^ ((x << 2u) & 0x000cu) ^ ((x << 5u) & 0x0380u) ^ ((x << 4u) & 0x0400u) ^ ((x << 6u) & 0x0800u) ^ ((x << 9u) & 0xa000u);
+        case 8u:
+            return ((y << 4u) & 0x0010u) ^ ((y << 6u) & 0x0080u) ^ ((y << 5u) & 0x0f00u) ^ ((y << 10u) & 0x5000u)
+                ^ ((x << 3u) & 0x0008u) ^ ((x << 4u) & 0x0460u) ^ ((x << 5u) & 0x0300u) ^ ((x << 6u) & 0x0800u) ^ ((x << 10u) & 0x2000u) ^ ((x << 9u) & 0x8000u);
+        default:
+            return ((x << 4u) & 0x0410u) ^ ((x << 5u) & 0x0340u) ^ ((x << 6u) & 0x0800u) ^ ((x << 11u) & 0xa000u)
+                ^ ((y << 5u) & 0x0f20u) ^ ((y << 6u) & 0x0080u) ^ ((y << 10u) & 0x1000u) ^ ((y << 11u) & 0x4000u);
+    }
+}
+
+uint readByteWord(bool fromLinear, uint byteOffset) {
+    return fromLinear ? linear[byteOffset >> 2u] : tiled[byteOffset >> 2u];
+}
+
+void writeWord(bool toLinear, uint byteOffset, uint value) {
+    if (toLinear) linear[byteOffset >> 2u] = value;
+    else tiled[byteOffset >> 2u] = value;
+}
+
+// Elements under four bytes share words with neighbours written by other invocations.
+void writePart(bool toLinear, uint byteOffset, uint value, uint mask) {
+    uint shift = (byteOffset & 3u) * 8u;
+    if (toLinear) {
+        atomicAnd(linear[byteOffset >> 2u], ~(mask << shift));
+        atomicOr(linear[byteOffset >> 2u], (value & mask) << shift);
+    } else {
+        atomicAnd(tiled[byteOffset >> 2u], ~(mask << shift));
+        atomicOr(tiled[byteOffset >> 2u], (value & mask) << shift);
+    }
+}
 
 void main() {
     uint x = gl_GlobalInvocationID.x;
     uint y = gl_GlobalInvocationID.y;
     if (x >= parameters.width || y >= parameters.height) return;
-    uint linearIndex = y * parameters.width + x;
-    uint tiledIndex = linearIndex;
-    if ((parameters.mode & 4u) != 0u) {
-        uint offset = ((y << 4u) & 0x0070u) ^ ((y << 5u) & 0x0f00u) ^ ((y << 9u) & 0x1000u) ^ ((y << 8u) & 0x4000u)
-            ^ ((x << 2u) & 0x000cu) ^ ((x << 5u) & 0x0380u) ^ ((x << 4u) & 0x0400u) ^ ((x << 6u) & 0x0800u) ^ ((x << 9u) & 0xa000u);
-        tiledIndex = ((y / 128u) * parameters.blocksPerRow + x / 128u) * 16384u + offset / 4u;
+    uint elementBytes = parameters.elementBytes;
+    uint linearByte = (y * parameters.width + x) * elementBytes;
+    uint tiledByte = linearByte;
+    if ((parameters.mode & 8u) != 0u) {
+        // A mip-tail level: one 64 KiB block, addressed from the level's origin inside it.
+        tiledByte = renderTargetOffset(x + parameters.tailX, y + parameters.tailY, elementBytes) & 0xffffu;
+    } else if ((parameters.mode & 4u) != 0u) {
+        uint blockWidth = elementBytes <= 2u ? 256u : (elementBytes <= 8u ? 128u : 64u);
+        uint blockHeight = 65536u / (blockWidth * elementBytes);
+        tiledByte = ((y / blockHeight) * parameters.blocksPerRow + x / blockWidth) * 65536u + (renderTargetOffset(x, y, elementBytes) & 0xffffu);
     }
-    uint pixel = (parameters.mode & 1u) != 0u ? linear[linearIndex] : tiled[tiledIndex];
-    if ((parameters.mode & 2u) != 0u) pixel = (pixel & 0xff00ff00u) | ((pixel & 0xffu) << 16u) | ((pixel >> 16u) & 0xffu);
-    if ((parameters.mode & 1u) != 0u) tiled[tiledIndex] = pixel;
-    else linear[linearIndex] = pixel;
+    bool toTiled = (parameters.mode & 1u) != 0u;
+    uint source = toTiled ? linearByte : tiledByte;
+    uint destination = toTiled ? tiledByte : linearByte;
+    if (elementBytes >= 4u) {
+        for (uint i = 0u; i < elementBytes; i += 4u) {
+            uint pixel = readByteWord(toTiled, source + i);
+            if ((parameters.mode & 2u) != 0u) pixel = (pixel & 0xff00ff00u) | ((pixel & 0xffu) << 16u) | ((pixel >> 16u) & 0xffu);
+            writeWord(!toTiled, destination + i, pixel);
+        }
+    } else {
+        uint mask = elementBytes == 1u ? 0xffu : 0xffffu;
+        uint value = (readByteWord(toTiled, source) >> ((source & 3u) * 8u)) & mask;
+        writePart(!toTiled, destination, value, mask);
+    }
 }

@@ -22,6 +22,8 @@ struct TileMipLayout {
 };
 
 std::vector<TileMipLayout> ComputeMipLayout(TextureTileMode tileMode, std::uint32_t format, std::uint32_t width, std::uint32_t height, std::uint32_t mipCount);
+// Mip chain of an uncompressed tiled surface described by its element size (render targets).
+std::vector<TileMipLayout> ComputeElementMipLayout(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t width, std::uint32_t height, std::uint32_t mipCount);
 std::uint64_t ComputeSurfaceSize(const std::vector<TileMipLayout>& mips, std::uint32_t arrayLayers);
 
 }

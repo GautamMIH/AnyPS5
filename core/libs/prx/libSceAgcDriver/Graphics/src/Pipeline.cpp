@@ -10,6 +10,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
     Require((target != nullptr) == state.hasColorTarget, "render target does not match decoded color state");
     Require((depthTarget != nullptr) == state.hasDepthTarget, "depth target does not match decoded depth state");
     Require(!state.hasDepthTarget || !state.depthState.depthBounds || context.depthBounds, "depth bounds test requires the depthBounds device feature");
+    Require(!state.hasDepthTarget || !state.depthState.depthBias || state.depthState.depthBiasClamp == 0.0f || context.depthBiasClamp, "clamped depth bias requires the depthBiasClamp device feature");
     Require(state.renderExtent.width != 0 && state.renderExtent.height != 0 && state.renderExtent.width <= context.limits.maxFramebufferWidth && state.renderExtent.height <= context.limits.maxFramebufferHeight, "framebuffer extent exceeds device limits");
     Require(state.hasColorTarget || state.hasDepthTarget || (context.limits.framebufferNoAttachmentsSampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0, "device does not support single-sample rendering without attachments");
     ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric);
@@ -126,6 +127,12 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
         raster.cullMode = state.cullMode;
         raster.frontFace = state.frontFace;
         raster.lineWidth = 1;
+        if (state.hasDepthTarget && state.depthState.depthBias) {
+            raster.depthBiasEnable = VK_TRUE;
+            raster.depthBiasConstantFactor = state.depthState.depthBiasConstant;
+            raster.depthBiasSlopeFactor = state.depthState.depthBiasSlope;
+            raster.depthBiasClamp = state.depthState.depthBiasClamp;
+        }
         VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
         samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};

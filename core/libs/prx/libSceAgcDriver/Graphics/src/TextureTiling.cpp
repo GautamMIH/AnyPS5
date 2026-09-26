@@ -240,6 +240,13 @@ std::vector<TileMipLayout> ComputeMipLayout(TextureTileMode tileMode, std::uint3
     return ComputeTiledMipLayout(tileMode, bytesPerElement, texelWidth, texelHeight, width, height, mipCount);
 }
 
+std::vector<TileMipLayout> ComputeElementMipLayout(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t width, std::uint32_t height, std::uint32_t mipCount) {
+    Require(width != 0 && height != 0, "cannot compute mip layout for a zero-sized surface");
+    Require(mipCount != 0 && mipCount <= 16u, "surface mip count is out of range");
+    Require(tileMode != TextureTileMode::kLinear, "element mip layouts are for tiled surfaces");
+    return ComputeTiledMipLayout(tileMode, elementBytes, 1u, 1u, width, height, mipCount);
+}
+
 std::uint64_t ComputeSurfaceSize(const std::vector<TileMipLayout>& mips, std::uint32_t arrayLayers) {
     Require(!mips.empty(), "cannot compute surface size for an empty mip chain");
     Require(arrayLayers != 0, "cannot compute surface size for zero array layers");

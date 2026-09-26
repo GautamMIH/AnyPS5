@@ -35,6 +35,8 @@ struct ColorTarget {
     std::size_t bytes;
     std::uint8_t componentMapping;
     ColorTileMode tileMode = ColorTileMode::Linear;
+    std::uint32_t elementBytes = 4;
+    ColorTail tail;
 };
 
 struct DepthTarget {
@@ -60,6 +62,10 @@ struct DepthState {
     VkStencilOpState back;
     bool clearDepth;
     bool clearStencil;
+    bool depthBias;
+    float depthBiasConstant;
+    float depthBiasSlope;
+    float depthBiasClamp;
     float depthClearValue;
     std::uint32_t stencilClearValue;
 };

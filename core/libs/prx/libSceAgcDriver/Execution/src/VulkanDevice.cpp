@@ -83,6 +83,7 @@ struct VulkanDevice::State {
     bool depthClipControl = false;
     bool depthRangeUnrestricted = false;
     bool depthBounds = false;
+    bool depthBiasClamp = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
     std::unique_ptr<Graphics::TextureDetiler> detiler;
@@ -405,6 +406,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.textureCompressionBC = VK_TRUE;
     enabled.depthBounds = available.depthBounds;
     state->depthBounds = enabled.depthBounds == VK_TRUE;
+    enabled.depthBiasClamp = available.depthBiasClamp;
+    state->depthBiasClamp = enabled.depthBiasClamp == VK_TRUE;
     state->samplerAnisotropy = true;
     state->textureCompressionBC = true;
     deviceInfo.pEnabledFeatures = &enabled;
@@ -750,6 +753,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
         state->samplerCache
     };
     context.depthBounds = state->depthBounds;
+    context.depthBiasClamp = state->depthBiasClamp;
     return context;
 }
 

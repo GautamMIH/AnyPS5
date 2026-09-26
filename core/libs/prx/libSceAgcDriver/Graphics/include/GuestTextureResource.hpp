@@ -32,6 +32,8 @@ struct GuestTextureResource {
     std::uint32_t baseArray;
     std::uint32_t mipCount;
     std::uint32_t baseLevel;
+    // Last mip the view exposes; the surface layout still spans all mipCount levels.
+    std::uint32_t lastLevel;
     TextureTileMode tileMode;
     TextureDimension dimension;
     std::uint32_t format;

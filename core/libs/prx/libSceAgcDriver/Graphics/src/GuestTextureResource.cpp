@@ -95,7 +95,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     Require(bcSwizzle == 0, "guest texture descriptor uses a BC swizzle which is not implemented");
 
     Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
-    Require(lastLevel == maxMip, "guest texture descriptor must expose every mip level down to the last one");
+    Require(lastLevel <= maxMip, "guest texture descriptor exposes mip levels past the surface");
 
     const auto tileMode = resolveTileMode(tileModeRaw);
     const auto dimension = resolveDimension(typeRaw);
@@ -125,6 +125,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.baseArray = baseArray;
     result.mipCount = maxMip + 1u;
     result.baseLevel = baseLevel;
+    result.lastLevel = lastLevel;
     result.tileMode = tileMode;
     result.dimension = dimension;
     result.format = format;

@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
@@ -64,6 +65,57 @@ VkBlendOp blendOp(std::uint32_t value) {
         case 4: return VK_BLEND_OP_REVERSE_SUBTRACT;
         default: throw std::runtime_error("AGC graphics: unsupported blend operation " + std::to_string(value));
     }
+}
+
+struct DecodedColorFormat {
+    VkFormat format;
+    std::uint32_t elementBytes;
+};
+
+// CB_COLOR_INFO FORMAT / NUMBER_TYPE / COMP_SWAP to a Vulkan attachment format (table from the
+// upstream PR #5 port). AMD formats list components from the least significant bits, as Vulkan's
+// non-packed formats do. Integer targets are rejected: fragment outputs are recompiled as floats.
+DecodedColorFormat decodeColorFormat(std::uint32_t info) {
+    constexpr std::uint32_t unorm = 0, srgb = 6, floating = 7;
+    const auto format = (info >> 2u) & 0x1fu;
+    const auto number = (info >> 8u) & 7u;
+    const auto swap = (info >> 11u) & 3u;
+    const auto fail = [&]() -> DecodedColorFormat {
+        std::ostringstream message;
+        message << "AGC graphics: CB_COLOR0_INFO=0x" << std::hex << info << ": unsupported color format " << std::dec << format << ", number type " << number << " or component swap " << swap;
+        throw std::runtime_error(message.str());
+    };
+    if (swap > 1 || (swap == 1 && format != 9 && format != 10)) return fail();
+    const bool alternate = swap == 1;
+    switch (format) {
+        case 1: if (number == unorm) return {VK_FORMAT_R8_UNORM, 1}; break;
+        case 2:
+            if (number == unorm) return {VK_FORMAT_R16_UNORM, 2};
+            if (number == floating) return {VK_FORMAT_R16_SFLOAT, 2};
+            break;
+        case 3: if (number == unorm) return {VK_FORMAT_R8G8_UNORM, 2}; break;
+        case 4: if (number == floating) return {VK_FORMAT_R32_SFLOAT, 4}; break;
+        case 5:
+            if (number == floating) return {VK_FORMAT_R16G16_SFLOAT, 4};
+            if (number == unorm) return {VK_FORMAT_R16G16_UNORM, 4};
+            break;
+        // COLOR_10_11_11: red in the low 11 bits, the Vulkan B10G11R11 packing.
+        case 6: if (number == floating) return {VK_FORMAT_B10G11R11_UFLOAT_PACK32, 4}; break;
+        // COLOR_2_10_10_10 keeps red in the low bits, the Vulkan A2B10G10R10 packing.
+        case 9: if (number == unorm) return {alternate ? VK_FORMAT_A2R10G10B10_UNORM_PACK32 : VK_FORMAT_A2B10G10R10_UNORM_PACK32, 4}; break;
+        case 10:
+            if (number == unorm) return {alternate ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM, 4};
+            if (number == srgb) return {alternate ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_R8G8B8A8_SRGB, 4};
+            break;
+        case 11: if (number == floating) return {VK_FORMAT_R32G32_SFLOAT, 8}; break;
+        case 12:
+            if (number == floating) return {VK_FORMAT_R16G16B16A16_SFLOAT, 8};
+            if (number == unorm) return {VK_FORMAT_R16G16B16A16_UNORM, 8};
+            break;
+        case 14: if (number == floating) return {VK_FORMAT_R32G32B32A32_SFLOAT, 16}; break;
+        default: break;
+    }
+    return fail();
 }
 
 void intersect(VkRect2D& result, const Registers& registers, std::uint32_t offset, bool screen) {
@@ -135,6 +187,42 @@ VkStencilOpState stencilState(std::uint32_t compare, std::uint32_t operations, s
     }
     result.reference = reference;
     return result;
+}
+
+// Depth bias (polygon offset): the inverse of RadeonSI's mapping from API values to
+// PA_SU_POLY_OFFSET_* (scale x16; offset x4 for Z16 with 16 negative DB bits, x1 for Z32F with 23).
+void decodeDepthBias(const Registers& cx, State& result) {
+    const auto raster = read(cx, 0x205);
+    const bool front = (raster & 0x800u) != 0 && (raster & 1u) == 0;
+    const bool back = (raster & 0x1000u) != 0 && (raster & 2u) == 0;
+    Require((raster & 0x2000u) == 0, "depth bias for point and line polygons is unsupported");
+    auto& state = result.depthState;
+    if (!front && !back) return;
+    if (!result.hasDepthTarget || result.depth.depthElementBytes == 0) return;
+    const auto frontScale = readFloat(cx, 0x2e0);
+    const auto frontOffset = readFloat(cx, 0x2e1);
+    const auto backScale = readFloat(cx, 0x2e2);
+    const auto backOffset = readFloat(cx, 0x2e3);
+    if (front && back && (frontScale != backScale || frontOffset != backOffset)) {
+        std::ostringstream message;
+        message << "AGC graphics: different front (" << frontScale << ", " << frontOffset << ") and back (" << backScale << ", " << backOffset << ") depth bias is unsupported";
+        throw std::runtime_error(message.str());
+    }
+    const auto scale = front ? frontScale : backScale;
+    const auto offset = front ? frontOffset : backOffset;
+    const auto format = read(cx, 0x2de);
+    const bool z16 = result.depth.depthElementBytes == 2;
+    // NEG_NUM_DB_BITS is a signed byte: -16 for Z16, -23 plus POLY_OFFSET_DB_IS_FLOAT_FMT for Z32F.
+    const auto expected = z16 ? 0xf0u : 0x1e9u;
+    if ((format & 0x1ffu) != expected) {
+        std::ostringstream message;
+        message << "AGC graphics: PA_SU_POLY_OFFSET_DB_FMT_CNTL=0x" << std::hex << format << " does not match the " << (z16 ? "16-bit" : "32-bit float") << " depth target";
+        throw std::runtime_error(message.str());
+    }
+    state.depthBias = true;
+    state.depthBiasSlope = scale / 16.0f;
+    state.depthBiasConstant = z16 ? offset / 4.0f : offset;
+    state.depthBiasClamp = readFloat(cx, 0x2df);
 }
 
 void decodeDepth(const Registers& cx, State& result) {
@@ -306,7 +394,13 @@ State DecodeState(const QueueState& queue) {
     zero(cx, 0x204, ~0x80000u, "unsupported PA_CL_CLIP_CNTL flags");
     result.negativeOneToOne = (read(cx, 0x204) & 0x80000u) == 0;
     const auto raster = read(cx, 0x205);
-    Require((raster & ~0x7u) == 0 || (raster & ~0x7u) == 0x240u, "polygon mode, depth bias, provoking vertex or nonstandard rasterization is unsupported");
+    // POLY_OFFSET_FRONT/BACK_ENABLE (bits 11-12) request depth bias; see decodeDepthBias.
+    const auto rasterMode = raster & ~0x1807u;
+    if (!(rasterMode == 0 || rasterMode == 0x240u)) {
+        std::ostringstream message;
+        message << "AGC graphics: PA_SU_SC_MODE_CNTL=0x" << std::hex << raster << ": polygon mode, provoking vertex or nonstandard rasterization is unsupported";
+        throw std::runtime_error(message.str());
+    }
     result.cullMode = ((raster & 1u) != 0 ? VK_CULL_MODE_FRONT_BIT : 0u) | ((raster & 2u) != 0 ? VK_CULL_MODE_BACK_BIT : 0u);
     if (result.rectList) result.cullMode = VK_CULL_MODE_NONE;
     result.frontFace = (raster & 4u) != 0 ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
@@ -342,27 +436,46 @@ State DecodeState(const QueueState& queue) {
         const auto info = read(cx, 0x31c);
         const auto number = (info >> 8u) & 7u;
         const auto swap = (info >> 11u) & 3u;
-        Require(((info >> 2u) & 0x1fu) == 10 && (number == 0 || number == 6) && swap <= 1, "unsupported color format or component order");
-        Require((info & ~0x00029f7cu) == 0, "color compression, DCC, endian conversion, nonstandard rounding or color optimization is unsupported");
-        Require((info & 0x8000u) != 0, "unclamped normalized color is unsupported");
-        zero(cx, 0x31b, ~0u, "color mip or array view");
+        const auto decoded = decodeColorFormat(info);
+        // ROUND_MODE (bit 18) only changes UNORM rounding.
+        Require((info & ~0x00069f7cu) == 0, "color compression, DCC, endian conversion or color optimization is unsupported");
+        Require((info & 0x8000u) != 0 || number == 7, "unclamped normalized color is unsupported");
+        // CB_COLOR_VIEW (gfx10 layout, Mesa): MIP_LEVEL (bits 26-29) selects the rendered mip; array
+        // slices are not modelled.
+        const auto view = read(cx, 0x31b);
+        zero(cx, 0x31b, ~0x3c000000u, "color array view");
+        const auto viewMip = (view >> 26u) & 0xfu;
         zero(cx, 0x31d, ~0u, "color samples, fragments or destination alpha override");
         const auto attrib2 = read(cx, 0x3b0);
-        Require((attrib2 >> 28u) == 0, "mipmapped render targets are unsupported");
+        const auto maxMip = attrib2 >> 28u;
+        Require(viewMip <= maxMip, "color view mip exceeds the surface");
         const auto attrib3 = read(cx, 0x3b8);
         result.color.tileMode = DecodeColorTileMode(attrib3);
         result.color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
-        const ColorTargetLayout colorLayout(result.color.extent.width, result.color.extent.height, result.color.tileMode);
+        result.color.elementBytes = decoded.elementBytes;
+        std::uint64_t mipOffset = 0;
+        if (maxMip != 0) {
+            // A mipmapped surface is laid out like a texture; the view renders into one of its mips.
+            Require(result.color.tileMode == ColorTileMode::RenderTarget, "mipmapped linear render targets are unsupported");
+            const auto mips = ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, result.color.elementBytes, result.color.extent.width, result.color.extent.height, maxMip + 1u);
+            const auto& mip = mips.at(viewMip);
+            mipOffset = mip.tiledOffset;
+            result.color.extent = {mip.width, mip.height};
+            if (mip.tail) result.color.tail = {true, mip.tailX, mip.tailY};
+        }
+        const ColorTargetLayout colorLayout(result.color.extent.width, result.color.extent.height, result.color.tileMode, result.color.elementBytes, result.color.tail);
         const auto high = read(cx, 0x390);
         Require((high & ~0xffu) == 0, "invalid color address extension");
-        result.color.address = (static_cast<std::uint64_t>(high) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x318)) << 8u);
+        result.color.address = ((static_cast<std::uint64_t>(high) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x318)) << 8u)) + mipOffset;
         result.color.bytes = colorLayout.Bytes();
         GuestMemory::CheckGpuRange(reinterpret_cast<const void*>(result.color.address), result.color.bytes, colorLayout.Alignment(), true);
-        result.color.format = swap == 0 ? (number == 0 ? VK_FORMAT_R8G8B8A8_UNORM : VK_FORMAT_R8G8B8A8_SRGB) : (number == 0 ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_B8G8R8A8_SRGB);
+        result.color.format = decoded.format;
+        static_cast<void>(swap);
         result.color.componentMapping = 0xe4u;
         result.renderExtent = result.color.extent;
     }
     decodeDepth(cx, result);
+    decodeDepthBias(cx, result);
     const auto psLow = queue.shader.find(0x8);
     const auto psHigh = queue.shader.find(0x9);
     result.hasFragmentShader = (psLow != queue.shader.end() && psLow->second != 0) || (psHigh != queue.shader.end() && psHigh->second != 0);

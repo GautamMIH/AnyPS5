@@ -9,7 +9,8 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
     try {
         Require(source != nullptr && descriptor.dimension == TextureDimension::k2D && descriptor.mipCount == 1 && descriptor.baseLevel == 0 && descriptor.baseArray == 0, "invalid resident texture view");
         const auto format = ResolveTextureFormat(descriptor.format);
-        Require(!IsBlockCompressed(descriptor.format) && BytesPerElement(descriptor.format) == 4, "resident texture copy requires a 32-bit texel format");
+        // The copy reinterprets texels bitwise, so only the element size has to match.
+        Require(!IsBlockCompressed(descriptor.format) && BytesPerElement(descriptor.format) == source->Description().elementBytes, "resident texture copy requires the render target's element size");
         VkFormatProperties properties{};
         context.formatProperties(context.physical, format, &properties);
         Require((properties.optimalTilingFeatures & (VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT)) == (VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT), "resident texture format does not support sampling and copies");

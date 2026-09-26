@@ -104,7 +104,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     auto resources = std::make_shared<ShaderResources>(context, shaders, state.color, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
     timing.Mark("shader_resources");
     if (state.hasColorTarget) {
-        const ColorTargetLayout colorLayout(state.color.extent.width, state.color.extent.height, state.color.tileMode);
+        const ColorTargetLayout colorLayout(state.color.extent.width, state.color.extent.height, state.color.tileMode, state.color.elementBytes, state.color.tail);
         Require(state.color.bytes == colorLayout.Bytes(), "color target transfer size mismatch");
         storage->color = context.renderCache->Get(state.color, state.blend.blendEnable != 0);
     }

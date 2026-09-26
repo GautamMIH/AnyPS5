@@ -12,7 +12,7 @@ public:
     ~GpuColorTransfer();
     GpuColorTransfer(const GpuColorTransfer&) = delete;
     GpuColorTransfer& operator=(const GpuColorTransfer&) = delete;
-    void Upload(std::uint64_t address, std::uint32_t width, std::uint32_t height, ColorTileMode mode);
+    void Upload(std::uint64_t address, std::uint32_t width, std::uint32_t height, ColorTileMode mode, std::uint32_t elementBytes = 4, ColorTail tail = {});
     void Detile(VkCommandBuffer commands, bool swapRedBlue = false);
     void Tile(VkCommandBuffer commands);
     void WriteBack(std::uint64_t address);
@@ -23,7 +23,7 @@ public:
 
 private:
     void writeBack(std::uint64_t address, bool tracked);
-    void prepare(std::uint32_t width, std::uint32_t height, ColorTileMode mode);
+    void prepare(std::uint32_t width, std::uint32_t height, ColorTileMode mode, std::uint32_t elementBytes, ColorTail tail);
     void convert(VkCommandBuffer commands, bool toTiled, bool swapRedBlue);
     void release() noexcept;
     Context context;
@@ -39,6 +39,8 @@ private:
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     ColorTileMode mode = ColorTileMode::Linear;
+    std::uint32_t elementBytes = 4;
+    ColorTail tail;
     std::unique_ptr<RenderTarget> target;
     VkExtent2D targetExtent{};
     VkFormat targetFormat = VK_FORMAT_UNDEFINED;
