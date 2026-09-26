@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <map>
+#include <vector>
 
 namespace AgcDriver::Graphics {
 
@@ -36,11 +37,46 @@ private:
     std::unique_ptr<GuestMemoryTracking::Watch> memoryWatch;
 };
 
+// A depth/stencil surface kept on the GPU between draws. Guest memory holds the PS5 tiled depth
+// and stencil planes; they are detiled on upload and written back when the guest touches them.
+class ResidentDepth {
+public:
+    ResidentDepth(const Context& context, const DepthTarget& depth);
+    ~ResidentDepth();
+    void Begin(VkCommandBuffer commands);
+    void Download(VkCommandBuffer commands);
+    void Commit();
+    RenderTarget& Target() { return *target; }
+    const DepthTarget& Description() const { return depth; }
+    bool Valid() const { return valid; }
+    bool Dirty() const { return dirty; }
+    void Invalidate();
+    void ReleaseMemory();
+    bool Overlaps(std::uint64_t address, std::size_t bytes) const;
+    bool SharesPages(const DepthTarget& other) const;
+
+private:
+    void transition(VkCommandBuffer commands, VkImageLayout next);
+    void copy(VkCommandBuffer commands, bool toImage);
+    void protect(GuestMemoryTracking::Protection protection);
+    void resolveCpuAccess(GuestMemoryTracking::Access access);
+    Context context;
+    DepthTarget depth;
+    std::unique_ptr<RenderTarget> target;
+    std::unique_ptr<Buffer> depthLinear;
+    std::unique_ptr<Buffer> stencilLinear;
+    VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bool valid = false;
+    bool dirty = false;
+    std::vector<std::unique_ptr<GuestMemoryTracking::Watch>> watches;
+};
+
 class RenderCache {
 public:
     explicit RenderCache(const Context& context) : context(context) {}
     ~RenderCache();
     std::shared_ptr<ResidentColor> Get(const ColorTarget& color, bool blending);
+    std::shared_ptr<ResidentDepth> GetDepth(const DepthTarget& depth);
     std::shared_ptr<ResidentColor> Find(std::uint64_t address) const;
     void Resolve(std::uint64_t address, std::size_t bytes, bool writable);
     void Flush();
@@ -48,6 +84,7 @@ public:
 private:
     Context context;
     std::map<std::uint64_t, std::shared_ptr<ResidentColor>> entries;
+    std::vector<std::shared_ptr<ResidentDepth>> depthEntries;
 };
 
 }

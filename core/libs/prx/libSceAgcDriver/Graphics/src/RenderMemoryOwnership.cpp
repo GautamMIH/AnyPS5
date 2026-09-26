@@ -57,6 +57,7 @@ void ResidentColor::resolveCpuAccess(GuestMemoryTracking::Access access) {
 
 RenderCache::~RenderCache() {
     for (const auto& [address, entry] : entries) entry->ReleaseMemory();
+    for (const auto& entry : depthEntries) entry->ReleaseMemory();
 }
 
 }

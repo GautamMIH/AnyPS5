@@ -14,12 +14,37 @@ void append(std::string& key, const TValue& value) {
     key.append(reinterpret_cast<const char*>(&value), sizeof(value));
 }
 
-std::string makeKey(const Context& context, const State& state, const std::shared_ptr<ResidentColor>& target, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
+void appendStencil(std::string& key, const VkStencilOpState& stencil) {
+    append(key, stencil.failOp);
+    append(key, stencil.passOp);
+    append(key, stencil.depthFailOp);
+    append(key, stencil.compareOp);
+    append(key, stencil.compareMask);
+    append(key, stencil.writeMask);
+    append(key, stencil.reference);
+}
+
+std::string makeKey(const Context& context, const State& state, const std::shared_ptr<ResidentColor>& target, const std::shared_ptr<ResidentDepth>& depth, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
     PerformanceTimer timing("Graphics.PipelineKey");
     std::string key;
     key.reserve(512);
     append(key, target ? target->Target().View() : VK_NULL_HANDLE);
     append(key, state.hasColorTarget);
+    append(key, depth ? depth->Target().View() : VK_NULL_HANDLE);
+    append(key, state.hasDepthTarget);
+    if (state.hasDepthTarget) {
+        const auto& depthState = state.depthState;
+        append(key, state.depth.format);
+        append(key, depthState.depthTest);
+        append(key, depthState.depthWrite);
+        append(key, depthState.depthCompare);
+        append(key, depthState.depthBounds);
+        append(key, depthState.minDepthBounds);
+        append(key, depthState.maxDepthBounds);
+        append(key, depthState.stencilTest);
+        appendStencil(key, depthState.front);
+        appendStencil(key, depthState.back);
+    }
     append(key, state.rectList);
     append(key, state.renderExtent.width);
     append(key, state.renderExtent.height);
@@ -103,9 +128,9 @@ std::string makeKey(const Context& context, const State& state, const std::share
 
 }
 
-std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const std::shared_ptr<ResidentColor>& target, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
+std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const std::shared_ptr<ResidentColor>& target, const std::shared_ptr<ResidentDepth>& depth, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
     PerformanceTimer timing("Graphics.PipelineCache");
-    auto key = makeKey(context, state, target, resources, shaders);
+    auto key = makeKey(context, state, target, depth, resources, shaders);
     timing.Mark("key");
     const auto found = lookup.find(key);
     if (found != lookup.end()) {
@@ -116,9 +141,9 @@ std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const s
         return pipeline;
     }
     timing.Mark("miss");
-    auto pipeline = std::make_shared<Pipeline>(context, state, target ? &target->Target() : nullptr, resources, shaders);
+    auto pipeline = std::make_shared<Pipeline>(context, state, target ? &target->Target() : nullptr, depth ? &depth->Target() : nullptr, resources, shaders);
     timing.Mark("create");
-    entries.push_back({std::move(key), target, pipeline});
+    entries.push_back({std::move(key), target, depth, pipeline});
     try {
         const auto it = std::prev(entries.end());
         Require(lookup.emplace(it->key, it).second, "duplicate graphics pipeline cache key");

@@ -79,10 +79,10 @@ void testRegisters() {
         execute(state, packet);
         const auto& registers = opcode == 0x9f ? state.context : opcode == 0x63 ? state.shader : state.userConfig;
         check(registers.at(0x10) == 43 && registers.at(0x11) == 42, "indirect register order or bank lost");
-        pairs[0] = 0x12;
+        pairs[0] = 0x16;
         pairs[4] = 0xffffffffu;
         expectFailure([&] { execute(state, packet); }, "sentinel");
-        check(!registers.contains(0x12), "invalid indirect packet partially changed state");
+        check(!registers.contains(0x16), "invalid indirect packet partially changed state");
         packet[1] = 0x1000;
         packet[2] = 0;
         expectFailure([&] { execute(state, packet); }, "guest");

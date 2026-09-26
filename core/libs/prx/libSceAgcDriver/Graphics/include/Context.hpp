@@ -64,6 +64,7 @@ struct Context {
     GraphicsPipelineCache* graphicsPipelines = nullptr;
     mutable std::shared_ptr<DescriptorCache> descriptorCache;
     mutable std::shared_ptr<SamplerCache> samplerCache;
+    bool depthBounds = false;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {

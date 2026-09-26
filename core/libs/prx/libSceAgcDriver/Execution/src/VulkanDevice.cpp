@@ -81,6 +81,7 @@ struct VulkanDevice::State {
     bool fragmentShaderBarycentric = false;
     bool depthClipControl = false;
     bool depthRangeUnrestricted = false;
+    bool depthBounds = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
     std::unique_ptr<Graphics::TextureDetiler> detiler;
@@ -399,6 +400,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     require(available.samplerAnisotropy && available.textureCompressionBC, "device lacks sampler anisotropy or BC texture compression support required for texture sampling");
     enabled.samplerAnisotropy = VK_TRUE;
     enabled.textureCompressionBC = VK_TRUE;
+    enabled.depthBounds = available.depthBounds;
+    state->depthBounds = enabled.depthBounds == VK_TRUE;
     state->samplerAnisotropy = true;
     state->textureCompressionBC = true;
     deviceInfo.pEnabledFeatures = &enabled;
@@ -703,7 +706,7 @@ ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
 }
 
 Graphics::Context VulkanDevice::graphicsContext() const {
-    return Graphics::Context{
+    auto context = Graphics::Context{
         state->device,
         state->physical,
         state->queue,
@@ -734,6 +737,8 @@ Graphics::Context VulkanDevice::graphicsContext() const {
         state->descriptorCache,
         state->samplerCache
     };
+    context.depthBounds = state->depthBounds;
+    return context;
 }
 
 void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable) {

@@ -3,6 +3,7 @@
 
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include <array>
 #include <cstddef>
@@ -36,10 +37,40 @@ struct ColorTarget {
     ColorTileMode tileMode = ColorTileMode::Linear;
 };
 
+struct DepthTarget {
+    std::uint64_t depthAddress;
+    std::uint64_t stencilAddress;
+    VkExtent2D extent;
+    std::uint32_t depthElementBytes;
+    bool hasStencil;
+    VkFormat format;
+    std::size_t depthBytes;
+    std::size_t stencilBytes;
+};
+
+struct DepthState {
+    bool depthTest;
+    bool depthWrite;
+    VkCompareOp depthCompare;
+    bool depthBounds;
+    float minDepthBounds;
+    float maxDepthBounds;
+    bool stencilTest;
+    VkStencilOpState front;
+    VkStencilOpState back;
+    bool clearDepth;
+    bool clearStencil;
+    float depthClearValue;
+    std::uint32_t stencilClearValue;
+};
+
 struct State {
     ShaderStages stages;
     ColorTarget color;
     bool hasColorTarget;
+    DepthTarget depth;
+    bool hasDepthTarget;
+    DepthState depthState;
     bool rectList = false;
     VkExtent2D renderExtent;
     VkPrimitiveTopology topology;

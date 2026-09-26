@@ -86,6 +86,17 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         it->second->ReleaseMemory();
         it = entries.erase(it);
     }
+    for (auto it = depthEntries.begin(); it != depthEntries.end();) {
+        if (!(*it)->Overlaps(color.address, color.bytes) && !(*it)->SharesPages(DepthTarget{color.address, 0, {}, 0, false, VK_FORMAT_UNDEFINED, color.bytes, 0})) {
+            ++it;
+            continue;
+        }
+        const auto& previous = (*it)->Description();
+        if (previous.depthBytes != 0) Resolve(previous.depthAddress, previous.depthBytes, true);
+        if (previous.stencilBytes != 0) Resolve(previous.stencilAddress, previous.stencilBytes, true);
+        (*it)->ReleaseMemory();
+        it = depthEntries.erase(it);
+    }
     if (entries.size() >= 64) {
         Flush();
         for (const auto& [address, resident] : entries) resident->ReleaseMemory();
@@ -110,14 +121,25 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
         if (entry->Dirty()) affected.push_back(entry);
         else if (writable) entry->Invalidate();
     }
-    if (affected.empty()) return;
+    std::vector<std::shared_ptr<ResidentDepth>> affectedDepth;
+    for (const auto& entry : depthEntries) {
+        if (!entry->Overlaps(address, bytes)) continue;
+        if (entry->Dirty()) affectedDepth.push_back(entry);
+        else if (writable) entry->Invalidate();
+    }
+    if (affected.empty() && affectedDepth.empty()) return;
     PerformanceTimer timing("Graphics.RenderCache.Resolve");
     if (context.drawQueue) context.drawQueue->Wait();
     CommandBatch batch(context);
     for (const auto& entry : affected) entry->Download(batch.Handle());
+    for (const auto& entry : affectedDepth) entry->Download(batch.Handle());
     batch.SubmitAndWait();
     timing.Mark("download_wait");
     for (const auto& entry : affected) {
+        entry->Commit();
+        if (writable) entry->Invalidate();
+    }
+    for (const auto& entry : affectedDepth) {
         entry->Commit();
         if (writable) entry->Invalidate();
     }

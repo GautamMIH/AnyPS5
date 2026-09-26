@@ -19,6 +19,7 @@ struct DrawStorage {
     std::unique_ptr<Buffer> indices;
     std::vector<std::unique_ptr<Buffer>> vertices;
     std::shared_ptr<ResidentColor> color;
+    std::shared_ptr<ResidentDepth> depth;
     std::shared_ptr<Pipeline> pipeline;
 };
 
@@ -40,7 +41,11 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     const auto indexBytes = static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize;
     Require(indexBytes <= std::numeric_limits<std::size_t>::max(), "index buffer size overflow");
     if (draw.indexed) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
-    Require(!draw.indexed || !state.hasColorTarget || draw.indexAddress + indexBytes <= state.color.address || state.color.address + state.color.bytes <= draw.indexAddress, "index buffer aliases the render target");
+    const auto aliasesTargets = [&](std::uint64_t address, std::uint64_t bytes) {
+        const auto overlaps = [&](std::uint64_t base, std::uint64_t size) { return size != 0 && address < base + size && base < address + bytes; };
+        return (state.hasColorTarget && overlaps(state.color.address, state.color.bytes)) || (state.hasDepthTarget && (overlaps(state.depth.depthAddress, state.depth.depthBytes) || overlaps(state.depth.stencilAddress, state.depth.stencilBytes)));
+    };
+    Require(!draw.indexed || !aliasesTargets(draw.indexAddress, indexBytes), "index buffer aliases a render target");
     if (state.rectList) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
     ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric);
     const auto shaderStages = PipelineStages(shaders);
@@ -88,7 +93,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         const auto bytes = VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance);
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
-        Require(!state.hasColorTarget || address + bytes <= state.color.address || state.color.address + state.color.bytes <= address, "vertex buffer aliases the render target");
+        Require(!aliasesTargets(address, bytes), "vertex buffer aliases a render target");
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
         auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         GuestMemory::Read(address, buffer->Bytes(), 1);
@@ -103,8 +108,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         Require(state.color.bytes == colorLayout.Bytes(), "color target transfer size mismatch");
         storage->color = context.renderCache->Get(state.color, state.blend.blendEnable != 0);
     }
+    if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
     timing.Mark("render_target_cache");
-    storage->pipeline = context.graphicsPipelines->Get(state, storage->color, *resources, shaders);
+    storage->pipeline = context.graphicsPipelines->Get(state, storage->color, storage->depth, *resources, shaders);
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
     const auto commands = context.drawQueue->Begin(context);
@@ -113,7 +119,17 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
     if (storage->color) storage->color->Begin(commands);
+    if (storage->depth) storage->depth->Begin(commands);
     pipeline.Begin(commands, state.renderExtent);
+    if (state.hasDepthTarget && (state.depthState.clearDepth || state.depthState.clearStencil) && state.scissor.extent.width != 0 && state.scissor.extent.height != 0) {
+        // DB_RENDER_CONTROL clears replace the draw's depth/stencil results with the clear values
+        // wherever it rasterizes; clear draws cover the scissor rectangle.
+        VkClearAttachment clear{};
+        clear.aspectMask = (state.depthState.clearDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) | (state.depthState.clearStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+        clear.clearValue.depthStencil = {state.depthState.depthClearValue, state.depthState.stencilClearValue};
+        const VkClearRect rect{state.scissor, 0, 1};
+        context.Function<PFN_vkCmdClearAttachments>("vkCmdClearAttachments")(commands, 1, &clear, 1, &rect);
+    }
     resources->Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout());
     pipeline.PushConstants(commands, shaders);
     if (state.stages.mesh) {

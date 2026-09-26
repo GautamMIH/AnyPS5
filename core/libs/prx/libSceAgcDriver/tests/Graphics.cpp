@@ -110,7 +110,13 @@ void stateTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "target zero");
     queue = makeState();
     queue.context[0x200] = 2;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "depth");
+    Require(!AgcDriver::Graphics::DecodeState(queue).hasDepthTarget, "depth state without an attachment must be ignored");
+    queue.context[0x10] = 3;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "depth base");
+    queue = makeState();
+    queue.context[0x200] = 0x1002u;
+    queue.context[0x10] = 3;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "reserved DB_DEPTH_CONTROL");
     queue = makeState();
     queue.context[0x10f] = 0x7fc00000;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "non-finite");
