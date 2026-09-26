@@ -107,6 +107,9 @@ add_executable(application_heap_tests EXCLUDE_FROM_ALL tests/ApplicationHeap.cpp
 target_include_directories(application_heap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(application_heap_tests PROPERTIES CXX_EXTENSIONS OFF)
 
+add_executable(ampr_packet_tests EXCLUDE_FROM_ALL tests/AmprPackets.cpp)
+target_include_directories(ampr_packet_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
 add_executable(guest_locale_tests EXCLUDE_FROM_ALL tests/GuestLocale.cpp)
 target_include_directories(guest_locale_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(guest_locale_tests PROPERTIES CXX_EXTENSIONS OFF)
