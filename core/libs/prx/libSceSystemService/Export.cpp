@@ -19,8 +19,10 @@ int APS5_VABI sceSystemServiceGetDisplaySafeAreaInfo(SystemServiceDisplaySafeAre
 }
 
 int APS5_VABI sceSystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLuminance* luminance) {
- (void)luminance;
- NotImplemented_nid_no_patch(__func__);
+ if (!luminance) return static_cast<int>(0x80A10003);
+ luminance->max_full_frame_tone_map_luminance = 1000.0f;
+ luminance->max_tone_map_luminance = 1000.0f;
+ luminance->min_tone_map_luminance = 0.01f;
  return 0;
 }
 

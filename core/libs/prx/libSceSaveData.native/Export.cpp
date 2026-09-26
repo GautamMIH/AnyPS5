@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 #include "SceTypes.hpp"
@@ -16,6 +17,10 @@ static bool g_initialized = false;
 
 static std::string save_root() {
     return std::string(SAVE_DIR);
+}
+
+static std::filesystem::path save_data_memory_path(int user_id, std::uint32_t slot_id) {
+    return std::filesystem::path(save_root()) / "savedatamemory" / (std::to_string(user_id) + "_" + std::to_string(slot_id) + ".bin");
 }
 
 static bool dir_name_match(const char* str, const char* pattern) {
@@ -153,9 +158,20 @@ int APS5_VABI sceSaveDataGetParam(const SaveDataMountPoint* mount_point, uint32_
 }
 
 int APS5_VABI sceSaveDataGetSaveDataMemory2(SaveDataMemoryGet2* get_param) {
-    (void)get_param;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (get_param == nullptr) return SAVE_DATA_ERROR_PARAMETER;
+    const auto path = save_data_memory_path(get_param->user_id, get_param->slot_id);
+    if (!std::filesystem::exists(path)) return SAVE_DATA_ERROR_NOT_FOUND;
+    if (get_param->data != nullptr) {
+        std::ifstream stream(path, std::ios::binary);
+        const auto& data = *get_param->data;
+        if (data.buf == nullptr || data.offset + data.buf_size > std::filesystem::file_size(path)) return SAVE_DATA_ERROR_PARAMETER;
+        stream.seekg(static_cast<std::streamoff>(data.offset));
+        stream.read(static_cast<char*>(data.buf), static_cast<std::streamsize>(data.buf_size));
+        if (!stream) return SAVE_DATA_ERROR_NOT_FOUND;
+    }
+    if (get_param->param != nullptr) std::memset(get_param->param, 0, sizeof(*get_param->param));
+    if (get_param->icon != nullptr) get_param->icon->data_size = 0;
+    return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataInitialize3(const void* init) {
@@ -271,22 +287,43 @@ int APS5_VABI sceSaveDataSetParam(const SaveDataMountPoint* mount_point, uint32_
 }
 
 int APS5_VABI sceSaveDataSetSaveDataMemory2(const SaveDataMemorySet2* set_param) {
-    (void)set_param;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (set_param == nullptr) return SAVE_DATA_ERROR_PARAMETER;
+    const auto path = save_data_memory_path(set_param->user_id, set_param->slot_id);
+    if (!std::filesystem::exists(path)) return SAVE_DATA_ERROR_NOT_FOUND;
+    const std::uint64_t size = std::filesystem::file_size(path);
+    std::fstream stream(path, std::ios::binary | std::ios::in | std::ios::out);
+    for (std::uint32_t index = 0; set_param->data != nullptr && index < set_param->data_num; ++index) {
+        const auto& data = set_param->data[index];
+        if (data.buf == nullptr || data.offset + data.buf_size > size) return SAVE_DATA_ERROR_PARAMETER;
+        stream.seekp(static_cast<std::streamoff>(data.offset));
+        stream.write(static_cast<const char*>(data.buf), static_cast<std::streamsize>(data.buf_size));
+        if (!stream) return SAVE_DATA_ERROR_OUT_OF_MEMORY;
+    }
+    stream.flush();
+    return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataSetupSaveDataMemory2(const SaveDataMemorySetup2* setup_param, SaveDataMemorySetupResult* result) {
-    (void)setup_param;
-    (void)result;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (setup_param == nullptr || setup_param->memory_size == 0) return SAVE_DATA_ERROR_PARAMETER;
+    const auto path = save_data_memory_path(setup_param->user_id, setup_param->slot_id);
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    const std::uint64_t existing = std::filesystem::exists(path) ? std::filesystem::file_size(path) : 0;
+    if (existing < setup_param->memory_size) {
+        std::ofstream(path, std::ios::binary | std::ios::app).close();
+        std::filesystem::resize_file(path, setup_param->memory_size, error);
+        if (error) return SAVE_DATA_ERROR_OUT_OF_MEMORY;
+    }
+    if (result != nullptr) {
+        std::memset(result, 0, sizeof(*result));
+        result->existed_memory_size = static_cast<std::size_t>(existing);
+    }
+    return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataSyncSaveDataMemory(const void* sync_param) {
     (void)sync_param;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return SAVE_DATA_OK;
 }
 
 int APS5_VABI sceSaveDataTerminate(void) {
