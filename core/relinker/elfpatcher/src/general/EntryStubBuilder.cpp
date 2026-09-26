@@ -62,4 +62,38 @@ std::vector<std::uint8_t> EntryStubBuilder::BuildNullArgumentCallStub(
     return s;
 }
 
+std::vector<std::uint8_t> EntryStubBuilder::BuildModuleInitStub(
+    const std::uint64_t stubVaddr,
+    const std::uint64_t targetVaddr,
+    const std::uint64_t hookSlotVaddr
+) const {
+    const auto rel32 = [](std::uint64_t target, std::uint64_t next) {
+        const auto delta = static_cast<std::int64_t>(target - next);
+        if (delta < INT32_MIN || delta > INT32_MAX)
+            throw Domain::RelinkerException("Module init stub reference is out of rel32 range", target);
+        return static_cast<std::int32_t>(delta);
+    };
+    const auto appendRel32 = [](std::vector<std::uint8_t>& out, std::int32_t value) {
+        for (int shift = 0; shift < 32; shift += 8)
+            out.push_back(static_cast<std::uint8_t>((value >> shift) & 0xff));
+    };
+    std::vector<std::uint8_t> s;
+    // mov rax, [rip + hook slot]
+    _appendBytes(s, kStubOpMovRaxRipRel, sizeof(kStubOpMovRaxRipRel));
+    appendRel32(s, rel32(hookSlotVaddr, stubVaddr + s.size() + 4));
+    // test rax, rax; jz fallback
+    _appendBytes(s, kStubOpTestRaxRax, sizeof(kStubOpTestRaxRax));
+    s.push_back(kStubOpJzRel8);
+    const std::size_t jumpOffset = s.size();
+    s.push_back(0);
+    // lea rdi, [rip + PS5 init entry]; jmp rax
+    _appendBytes(s, kStubOpLeaRdiRipRel, sizeof(kStubOpLeaRdiRipRel));
+    appendRel32(s, rel32(targetVaddr, stubVaddr + s.size() + 4));
+    _appendBytes(s, kStubOpJmpRax, sizeof(kStubOpJmpRax));
+    s[jumpOffset] = static_cast<std::uint8_t>(s.size() - jumpOffset - 1);
+    const auto fallback = BuildNullArgumentCallStub(stubVaddr + s.size(), targetVaddr);
+    s.insert(s.end(), fallback.begin(), fallback.end());
+    return s;
+}
+
 }

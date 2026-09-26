@@ -16,6 +16,12 @@ public:
         std::uint64_t stubVaddr,
         std::uint64_t targetVaddr
     ) const override;
+
+    std::vector<std::uint8_t> BuildModuleInitStub(
+        std::uint64_t stubVaddr,
+        std::uint64_t targetVaddr,
+        std::uint64_t hookSlotVaddr
+    ) const override;
 };
 
 }

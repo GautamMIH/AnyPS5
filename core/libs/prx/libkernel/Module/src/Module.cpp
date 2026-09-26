@@ -26,8 +26,31 @@ constexpr char kModuleExtension[] = ".prx";
 constexpr char kSignedModuleExtension[] = ".sprx";
 
 using ModuleEntry = int (APS5_VABI*)(std::size_t args, const void* argp);
+using ModuleInit = int (APS5_VABI*)(std::size_t args, const void* argp, void* entry);
 
 #if defined(__linux__)
+
+// A module being started by sceKernelLoadStartModule. dlopen runs init functions on the calling
+// thread, dependencies first, so the hook matches the module by path before handing over the
+// start arguments.
+struct PendingStart {
+    std::filesystem::path Path;
+    std::size_t Args;
+    const void* Argp;
+    bool Started;
+    int Result;
+};
+
+thread_local PendingStart* pendingStart = nullptr;
+
+bool isPendingModule(const PendingStart& pending, const char* loadedPath) {
+    if (loadedPath == nullptr)
+        return false;
+    if (pending.Path == loadedPath)
+        return true;
+    std::error_code error;
+    return std::filesystem::equivalent(pending.Path, loadedPath, error);
+}
 
 struct LoadedModule {
     void* Handle;
@@ -172,6 +195,26 @@ int APS5_VABI sceKernelGetModuleInfoFromAddr(uint64_t addr, int n, ModuleInfo* r
  return 0;
 }
 
+#if defined(__linux__)
+// Exported as __anyps5_module_init. DT_INIT of every relinked library tail-calls this with the
+// PS5 init entry, which runs the module's initializers and then module_start(args, argp).
+// Modules loaded at startup or as dependencies are started without arguments, as the PS5
+// loader does.
+__attribute__((visibility("default"))) int __anyps5_module_init_nid_no_patch_cut(ModuleInit init) {
+    PendingStart* pending = pendingStart;
+    if (pending != nullptr && !pending->Started) {
+        Dl_info info{};
+        if (dladdr(reinterpret_cast<void*>(init), &info) != 0 && isPendingModule(*pending, info.dli_fname)) {
+            pending->Started = true;
+            pending->Result = init(pending->Args, pending->Argp, nullptr);
+            return 0;
+        }
+    }
+    init(0, nullptr, nullptr);
+    return 0;
+}
+#endif
+
 KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, size_t args, const void* argp, uint32_t flags, const KernelLoadModuleOpt* opt, int* res) {
     (void)flags;
     (void)opt;
@@ -181,13 +224,19 @@ KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, si
     const std::filesystem::path path = librariesDirectory() / moduleFileName(module_file_name);
     if (!std::filesystem::is_regular_file(path))
         return kErrorNoEntry;
+    // The relinked init runs module_start itself; see __anyps5_module_init.
+    PendingStart pending{path, args, argp, false, 0};
+    pendingStart = &pending;
     void* handle = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
+    pendingStart = nullptr;
     if (handle == nullptr)
         throw std::runtime_error(std::string("module load failed: ") + dlerror());
     const KernelModule module = registry().Register(handle, path, true);
-    int result = 0;
-    if (auto* start = reinterpret_cast<ModuleEntry>(findSymbol(handle, kModuleStartName)))
-        result = start(args, argp);
+    int result = pending.Result;
+    if (!pending.Started) {
+        if (auto* start = reinterpret_cast<ModuleEntry>(findSymbol(handle, kModuleStartName)))
+            result = start(args, argp);
+    }
     if (res != nullptr)
         *res = result;
     return module;

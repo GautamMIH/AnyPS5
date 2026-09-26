@@ -2,6 +2,7 @@
 #include <elfpatcher/general/ElfConstants.hpp>
 #include <elfpatcher/general/ProgramHeaderLayoutRequest.hpp>
 #include <elfpatcher/general/SectionHeaderTableRequest.hpp>
+#include <cstring>
 #include <string>
 
 namespace Elfpatcher::Linux {
@@ -60,6 +61,22 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
             b.push_back(0);
     };
 
+    // Libraries get one GOT slot for the runtime's module-init hook (see BuildModuleInitStub),
+    // placed first in the extra block so its address is known before the tables are laid out.
+    const bool hasInitHook = isLibrary && linkInfo.InitAddress != 0;
+    if (hasInitHook)
+        alignBuf(buf, kHookSlotAlignment);
+    const auto extraBlockOff = static_cast<std::uint64_t>(buf.size());
+    const std::uint64_t extraBlockVaddr = _programHeaderLayoutBuilder->ComputeExtraBlockVaddr(originalHeaders, extraBlockOff);
+    const auto vaddrOfExtraBlockOffset = [extraBlockOff, extraBlockVaddr](std::uint64_t fileOffset) -> std::uint64_t {
+        if (fileOffset < extraBlockOff)
+            throw Domain::RelinkerException("Extra block member offset lies before the extra block");
+        return extraBlockVaddr + (fileOffset - extraBlockOff);
+    };
+    const std::uint64_t hookSlotVaddr = hasInitHook ? vaddrOfExtraBlockOffset(extraBlockOff) : 0;
+    if (hasInitHook)
+        _byteWriter->AppendU64(buf, 0);
+
     const auto dynStrOff = static_cast<std::uint64_t>(buf.size());
     for (std::uint8_t b : dynSection.DynStrData)
         buf.push_back(b);
@@ -73,17 +90,38 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
             buf.push_back(static_cast<std::uint8_t>(c));
         buf.push_back(0);
     }
+    const std::uint64_t hookNameStrOff = static_cast<std::uint64_t>(buf.size()) - dynStrOff;
+    if (hasInitHook) {
+        for (const char* c = kModuleInitHookName; *c; ++c)
+            buf.push_back(static_cast<std::uint8_t>(*c));
+        buf.push_back(0);
+    }
     const std::uint64_t dynStrSize = static_cast<std::uint64_t>(buf.size()) - dynStrOff;
     alignBuf(buf, kDynStrAlignment);
 
     const auto dynSymOff = static_cast<std::uint64_t>(buf.size());
     for (std::uint8_t b : dynSection.DynSymData)
         buf.push_back(b);
+    const std::uint64_t hookSymbolIndex = dynSection.DynSymData.size() / kSymEntrySize;
+    if (hasInitHook) {
+        _byteWriter->AppendU32(buf, static_cast<std::uint32_t>(hookNameStrOff));
+        buf.push_back(kSymInfoWeakFunction);
+        buf.push_back(0);
+        _byteWriter->AppendU16(buf, 0);
+        _byteWriter->AppendU64(buf, 0);
+        _byteWriter->AppendU64(buf, 0);
+    }
     alignBuf(buf, kDynSymAlignment);
 
     const auto relaOff = static_cast<std::uint64_t>(buf.size());
     for (std::uint8_t b : dynSection.RelaData)
         buf.push_back(b);
+    if (hasInitHook) {
+        _byteWriter->AppendU64(buf, hookSlotVaddr);
+        _byteWriter->AppendU64(buf, (hookSymbolIndex << 32) | R_X86_64_GLOB_DAT);
+        _byteWriter->AppendI64(buf, 0);
+    }
+    const std::uint64_t relaSize = static_cast<std::uint64_t>(buf.size()) - relaOff;
     alignBuf(buf, kRelaAlignment);
 
     const auto relaPltOff = static_cast<std::uint64_t>(buf.size());
@@ -97,6 +135,16 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     const auto hashOff = static_cast<std::uint64_t>(buf.size());
     for (std::uint8_t b : dynSection.HashData)
         buf.push_back(b);
+    if (hasInitHook) {
+        // The undefined hook symbol joins no bucket; it only extends the chain array.
+        std::uint32_t chainCount = 0;
+        std::memcpy(&chainCount, buf.data() + hashOff + 4, sizeof(chainCount));
+        if (chainCount != hookSymbolIndex)
+            throw Domain::RelinkerException("Dynamic symbol hash table does not cover the symbol table");
+        ++chainCount;
+        std::memcpy(buf.data() + hashOff + 4, &chainCount, sizeof(chainCount));
+        _byteWriter->AppendU32(buf, 0);
+    }
 
     const auto appendVersionTable = [&](const std::vector<std::uint8_t>& table) -> std::uint64_t {
         alignBuf(buf, kVersionTableAlignment);
@@ -105,18 +153,14 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
             buf.push_back(b);
         return offset;
     };
-    const std::uint64_t versymOff = dynSection.VersymData.empty() ? 0 : appendVersionTable(dynSection.VersymData);
+    std::vector<std::uint8_t> versymData = dynSection.VersymData;
+    if (hasInitHook && !versymData.empty())
+        _byteWriter->AppendU16(versymData, kVersionIndexGlobal);
+    const std::uint64_t versymOff = versymData.empty() ? 0 : appendVersionTable(versymData);
     const std::uint64_t verdefOff = dynSection.VerdefData.empty() ? 0 : appendVersionTable(dynSection.VerdefData);
     const std::uint64_t verneedOff = dynSection.VerneedData.empty() ? 0 : appendVersionTable(dynSection.VerneedData);
 
-    const std::uint64_t extraBlockOff = dynStrOff;
-    const std::uint64_t extraBlockVaddr = _programHeaderLayoutBuilder->ComputeExtraBlockVaddr(originalHeaders, extraBlockOff);
 
-    const auto vaddrOfExtraBlockOffset = [extraBlockOff, extraBlockVaddr](std::uint64_t fileOffset) -> std::uint64_t {
-        if (fileOffset < extraBlockOff)
-            throw Domain::RelinkerException("Extra block member offset lies before the extra block");
-        return extraBlockVaddr + (fileOffset - extraBlockOff);
-    };
 
     std::uint64_t initStubVaddr = 0;
     std::uint64_t finiStubVaddr = 0;
@@ -131,8 +175,12 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
                 buf.push_back(b);
             return stubVaddr;
         };
-        if (linkInfo.InitAddress != 0)
-            initStubVaddr = appendCallStub(linkInfo.InitAddress);
+        if (hasInitHook) {
+            alignBuf(buf, kStubAlignment);
+            initStubVaddr = vaddrOfExtraBlockOffset(static_cast<std::uint64_t>(buf.size()));
+            for (std::uint8_t b : _entryStubBuilder->BuildModuleInitStub(initStubVaddr, linkInfo.InitAddress, hookSlotVaddr))
+                buf.push_back(b);
+        }
         if (linkInfo.FiniAddress != 0)
             finiStubVaddr = appendCallStub(linkInfo.FiniAddress);
         alignBuf(buf, kDynSymAlign);
@@ -151,7 +199,7 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     _appendDynEntry(dynSegBuf, DT_STRSZ, dynStrSize);
     _appendDynEntry(dynSegBuf, DT_SYMTAB, vaddrOfExtraBlockOffset(dynSymOff));
     _appendDynEntry(dynSegBuf, DT_SYMENT, kSymEntrySize);
-    if (!dynSection.VersymData.empty())
+    if (!versymData.empty())
         _appendDynEntry(dynSegBuf, DT_VERSYM, vaddrOfExtraBlockOffset(versymOff));
     if (!dynSection.VerdefData.empty()) {
         _appendDynEntry(dynSegBuf, DT_VERDEF, vaddrOfExtraBlockOffset(verdefOff));
@@ -161,9 +209,9 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
         _appendDynEntry(dynSegBuf, DT_VERNEED, vaddrOfExtraBlockOffset(verneedOff));
         _appendDynEntry(dynSegBuf, DT_VERNEEDNUM, dynSection.VerneedCount);
     }
-    if (!dynSection.RelaData.empty()) {
+    if (relaSize != 0) {
         _appendDynEntry(dynSegBuf, DT_RELA, vaddrOfExtraBlockOffset(relaOff));
-        _appendDynEntry(dynSegBuf, DT_RELASZ, dynSection.RelaData.size());
+        _appendDynEntry(dynSegBuf, DT_RELASZ, relaSize);
         _appendDynEntry(dynSegBuf, DT_RELAENT, kRelaEntrySize);
     }
     if (!dynSection.RelaPltData.empty()) {
@@ -232,7 +280,7 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     sectionRequest.DynStrOffset = dynStrOff;
     sectionRequest.DynStrSize = dynStrSize;
     sectionRequest.DynSymOffset = dynSymOff;
-    sectionRequest.DynSymSize = dynSection.DynSymData.size();
+    sectionRequest.DynSymSize = dynSection.DynSymData.size() + (hasInitHook ? kSymEntrySize : 0);
     sectionRequest.DynamicSegmentOffset = dynSegOff;
     sectionRequest.DynamicSegmentSize = dynSegBuf.size();
     sectionRequest.StubOffset = stubOff;

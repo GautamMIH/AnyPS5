@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
+#include <string>
 #include "prx/libc/include/Shutdown.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -75,17 +76,26 @@ int APS5_VABI sceSystemServiceParamGetInt(int paramId, int* value) {
  return SYSTEM_SERVICE_OK;
 }
 
+// The system name is the only string parameter (as in KytyPS5).
 int APS5_VABI sceSystemServiceParamGetString(int param_id, char* buf, size_t buf_size) {
- (void)param_id;
- (void)buf;
- (void)buf_size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (buf == nullptr || buf_size == 0) {
+  return SYSTEM_SERVICE_ERROR_PARAMETER;
+ }
+ if (param_id != SYSTEM_SERVICE_PARAM_ID_SYSTEM_NAME) {
+  NotImplemented_nid_no_patch(("sceSystemServiceParamGetString: parameter " + std::to_string(param_id)).c_str());
+  return SYSTEM_SERVICE_ERROR_PARAMETER;
+ }
+ constexpr char name[] = "AnyPS5";
+ if (sizeof(name) > buf_size) {
+  return SYSTEM_SERVICE_ERROR_PARAMETER;
+ }
+ std::memcpy(buf, name, sizeof(name));
+ return SYSTEM_SERVICE_OK;
 }
 
+// Resets the console's idle timer; the host has no auto-dim or rest mode to postpone.
 int APS5_VABI sceSystemServicePowerTick(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return SYSTEM_SERVICE_OK;
 }
 
 int APS5_VABI sceSystemServiceReceiveEvent(SystemServiceEvent* event) {

@@ -41,6 +41,10 @@ inline constexpr std::size_t kPhdrAlignOffset = 48;
 inline constexpr std::size_t kDynEntrySize = 16;
 
 inline constexpr std::uint64_t kSymEntrySize = 24;
+inline constexpr std::uint8_t kSymInfoWeakFunction = 0x22;
+inline constexpr std::uint64_t R_X86_64_GLOB_DAT = 6;
+inline constexpr std::uint16_t kVersionIndexGlobal = 1;
+inline constexpr std::size_t kHookSlotAlignment = 8;
 
 inline constexpr std::uint64_t kRelaEntrySize = 24;
 
@@ -62,6 +66,7 @@ inline constexpr std::uint32_t PT_DYNAMIC = 2;
 inline constexpr std::uint32_t PT_INTERP = 3;
 inline constexpr std::uint32_t PT_NOTE = 4;
 inline constexpr std::uint32_t PT_PHDR = 6;
+inline constexpr std::uint32_t PT_GNU_EH_FRAME = 0x6474e550;
 inline constexpr std::uint32_t PT_GNU_RELRO = 0x6474e552;
 inline constexpr std::uint32_t PT_GNU_STACK = 0x6474e551;
 inline constexpr std::uint64_t kGnuStackAlignment = 16;
@@ -149,6 +154,13 @@ inline constexpr std::uint8_t kStubOpXorEsiEsi[] = {0x31, 0xf6};
 inline constexpr std::uint8_t kStubOpXorEdxEdx[] = {0x31, 0xd2};
 inline constexpr std::uint8_t kStubOpPopRbp = 0x5d;
 inline constexpr std::uint8_t kStubOpRet = 0xc3;
+inline constexpr std::uint8_t kStubOpMovRaxRipRel[] = {0x48, 0x8b, 0x05};
+inline constexpr std::uint8_t kStubOpTestRaxRax[] = {0x48, 0x85, 0xc0};
+inline constexpr std::uint8_t kStubOpJzRel8 = 0x74;
+inline constexpr std::uint8_t kStubOpLeaRdiRipRel[] = {0x48, 0x8d, 0x3d};
+inline constexpr std::uint8_t kStubOpJmpRax[] = {0xff, 0xe0};
+// Runtime hook that starts relinked libraries with the arguments of sceKernelLoadStartModule.
+inline constexpr char kModuleInitHookName[] = "__anyps5_module_init";
 
 }
 
