@@ -282,7 +282,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     auto bindings = bindingAllocator.Allocate(program, request.layout);
 
     constexpr DescriptorBindingBuilder descriptorBindingBuilder;
-    descriptorBindingBuilder.Populate(bindings, program, resourceSnapshot);
+    descriptorBindingBuilder.Populate(bindings, program, resourceSnapshot, request.target.storageBufferOffsetAlignment);
 
     SpirvTargetOptions targetOptions {};
     targetOptions.vulkanVersion = request.target.vulkanVersion;
@@ -303,6 +303,17 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     static std::atomic<std::uint64_t> variants{0};
     result.variantId = variants.fetch_add(1, std::memory_order_relaxed) + 1;
     result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
+    // Debug aid: APS5_DUMP_SPIRV=<directory> saves each emitted module as
+    // <directory>/<code address>-<variant>.spv, for spirv-val and spirv-dis.
+    if (const char* directory = std::getenv("APS5_DUMP_SPIRV")) {
+        char path[512];
+        std::snprintf(path, sizeof(path), "%s/%llx-%llu.spv", directory, static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(result.variantId));
+        if (auto* file = std::fopen(path, "wb")) {
+            const auto& words = result.spirv.Words();
+            std::fwrite(words.data(), sizeof(std::uint32_t), words.size(), file);
+            std::fclose(file);
+        }
+    }
 
 #if ANYPS5_ENABLE_SPIRV_TOOLS
     result.spirv = ValidateAndOptimizeSpirv(result.spirv, request.target.vulkanVersion, request.target.spirvVersion);
@@ -338,7 +349,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     bindings.layout = variant.bindings.layout;
     bindings.pushConstantOffsetBytes = variant.bindings.pushConstantOffsetBytes;
     bindings.pushConstantSizeBytes = variant.bindings.pushConstantSizeBytes;
-    DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot);
+    DescriptorBindingBuilder{}.Populate(bindings, variant.info.info, variant.info.stage, variant.info.userDataBase, snapshot, request.target.storageBufferOffsetAlignment);
     result.bindings = std::move(bindings.bindings);
     result.pushConstants = std::move(bindings.pushConstants);
     for (auto& attribute : result.vertexAttributes) {

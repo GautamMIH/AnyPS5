@@ -207,8 +207,12 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
     for (const auto& target : targets) Require(!overlap(address, size, target.address, target.bytes), "shader buffer aliases the render target");
     Require(!overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
-    guestMemory.AddWritable(address, size);
-    allocations.push_back({address, size, true, nullptr});
+    // The view starts BufferViewMisalignment bytes below the base to meet the descriptor offset
+    // alignment; the recompiler passed the same difference to the shader. The extra bytes are
+    // uploaded but never written back.
+    const auto below = ShaderRecompiler::BufferViewMisalignment(address, static_cast<std::uint32_t>(context.limits.minStorageBufferOffsetAlignment));
+    guestMemory.AddWritable(address, size, below);
+    allocations.push_back({address - below, size + below, true, nullptr});
     return allocations.size() - 1;
 }
 

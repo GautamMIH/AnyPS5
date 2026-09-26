@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -18,10 +19,12 @@ void GuestBufferMemory::validate(std::uint64_t address, std::size_t bytes) const
     Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "guest memory range overflow");
 }
 
-void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes) {
+void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes, std::size_t leading) {
     validate(address, bytes);
+    Require(leading <= address, "guest memory range underflow");
     GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
-    regions.push_back({address, address + bytes, true, {}, nullptr});
+    if (leading != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), leading, 1, false);
+    regions.push_back({address - leading, address + bytes, true, {}, nullptr});
     writes.emplace_back(address, address + bytes);
 }
 
@@ -59,13 +62,27 @@ void GuestBufferMemory::Upload(bool addressable) {
         }
     }
     regions = std::move(merged);
+    // Storage buffer views must start at multiples of minStorageBufferOffsetAlignment from their
+    // buffer, so each buffer starts at an aligned guest address: the region is extended down to
+    // it unless that would reach into the previous region (addresses keep a single owner). The
+    // padding stays within the region's first page; it is never written back.
+    const auto alignment = std::max<std::uint64_t>(context.limits.minStorageBufferOffsetAlignment, 1u);
+    std::uint64_t previousEnd = 0;
     for (auto& region : regions) {
+        const auto aligned = region.begin & ~(alignment - 1u);
+        const auto padding = aligned >= previousEnd ? region.begin - aligned : 0u;
+        previousEnd = region.end;
+        region.begin -= padding;
         const auto bytes = region.end - region.begin;
         Require(bytes <= std::numeric_limits<std::size_t>::max(), "guest GPU allocation size overflow");
         const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
         region.buffer = std::make_unique<Buffer>(context, static_cast<std::size_t>(bytes), usage);
-        if (region.writable) GuestMemory::Read(region.begin, region.buffer->Bytes());
-        else std::memcpy(region.buffer->Bytes().data(), region.snapshot.data(), region.snapshot.size());
+        if (region.writable) {
+            GuestMemory::Read(region.begin, region.buffer->Bytes());
+        } else {
+            std::memset(region.buffer->Bytes().data(), 0, static_cast<std::size_t>(padding));
+            std::memcpy(region.buffer->Bytes().data() + padding, region.snapshot.data(), region.snapshot.size());
+        }
         region.snapshot.clear();
     }
 }
@@ -78,7 +95,11 @@ VkDescriptorBufferInfo GuestBufferMemory::Descriptor(std::uint64_t address, std:
     const auto& region = *std::prev(found);
     Require(address >= region.begin && address + bytes <= region.end && region.buffer != nullptr, "guest buffer view exceeds its GPU owner");
     const auto offset = address - region.begin;
-    Require(context.limits.minStorageBufferOffsetAlignment != 0 && offset % context.limits.minStorageBufferOffsetAlignment == 0, "guest buffer view violates storage buffer offset alignment");
+    if (context.limits.minStorageBufferOffsetAlignment == 0 || offset % context.limits.minStorageBufferOffsetAlignment != 0) {
+        char message[200];
+        std::snprintf(message, sizeof(message), "guest buffer view at 0x%llx (region 0x%llx) violates storage buffer offset alignment %llu", static_cast<unsigned long long>(address), static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(context.limits.minStorageBufferOffsetAlignment));
+        Require(false, message);
+    }
     Require(bytes <= context.limits.maxStorageBufferRange, "guest buffer view exceeds descriptor range limit");
     return {region.buffer->Handle(), offset, bytes};
 }

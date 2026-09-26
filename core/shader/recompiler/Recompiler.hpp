@@ -134,7 +134,20 @@ struct SpirvTarget {
     std::uint32_t maxWorkgroupSharedMemoryBytes;
     std::optional<MeshTargetLimits> mesh;
     std::optional<TessellationTargetLimits> tessellation;
+    // minStorageBufferOffsetAlignment of the device. A guest buffer whose base is not a multiple
+    // of it is bound from the aligned address below (BufferViewMisalignment), and the shader adds
+    // the difference; 0 or 1 binds every buffer at its base.
+    std::uint32_t storageBufferOffsetAlignment = 0;
 };
+
+// The bytes a guest buffer view starts before its V# base so that its descriptor offset meets the
+// device alignment. Only dword multiples below 256 can be carried to the shader (a byte per
+// buffer, applied in dwords); other bases are bound unmodified.
+[[nodiscard]] inline std::uint32_t BufferViewMisalignment(std::uint64_t base, std::uint32_t alignment) {
+    if (alignment <= 1u) return 0u;
+    const auto misalignment = static_cast<std::uint32_t>(base % alignment);
+    return misalignment % 4u == 0u && misalignment < 256u ? misalignment : 0u;
+}
 
 struct BindingLayout {
     std::uint32_t descriptorSet;

@@ -192,13 +192,28 @@ std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, st
 
 }
 
-void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const IrProgram& program, const ResourceSnapshot& snapshot) const {
-    Populate(allocation, program.Info(), program.Resources().stage, program.Resources().userDataBase, snapshot);
+void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const IrProgram& program, const ResourceSnapshot& snapshot, std::uint32_t bufferOffsetAlignment) const {
+    Populate(allocation, program.Info(), program.Resources().stage, program.Resources().userDataBase, snapshot, bufferOffsetAlignment);
 }
 
-void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot) const {
+void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, std::uint32_t bufferOffsetAlignment) const {
     const IrBindingLayout& layout = allocation.layout;
-    const std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, userDataBase, snapshot);
+    std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, userDataBase, snapshot);
+    // Byte offsets of guest buffers bound below their base (the backend reads one byte per buffer,
+    // in resource order, from shader data dword memoryOffsetDword on).
+    for (const IrDescriptorBinding& logical : layout.descriptors) {
+        if (RoleFor(logical.kind) != DescriptorRole::GuestBuffers) continue;
+        const auto words = GuestBuffersDescriptor(logical.resources, snapshot);
+        for (std::size_t element = 0; element < logical.resources.size(); ++element) {
+            const std::uint32_t resource = logical.resources[element];
+            if (resource >= layout.memoryOffsetCount) continue;
+            const std::uint64_t base = words.at(element * 4u) | (static_cast<std::uint64_t>(words.at(element * 4u + 1u) & 0xffffu) << 32u);
+            const auto misalignment = BufferViewMisalignment(base, bufferOffsetAlignment);
+            auto& dword = shaderData.at(layout.memoryOffsetDword + resource / 4u);
+            const auto shift = (resource % 4u) * 8u;
+            dword = (dword & ~(0xffu << shift)) | (misalignment << shift);
+        }
+    }
 
     std::vector<DescriptorBinding> bindings;
     bindings.reserve(layout.descriptors.size());

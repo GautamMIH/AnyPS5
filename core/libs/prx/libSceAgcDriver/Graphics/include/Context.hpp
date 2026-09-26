@@ -85,6 +85,14 @@ struct Context {
         }
         throw std::runtime_error("AGC graphics: required Vulkan memory type is unavailable");
     }
+
+    // A type with the preferred flags if one exists, otherwise one with the required flags.
+    std::uint32_t MemoryType(std::uint32_t mask, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred) const {
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+            if ((mask & (1u << i)) != 0 && (memory.memoryTypes[i].propertyFlags & (required | preferred)) == (required | preferred)) return i;
+        }
+        return MemoryType(mask, required);
+    }
 };
 
 }

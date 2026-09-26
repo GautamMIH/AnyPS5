@@ -18,7 +18,9 @@ class GuestBufferMemory {
 public:
     explicit GuestBufferMemory(const Context& context);
     void AcquireRegistered();
-    void AddWritable(std::uint64_t address, std::size_t bytes);
+    // leading: bytes before address the region also covers for a view's alignment; they are
+    // uploaded but never written back.
+    void AddWritable(std::uint64_t address, std::size_t bytes, std::size_t leading = 0);
     void AddSnapshot(const GuestMemorySnapshot& snapshot);
     void Upload(bool addressable);
     VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes) const;

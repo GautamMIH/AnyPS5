@@ -273,6 +273,43 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     std::vector<VkPhysicalDevice> devices(count);
     check(enumerate(state->instance, &count, devices.data()), "vkEnumeratePhysicalDevices");
     devices.resize(count);
+    // Device preference follows shadPS4 (vk_instance.cpp): Vulkan 1.1 support, then discrete GPUs,
+    // then anything but a CPU implementation, then the largest device-local heap. The first
+    // suitable device in that order is used. ANYPS5_GPU=<index> picks a device by enumeration
+    // index instead.
+    const auto getProperties = state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
+    const auto getMemory = state->InstanceFunction<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties");
+    if (const char* chosen = std::getenv("ANYPS5_GPU")) {
+        const auto index = std::strtoul(chosen, nullptr, 10);
+        require(index < devices.size(), "ANYPS5_GPU names a device index past the enumerated devices");
+        devices = {devices[index]};
+    } else {
+        const auto deviceLocalBytes = [&](VkPhysicalDevice physical) {
+            VkPhysicalDeviceMemoryProperties memory{};
+            getMemory(physical, &memory);
+            VkDeviceSize largest = 0;
+            for (std::uint32_t i = 0; i < memory.memoryHeapCount; ++i) {
+                if ((memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) largest = std::max(largest, memory.memoryHeaps[i].size);
+            }
+            return largest;
+        };
+        std::stable_sort(devices.begin(), devices.end(), [&](VkPhysicalDevice left, VkPhysicalDevice right) {
+            VkPhysicalDeviceProperties l{};
+            VkPhysicalDeviceProperties r{};
+            getProperties(left, &l);
+            getProperties(right, &r);
+            const bool lApi = l.apiVersion >= VK_API_VERSION_1_1;
+            const bool rApi = r.apiVersion >= VK_API_VERSION_1_1;
+            if (lApi != rApi) return lApi;
+            const bool lDiscrete = l.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+            const bool rDiscrete = r.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+            if (lDiscrete != rDiscrete) return lDiscrete;
+            const bool lCpu = l.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+            const bool rCpu = r.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+            if (lCpu != rCpu) return rCpu;
+            return deviceLocalBytes(left) > deviceLocalBytes(right);
+        });
+    }
     VkPhysicalDevice selected = VK_NULL_HANDLE;
     std::uint32_t family = 0;
     const std::array<const char*, 1> presentationExtensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
@@ -322,6 +359,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(selected, &properties);
     state->properties = properties.properties;
     state->physical = selected;
+    std::fprintf(stderr, "[AnyPS5] Vulkan device: %s\n", state->properties.deviceName);
     if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0) {
         state->capabilities.push_back(spv::CapabilityGroupNonUniform);
         if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) != 0) state->capabilities.push_back(spv::CapabilityGroupNonUniformBallot);
@@ -767,6 +805,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
 ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
     const auto& limits = state->properties.limits;
     ShaderRecompiler::SpirvTarget target{VK_API_VERSION_1_1, state->meshShader ? 0x00010400u : 0x00010300u, state->subgroup.subgroupSize, ShaderRecompiler::BdaAbi::Version, state->capabilities, state->spirvExtensions, false, {limits.maxComputeWorkGroupSize[0], limits.maxComputeWorkGroupSize[1], limits.maxComputeWorkGroupSize[2]}, limits.maxComputeWorkGroupInvocations, limits.maxComputeSharedMemorySize, {}, {}};
+    target.storageBufferOffsetAlignment = static_cast<std::uint32_t>(limits.minStorageBufferOffsetAlignment);
     if (state->meshShader) {
         const auto& mesh = state->meshLimits;
         target.mesh = ShaderRecompiler::MeshTargetLimits{{mesh.maxMeshWorkGroupSize[0], mesh.maxMeshWorkGroupSize[1], mesh.maxMeshWorkGroupSize[2]}, mesh.maxMeshWorkGroupInvocations, std::min(mesh.maxMeshSharedMemorySize, mesh.maxMeshPayloadAndSharedMemorySize), mesh.maxMeshOutputVertices, mesh.maxMeshOutputPrimitives, mesh.maxMeshOutputComponents, std::min(mesh.maxMeshOutputMemorySize, mesh.maxMeshPayloadAndOutputMemorySize), mesh.meshOutputPerVertexGranularity, mesh.meshOutputPerPrimitiveGranularity};
