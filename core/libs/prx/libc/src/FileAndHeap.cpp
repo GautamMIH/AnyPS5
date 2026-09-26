@@ -116,6 +116,22 @@ int APS5_VABI posix_memalign_nid_postfix(void** pointer, size_t alignment, size_
     return ApplicationHeapPosixAlign_nid_no_patch(pointer, alignment, size);
 }
 
+void* APS5_VABI reallocalign_nid_postfix(void* ptr, size_t size, size_t alignment) {
+    return ApplicationHeapReallocateAligned_nid_no_patch(ptr, size, alignment);
+}
+
+size_t APS5_VABI malloc_usable_size_nid_postfix(void* ptr) {
+    return ApplicationHeapUsableSize_nid_no_patch(ptr);
+}
+
+int APS5_VABI malloc_stats_nid_postfix(void* statistics) {
+    return ApplicationHeapStatistics_nid_no_patch(statistics, false);
+}
+
+int APS5_VABI malloc_stats_fast_nid_postfix(void* statistics) {
+    return ApplicationHeapStatistics_nid_no_patch(statistics, true);
+}
+
 void APS5_VABI qsort_nid_postfix(void* base, size_t count, size_t size, int (APS5_VABI *compare)(const void*, const void*)) {
     if (!compare) throw std::invalid_argument("qsort: null comparator");
     if (size == 0) throw std::invalid_argument("qsort: zero element size");

@@ -1,5 +1,6 @@
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libc/include/MallocStatistics.hpp"
 #include <array>
 #include <cstdint>
 #include <cstdlib>
@@ -10,6 +11,10 @@
 #include <new>
 #include <stdexcept>
 
+#if defined(__linux__)
+#include <malloc.h>
+#endif
+
 namespace {
 
 using Allocate = void* (APS5_VABI *)(std::size_t);
@@ -19,6 +24,9 @@ using Calloc = void* (APS5_VABI *)(std::size_t, std::size_t);
 using Align = void* (APS5_VABI *)(std::size_t, std::size_t);
 using PosixAlign = int (APS5_VABI *)(void**, std::size_t, std::size_t);
 using Initialize = void (APS5_VABI *)();
+using ReallocateAligned = void* (APS5_VABI *)(void*, std::size_t, std::size_t);
+using Statistics = int (APS5_VABI *)(void*);
+using UsableSize = std::size_t (APS5_VABI *)(void*);
 
 std::mutex heapMutex;
 std::array<void*, 10> heapApi{};
@@ -47,8 +55,91 @@ TValue read(const void* pointer, std::size_t offset) {
     return value;
 }
 
+#if defined(__linux__)
+void* APS5_VABI defaultAllocate(std::size_t bytes) {
+    return std::malloc(bytes == 0 ? 1 : bytes);
+}
+
+void APS5_VABI defaultFree(void* pointer) {
+    std::free(pointer);
+}
+
+void* APS5_VABI defaultReallocate(void* pointer, std::size_t bytes) {
+    return std::realloc(pointer, bytes == 0 ? 1 : bytes);
+}
+
+void* APS5_VABI defaultCalloc(std::size_t count, std::size_t bytes) {
+    return std::calloc(count == 0 ? 1 : count, bytes == 0 ? 1 : bytes);
+}
+
+int APS5_VABI defaultPosixAlign(void** pointer, std::size_t alignment, std::size_t bytes) {
+    return posix_memalign(pointer, alignment < sizeof(void*) ? sizeof(void*) : alignment, bytes == 0 ? 1 : bytes);
+}
+
+void* APS5_VABI defaultAlign(std::size_t alignment, std::size_t bytes) {
+    void* pointer = nullptr;
+    return defaultPosixAlign(&pointer, alignment, bytes) == 0 ? pointer : nullptr;
+}
+
+void* APS5_VABI defaultReallocateAligned(void* pointer, std::size_t bytes, std::size_t alignment) {
+    void* replacement = defaultAlign(alignment, bytes);
+    if (replacement == nullptr || pointer == nullptr)
+        return replacement;
+    const std::size_t previous = malloc_usable_size(pointer);
+    std::memcpy(replacement, pointer, previous < bytes ? previous : bytes);
+    std::free(pointer);
+    return replacement;
+}
+
+int APS5_VABI defaultStatistics(void* output) {
+    if (output == nullptr) return 22;
+    const auto info = mallinfo2();
+    auto* statistics = static_cast<MallocStatistics::ManagedSize*>(output);
+    statistics->maxSystemSize = info.arena + info.hblkhd;
+    statistics->currentSystemSize = info.arena + info.hblkhd;
+    statistics->maxInuseSize = info.uordblks + info.hblkhd;
+    statistics->currentInuseSize = info.uordblks + info.hblkhd;
+    return 0;
+}
+
+std::size_t APS5_VABI defaultUsableSize(void* pointer) {
+    return pointer == nullptr ? 0 : malloc_usable_size(pointer);
+}
+
+void registerDefaultHeap() {
+    std::array<void*, 10> api{};
+    api[0] = reinterpret_cast<void*>(&defaultAllocate);
+    api[1] = reinterpret_cast<void*>(&defaultFree);
+    api[2] = reinterpret_cast<void*>(&defaultReallocate);
+    api[3] = reinterpret_cast<void*>(&defaultCalloc);
+    api[4] = reinterpret_cast<void*>(&defaultAlign);
+    api[5] = reinterpret_cast<void*>(&defaultReallocateAligned);
+    api[6] = reinterpret_cast<void*>(&defaultPosixAlign);
+    api[7] = reinterpret_cast<void*>(&defaultStatistics);
+    api[8] = reinterpret_cast<void*>(&defaultStatistics);
+    api[9] = reinterpret_cast<void*>(&defaultUsableSize);
+    ApplicationHeapRegister_nid_no_patch(api.data());
+}
+
+#else
+void registerDefaultHeap() {
+    throw std::runtime_error("application heap: the default allocator is not implemented on this platform");
+}
+#endif
+
+void ensureInitialized() {
+    bool registered;
+    {
+        std::lock_guard lock(heapMutex);
+        registered = heapApi[0] != nullptr;
+    }
+    if (!registered)
+        ApplicationHeapInitialize_nid_no_patch(ApplicationProcessParameters_nid_no_patch());
+}
+
 template<typename TCallback>
 TCallback callback(std::size_t index) {
+    ensureInitialized();
     std::lock_guard lock(heapMutex);
     if (heapFailure) std::rethrow_exception(heapFailure);
     if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
@@ -102,8 +193,17 @@ void ApplicationHeapInitialize_nid_no_patch(const void* processParameters) {
         try {
             if (read<std::uint64_t>(processParameters, 0) < 0x40 || read<std::uint32_t>(processParameters, 8) != 0x4942524f) throw std::runtime_error("application heap: invalid process parameters");
             const auto* libcParameters = read<const void*>(processParameters, 0x38);
-            if (read<std::uint64_t>(libcParameters, 0) < 0x38) throw std::runtime_error("application heap: invalid libc parameters");
-            const auto* replacement = read<const void*>(libcParameters, 0x30);
+            const void* replacement = libcParameters != nullptr && read<std::uint64_t>(libcParameters, 0) >= 0x38 ? read<const void*>(libcParameters, 0x30) : nullptr;
+            if (replacement == nullptr) {
+                bool registered;
+                {
+                    std::lock_guard lock(heapMutex);
+                    registered = heapApi[0] != nullptr;
+                }
+                if (!registered)
+                    registerDefaultHeap();
+                return;
+            }
             if (read<std::uint64_t>(replacement, 0) != 0x78 || read<std::uint64_t>(replacement, 8) != 2) throw std::runtime_error("application heap: unsupported allocator replacement table");
             std::array<void*, 10> api;
             std::memcpy(api.data(), static_cast<const std::byte*>(replacement) + 0x20, sizeof(api));
@@ -175,4 +275,25 @@ int ApplicationHeapPosixAlign_nid_no_patch(void** pointer, std::size_t alignment
     if (reinterpret_cast<std::uintptr_t>(result) % alignment != 0) throw std::runtime_error("application heap: allocator returned a misaligned pointer");
     *pointer = result;
     return 0;
+}
+
+void* ApplicationHeapReallocateAligned_nid_no_patch(void* pointer, std::size_t bytes, std::size_t alignment) {
+    requireAlignment(alignment);
+    const auto reallocate = callback<ReallocateAligned>(5);
+    CallbackScope scope;
+    void* result = requireAllocation(reallocate(pointer, bytes, alignment));
+    if (reinterpret_cast<std::uintptr_t>(result) % alignment != 0) throw std::runtime_error("application heap: allocator returned a misaligned pointer");
+    return result;
+}
+
+std::size_t ApplicationHeapUsableSize_nid_no_patch(void* pointer) {
+    const auto usableSize = callback<UsableSize>(9);
+    CallbackScope scope;
+    return usableSize(pointer);
+}
+
+int ApplicationHeapStatistics_nid_no_patch(void* statistics, bool fast) {
+    const auto collect = callback<Statistics>(fast ? 8 : 7);
+    CallbackScope scope;
+    return collect(statistics);
 }
