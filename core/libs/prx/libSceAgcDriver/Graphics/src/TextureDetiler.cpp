@@ -31,6 +31,7 @@ std::uint32_t BlockBytesFor(TextureTileMode tileMode) {
         case TextureTileMode::kStandard256B: return 256u;
         case TextureTileMode::kStandard4KB: return 4096u;
         case TextureTileMode::RenderTarget64KB:
+        case TextureTileMode::Depth64KB:
         case TextureTileMode::kStandard64KB: return 65536u;
     }
     throw std::runtime_error("AGC graphics: TextureDetiler encountered an unknown tile mode");
@@ -93,7 +94,7 @@ VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elem
     for (const auto& entry : pipelines) {
         if (entry.first == key) return entry.second;
     }
-    const std::uint32_t values[3] = {elementBytes, BlockBytesFor(tileMode), tileMode == TextureTileMode::kLinear ? 0u : (tileMode == TextureTileMode::RenderTarget64KB ? 2u : 1u)};
+    const std::uint32_t values[3] = {elementBytes, BlockBytesFor(tileMode), tileMode == TextureTileMode::kLinear ? 0u : tileMode == TextureTileMode::RenderTarget64KB ? 2u : tileMode == TextureTileMode::Depth64KB ? 3u : 1u};
     const VkSpecializationMapEntry entries[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
     VkSpecializationInfo specialization{};
     specialization.mapEntryCount = 3;

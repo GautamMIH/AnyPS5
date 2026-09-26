@@ -121,7 +121,8 @@ struct Module {
             Require(value == spv::BuiltInPosition && signature == "f32x4" && !position, "unsupported or duplicate vertex built-in output");
             position = true;
         } else {
-            Require(storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || (value == spv::BuiltInFrontFacing && signature == "bool")), "unsupported fragment built-in");
+            const bool depthOutput = storage == spv::StorageClassOutput && value == spv::BuiltInFragDepth && signature == "f32";
+            Require(depthOutput || (storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || (value == spv::BuiltInFrontFacing && signature == "bool"))), "unsupported fragment built-in");
         }
     }
 };
@@ -342,7 +343,11 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
         mode(spv::ExecutionModeVertexOrderCw, {});
         Require(module.modes.size() == 3, "unsupported tessellation-evaluation execution mode");
     } else if (fragment) {
-        for (const auto& [name, operands] : module.modes) Require(operands.empty() && (name == spv::ExecutionModeOriginUpperLeft || name == spv::ExecutionModeEarlyFragmentTests), "unsupported fragment execution mode");
+        // Depth modes come from shaders that export depth (DB_SHADER_CONTROL.Z_EXPORT_ENABLE).
+        const auto allowed = [](std::uint32_t name) {
+            return name == spv::ExecutionModeOriginUpperLeft || name == spv::ExecutionModeEarlyFragmentTests || name == spv::ExecutionModeDepthReplacing || name == spv::ExecutionModeDepthGreater || name == spv::ExecutionModeDepthLess || name == spv::ExecutionModeDepthUnchanged;
+        };
+        for (const auto& [name, operands] : module.modes) Require(operands.empty() && allowed(name), "unsupported fragment execution mode");
     } else Require(module.modes.empty(), "unsupported vertex execution mode");
     std::set<std::pair<std::uint32_t, std::uint32_t>> descriptors;
     bool push = false;
@@ -543,7 +548,7 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
     Require(state.stages.path == ShaderPath::Vertex || tessellation || mesh, "unsupported graphics shader path");
     Require(state.stages.mesh.has_value() == mesh && state.stages.tessellation.has_value() == tessellation, "graphics stage configuration disagrees with its path");
     Require(!state.rectList || (state.stages.path == ShaderPath::Vertex && state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST && state.cullMode == VK_CULL_MODE_NONE), "invalid rect-list pipeline state");
-    Require(shaders.size() == (tessellation || state.rectList ? 4u : 2u), "incorrect graphics stage count");
+    Require(shaders.size() == (tessellation || state.rectList ? 4u : 2u) - (state.hasFragmentShader ? 0u : 1u), "incorrect graphics stage count");
     const std::array<Stage, 4> tessStages{Stage::Local, Stage::TessellationControl, Stage::TessellationEvaluation, Stage::Fragment};
     static_cast<void>(AssemblePushConstants(shaders));
     std::shared_ptr<const ValidatedInterface> previous;
@@ -561,7 +566,10 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         }
         previous = current;
     }
-    Require(previous->outputs.size() == 1 && previous->outputs.contains(0) && previous->outputs.at(0) == "vertex:f32x4", "fragment shader must export one float4 color at location zero");
+    // Color exports reach nothing without a color target, so a depth-only pixel shader may have none.
+    const bool colorOutput = previous->outputs.size() == 1 && previous->outputs.contains(0) && previous->outputs.at(0) == "vertex:f32x4";
+    if (state.hasFragmentShader)
+        Require(colorOutput || (!state.hasColorTarget && previous->outputs.empty()), "fragment shader must export one float4 color at location zero");
 }
 
 void ValidateShaderPair(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment) {

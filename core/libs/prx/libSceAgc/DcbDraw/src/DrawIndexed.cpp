@@ -9,13 +9,11 @@
 
 extern "C" {
 
+// DRAW_INDEX_2: max index count, index buffer address, index count, initiator (as in KytyPS5).
 uint32_t* APS5_VABI sceAgcDcbDrawIndex(CommandBuffer* buf, uint32_t index_count, const volatile void* index_addr, uint64_t modifier) {
- (void)buf;
- (void)index_count;
- (void)index_addr;
- (void)modifier;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    const auto address = reinterpret_cast<std::uint64_t>(index_addr);
+    Agc::Command::Require(address != 0 && (address & 1u) == 0, __func__, "null or misaligned index buffer");
+    return Agc::Command::Emit(buf, 0x27u, {index_count == 0 ? 1u : index_count, static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), index_count, Agc::Command::DrawInitiator(modifier, true, __func__)}, __func__);
 }
 
 std::uint32_t APS5_VABI sceAgcDcbDrawIndexGetSize() {
@@ -35,8 +33,7 @@ std::uint32_t* APS5_VABI sceAgcDcbDrawIndexOffset(CommandBuffer* buf, std::uint3
 }
 
 uint32_t APS5_VABI sceAgcDcbDrawIndexOffsetGetSize(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return 20;
 }
 
 uint32_t* APS5_VABI sceAgcDcbDrawIndexIndirect(CommandBuffer* buf, uint32_t data_offset_in_bytes, uint64_t modifier) {

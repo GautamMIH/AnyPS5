@@ -11,6 +11,7 @@
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include <cstdio>
 #include <bit>
 #include <algorithm>
 #include <array>
@@ -67,7 +68,11 @@ struct Submission {
 
 std::uint32_t readRegister(const Registers& registers, std::uint32_t offset) {
     const auto it = registers.find(offset);
-    require(it != registers.end(), "required shader register has not been written");
+    if (it == registers.end()) {
+        char message[96];
+        std::snprintf(message, sizeof(message), "AGC driver: required shader register 0x%x has not been written", offset);
+        throw std::runtime_error(message);
+    }
     return it->second;
 }
 
@@ -477,9 +482,12 @@ private:
         } else {
             append(0xc8, 2, Stage::Vertex, 0x8b, 0x8c, Role::Main);
         }
-        append(0x008, 1, Stage::Fragment, 0x00b, 0x00c, Role::Fragment);
-        programs.back().firstUserSgpr = 0;
-        const auto pixel = Graphics::DecodePixelStageInfo(queue.context, graphics.hasColorTarget, graphics.color.componentMapping);
+        std::optional<ShaderRecompiler::ShaderPixelStageInfo> pixel;
+        if (graphics.hasFragmentShader) {
+            append(0x008, 1, Stage::Fragment, 0x00b, 0x00c, Role::Fragment);
+            programs.back().firstUserSgpr = 0;
+            pixel = Graphics::DecodePixelStageInfo(queue.context, graphics.hasColorTarget, graphics.color.componentMapping);
+        }
         std::vector<ShaderRecompiler::MemoryRegion> memory;
         std::vector<ShaderRecompiler::LinkedProgram> linked;
         for (std::size_t i = 0; i < programs.size(); ++i) {
@@ -507,7 +515,7 @@ private:
             const auto waveSize = program.binary.stage == Stage::Fragment ? graphics.stages.fragmentWaveSize : graphics.stages.vertexWaveSize;
             ShaderRecompiler::RecompileRequest request{
                 program.binary,
-                {waveSize, program.firstUserSgpr, program.userData, std::nullopt, program.binary.stage == Stage::Fragment ? std::optional(pixel) : std::nullopt, program.binary.stage == Stage::Fragment ? std::nullopt : std::optional(Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData)), memory},
+                {waveSize, program.firstUserSgpr, program.userData, std::nullopt, program.binary.stage == Stage::Fragment ? pixel : std::nullopt, program.binary.stage == Stage::Fragment ? std::nullopt : std::optional(Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData)), memory},
                 device->Target(),
                 {0, 0, pushCursorBytes, Graphics::PipelinePushConstantBytes - pushCursorBytes},
                 ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
@@ -537,11 +545,14 @@ private:
         }
         timing.Mark("shaders");
         if (graphics.rectList) {
-            require(stages.size() == 2, "rect-list requires vertex and fragment programs");
-            auto rectangle = ShaderRecompiler::BuildRectListShaders(results[0], results[1], device->Target());
+            require(stages.size() == (graphics.hasFragmentShader ? 2u : 1u), "rect-list requires a vertex program and at most one fragment program");
+            // Without a pixel shader no parameters are interpolated.
+            const ShaderRecompiler::RecompileResult noFragment{};
+            auto rectangle = ShaderRecompiler::BuildRectListShaders(results[0], graphics.hasFragmentShader ? results[1] : noFragment, device->Target());
             results.push_back(std::move(rectangle.control));
             results.push_back(std::move(rectangle.evaluation));
-            stages.insert(stages.begin() + 1, {{Stage::TessellationControl, &results[2], 0}, {Stage::TessellationEvaluation, &results[3], 0}});
+            const auto control = results.size() - 2;
+            stages.insert(stages.begin() + 1, {{Stage::TessellationControl, &results[control], 0}, {Stage::TessellationEvaluation, &results[control + 1], 0}});
         }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : memory) snapshots.push_back({region.guestAddress, region.bytes});
@@ -648,7 +659,7 @@ private:
                         direct = Pm4::ResolveDispatch(packet, queue);
                     }
                     dispatch(queue, direct, submission);
-                } else if (opcode == 0x35 || opcode == 0x2d) {
+                } else if (opcode == 0x35 || opcode == 0x27 || opcode == 0x2d) {
                     draw(queue, packet, submission);
                 } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
                     std::lock_guard gpuLock(gpuMutex);

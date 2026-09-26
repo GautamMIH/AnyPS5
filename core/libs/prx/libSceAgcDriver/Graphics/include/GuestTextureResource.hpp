@@ -12,7 +12,9 @@ enum class TextureTileMode {
     kStandard256B,
     kStandard4KB,
     kStandard64KB,
-    RenderTarget64KB
+    RenderTarget64KB,
+    // SW_64KB_Z_X: depth and stencil planes written by the depth block (see DepthTargetLayout).
+    Depth64KB
 };
 
 enum class TextureDimension {

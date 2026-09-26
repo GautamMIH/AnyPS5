@@ -112,17 +112,17 @@ void ResidentDepth::Begin(VkCommandBuffer commands) {
         const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
         if (depthLinear) {
             const DepthTargetLayout plane(depth.extent.width, depth.extent.height, depth.depthElementBytes);
-            std::vector<std::byte> tiled(plane.Bytes());
+            depthTiled.resize(plane.Bytes());
             std::vector<std::byte> linear(plane.LinearBytes());
-            GuestMemory::Read(depth.depthAddress, tiled, plane.Alignment());
-            plane.Detile(tiled, linear);
+            GuestMemory::Read(depth.depthAddress, depthTiled, plane.Alignment());
+            plane.Detile(depthTiled, linear);
             depthToHost(depth, linear, depthLinear->Bytes());
         }
         if (stencilLinear) {
             const DepthTargetLayout plane(depth.extent.width, depth.extent.height, 1);
-            std::vector<std::byte> tiled(plane.Bytes());
-            GuestMemory::Read(depth.stencilAddress, tiled, plane.Alignment());
-            plane.Detile(tiled, stencilLinear->Bytes());
+            stencilTiled.resize(plane.Bytes());
+            GuestMemory::Read(depth.stencilAddress, stencilTiled, plane.Alignment());
+            plane.Detile(stencilTiled, stencilLinear->Bytes());
         }
         timing.Mark("detile", depth.depthBytes + depth.stencilBytes);
         VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -164,19 +164,15 @@ void ResidentDepth::Commit() {
         const DepthTargetLayout plane(depth.extent.width, depth.extent.height, depth.depthElementBytes);
         std::vector<std::byte> linear(plane.LinearBytes());
         depthToGuest(depth, depthLinear->Bytes(), linear);
-        // Padding texels outside the extent keep their guest contents.
-        std::vector<std::byte> tiled(plane.Bytes());
-        GuestMemory::Read(depth.depthAddress, tiled, plane.Alignment());
-        plane.Tile(linear, tiled);
-        GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(depth.depthAddress, tiled.data(), tiled.size());
+        // Padding texels outside the extent keep their uploaded contents.
+        plane.Tile(linear, depthTiled);
+        GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(depth.depthAddress, depthTiled.data(), depthTiled.size());
     }
     if (stencilLinear) {
         stencilLinear->Invalidate();
         const DepthTargetLayout plane(depth.extent.width, depth.extent.height, 1);
-        std::vector<std::byte> tiled(plane.Bytes());
-        GuestMemory::Read(depth.stencilAddress, tiled, plane.Alignment());
-        plane.Tile(stencilLinear->Bytes(), tiled);
-        GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(depth.stencilAddress, tiled.data(), tiled.size());
+        plane.Tile(stencilLinear->Bytes(), stencilTiled);
+        GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(depth.stencilAddress, stencilTiled.data(), stencilTiled.size());
     }
     timing.Mark("guest_write", depth.depthBytes + depth.stencilBytes);
     dirty = false;

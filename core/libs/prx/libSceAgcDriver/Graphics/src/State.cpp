@@ -27,7 +27,11 @@ float readFloat(const Registers& registers, std::uint32_t offset) {
 }
 
 void zero(const Registers& registers, std::uint32_t offset, std::uint32_t mask, const char* name, const char* bank = "context") {
-    Require((read(registers, offset, bank) & mask) == 0, std::string(name) + " is unsupported");
+    const auto value = read(registers, offset, bank);
+    if ((value & mask) == 0) return;
+    std::ostringstream message;
+    message << "AGC graphics: " << name << " is unsupported (" << bank << " register 0x" << std::hex << offset << " = 0x" << value << ")";
+    throw std::runtime_error(message.str());
 }
 
 VkBlendFactor blendFactor(std::uint32_t value) {
@@ -277,7 +281,8 @@ State DecodeState(const QueueState& queue) {
     }
     zero(queue.userConfig, 0x24b, ~0u, "primitive restart (GE_MULTI_PRIM_IB_RESET_EN)", "user-config");
     zero(cx, 0x207, ~0u, "clip distances, layer, viewport or auxiliary vertex exports");
-    zero(cx, 0x203, ~0x00009870u, "depth export, shader coverage or ordered fragment execution");
+    // Z_EXPORT_ENABLE (bit 0): the pixel shader writes depth (recompiled to gl_FragDepth).
+    zero(cx, 0x203, ~0x00009871u, "stencil or mask export, shader coverage or ordered fragment execution");
     zero(cx, 0x2dc, ~0x0001ff00u, "alpha-to-coverage");
     zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
     zero(cx, 0x292, ~2u, "scan conversion mode");
@@ -314,10 +319,24 @@ State DecodeState(const QueueState& queue) {
     }
     result.hasColorTarget = targetMask != 0;
     Require(!result.hasColorTarget || shaderMask == 0xfu, "partial shader color exports are unsupported");
-    Require(read(cx, 0x202) == 0xcc0010u, "only normal color rendering with copy ROP is supported");
-    zero(cx, 0x1c4, ~0u, "depth or sample-mask export");
+    // CB_COLOR_CONTROL: MODE (bits 4-6) is NORMAL, or DISABLE for draws without color targets; copy ROP.
+    const auto colorControl = read(cx, 0x202);
+    if (!(colorControl == 0xcc0010u || (colorControl == 0xcc0000u && !result.hasColorTarget))) {
+        std::ostringstream message;
+        message << "AGC graphics: CB_COLOR_CONTROL=0x" << std::hex << colorControl << ": only normal color rendering (or disabled color without targets) with copy ROP is supported";
+        throw std::runtime_error(message.str());
+    }
+    // SPI_SHADER_Z_FORMAT: 32_R (depth only) with Z export, otherwise nothing.
+    const auto depthExport = (read(cx, 0x203) & 1u) != 0;
+    zero(cx, 0x1c4, depthExport ? ~1u : ~0u, "stencil or sample-mask export, or a depth export format other than 32_R");
+    Require(!depthExport || read(cx, 0x1c4) == 1u, "depth export without the 32_R export format");
     const auto exportFormat = read(cx, 0x1c5);
-    Require(exportFormat == 4 || exportFormat == 9, "only FP16_ABGR or 32_ABGR color export is supported");
+    // SPI_SHADER_ZERO discards color exports, as a draw without color attachments does.
+    if (!(exportFormat == 4 || exportFormat == 9 || (exportFormat == 0 && !result.hasColorTarget))) {
+        std::ostringstream message;
+        message << "AGC graphics: SPI_SHADER_COL_FORMAT=0x" << std::hex << exportFormat << ": only FP16_ABGR or 32_ABGR color export, or no export without a color target, is supported";
+        throw std::runtime_error(message.str());
+    }
     Require(read(cx, 0x1c3) == 4, "additional position exports are unsupported");
     if (result.hasColorTarget) {
         const auto info = read(cx, 0x31c);
@@ -344,6 +363,10 @@ State DecodeState(const QueueState& queue) {
         result.renderExtent = result.color.extent;
     }
     decodeDepth(cx, result);
+    const auto psLow = queue.shader.find(0x8);
+    const auto psHigh = queue.shader.find(0x9);
+    result.hasFragmentShader = (psLow != queue.shader.end() && psLow->second != 0) || (psHigh != queue.shader.end() && psHigh->second != 0);
+    Require(result.hasFragmentShader || !result.hasColorTarget, "color writes without a pixel shader");
     if (result.hasColorTarget) {
         if (result.hasDepthTarget) result.renderExtent = {std::min(result.color.extent.width, result.depth.extent.width), std::min(result.color.extent.height, result.depth.extent.height)};
     } else if (result.hasDepthTarget) {

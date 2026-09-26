@@ -65,6 +65,10 @@ private:
     std::unique_ptr<RenderTarget> target;
     std::unique_ptr<Buffer> depthLinear;
     std::unique_ptr<Buffer> stencilLinear;
+    // Guest planes as last uploaded; the guest cannot change them while they are resident, so
+    // write-back tiles into these copies instead of reading protected memory.
+    std::vector<std::byte> depthTiled;
+    std::vector<std::byte> stencilTiled;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     bool valid = false;
     bool dirty = false;

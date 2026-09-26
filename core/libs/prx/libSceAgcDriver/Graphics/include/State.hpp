@@ -70,6 +70,8 @@ struct State {
     bool hasColorTarget;
     DepthTarget depth;
     bool hasDepthTarget;
+    // Depth-only draws may bind no pixel shader (the SDK's null PS).
+    bool hasFragmentShader = true;
     DepthState depthState;
     bool rectList = false;
     VkExtent2D renderExtent;
