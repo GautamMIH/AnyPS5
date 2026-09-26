@@ -6,13 +6,20 @@
 
 namespace AgcDriver::Graphics {
 
-Pipeline::Pipeline(const Context& context, const State& state, const RenderTarget* target, const RenderTarget* depthTarget, const ShaderResources& resources, std::span<const CompiledShader> shaders) : context(context), _modules(shaders.size()) {
-    Require((target != nullptr) == state.hasColorTarget, "render target does not match decoded color state");
+Pipeline::Pipeline(const Context& context, const State& state, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget, const ShaderResources& resources, std::span<const CompiledShader> shaders) : context(context), _modules(shaders.size()) {
+    const auto slots = state.ColorSlotCount();
+    Require(targets.size() == slots, "render targets do not match decoded color state");
+    for (std::uint32_t slot = 0; slot < slots; ++slot) Require((targets[slot] != nullptr) == ((state.colorTargetMask & (1u << slot)) != 0), "render target does not match decoded color state");
+    Require(slots <= context.limits.maxColorAttachments, "color targets exceed the device's attachment limit");
+    const auto sameBlend = [](const VkPipelineColorBlendAttachmentState& a, const VkPipelineColorBlendAttachmentState& b) {
+        return a.blendEnable == b.blendEnable && a.srcColorBlendFactor == b.srcColorBlendFactor && a.dstColorBlendFactor == b.dstColorBlendFactor && a.colorBlendOp == b.colorBlendOp && a.srcAlphaBlendFactor == b.srcAlphaBlendFactor && a.dstAlphaBlendFactor == b.dstAlphaBlendFactor && a.alphaBlendOp == b.alphaBlendOp && a.colorWriteMask == b.colorWriteMask;
+    };
+    for (std::uint32_t slot = 1; slot < slots; ++slot) Require(context.independentBlend || sameBlend(state.blends[0], state.blends[slot]), "per-target blend state requires the independentBlend device feature");
     Require((depthTarget != nullptr) == state.hasDepthTarget, "depth target does not match decoded depth state");
     Require(!state.hasDepthTarget || !state.depthState.depthBounds || context.depthBounds, "depth bounds test requires the depthBounds device feature");
     Require(!state.hasDepthTarget || !state.depthState.depthBias || state.depthState.depthBiasClamp == 0.0f || context.depthBiasClamp, "clamped depth bias requires the depthBiasClamp device feature");
     Require(state.renderExtent.width != 0 && state.renderExtent.height != 0 && state.renderExtent.width <= context.limits.maxFramebufferWidth && state.renderExtent.height <= context.limits.maxFramebufferHeight, "framebuffer extent exceeds device limits");
-    Require(state.hasColorTarget || state.hasDepthTarget || (context.limits.framebufferNoAttachmentsSampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0, "device does not support single-sample rendering without attachments");
+    Require(state.HasColorTarget() || state.hasDepthTarget || (context.limits.framebufferNoAttachmentsSampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0, "device does not support single-sample rendering without attachments");
     ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, ShaderDeviceFeatures::Of(context));
     Require(!state.negativeOneToOne || context.depthClipControl, "negative-one-to-one depth clipping requires VK_EXT_depth_clip_control with depthClipControl enabled");
     if (state.rectList) Require(context.tessellationShader && context.limits.maxTessellationPatchSize >= 4, "rect-list requires tessellation with four output control points");
@@ -58,7 +65,6 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
         layoutInfo.pPushConstantRanges = pushStages != 0 ? &push : nullptr;
         Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &layoutInfo, nullptr, &layout), "vkCreatePipelineLayout graphics");
         VkAttachmentDescription color{};
-        color.format = state.color.format;
         color.samples = VK_SAMPLE_COUNT_1_BIT;
         color.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -77,11 +83,14 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
         depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         std::vector<VkAttachmentDescription> attachments;
         std::vector<VkImageView> views;
-        if (state.hasColorTarget) {
+        std::vector<VkAttachmentReference> references(slots, VkAttachmentReference{VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED});
+        for (std::uint32_t slot = 0; slot < slots; ++slot) {
+            if (targets[slot] == nullptr) continue;
+            references[slot] = {static_cast<std::uint32_t>(attachments.size()), VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+            color.format = state.colors[slot].format;
             attachments.push_back(color);
-            views.push_back(target->View());
+            views.push_back(targets[slot]->View());
         }
-        const VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
         const VkAttachmentReference depthReference{static_cast<std::uint32_t>(attachments.size()), VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
         if (state.hasDepthTarget) {
             attachments.push_back(depth);
@@ -89,8 +98,8 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
         }
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = state.hasColorTarget ? 1 : 0;
-        subpass.pColorAttachments = state.hasColorTarget ? &reference : nullptr;
+        subpass.colorAttachmentCount = slots;
+        subpass.pColorAttachments = references.empty() ? nullptr : references.data();
         subpass.pDepthStencilAttachment = state.hasDepthTarget ? &depthReference : nullptr;
         VkRenderPassCreateInfo passInfo{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
         passInfo.attachmentCount = static_cast<std::uint32_t>(attachments.size());
@@ -136,8 +145,8 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
         VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
         samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
-        blend.attachmentCount = state.hasColorTarget ? 1 : 0;
-        blend.pAttachments = state.hasColorTarget ? &state.blend : nullptr;
+        blend.attachmentCount = slots;
+        blend.pAttachments = slots != 0 ? state.blends.data() : nullptr;
         std::copy(state.blendConstants.begin(), state.blendConstants.end(), blend.blendConstants);
         VkGraphicsPipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
         pipelineInfo.stageCount = static_cast<std::uint32_t>(stages.size());

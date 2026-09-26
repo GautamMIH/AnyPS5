@@ -90,8 +90,27 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     constexpr GraphBuilder graphBuilder;
     auto cfg = graphBuilder.Build(decoded);
 
+    // Debug aids: APS5_DUMP_SHADER_CODE=<directory> saves the code of every shader, and
+    // APS5_DUMP_FAILED_SHADERS=<directory> that of shaders whose control flow cannot be
+    // structured, each as <directory>/<code address>.bin.
+    const auto dumpCode = [&](const char* variable) {
+        const char* directory = std::getenv(variable);
+        if (directory == nullptr) return;
+        char path[512];
+        std::snprintf(path, sizeof(path), "%s/%llx.bin", directory, static_cast<unsigned long long>(request.shader.codeAddress));
+        if (auto* file = std::fopen(path, "wb")) {
+            std::fwrite(request.shader.code.data(), sizeof(std::uint32_t), request.shader.code.size(), file);
+            std::fclose(file);
+        }
+    };
+    dumpCode("APS5_DUMP_SHADER_CODE");
     constexpr Structurizer structurizer;
-    structurizer.Structurize(cfg);
+    try {
+        structurizer.Structurize(cfg);
+    } catch (const std::exception&) {
+        dumpCode("APS5_DUMP_FAILED_SHADERS");
+        throw;
+    }
 
     TranslateOptions translateOptions {};
     translateOptions.stage = stageKind;
@@ -275,6 +294,12 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
 
     constexpr SpirvEmitter spirvEmitter;
     RecompileResult result;
+    for (const auto& block : program.Blocks()) {
+        for (const IrValue* inst : block->Instructions()) {
+            const auto opcode = inst->Opcode();
+            if (opcode == IrOpcode::IXor32 || opcode == IrOpcode::BitwiseXor32) result.usesBitwiseXor = true;
+        }
+    }
     static std::atomic<std::uint64_t> variants{0};
     result.variantId = variants.fetch_add(1, std::memory_order_relaxed) + 1;
     result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);

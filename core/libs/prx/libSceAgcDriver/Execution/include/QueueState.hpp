@@ -33,6 +33,12 @@ inline Registers InitialContextRegisters() {
         {0x390, 0}, {0x3b0, 0}, {0x3b8, 0}
     };
     for (std::uint32_t i = 0; i < 8; ++i) result.emplace(0x1e0 + i, 0x20010001);
+    for (std::uint32_t i = 0; i < 8; ++i) {
+        // CB_COLOR<i> BASE, VIEW, INFO, ATTRIB, CMASK and CLEAR_WORD0/1, then the per-target arrays
+        // BASE_EXT, CMASK_BASE_EXT, ATTRIB2 and ATTRIB3.
+        for (const auto offset : {0x318u, 0x31bu, 0x31cu, 0x31du, 0x31fu, 0x323u, 0x324u}) result.emplace(offset + 0xf * i, 0);
+        for (const auto offset : {0x390u, 0x398u, 0x3b0u, 0x3b8u}) result.emplace(offset + i, 0);
+    }
     for (std::uint32_t i = 0; i < 16; ++i) {
         result.emplace(0x94 + 2 * i, 0x80000000);
         result.emplace(0x95 + 2 * i, 0x40004000);

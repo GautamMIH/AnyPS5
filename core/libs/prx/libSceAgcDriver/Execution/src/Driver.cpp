@@ -8,12 +8,14 @@
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <cstdio>
 #include <bit>
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <condition_variable>
 #include <cstring>
@@ -442,6 +444,18 @@ private:
         timing.Mark("snapshots");
         device->Dispatch(compiled, packet[1], packet[2], packet[3], snapshots);
         timing.Mark("dispatch_and_resource_release");
+        // A shader that stores to a buffer starting at a registered CMASK without XOR address
+        // math is taken to clear it (shadPS4). The dispatch itself still runs.
+        if (!compiled.usesBitwiseXor) {
+            for (const auto& binding : compiled.bindings) {
+                if (binding.kind != ShaderRecompiler::DescriptorKind::StorageBuffer || binding.readOnly) continue;
+                for (std::uint32_t element = 0; element < binding.count && (element + 1u) * 4u <= binding.guestDescriptor.size(); ++element) {
+                    if (element < binding.bufferWritten.size() && !binding.bufferWritten[element]) continue;
+                    const auto* words = binding.guestDescriptor.data() + element * 4u;
+                    Graphics::NoteMetadataClear(words[0] | (static_cast<std::uint64_t>(words[1] & 0xffffu) << 32u));
+                }
+            }
+        }
     }
 
     void draw(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
@@ -449,6 +463,11 @@ private:
         auto drawParameters = Pm4::ResolveDraw(packet, queue);
         if (!drawParameters.indexed && (drawParameters.indexCount == 0 || drawParameters.instanceCount == 0)) return;
         const auto graphics = Graphics::DecodeState(queue);
+        if (graphics.eliminateFastClear) {
+            std::lock_guard gpuLock(gpuMutex);
+            device->ResolveFastClears(graphics);
+            return;
+        }
         struct Program {
             ShaderRecompiler::ShaderBinary binary;
             std::uint32_t userDataBase;
@@ -527,7 +546,9 @@ private:
         if (graphics.hasFragmentShader) {
             append(0x008, 1, Stage::Fragment, 0x00b, 0x00c, Role::Fragment);
             programs.back().firstUserSgpr = 0;
-            pixel = Graphics::DecodePixelStageInfo(queue.context, graphics.hasColorTarget, graphics.color.componentMapping);
+            std::array<std::uint8_t, 8> mappings{};
+            for (std::uint32_t slot = 0; slot < mappings.size(); ++slot) mappings[slot] = (graphics.colorTargetMask & (1u << slot)) != 0 ? graphics.colors[slot].componentMapping : 0xe4u;
+            pixel = Graphics::DecodePixelStageInfo(queue.context, mappings);
         }
         std::vector<ShaderRecompiler::MemoryRegion> memory;
         std::vector<ShaderRecompiler::LinkedProgram> linked;
@@ -598,7 +619,15 @@ private:
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : memory) snapshots.push_back({region.guestAddress, region.bytes});
         timing.Mark("post_compile_prepare");
-        device->EnqueueDraw(graphics, drawParameters, stages, snapshots);
+        // Debug aid: ANYPS5_SYNC_DRAWS=1 completes each draw before the next packet, so a GPU
+        // fault surfaces at the draw that caused it.
+        static const bool syncDraws = std::getenv("ANYPS5_SYNC_DRAWS") != nullptr;
+        if (syncDraws) {
+            device->Draw(graphics, drawParameters, stages, snapshots);
+            std::fprintf(stderr, "[pm4] draw completed\n");
+        } else {
+            device->EnqueueDraw(graphics, drawParameters, stages, snapshots);
+        }
         timing.Mark("draw_and_resource_release");
     }
 
@@ -649,9 +678,21 @@ private:
                 cursor += count;
                 continue;
             }
+            // Debug aid: ANYPS5_TRACE_PM4=1 logs every executed packet; DMA_DATA also logs its
+            // destination and size.
+            static const bool tracePm4 = std::getenv("ANYPS5_TRACE_PM4") != nullptr;
+            if (tracePm4) {
+                if (opcode == 0x15 && queue.shader.contains(0x20c) && queue.shader.contains(0x20d)) std::fprintf(stderr, "[pm4] q%u op=0x15 dispatch %ux%ux%u program=0x%llx\n", static_cast<unsigned>(submission.queue), packet[1], packet[2], packet[3], static_cast<unsigned long long>((static_cast<std::uint64_t>(queue.shader.at(0x20c)) << 8u) | (static_cast<std::uint64_t>(queue.shader.at(0x20d) & 0xffu) << 40u)));
+                else if (opcode == 0x50 && count >= 7) std::fprintf(stderr, "[pm4] q%u op=0x%02x dst=0x%llx bytes=0x%x control=0x%08x src=0x%08x%08x\n", static_cast<unsigned>(submission.queue), static_cast<unsigned>(opcode), static_cast<unsigned long long>(packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u)), packet[6] & 0x3ffffffu, packet[1], packet[3], packet[2]);
+                else std::fprintf(stderr, "[pm4] q%u op=0x%02x dwords=%zu\n", static_cast<unsigned>(submission.queue), static_cast<unsigned>(opcode), count);
+            }
             if (opcode == 0x3f) {
                 spliceIndirectBuffer(submission, cursor);
                 continue;
+            }
+            // A DMA_DATA fill (immediate source) of a registered CMASK clears it (shadPS4 FillBuffer).
+            if (opcode == 0x50 && count >= 7 && (((packet[1] >> 29u) & 3u) | ((packet[6] >> 24u) & 4u) | ((packet[6] >> 25u) & 8u)) == 2u) {
+                Graphics::NoteMetadataClear(packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u));
             }
             {
                 PerformanceContext timingContext(frameTiming.get());

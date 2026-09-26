@@ -66,6 +66,7 @@ struct Context {
     mutable std::shared_ptr<SamplerCache> samplerCache;
     bool depthBounds = false;
     bool depthBiasClamp = false;
+    bool independentBlend = false;
     bool imageGatherExtended = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;

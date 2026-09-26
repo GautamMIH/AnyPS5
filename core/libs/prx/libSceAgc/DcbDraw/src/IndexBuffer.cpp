@@ -15,20 +15,16 @@ std::uint32_t* APS5_VABI sceAgcDcbSetIndexBuffer(CommandBuffer* buf, std::uint64
 }
 
 std::uint32_t APS5_VABI sceAgcDcbSetIndexBufferGetSize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return 12;
 }
 
-uint32_t* APS5_VABI sceAgcDcbSetIndexCount(CommandBuffer* buf, uint32_t index_count) {
- (void)buf;
- (void)index_count;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+// INDEX_BUFFER_SIZE bounds the indices later indexed draws may read (KytyPS5).
+std::uint32_t* APS5_VABI sceAgcDcbSetIndexCount(CommandBuffer* buf, std::uint32_t indexCount) {
+    return Agc::Command::Emit(buf, 0x13u, {indexCount}, __func__);
 }
 
 std::uint32_t APS5_VABI sceAgcDcbSetIndexCountGetSize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return 8;
 }
 
 std::uint32_t* APS5_VABI sceAgcDcbSetIndexSize(CommandBuffer* buf, std::uint8_t indexSize, std::uint8_t cachePolicy) {
@@ -46,8 +42,7 @@ std::uint32_t* APS5_VABI AgcDcbSetIndexSizeExtended(CommandBuffer* buf, std::uin
 APS5_EXPORT("-KRzWekV120", AgcDcbSetIndexSizeExtended);
 
 std::uint32_t APS5_VABI sceAgcDcbSetIndexSizeGetSize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return 12;
 }
 
 std::uint32_t* APS5_VABI sceAgcDcbSetIndexIndirectArgs(CommandBuffer* buf, std::uint32_t dataOffsetInBytes) {

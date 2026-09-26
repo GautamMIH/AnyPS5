@@ -1,5 +1,6 @@
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
@@ -86,6 +87,7 @@ struct VulkanDevice::State {
     bool depthRangeUnrestricted = false;
     bool depthBounds = false;
     bool depthBiasClamp = false;
+    bool independentBlend = false;
     bool imageGatherExtended = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
@@ -413,6 +415,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->depthBounds = enabled.depthBounds == VK_TRUE;
     enabled.depthBiasClamp = available.depthBiasClamp;
     state->depthBiasClamp = enabled.depthBiasClamp == VK_TRUE;
+    enabled.independentBlend = available.independentBlend;
+    state->independentBlend = enabled.independentBlend == VK_TRUE;
     enabled.shaderImageGatherExtended = available.shaderImageGatherExtended;
     state->imageGatherExtended = enabled.shaderImageGatherExtended == VK_TRUE;
     enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
@@ -805,6 +809,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     };
     context.depthBounds = state->depthBounds;
     context.depthBiasClamp = state->depthBiasClamp;
+    context.independentBlend = state->independentBlend;
     context.imageGatherExtended = state->imageGatherExtended;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
@@ -815,6 +820,14 @@ void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool 
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     state->drawQueue->Resolve(address, bytes);
     state->renderCache->Resolve(address, bytes, writable);
+}
+
+void VulkanDevice::ResolveFastClears(const Graphics::State& graphics) {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+        static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+    });
+    Graphics::ApplyFastClears(graphics);
 }
 
 void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {

@@ -326,6 +326,9 @@ struct RecompileResult {
     std::vector<std::uint32_t> parameterExports;
     std::vector<FragmentParameter> fragmentParameters;
     bool cacheHit = false;
+    // The program computes an XOR. shadPS4 treats a shader that writes a surface's metadata
+    // without XOR address math as a clear rather than an encode (FastClear.hpp).
+    bool usesBitwiseXor = false;
     // Identifies the compiled variant the result came from: equal ids mean identical SPIR-V and
     // bindings, so drivers can reuse pipeline objects. Zero when unknown.
     std::uint64_t variantId = 0;

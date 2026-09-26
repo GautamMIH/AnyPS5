@@ -91,8 +91,18 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     Require(!prtDefColor, "guest texture descriptor uses a partially resident default color which is not implemented");
     Require(arrayPitch == 0, "guest texture descriptor uses a nonzero array pitch which is not implemented");
     Require(!msaaDepth, "guest texture descriptor uses MSAA which is not implemented");
-    Require(maxUncompBlkSize == 0 && maxCompBlkSize == 0, "guest texture descriptor uses DCC block size overrides which are not implemented");
-    Require(!metaPipeAligned && !writeCompress && !metaCompress && !dccAlphaPos && !dccColorTransf && metaAddr == 0, "guest texture descriptor uses metadata compression which is not implemented");
+    // DCC fields (block sizes, compression, metadata address) describe how a surface may be
+    // stored compressed. Emulated GPU writes are always plain texels (colour targets ignore
+    // DCC_ENABLE too), so the surface is read uncompressed and the metadata is never consulted,
+    // as in shadPS4.
+    static_cast<void>(maxUncompBlkSize);
+    static_cast<void>(maxCompBlkSize);
+    static_cast<void>(metaPipeAligned);
+    static_cast<void>(writeCompress);
+    static_cast<void>(metaCompress);
+    static_cast<void>(dccAlphaPos);
+    static_cast<void>(dccColorTransf);
+    static_cast<void>(metaAddr);
     Require(bcSwizzle == 0, "guest texture descriptor uses a BC swizzle which is not implemented");
 
     Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");

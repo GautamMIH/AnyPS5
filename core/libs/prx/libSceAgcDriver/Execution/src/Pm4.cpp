@@ -273,8 +273,15 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             require((packet[1] & 3u) == 0 && packet[3] == 0x80000000u && packet[4] <= 0x3fffu, "unsupported indirect-register address or control fields");
             break;
         case 0x69: case 0x76: case 0x79: case 0x7a: {
-            if (opcode != 0x76) graphics();
             require(packet.size() >= 3, "register packet has no values");
+            // AGC tags memory waits with writes to its internal data register (UCONFIG 0x342),
+            // which has no hardware effect; compute queues carry those tags too.
+            const auto waitTag = opcode == 0x79 && registerOffset(packet[1]) == 0x342u;
+            if (opcode != 0x76 && queue != 0 && !waitTag) {
+                char message[64];
+                std::snprintf(message, sizeof(message), "graphics packet in compute queue (register 0x%x)", registerOffset(packet[1]));
+                require(false, message);
+            }
             if (opcode == 0x7a) require((packet[1] & 0xf0000000u) == 0 || (packet.size() == 3 && packet[1] == 0x20000243u), "indexed register bank selection is not implemented");
             const auto offset = registerOffset(packet[1]);
             require(packet.size() - 2 <= 0x10000u - offset, "register range overflow");

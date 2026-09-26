@@ -1,5 +1,7 @@
 #include "ControlFlow/Structurizer.hpp"
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -253,6 +255,25 @@ bool hasLinearPathToTerminal(const ControlFlowGraph& graph, std::uint32_t start)
     }
 }
 
+// The arm leads, through blocks only the header reaches, straight to a return: `if (c) return;`.
+bool isPrivateExit(const ControlFlowGraph& graph, std::uint32_t header, std::uint32_t arm) {
+    std::vector<bool> visited(graph.blocks.size(), false);
+    for (auto blockId = arm;;) {
+        if (visited[blockId] || !graph.Dominates(header, blockId)) {
+            return false;
+        }
+        visited[blockId] = true;
+        const auto& block = graph.FindBlock(blockId);
+        if (block.successors.empty()) {
+            return block.terminator.kind == TerminatorKind::Return;
+        }
+        if (block.successors.size() != 1) {
+            return false;
+        }
+        blockId = block.successors.front();
+    }
+}
+
 bool isEnclosingLinearExit(const ControlFlowGraph& graph, std::uint32_t header, std::uint32_t blockId) {
     if (!hasLinearPathToTerminal(graph, blockId)) {
         return false;
@@ -313,6 +334,13 @@ std::uint32_t findSelectionMerge(const ControlFlowGraph& graph, const BasicBlock
                 }
                 if (graph.Dominates(block.id, trueTarget) && hasLinearPathToTerminal(graph, falseTarget)) {
                     return trueTarget;
+                }
+                // An early return: the construct merges where the other arm continues, even when
+                // that block is also reached around the header (the shared merge is split later).
+                const bool trueExits = isPrivateExit(graph, block.id, trueTarget);
+                const bool falseExits = isPrivateExit(graph, block.id, falseTarget);
+                if (trueExits != falseExits) {
+                    return trueExits ? falseTarget : trueTarget;
                 }
             }
         }
@@ -435,6 +463,130 @@ std::vector<std::uint32_t> selectionRegion(const ControlFlowGraph& graph, const 
     return region;
 }
 
+// Early returns: an edge into a return block that does not post-dominate its source is a
+// conditional exit (`if (c) return;`) rather than the end of a construct. When several places
+// share such a block, each early-exit predecessor gets its own copy, so every early return
+// belongs to one construct; edges from blocks the return post-dominates keep the original. Blocks
+// are instruction ranges translated independently, so a copy repeats the same guest instructions.
+// Needs post-dominators; returns whether the graph changed.
+bool duplicateEarlyExits(ControlFlowGraph& graph) {
+    bool changed = false;
+    const auto count = graph.blocks.size();
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto exitId = graph.blocks[index].id;
+        const auto& exit = graph.blocks[index];
+        if (exit.terminator.kind != TerminatorKind::Return || !exit.successors.empty() || exit.predecessors.size() < 2) {
+            continue;
+        }
+        std::vector<std::uint32_t> keep;
+        std::vector<std::uint32_t> early;
+        for (const auto predecessor : exit.predecessors) {
+            (contains(graph.FindBlock(predecessor).postDominators, exitId) ? keep : early).push_back(predecessor);
+        }
+        // With every edge early, the original stays with the first of them.
+        if (keep.empty()) {
+            keep.push_back(early.front());
+            early.erase(early.begin());
+        }
+        for (const auto predecessor : early) {
+            BasicBlock copy = graph.FindBlock(exitId);
+            copy.id = static_cast<std::uint32_t>(graph.blocks.size());
+            copy.predecessors = {predecessor};
+            auto& source = graph.FindBlock(predecessor);
+            replaceValue(source.successors, exitId, copy.id);
+            replaceTerminatorTarget(source.terminator, exitId, copy.id);
+            graph.blocks.push_back(std::move(copy));
+            changed = true;
+        }
+        graph.FindBlock(exitId).predecessors = keep;
+    }
+    return changed;
+}
+
+// Upper bound on the graph size node splitting may grow a shader to.
+constexpr std::size_t MaxSplitGraphBlocks = 4096;
+
+// Node splitting: a selection region entered from outside its header (compilers tail-merge
+// shared code this way) is not a structured construct. The outside predecessors of the entered
+// block get their own copy of the region part reachable from it, which leaves the selection
+// single-entry. Blocks are instruction ranges translated independently, so a copy repeats the
+// same guest instructions. Returns false when the copy would duplicate a loop back edge whose
+// header stays outside it, or grow the graph past MaxSplitGraphBlocks.
+bool cloneExternallyEnteredTail(ControlFlowGraph& graph, std::uint32_t headerId, const std::vector<std::uint32_t>& region, std::uint32_t entry) {
+    std::vector<std::uint32_t> visited;
+    std::vector<std::uint32_t> order;
+    const std::function<void(std::uint32_t)> visit = [&](std::uint32_t blockId) {
+        visited.push_back(blockId);
+        for (const auto successor : graph.FindBlock(blockId).successors) {
+            if (contains(region, successor) && !contains(visited, successor)) {
+                visit(successor);
+            }
+        }
+        order.push_back(blockId);
+    };
+    visit(entry);
+    // Reverse postorder from the entry keeps every copy after the copies that dominate it.
+    std::reverse(order.begin(), order.end());
+    if (graph.blocks.size() + order.size() > MaxSplitGraphBlocks) {
+        return false;
+    }
+    for (const auto& edge : graph.backEdges) {
+        if (contains(order, edge.sourceBlock) && !contains(order, edge.targetBlock)) {
+            return false;
+        }
+    }
+
+    std::map<std::uint32_t, std::uint32_t> copies;
+    for (const auto blockId : order) {
+        BasicBlock copy = graph.FindBlock(blockId);
+        copy.id = static_cast<std::uint32_t>(graph.blocks.size());
+        copy.predecessors.clear();
+        copy.dominators.clear();
+        copy.postDominators.clear();
+        copies.emplace(blockId, copy.id);
+        graph.blocks.push_back(std::move(copy));
+    }
+    const auto copyOf = [&](std::uint32_t blockId) {
+        const auto it = copies.find(blockId);
+        return it != copies.end() ? it->second : blockId;
+    };
+    for (const auto& [original, copyId] : copies) {
+        auto& copy = graph.FindBlock(copyId);
+        for (auto& successor : copy.successors) {
+            successor = copyOf(successor);
+        }
+        sortUnique(copy.successors);
+        auto& terminator = copy.terminator;
+        terminator.trueBlock = copyOf(terminator.trueBlock);
+        terminator.falseBlock = copyOf(terminator.falseBlock);
+        terminator.mergeBlock = copyOf(terminator.mergeBlock);
+        terminator.continueBlock = copyOf(terminator.continueBlock);
+        for (auto& target : terminator.indirectTargets) {
+            target = copyOf(target);
+        }
+        for (auto& target : terminator.indirectSelectorTargets) {
+            target = copyOf(target);
+        }
+    }
+
+    // Debug aid: APS5_TRACE_STRUCTURIZE=1 reports each split.
+    static const bool trace = std::getenv("APS5_TRACE_STRUCTURIZE") != nullptr;
+    if (trace) {
+        std::fprintf(stderr, "[structurize] selection %u: copied %zu blocks entered at %u\n", headerId, order.size(), entry);
+    }
+
+    const auto predecessors = graph.FindBlock(entry).predecessors;
+    for (const auto predecessor : predecessors) {
+        if (predecessor == headerId || contains(region, predecessor)) {
+            continue;
+        }
+        auto& block = graph.FindBlock(predecessor);
+        replaceValue(block.successors, entry, copies.at(entry));
+        replaceTerminatorTarget(block.terminator, entry, copies.at(entry));
+    }
+    return true;
+}
+
 bool splitOneSelectionMerge(ControlFlowGraph& graph) {
     std::vector<std::uint32_t> loopHeaders;
     loopHeaders.reserve(graph.naturalLoops.size());
@@ -473,7 +625,16 @@ bool splitOneSelectionMerge(ControlFlowGraph& graph) {
             });
         });
         if (external != region.end()) {
-            throw std::runtime_error("selection header block " + std::to_string(blockId) + " has externally entered region block " + std::to_string(*external) + "; semantic block cloning is disabled");
+            static const bool trace = std::getenv("APS5_TRACE_STRUCTURIZE") != nullptr;
+            if (trace) {
+                std::fprintf(stderr, "[structurize] selection %u (true %u, false %u) merge %u region", blockId, block.terminator.trueBlock, block.terminator.falseBlock, merge);
+                for (const auto member : region) std::fprintf(stderr, " %u", member);
+                std::fprintf(stderr, "\n");
+            }
+            if (cloneExternallyEnteredTail(graph, blockId, region, *external)) {
+                return true;
+            }
+            throw std::runtime_error("selection header block " + std::to_string(blockId) + " has externally entered region block " + std::to_string(*external) + " that cannot be split");
         }
 
         const auto constructBlocks = dominatedBlocks(graph, blockId, merge);
@@ -580,6 +741,9 @@ void tarjanVisit(TarjanState& state, std::uint32_t blockId) {
 
 void Structurizer::Structurize(ControlFlowGraph& graph) const {
     recomputeAnalyses(graph);
+    if (duplicateEarlyExits(graph)) {
+        recomputeAnalyses(graph);
+    }
     verifyReducibility(graph);
     canonicalizeNaturalLoops(graph);
     splitSharedMergeBlocks(graph);

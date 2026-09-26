@@ -585,10 +585,16 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         }
         previous = current;
     }
-    // Color exports reach nothing without a color target, so a depth-only pixel shader may have none.
-    const bool colorOutput = previous->outputs.size() == 1 && previous->outputs.contains(0) && previous->outputs.at(0) == "vertex:f32x4";
-    if (state.hasFragmentShader)
-        Require(colorOutput || (!state.hasColorTarget && previous->outputs.empty()), "fragment shader must export one float4 color at location zero");
+    // Every written colour target needs a float4 export at its slot; exports to other slots reach
+    // no attachment, so a depth-only pixel shader may have none.
+    if (state.hasFragmentShader) {
+        for (const auto& [location, signature] : previous->outputs) Require(location < MaxColorTargets, "fragment output location " + std::to_string(location) + " is not a color target");
+        for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+            if ((state.colorTargetMask & (1u << slot)) == 0) continue;
+            const auto output = previous->outputs.find(slot);
+            Require(output != previous->outputs.end() && output->second == "vertex:f32x4", "fragment shader must export a float4 color for color target " + std::to_string(slot));
+        }
+    }
 }
 
 void ValidateShaderPair(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment) {

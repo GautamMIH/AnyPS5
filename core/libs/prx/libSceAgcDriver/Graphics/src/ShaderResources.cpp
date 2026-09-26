@@ -60,20 +60,20 @@ const char* kindName(ShaderRecompiler::DescriptorKind kind) {
 
 }
 
-ShaderResources::ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes) : ShaderResources(context, std::array<CompiledShader, 2>{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, static_cast<std::uint32_t>(vertex.pushConstants.size())}}}, target, indexAddress, indexBytes) {}
+ShaderResources::ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes) : ShaderResources(context, std::array<CompiledShader, 2>{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, static_cast<std::uint32_t>(vertex.pushConstants.size())}}}, targets, indexAddress, indexBytes) {}
 
-ShaderResources::ShaderResources(const Context& context, std::span<const CompiledShader> shaders, const ColorTarget& target, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots) : context(context), guestMemory(context) {
+ShaderResources::ShaderResources(const Context& context, std::span<const CompiledShader> shaders, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots) : context(context), guestMemory(context) {
     prepareAddressBindings(shaders, snapshots);
-    build(shaders, &target, indexAddress, indexBytes);
+    build(shaders, targets, indexAddress, indexBytes);
 }
 
 ShaderResources::ShaderResources(const Context& context, const CompiledShader& compute, std::span<const GuestMemorySnapshot> snapshots) : context(context), guestMemory(context) {
     Require(compute.stage == ShaderRecompiler::ShaderStage::Compute, "compute resources require a compute shader");
     prepareAddressBindings(std::span<const CompiledShader>(&compute, 1), snapshots);
-    build(std::span<const CompiledShader>(&compute, 1), nullptr, 0, 0);
+    build(std::span<const CompiledShader>(&compute, 1), {}, 0, 0);
 }
 
-void ShaderResources::build(std::span<const CompiledShader> shaders, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
+void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes) {
     PerformanceTimer timing("Graphics.ShaderResources");
     try {
         Require(!shaders.empty() && context.limits.maxBoundDescriptorSets >= 1, "shader descriptor set exceeds device limits");
@@ -104,7 +104,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
                 Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, binding.count, flags, nullptr}, {}};
                 if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
                     Require(binding.guestDescriptor.size() == static_cast<std::uint64_t>(binding.count) * 4, "guest buffer descriptor must contain four DWORDs per array element");
-                    for (std::uint32_t element = 0; element < binding.count; ++element) item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), target, indexAddress, indexBytes));
+                    for (std::uint32_t element = 0; element < binding.count; ++element) item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), targets, indexAddress, indexBytes));
                 } else if (addressRole) {
                     item.allocations.push_back(allocations.size());
                     allocations.push_back({0, 0, false, nullptr, binding.role});
@@ -181,7 +181,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
     }
 }
 
-std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
+std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes) {
     Require(words.size() == 4, "buffer descriptor must contain four DWORDs");
     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
     const auto address = descriptor.Base48();
@@ -205,7 +205,7 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
         return unusable("unmapped range");
     }
     GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
-    Require(target == nullptr || !overlap(address, size, target->address, target->bytes), "shader buffer aliases the render target");
+    for (const auto& target : targets) Require(!overlap(address, size, target.address, target.bytes), "shader buffer aliases the render target");
     Require(!overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
     guestMemory.AddWritable(address, size);
     allocations.push_back({address, size, true, nullptr});

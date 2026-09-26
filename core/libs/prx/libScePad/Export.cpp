@@ -3,13 +3,23 @@
 #include <cstring>
 #include <stdexcept>
 #include <chrono>
+#include <set>
 #include <thread>
+#include <tuple>
 
 #include "SceTypes.hpp"
 #include "prx//libc/include/General.hpp"
 #include "prx/libScePad/include/Pad.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 
+
+namespace {
+
+// Ports opened with scePadOpen, as (user, type, index); all share the one emulated controller.
+bool padInitialized = false;
+std::set<std::tuple<int, int, int>> openedPorts;
+
+}
 
 extern "C" {
 
@@ -63,12 +73,10 @@ int APS5_VABI scePadGetControllerInformation(int handle, PadControllerInformatio
  return PAD_OK;
 }
 
+// As in shadPS4: the handle of a port opened with the same user, type and index.
 int APS5_VABI scePadGetHandle(int user_id, int type, int index) {
- (void)user_id;
- (void)type;
- (void)index;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!padInitialized) return PAD_ERROR_NOT_INITIALIZED;
+ return openedPorts.contains({user_id, type, index}) ? PAD_HANDLE : PAD_ERROR_NO_HANDLE;
 }
 
 int APS5_VABI scePadGetTriggerEffectState(int handle, PadTriggerEffectStateInformation* info) {
@@ -80,6 +88,7 @@ int APS5_VABI scePadGetTriggerEffectState(int handle, PadTriggerEffectStateInfor
 
 int APS5_VABI scePadInit_nid_postfix(void) {
  Pad::Initialize();
+ padInitialized = true;
  return PAD_OK;
 }
 
@@ -93,23 +102,22 @@ int APS5_VABI scePadOpen_nid_postfix(int userId, int type, int index, const void
  if (!personalPort && !systemRemote) {
   return PAD_ERROR_INVALID_ARG;
  }
+ openedPorts.insert({userId, type, index});
  return PAD_HANDLE;
 }
 
 // The pad layer keeps only the current state, so each read returns one sample: the latest.
 int APS5_VABI scePadRead_nid_postfix(int handle, PadData* data, int num) {
- constexpr int kPadErrorInvalidArgument = static_cast<int>(0x80920001);
- constexpr int kPadErrorInvalidHandle = static_cast<int>(0x80920003);
  constexpr int kMaxSamples = 64;
- if (handle != 1) return kPadErrorInvalidHandle;
- if (data == nullptr || num < 1 || num > kMaxSamples) return kPadErrorInvalidArgument;
+ if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ if (data == nullptr || num < 1 || num > kMaxSamples) return PAD_ERROR_INVALID_ARG;
  data[0] = Pad::ReadState();
  return 1;
 }
 
 int APS5_VABI scePadReadState(int handle, PadData* data) {
- if (handle != 1) APS5_INVALID_ARG_EX;
- if (data == nullptr) APS5_INVALID_ARG_EX;
+ if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ if (data == nullptr) return PAD_ERROR_INVALID_ARG;
 
  *data = Pad::ReadState();
 

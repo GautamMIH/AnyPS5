@@ -2,6 +2,18 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include <mutex>
+#include <set>
+#include <stdexcept>
+
+namespace {
+
+// Contexts only carry identity here; batches, which run the audio DSP work, are not modelled.
+std::mutex contextMutex;
+std::set<AcmContextId> contexts;
+AcmContextId nextContext = 1;
+
+}
 
 extern "C" {
 
@@ -34,14 +46,17 @@ int APS5_VABI sceAcmBatchWait(AcmContextId context, AcmBatchId batch, uint32_t t
 }
 
 int APS5_VABI sceAcmContextCreate(AcmContextId* context) {
- (void)context;
- NotImplemented_nid_no_patch(__func__);
+ if (context == nullptr) throw std::runtime_error("sceAcmContextCreate: null context");
+ std::lock_guard lock(contextMutex);
+ const auto id = nextContext++;
+ contexts.insert(id);
+ *context = id;
  return 0;
 }
 
 int APS5_VABI sceAcmContextDestroy(AcmContextId context) {
- (void)context;
- NotImplemented_nid_no_patch(__func__);
+ std::lock_guard lock(contextMutex);
+ if (contexts.erase(context) == 0) throw std::runtime_error("sceAcmContextDestroy: unknown context");
  return 0;
 }
 

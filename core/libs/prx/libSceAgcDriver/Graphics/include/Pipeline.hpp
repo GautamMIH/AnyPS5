@@ -7,7 +7,8 @@ namespace AgcDriver::Graphics {
 
 class Pipeline {
 public:
-    Pipeline(const Context& context, const State& state, const RenderTarget* target, const RenderTarget* depthTarget, const ShaderResources& resources, std::span<const CompiledShader> shaders);
+    // targets holds one entry per colour slot up to State::ColorSlotCount(); unwritten slots are null.
+    Pipeline(const Context& context, const State& state, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget, const ShaderResources& resources, std::span<const CompiledShader> shaders);
     ~Pipeline();
     Pipeline(const Pipeline&) = delete;
     Pipeline& operator=(const Pipeline&) = delete;

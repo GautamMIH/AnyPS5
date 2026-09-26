@@ -58,6 +58,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/PresentationScaler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Draw.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/FastClear.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DepthTargetLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetTransfer.cpp
@@ -295,6 +296,7 @@ if(AGC_BUILD_VISUAL_TEST)
             Execution/src/GuestMemory.cpp
             Execution/src/BdaFeatures.cpp
             Graphics/src/Draw.cpp
+            Graphics/src/FastClear.cpp
             Graphics/src/ColorTargetLayout.cpp
             Graphics/src/DepthTargetLayout.cpp
             Graphics/src/ColorTargetTransfer.cpp

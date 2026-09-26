@@ -22,6 +22,7 @@ public:
     void WaitDraws();
     void AcquireGpuMemory();
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
+    void ResolveFastClears(const Graphics::State& graphics);
     void* Window() const;
     void Resize(std::uint32_t width, std::uint32_t height);
     bool Presentable() const;

@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
@@ -18,7 +19,7 @@ namespace {
 struct DrawStorage {
     std::unique_ptr<Buffer> indices;
     std::vector<std::unique_ptr<Buffer>> vertices;
-    std::shared_ptr<ResidentColor> color;
+    std::array<std::shared_ptr<ResidentColor>, MaxColorTargets> colors;
     std::shared_ptr<ResidentDepth> depth;
     std::shared_ptr<Pipeline> pipeline;
 };
@@ -27,6 +28,9 @@ struct DrawStorage {
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
     PerformanceTimer timing("Graphics.Draw");
+    ApplyFastClears(state);
+    // With surfaces kept uncompressed, resolving the fast clear is all an elimination pass does.
+    if (state.eliminateFastClear) return;
     Require(draw.indexed ? draw.flags == 0 : (draw.flags & ~0x20u) == 0, "draw modifiers are unsupported");
     if (draw.indexed) {
         Require(draw.indexSize == 2 || draw.indexSize == 4, "only uint16 and uint32 index buffers are supported");
@@ -41,9 +45,16 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     const auto indexBytes = static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize;
     Require(indexBytes <= std::numeric_limits<std::size_t>::max(), "index buffer size overflow");
     if (draw.indexed) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
+    std::vector<ColorTarget> colorTargets;
+    for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+        if ((state.colorTargetMask & (1u << slot)) != 0) colorTargets.push_back(state.colors[slot]);
+    }
     const auto aliasesTargets = [&](std::uint64_t address, std::uint64_t bytes) {
         const auto overlaps = [&](std::uint64_t base, std::uint64_t size) { return size != 0 && address < base + size && base < address + bytes; };
-        return (state.hasColorTarget && overlaps(state.color.address, state.color.bytes)) || (state.hasDepthTarget && (overlaps(state.depth.depthAddress, state.depth.depthBytes) || overlaps(state.depth.stencilAddress, state.depth.stencilBytes)));
+        for (const auto& color : colorTargets) {
+            if (overlaps(color.address, color.bytes)) return true;
+        }
+        return (state.hasDepthTarget && (overlaps(state.depth.depthAddress, state.depth.depthBytes) || overlaps(state.depth.stencilAddress, state.depth.stencilBytes)));
     };
     Require(!draw.indexed || !aliasesTargets(draw.indexAddress, indexBytes), "index buffer aliases a render target");
     if (state.rectList) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
@@ -101,16 +112,21 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         vertexBuffers.push_back(std::move(buffer));
     }
     timing.Mark("vertex_upload");
-    auto resources = std::make_shared<ShaderResources>(context, shaders, state.color, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+    auto resources = std::make_shared<ShaderResources>(context, shaders, colorTargets, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
     timing.Mark("shader_resources");
-    if (state.hasColorTarget) {
-        const ColorTargetLayout colorLayout(state.color.extent.width, state.color.extent.height, state.color.tileMode, state.color.elementBytes, state.color.tail);
-        Require(state.color.bytes == colorLayout.Bytes(), "color target transfer size mismatch");
-        storage->color = context.renderCache->Get(state.color, state.blend.blendEnable != 0);
+    for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+        if ((state.colorTargetMask & (1u << slot)) == 0) continue;
+        const auto& color = state.colors[slot];
+        const ColorTargetLayout colorLayout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
+        Require(color.bytes == colorLayout.Bytes(), "color target transfer size mismatch");
+        // The render cache evicts residents that share pages with a new target, so the targets of
+        // one draw must be disjoint.
+        for (std::uint32_t other = 0; other < slot; ++other) Require(!storage->colors[other] || !storage->colors[other]->SharesPages(color), "color targets of one draw share memory pages");
+        storage->colors[slot] = context.renderCache->Get(color, state.blends[slot].blendEnable != 0);
     }
     if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
     timing.Mark("render_target_cache");
-    storage->pipeline = context.graphicsPipelines->Get(state, storage->color, storage->depth, *resources, shaders);
+    storage->pipeline = context.graphicsPipelines->Get(state, storage->colors, storage->depth, *resources, shaders);
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
     const auto commands = context.drawQueue->Begin(context);
@@ -119,7 +135,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
     resources->RecordUploads(commands);
-    if (storage->color) storage->color->Begin(commands);
+    for (const auto& color : storage->colors) {
+        if (color) color->Begin(commands);
+    }
     if (storage->depth) storage->depth->Begin(commands);
     pipeline.Begin(commands, state.renderExtent);
     if (state.hasDepthTarget && (state.depthState.clearDepth || state.depthState.clearStencil) && state.scissor.extent.width != 0 && state.scissor.extent.height != 0) {

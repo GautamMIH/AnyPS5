@@ -6,6 +6,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthTargetLayout.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include <array>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include "Recompiler.hpp"
@@ -37,6 +38,10 @@ struct ColorTarget {
     ColorTileMode tileMode = ColorTileMode::Linear;
     std::uint32_t elementBytes = 4;
     ColorTail tail;
+    // CB_COLOR_INFO.FAST_CLEAR with the CMASK address and CB_COLOR_CLEAR_WORD0/1; see FastClear.hpp.
+    bool fastClear = false;
+    std::uint64_t cmaskAddress = 0;
+    std::array<std::uint32_t, 2> clearWords{};
 };
 
 struct DepthTarget {
@@ -70,16 +75,25 @@ struct DepthState {
     std::uint32_t stencilClearValue;
 };
 
+// CB colour targets (MRT slots) a draw can write.
+constexpr std::uint32_t MaxColorTargets = 8;
+
 struct State {
     ShaderStages stages;
-    ColorTarget color;
-    bool hasColorTarget;
+    // Slot i is written when bit i of colorTargetMask is set; other slots are unused attachments.
+    std::array<ColorTarget, MaxColorTargets> colors{};
+    std::uint32_t colorTargetMask = 0;
+    bool HasColorTarget() const { return colorTargetMask != 0; }
+    // Attachment slots up to the highest written one.
+    std::uint32_t ColorSlotCount() const { return static_cast<std::uint32_t>(std::bit_width(colorTargetMask)); }
     DepthTarget depth;
     bool hasDepthTarget;
     // Depth-only draws may bind no pixel shader (the SDK's null PS).
     bool hasFragmentShader = true;
     DepthState depthState;
     bool rectList = false;
+    // CB_COLOR_CONTROL.MODE ELIMINATE_FAST_CLEAR: the draw only resolves fast-cleared tiles.
+    bool eliminateFastClear = false;
     VkExtent2D renderExtent;
     VkPrimitiveTopology topology;
     VkViewport viewport;
@@ -87,7 +101,7 @@ struct State {
     VkRect2D scissor;
     VkCullModeFlags cullMode;
     VkFrontFace frontFace;
-    VkPipelineColorBlendAttachmentState blend;
+    std::array<VkPipelineColorBlendAttachmentState, MaxColorTargets> blends{};
     std::array<float, 4> blendConstants;
 };
 

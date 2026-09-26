@@ -7,6 +7,8 @@
 #include <cmath>
 #include <limits>
 #include <sstream>
+#include <cstdio>
+#include <mutex>
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -391,7 +393,9 @@ State DecodeState(const QueueState& queue) {
         message << "AGC graphics: PA_CL_VTE_CNTL=0x" << std::hex << viewportControl << ": expected 0x43f for homogeneous positions and all viewport transforms; pre-divided coordinates, reciprocal W or disabled transforms are unsupported";
         throw std::runtime_error(message.str());
     }
-    zero(cx, 0x204, ~0x80000u, "unsupported PA_CL_CLIP_CNTL flags");
+    // DX_CLIP_SPACE_DEF (bit 19) selects the depth clip range; DX_LINEAR_ATTR_CLIP_ENA (bit 24)
+    // clips attributes linearly, as Vulkan implementations always do (RADV sets it).
+    zero(cx, 0x204, ~0x1080000u, "unsupported PA_CL_CLIP_CNTL flags");
     result.negativeOneToOne = (read(cx, 0x204) & 0x80000u) == 0;
     const auto raster = read(cx, 0x205);
     // POLY_OFFSET_FRONT/BACK_ENABLE (bits 11-12) request depth bias; see decodeDepthBias.
@@ -406,23 +410,21 @@ State DecodeState(const QueueState& queue) {
     result.frontFace = (raster & 4u) != 0 ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
     const auto targetMask = read(cx, 0x8e);
     const auto shaderMask = read(cx, 0x8f);
-    if ((targetMask & ~0xfu) != 0 || (shaderMask & ~0xfu) != 0) {
-        std::ostringstream message;
-        message << "AGC graphics: only color target zero is supported: CB_TARGET_MASK=0x" << std::hex << targetMask << ", CB_SHADER_MASK=0x" << shaderMask;
-        throw std::runtime_error(message.str());
-    }
     const auto psLow = queue.shader.find(0x8);
     const auto psHigh = queue.shader.find(0x9);
     result.hasFragmentShader = (psLow != queue.shader.end() && psLow->second != 0) || (psHigh != queue.shader.end() && psHigh->second != 0);
     // The colour block writes a component only when both CB_TARGET_MASK and CB_SHADER_MASK enable it,
     // and only a pixel shader produces colour.
     const auto writeMask = result.hasFragmentShader ? targetMask & shaderMask : 0u;
-    result.hasColorTarget = writeMask != 0;
+    for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+        if (((writeMask >> (4u * slot)) & 0xfu) != 0) result.colorTargetMask |= 1u << slot;
+    }
     // CB_COLOR_CONTROL: MODE (bits 4-6) is NORMAL, or DISABLE for draws without color targets; copy ROP.
     const auto colorControl = read(cx, 0x202);
-    if (!(colorControl == 0xcc0010u || (colorControl == 0xcc0000u && !result.hasColorTarget))) {
+    result.eliminateFastClear = colorControl == 0xcc0020u && result.HasColorTarget();
+    if (!(colorControl == 0xcc0010u || result.eliminateFastClear || (colorControl == 0xcc0000u && !result.HasColorTarget()))) {
         std::ostringstream message;
-        message << "AGC graphics: CB_COLOR_CONTROL=0x" << std::hex << colorControl << ": only normal color rendering (or disabled color without targets) with copy ROP is supported";
+        message << "AGC graphics: CB_COLOR_CONTROL=0x" << std::hex << colorControl << ": only normal color rendering, fast-clear elimination, or disabled color without targets, with copy ROP, is supported";
         throw std::runtime_error(message.str());
     }
     // SPI_SHADER_Z_FORMAT: 32_R (depth only) with Z export, otherwise nothing.
@@ -430,61 +432,85 @@ State DecodeState(const QueueState& queue) {
     zero(cx, 0x1c4, depthExport ? ~1u : ~0u, "stencil or sample-mask export, or a depth export format other than 32_R");
     Require(!depthExport || read(cx, 0x1c4) == 1u, "depth export without the 32_R export format");
     const auto exportFormat = read(cx, 0x1c5);
-    // SPI_SHADER_ZERO discards color exports, as a draw without color attachments does.
-    if (!(exportFormat == 4 || exportFormat == 9 || (exportFormat == 0 && !result.hasColorTarget))) {
+    // Each written target needs FP16_ABGR or 32_ABGR exports; exports to unwritten targets reach
+    // no attachment. Fast-clear elimination is done by the colour block and exports nothing.
+    for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+        const auto format = (exportFormat >> (4u * slot)) & 0xfu;
+        if ((result.colorTargetMask & (1u << slot)) == 0 || format == 4 || format == 9 || result.eliminateFastClear) continue;
         std::ostringstream message;
-        message << "AGC graphics: SPI_SHADER_COL_FORMAT=0x" << std::hex << exportFormat << ": only FP16_ABGR or 32_ABGR color export, or no export without a color target, is supported";
+        message << "AGC graphics: SPI_SHADER_COL_FORMAT=0x" << std::hex << exportFormat << ": color target " << std::dec << slot << " needs FP16_ABGR or 32_ABGR export";
         throw std::runtime_error(message.str());
     }
     Require(read(cx, 0x1c3) == 4, "additional position exports are unsupported");
-    if (result.hasColorTarget) {
-        const auto info = read(cx, 0x31c);
+    for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+        if ((result.colorTargetMask & (1u << slot)) == 0) continue;
+        // CB_COLOR<n> registers repeat every 15 dwords; BASE_EXT, ATTRIB2 and ATTRIB3 are arrays.
+        const auto cb = 0xfu * slot;
+        auto& color = result.colors[slot];
+        const auto info = read(cx, 0x31c + cb);
         const auto number = (info >> 8u) & 7u;
         const auto swap = (info >> 11u) & 3u;
         const auto decoded = decodeColorFormat(info);
-        // ROUND_MODE (bit 18) only changes UNORM rounding.
-        Require((info & ~0x00069f7cu) == 0, "color compression, DCC, endian conversion or color optimization is unsupported");
+        // ROUND_MODE (bit 18) only changes UNORM rounding; FAST_CLEAR (bit 13) is modelled by
+        // FastClear.hpp. Surfaces are always stored uncompressed, as in shadPS4, so the CMASK
+        // layout (CMASK_IS_LINEAR bit 19, CMASK_ADDR_TYPE bits 29-30), the BLEND_OPT hints
+        // (bits 20-25) and DCC_ENABLE (bit 28) change nothing (layout as in shadPS4 regs_color.h).
+        if ((info & ~0x73febf7cu) != 0) {
+            std::ostringstream message;
+            message << "AGC graphics: CB_COLOR" << slot << "_INFO=0x" << std::hex << info << ": FMASK compression or endian conversion is unsupported";
+            throw std::runtime_error(message.str());
+        }
         Require((info & 0x8000u) != 0 || number == 7, "unclamped normalized color is unsupported");
         // CB_COLOR_VIEW (gfx10 layout, Mesa): MIP_LEVEL (bits 26-29) selects the rendered mip; array
         // slices are not modelled.
-        const auto view = read(cx, 0x31b);
-        zero(cx, 0x31b, ~0x3c000000u, "color array view");
+        const auto view = read(cx, 0x31b + cb);
+        zero(cx, 0x31b + cb, ~0x3c000000u, "color array view");
         const auto viewMip = (view >> 26u) & 0xfu;
-        zero(cx, 0x31d, ~0u, "color samples, fragments or destination alpha override");
-        const auto attrib2 = read(cx, 0x3b0);
+        zero(cx, 0x31d + cb, ~0u, "color samples, fragments or destination alpha override");
+        const auto attrib2 = read(cx, 0x3b0 + slot);
         const auto maxMip = attrib2 >> 28u;
         Require(viewMip <= maxMip, "color view mip exceeds the surface");
-        const auto attrib3 = read(cx, 0x3b8);
-        result.color.tileMode = DecodeColorTileMode(attrib3);
-        result.color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
-        result.color.elementBytes = decoded.elementBytes;
+        const auto attrib3 = read(cx, 0x3b8 + slot);
+        color.tileMode = DecodeColorTileMode(attrib3);
+        color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
+        color.elementBytes = decoded.elementBytes;
         std::uint64_t mipOffset = 0;
         if (maxMip != 0) {
             // A mipmapped surface is laid out like a texture; the view renders into one of its mips.
-            Require(result.color.tileMode == ColorTileMode::RenderTarget, "mipmapped linear render targets are unsupported");
-            const auto mips = ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, result.color.elementBytes, result.color.extent.width, result.color.extent.height, maxMip + 1u);
+            Require(color.tileMode == ColorTileMode::RenderTarget, "mipmapped linear render targets are unsupported");
+            const auto mips = ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, color.elementBytes, color.extent.width, color.extent.height, maxMip + 1u);
             const auto& mip = mips.at(viewMip);
             mipOffset = mip.tiledOffset;
-            result.color.extent = {mip.width, mip.height};
-            if (mip.tail) result.color.tail = {true, mip.tailX, mip.tailY};
+            color.extent = {mip.width, mip.height};
+            if (mip.tail) color.tail = {true, mip.tailX, mip.tailY};
         }
-        const ColorTargetLayout colorLayout(result.color.extent.width, result.color.extent.height, result.color.tileMode, result.color.elementBytes, result.color.tail);
-        const auto high = read(cx, 0x390);
+        const ColorTargetLayout colorLayout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
+        const auto high = read(cx, 0x390 + slot);
         Require((high & ~0xffu) == 0, "invalid color address extension");
-        result.color.address = ((static_cast<std::uint64_t>(high) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x318)) << 8u)) + mipOffset;
-        result.color.bytes = colorLayout.Bytes();
-        GuestMemory::CheckGpuRange(reinterpret_cast<const void*>(result.color.address), result.color.bytes, colorLayout.Alignment(), true);
-        result.color.format = decoded.format;
+        color.address = ((static_cast<std::uint64_t>(high) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x318 + cb)) << 8u)) + mipOffset;
+        color.bytes = colorLayout.Bytes();
+        GuestMemory::CheckGpuRange(reinterpret_cast<const void*>(color.address), color.bytes, colorLayout.Alignment(), true);
+        color.format = decoded.format;
         static_cast<void>(swap);
-        result.color.componentMapping = 0xe4u;
-        result.renderExtent = result.color.extent;
+        color.componentMapping = 0xe4u;
+        color.fastClear = (info & 0x2000u) != 0;
+        if (color.fastClear) {
+            const auto cmaskHigh = read(cx, 0x398 + slot);
+            Require((cmaskHigh & ~0xffu) == 0, "invalid CMASK address extension");
+            color.cmaskAddress = (static_cast<std::uint64_t>(cmaskHigh) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x31f + cb)) << 8u);
+            color.clearWords = {read(cx, 0x323 + cb), read(cx, 0x324 + cb)};
+        }
     }
     decodeDepth(cx, result);
     decodeDepthBias(cx, result);
-    if (result.hasColorTarget) {
-        if (result.hasDepthTarget) result.renderExtent = {std::min(result.color.extent.width, result.depth.extent.width), std::min(result.color.extent.height, result.depth.extent.height)};
-    } else if (result.hasDepthTarget) {
-        result.renderExtent = result.depth.extent;
+    if (result.HasColorTarget() || result.hasDepthTarget) {
+        // The framebuffer covers the area every attachment shares.
+        result.renderExtent = {~0u, ~0u};
+        const auto shrink = [&](VkExtent2D extent) { result.renderExtent = {std::min(result.renderExtent.width, extent.width), std::min(result.renderExtent.height, extent.height)}; };
+        for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+            if ((result.colorTargetMask & (1u << slot)) != 0) shrink(result.colors[slot].extent);
+        }
+        if (result.hasDepthTarget) shrink(result.depth.extent);
     } else {
         const auto screenBottomRight = read(cx, 0xd);
         result.renderExtent = {screenBottomRight & 0xffffu, screenBottomRight >> 16u};
@@ -517,20 +543,22 @@ State DecodeState(const QueueState& queue) {
     intersect(result.scissor, cx, 0x81, false);
     intersect(result.scissor, cx, 0x90, false);
     if ((read(cx, 0x292) & 2u) != 0) intersect(result.scissor, cx, 0x94, false);
-    if (result.hasColorTarget) {
-        const auto blend = read(cx, 0x1e0);
+    for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+        if ((result.colorTargetMask & (1u << slot)) == 0) continue;
+        const auto blend = read(cx, 0x1e0 + slot);
         Require((blend & 0x0000e000u) == 0, "reserved blend control bits");
-        result.blend.colorWriteMask = writeMask;
-        result.blend.blendEnable = (blend >> 30u) & 1u;
-        if (result.blend.blendEnable) {
-            Require((read(cx, 0x31c) & 0x10000u) == 0, "blend bypass conflicts with enabled blending");
-            result.blend.srcColorBlendFactor = blendFactor(blend & 0x1fu);
-            result.blend.dstColorBlendFactor = blendFactor((blend >> 8u) & 0x1fu);
-            result.blend.colorBlendOp = blendOp((blend >> 5u) & 7u);
+        auto& state = result.blends[slot];
+        state.colorWriteMask = (writeMask >> (4u * slot)) & 0xfu;
+        state.blendEnable = (blend >> 30u) & 1u;
+        if (state.blendEnable) {
+            Require((read(cx, 0x31c + 0xfu * slot) & 0x10000u) == 0, "blend bypass conflicts with enabled blending");
+            state.srcColorBlendFactor = blendFactor(blend & 0x1fu);
+            state.dstColorBlendFactor = blendFactor((blend >> 8u) & 0x1fu);
+            state.colorBlendOp = blendOp((blend >> 5u) & 7u);
             const auto alpha = (blend & 0x20000000u) != 0 ? blend >> 16u : blend;
-            result.blend.srcAlphaBlendFactor = blendFactor(alpha & 0x1fu);
-            result.blend.dstAlphaBlendFactor = blendFactor((alpha >> 8u) & 0x1fu);
-            result.blend.alphaBlendOp = blendOp((alpha >> 5u) & 7u);
+            state.srcAlphaBlendFactor = blendFactor(alpha & 0x1fu);
+            state.dstAlphaBlendFactor = blendFactor((alpha >> 8u) & 0x1fu);
+            state.alphaBlendOp = blendOp((alpha >> 5u) & 7u);
             for (std::uint32_t i = 0; i < 4; ++i) result.blendConstants[i] = readFloat(cx, 0x105 + i);
         }
     }
