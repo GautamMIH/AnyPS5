@@ -16,7 +16,8 @@ public:
 
 private:
     struct Entry {
-        std::array<std::uint32_t, 8> descriptor;
+        // Descriptor words plus the view dimension, which the shader's image shape may change.
+        std::array<std::uint32_t, 9> descriptor;
         std::vector<std::byte> snapshot;
         std::shared_ptr<Texture> texture;
         std::weak_ptr<ResidentColor> source;

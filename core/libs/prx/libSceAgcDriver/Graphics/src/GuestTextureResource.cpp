@@ -140,7 +140,8 @@ bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, Texture
     switch (shape) {
         case ShaderRecompiler::DescriptorImageShape::Image1D: return dimension == TextureDimension::k1D;
         case ShaderRecompiler::DescriptorImageShape::Image2D: return dimension == TextureDimension::k2D;
-        case ShaderRecompiler::DescriptorImageShape::Image2DArray: return dimension == TextureDimension::k2DArray;
+        // A cube's faces are addressable as 2D array layers.
+        case ShaderRecompiler::DescriptorImageShape::Image2DArray: return dimension == TextureDimension::k2DArray || dimension == TextureDimension::kCube;
         case ShaderRecompiler::DescriptorImageShape::ImageCube: return dimension == TextureDimension::kCube;
         case ShaderRecompiler::DescriptorImageShape::Image3D: return false;
     }

@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <array>
 #include <cstring>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 
@@ -25,7 +26,9 @@ constexpr std::uint32_t spiShaderColFormat = 0x1C5;
 std::uint32_t read(const Registers& registers, std::uint32_t offset) {
     const auto it = registers.find(offset);
     if (it == registers.end()) {
-        throw std::runtime_error("AGC graphics: missing register at DWORD 0x" + std::to_string(offset));
+        char message[64];
+        std::snprintf(message, sizeof(message), "AGC graphics: missing register at DWORD 0x%x", offset);
+        throw std::runtime_error(message);
     }
     return it->second;
 }

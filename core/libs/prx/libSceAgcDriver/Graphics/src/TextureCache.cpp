@@ -27,8 +27,9 @@ void TextureCache::trim() {
 std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
     Require(words.size() == 8, "texture cache descriptor must contain eight DWORDs");
     trim();
-    std::array<std::uint32_t, 8> key;
+    std::array<std::uint32_t, 9> key;
     std::copy(words.begin(), words.end(), key.begin());
+    key[8] = static_cast<std::uint32_t>(resource.dimension);
     auto source = context.renderCache ? context.renderCache->Find(resource.baseAddress) : nullptr;
     if (source) {
         const auto& color = source->Description();

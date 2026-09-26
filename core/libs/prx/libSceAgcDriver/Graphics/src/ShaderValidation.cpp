@@ -190,9 +190,16 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     Require((subgroup.supportedOperations & subgroupOperations) == subgroupOperations, "device lacks operations for subgroup capability " + std::to_string(instruction[1]));
                 }
 
+                // Shader plus the capabilities every Vulkan implementation must support.
                 const bool isBaseCapability =
                     capability == spv::CapabilityShader ||
-                    capability == spv::CapabilitySignedZeroInfNanPreserve;
+                    capability == spv::CapabilitySignedZeroInfNanPreserve ||
+                    capability == spv::CapabilitySampled1D ||
+                    capability == spv::CapabilityImage1D ||
+                    capability == spv::CapabilitySampledBuffer ||
+                    capability == spv::CapabilityImageBuffer ||
+                    capability == spv::CapabilityImageQuery ||
+                    capability == spv::CapabilityDerivativeControl;
 
                 const bool isBdaCapability =
                     shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version &&

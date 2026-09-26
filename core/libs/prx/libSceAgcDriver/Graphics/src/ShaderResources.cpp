@@ -4,6 +4,9 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/General.hpp"
 #include "Optimization/include/Optimization/ShaderStageInputInfo.hpp"
+#include <array>
+#include <atomic>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <set>
@@ -175,16 +178,27 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, const Color
 
 std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, const ColorTarget* target, std::uint64_t indexAddress, std::size_t indexBytes) {
     Require(words.size() == 4, "buffer descriptor must contain four DWORDs");
-    Require((words[1] & 0x40000000u) == 0, "buffer descriptor has reserved bits set");
     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
-    Require(descriptor.Type() == 0u, "buffer descriptor uses an unsupported type");
     const auto address = descriptor.Base48();
     const auto byteSize = descriptor.GetSize();
-    Require(address != 0, "null shader buffer descriptor address");
-    Require(byteSize != 0, "empty shader buffer descriptor");
-    Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
-    Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
+    // Games leave descriptor slots unfilled for resources a draw never reaches; the hardware only
+    // faults if such a descriptor is used. An unusable one binds an empty buffer: shader accesses
+    // are bounds-checked against the bound size, so reads return zero as with NUM_RECORDS = 0.
+    const auto unusable = [&](const char* reason) {
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true)) std::fprintf(stderr, "[AnyPS5] binding an empty buffer for an unusable buffer descriptor (%s): %08x %08x %08x %08x\n", reason, words[0], words[1], words[2], words[3]);
+        const std::array<std::uint32_t, 4> empty{};
+        return addDataBuffer(empty);
+    };
+    if ((words[1] & 0x40000000u) != 0 || descriptor.Type() != 0u) return unusable("reserved bits or type");
+    if (address == 0 || byteSize == 0) return unusable("null address or size");
+    if (byteSize > context.limits.maxStorageBufferRange || byteSize > std::numeric_limits<std::size_t>::max()) return unusable("size");
     const auto size = static_cast<std::size_t>(byteSize);
+    try {
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, false);
+    } catch (const std::runtime_error&) {
+        return unusable("unmapped range");
+    }
     GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
     Require(target == nullptr || !overlap(address, size, target->address, target->bytes), "shader buffer aliases the render target");
     Require(!overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
@@ -221,8 +235,10 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(binding.count <= context.limits.maxPerStageDescriptorSampledImages, "shader sampled-image descriptors exceed per-stage limits");
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
-            const auto resource = DecodeTextureResource(words);
-            Require(MatchesGuestDimension(*binding.imageShape, resource.dimension), "guest texture dimension disagrees with the shader's declared image shape");
+            auto resource = DecodeTextureResource(words);
+            Require(MatchesGuestDimension(*binding.imageShape, resource.dimension), "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (" + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ") disagrees with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
+            // The view follows the shader's shape: a cube sampled as an array is viewed as its faces.
+            if (*binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2DArray) resource.dimension = TextureDimension::k2DArray;
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             textures.push_back(context.textureCache->Get(words, resource, components));
             item.imageAllocations.push_back(textures.size() - 1);
