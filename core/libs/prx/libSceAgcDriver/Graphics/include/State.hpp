@@ -42,6 +42,13 @@ struct ColorTarget {
     bool fastClear = false;
     std::uint64_t cmaskAddress = 0;
     std::array<std::uint32_t, 2> clearWords{};
+    // Slices of an array or volume surface: the draw renders slices [baseLayer, baseLayer +
+    // layers) of surfaceSlices, sliceBytes apart; address and bytes cover the rendered slices.
+    std::uint32_t layers = 1;
+    std::uint32_t baseLayer = 0;
+    std::uint32_t surfaceSlices = 1;
+    std::uint64_t sliceBytes = 0;
+    bool Layered() const { return surfaceSlices > 1; }
 };
 
 struct DepthTarget {
@@ -92,6 +99,8 @@ struct State {
     bool hasFragmentShader = true;
     DepthState depthState;
     bool rectList = false;
+    // The geometry stage selects each primitive's render-target layer.
+    bool layeredOutput = false;
     // CB_COLOR_CONTROL.MODE ELIMINATE_FAST_CLEAR: the draw only resolves fast-cleared tiles.
     bool eliminateFastClear = false;
     VkExtent2D renderExtent;

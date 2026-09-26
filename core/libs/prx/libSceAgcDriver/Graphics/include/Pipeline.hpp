@@ -32,11 +32,20 @@ struct ShaderDeviceFeatures {
     bool imageGatherExtended = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
+    // geometryShader: the Geometry capability, used by pixel shaders reading their layer.
+    bool geometryShader = false;
 
     static ShaderDeviceFeatures Of(const Context& context) {
-        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat};
+        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader};
     }
 };
+
+// Host invocations of a mesh workgroup: a wave64 program on a 32-lane host subgroup runs two guest
+// lanes per invocation (the recompiler's laneCount).
+inline std::uint32_t MeshInvocations(const State& state, std::uint32_t hostSubgroupSize) {
+    const auto lanes = state.stages.vertexWaveSize == 64u && hostSubgroupSize == 32u ? 2u : 1u;
+    return state.stages.mesh.has_value() ? state.stages.mesh->threadsPerGroup / lanes : 0u;
+}
 
 void ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, const ShaderDeviceFeatures& features = {});
 

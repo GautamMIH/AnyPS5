@@ -84,7 +84,7 @@ RenderTarget::RenderTarget(const Context& context, const ColorTarget& target, bo
     context.formatProperties(context.physical, target.format, &properties);
     const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | (blending ? VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT : 0u);
     Require((properties.optimalTilingFeatures & required) == required, "render-target format does not support required operations");
-    create(target.format, target.extent, target.bytes, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+    create(target.format, target.extent, target.bytes, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, target.Layered() ? target.layers : 1u);
 }
 
 RenderTarget::RenderTarget(const Context& context, const DepthTarget& target) : context(context) {
@@ -96,19 +96,20 @@ RenderTarget::RenderTarget(const Context& context, const DepthTarget& target) : 
     create(target.format, target.extent, target.depthBytes + target.stencilBytes, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, aspect);
 }
 
-void RenderTarget::create(VkFormat format, VkExtent2D extent, std::size_t bytes, VkImageUsageFlags attachment, VkImageAspectFlags aspect) {
+void RenderTarget::create(VkFormat format, VkExtent2D extent, std::size_t bytes, VkImageUsageFlags attachment, VkImageAspectFlags aspect, std::uint32_t layers) {
     const auto usage = attachment | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     VkImageFormatProperties supported{};
     Check(context.imageFormatProperties(context.physical, format, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, usage, 0, &supported), "vkGetPhysicalDeviceImageFormatProperties");
     Require(extent.width <= supported.maxExtent.width && extent.height <= supported.maxExtent.height && (supported.sampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0 && bytes <= supported.maxResourceSize, "render target exceeds device image limits");
     Require(extent.width <= context.limits.maxFramebufferWidth && extent.height <= context.limits.maxFramebufferHeight, "render target exceeds framebuffer limits");
+    Require(layers != 0 && layers <= supported.maxArrayLayers && layers <= context.limits.maxFramebufferLayers, "render target layers exceed device limits");
     try {
         VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         info.imageType = VK_IMAGE_TYPE_2D;
         info.format = format;
         info.extent = {extent.width, extent.height, 1};
         info.mipLevels = 1;
-        info.arrayLayers = 1;
+        info.arrayLayers = layers;
         info.samples = VK_SAMPLE_COUNT_1_BIT;
         info.tiling = VK_IMAGE_TILING_OPTIMAL;
         info.usage = usage;
@@ -124,9 +125,9 @@ void RenderTarget::create(VkFormat format, VkExtent2D extent, std::size_t bytes,
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory");
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewInfo.image = image;
-        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.viewType = layers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
         viewInfo.format = format;
-        viewInfo.subresourceRange = {aspect, 0, 1, 0, 1};
+        viewInfo.subresourceRange = {aspect, 0, 1, 0, layers};
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView");
     } catch (...) {
         release();

@@ -44,7 +44,7 @@ public:
     VkImageView View() const;
 
 private:
-    void create(VkFormat format, VkExtent2D extent, std::size_t bytes, VkImageUsageFlags attachment, VkImageAspectFlags aspect);
+    void create(VkFormat format, VkExtent2D extent, std::size_t bytes, VkImageUsageFlags attachment, VkImageAspectFlags aspect, std::uint32_t layers = 1);
     void release() noexcept;
     Context context;
     VkImage image = VK_NULL_HANDLE;

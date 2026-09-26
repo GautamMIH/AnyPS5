@@ -67,6 +67,7 @@ struct Context {
     bool depthBounds = false;
     bool depthBiasClamp = false;
     bool independentBlend = false;
+    bool geometryShader = false;
     bool imageGatherExtended = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;

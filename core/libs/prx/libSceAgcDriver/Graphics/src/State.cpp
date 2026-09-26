@@ -370,7 +370,17 @@ State DecodeState(const QueueState& queue) {
         default: throw std::runtime_error("AGC graphics: unsupported primitive type " + std::to_string(primitive));
     }
     zero(queue.userConfig, 0x24b, ~0u, "primitive restart (GE_MULTI_PRIM_IB_RESET_EN)", "user-config");
-    zero(cx, 0x207, ~0u, "clip distances, layer, viewport or auxiliary vertex exports");
+    // PA_CL_VS_OUT_CNTL: USE_VTX_RENDER_TARGET_INDX (bit 18) takes the layer from the misc vector
+    // (VS_OUT_MISC_VEC_ENA, bit 21), which may travel on the side bus (bit 24); the recompiler
+    // writes it to Layer. Other auxiliary outputs are not modelled.
+    const auto vsOut = read(cx, 0x207);
+    result.layeredOutput = (vsOut & (1u << 18u)) != 0;
+    Require(!result.layeredOutput || (vsOut & (1u << 21u)) != 0, "a vertex render-target index without the misc export vector");
+    if ((vsOut & ~0x01240000u) != 0) {
+        std::ostringstream message;
+        message << "AGC graphics: PA_CL_VS_OUT_CNTL=0x" << std::hex << vsOut << ": clip distances, layer, viewport or auxiliary vertex exports are unsupported (CB_COLOR0_VIEW=0x" << read(cx, 0x31b) << " DB_DEPTH_VIEW=0x" << read(cx, 0x002) << " DB_Z_INFO=0x" << read(cx, 0x010) << " CB_TARGET_MASK=0x" << read(cx, 0x8e) << " SPI_SHADER_POS_FORMAT=0x" << read(cx, 0x1c3) << " VGT_SHADER_STAGES_EN=0x" << read(cx, 0x2d5) << ")";
+        throw std::runtime_error(message.str());
+    }
     // Z_EXPORT_ENABLE (bit 0): the pixel shader writes depth (recompiled to gl_FragDepth).
     zero(cx, 0x203, ~0x00009871u, "stencil or mask export, shader coverage or ordered fragment execution");
     zero(cx, 0x2dc, ~0x0001ff00u, "alpha-to-coverage");
@@ -441,7 +451,9 @@ State DecodeState(const QueueState& queue) {
         message << "AGC graphics: SPI_SHADER_COL_FORMAT=0x" << std::hex << exportFormat << ": color target " << std::dec << slot << " needs FP16_ABGR or 32_ABGR export";
         throw std::runtime_error(message.str());
     }
-    Require(read(cx, 0x1c3) == 4, "additional position exports are unsupported");
+    // SPI_SHADER_POS_FORMAT: POS0, plus POS1 when the misc vector is exported.
+    const auto positionFormat = read(cx, 0x1c3);
+    Require(positionFormat == 4u || (positionFormat == 0x44u && (vsOut & (1u << 21u)) != 0), "additional position exports are unsupported");
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         if ((result.colorTargetMask & (1u << slot)) == 0) continue;
         // CB_COLOR<n> registers repeat every 15 dwords; BASE_EXT, ATTRIB2 and ATTRIB3 are arrays.
@@ -463,9 +475,12 @@ State DecodeState(const QueueState& queue) {
         Require((info & 0x8000u) != 0 || number == 7, "unclamped normalized color is unsupported");
         // CB_COLOR_VIEW (gfx10 layout, Mesa): MIP_LEVEL (bits 26-29) selects the rendered mip; array
         // slices are not modelled.
+        // CB_COLOR_VIEW (gfx10): SLICE_START (bits 0-10), SLICE_MAX (bits 13-23), MIP_LEVEL (26-29).
         const auto view = read(cx, 0x31b + cb);
-        zero(cx, 0x31b + cb, ~0x3c000000u, "color array view");
+        zero(cx, 0x31b + cb, ~0x3cffe7ffu, "color view");
         const auto viewMip = (view >> 26u) & 0xfu;
+        const auto sliceStart = view & 0x7ffu;
+        auto sliceMax = (view >> 13u) & 0x7ffu;
         zero(cx, 0x31d + cb, ~0u, "color samples, fragments or destination alpha override");
         const auto attrib2 = read(cx, 0x3b0 + slot);
         const auto maxMip = attrib2 >> 28u;
@@ -489,6 +504,28 @@ State DecodeState(const QueueState& queue) {
         Require((high & ~0xffu) == 0, "invalid color address extension");
         color.address = ((static_cast<std::uint64_t>(high) << 40u) | (static_cast<std::uint64_t>(read(cx, 0x318 + cb)) << 8u)) + mipOffset;
         color.bytes = colorLayout.Bytes();
+        // As in KytyPS5: a volume (RESOURCE_TYPE 3D) stores ATTRIB3.MIP0_DEPTH + 1 slices and the
+        // view only bounds the exported ones; a 2D array spans the slices its view names.
+        if (((attrib3 >> 24u) & 3u) == 2u) {
+            color.surfaceSlices = (attrib3 & 0x1fffu) + 1u;
+            sliceMax = std::min(sliceMax, color.surfaceSlices - 1u);
+        } else {
+            color.surfaceSlices = std::max(attrib3 & 0x1fffu, sliceMax) + 1u;
+        }
+        if (!(sliceStart <= sliceMax && sliceMax < color.surfaceSlices)) {
+            std::ostringstream message;
+            message << "AGC graphics: CB_COLOR" << slot << "_VIEW=0x" << std::hex << view << " selects slices outside the surface (CB_COLOR" << slot << "_ATTRIB3=0x" << attrib3 << ", ATTRIB2=0x" << attrib2 << ")";
+            throw std::runtime_error(message.str());
+        }
+        if (color.Layered()) {
+            // Slices are laid out like texture array layers, so they share texture addressing.
+            Require(maxMip == 0 && color.tileMode == ColorTileMode::RenderTarget, "mipmapped or linear array color targets are not modelled");
+            color.sliceBytes = ComputeSurfaceSize(ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, color.elementBytes, color.extent.width, color.extent.height, 1), 1);
+            color.baseLayer = sliceStart;
+            color.layers = sliceMax - sliceStart + 1u;
+            color.address += color.sliceBytes * sliceStart;
+            color.bytes = static_cast<std::size_t>(color.sliceBytes * color.layers);
+        }
         GuestMemory::CheckGpuRange(reinterpret_cast<const void*>(color.address), color.bytes, colorLayout.Alignment(), true);
         color.format = decoded.format;
         static_cast<void>(swap);

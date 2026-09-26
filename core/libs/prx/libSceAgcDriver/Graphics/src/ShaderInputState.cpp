@@ -139,7 +139,9 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     };
 }
 
-ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const std::byte> header, std::uint64_t headerAddress, std::span<const std::uint32_t> userData) {
+// userSgprBase: the SGPR where user data starts. Merged stages (ES+GS, LS+HS) begin with eight
+// system SGPRs; the header's direct-resource offsets count from the first user SGPR.
+ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const std::byte> header, std::uint64_t headerAddress, std::span<const std::uint32_t> userData, std::uint32_t userSgprBase) {
     if (header.size() < sizeof(Shader)) throw std::runtime_error("AGC graphics: shader header is smaller than the fixed AGC header");
     Shader shader;
     std::memcpy(&shader, header.data(), sizeof(Shader));
@@ -155,8 +157,8 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const st
     for (std::uint32_t type = 0; type < userDataHeader.direct_resource_count; ++type) {
         const auto reg = directOffsets[type];
         if (reg == ShaderRegs::AGC_ILLEGAL_DIRECT_OFFSET) continue;
-        if (type == static_cast<std::uint32_t>(ShaderRegs::AgcDirectResourceType::PtrVertexBufferTable)) vertexBufferReg = reg;
-        if (type == static_cast<std::uint32_t>(ShaderRegs::AgcDirectResourceType::PtrVertexAttribDescTable)) vertexAttribReg = reg;
+        if (type == static_cast<std::uint32_t>(ShaderRegs::AgcDirectResourceType::PtrVertexBufferTable)) vertexBufferReg = static_cast<std::int32_t>(reg + userSgprBase);
+        if (type == static_cast<std::uint32_t>(ShaderRegs::AgcDirectResourceType::PtrVertexAttribDescTable)) vertexAttribReg = static_cast<std::int32_t>(reg + userSgprBase);
     }
     if (vertexAttribReg < 0) return info;
     if (vertexBufferReg < 0) throw std::runtime_error("AGC graphics: vertex attribute table requires a vertex buffer table");
@@ -168,7 +170,15 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const st
     _readHeaderArray(header, headerAddress, shader.input_semantics, shader.num_input_semantics, semantics.data());
     const auto attribTableAddr = static_cast<std::uint64_t>(userData[static_cast<std::uint32_t>(vertexAttribReg)]) | (static_cast<std::uint64_t>(userData[static_cast<std::uint32_t>(vertexAttribReg) + 1u]) << 32u);
     const auto bufferTableAddr = static_cast<std::uint64_t>(userData[static_cast<std::uint32_t>(vertexBufferReg)]) | (static_cast<std::uint64_t>(userData[static_cast<std::uint32_t>(vertexBufferReg) + 1u]) << 32u);
-    if (attribTableAddr == 0) throw std::runtime_error("AGC graphics: null vertex attribute table address");
+    if (attribTableAddr == 0) {
+        std::string message = "AGC graphics: null vertex attribute table address (shader type " + std::to_string(shader.type) + ", attribute table s" + std::to_string(vertexAttribReg) + ", buffer table s" + std::to_string(vertexBufferReg) + ", user data";
+        for (const auto value : userData) {
+            char word[12];
+            std::snprintf(word, sizeof(word), " %08x", value);
+            message += word;
+        }
+        throw std::runtime_error(message + ")");
+    }
     if (bufferTableAddr == 0) throw std::runtime_error("AGC graphics: null vertex buffer table address");
     info.fetchEmbedded = true;
     info.fetchAttribReg = static_cast<std::uint32_t>(vertexAttribReg);

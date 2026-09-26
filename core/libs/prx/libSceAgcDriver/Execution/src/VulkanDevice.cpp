@@ -88,6 +88,7 @@ struct VulkanDevice::State {
     bool depthBounds = false;
     bool depthBiasClamp = false;
     bool independentBlend = false;
+    bool geometryShader = false;
     bool imageGatherExtended = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
@@ -446,6 +447,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.tessellationShader = available.tessellationShader;
     state->tessellationShader = enabled.tessellationShader == VK_TRUE;
     if (state->tessellationShader) state->capabilities.push_back(3);
+    // The Geometry capability also covers pixel shaders reading their render-target layer.
+    enabled.geometryShader = available.geometryShader;
+    state->geometryShader = enabled.geometryShader == VK_TRUE;
+    if (state->geometryShader) state->capabilities.push_back(spv::CapabilityGeometry);
     require(available.samplerAnisotropy && available.textureCompressionBC, "device lacks sampler anisotropy or BC texture compression support required for texture sampling");
     enabled.samplerAnisotropy = VK_TRUE;
     enabled.textureCompressionBC = VK_TRUE;
@@ -849,6 +854,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.depthBounds = state->depthBounds;
     context.depthBiasClamp = state->depthBiasClamp;
     context.independentBlend = state->independentBlend;
+    context.geometryShader = state->geometryShader;
     context.imageGatherExtended = state->imageGatherExtended;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;

@@ -80,9 +80,23 @@ std::uint32_t HostSubgroupSize(const RecompileRequest& request) {
 
 }
 
+// The draw's geometry subgroup configuration, when the request has one.
+const MeshConfiguration* MeshOf(const RecompileRequest& request) {
+    return request.graphics.has_value() && request.graphics->mesh.has_value() ? &*request.graphics->mesh : nullptr;
+}
+
+std::vector<std::uint32_t> SpliceGeometryHalves(std::span<const std::uint32_t> front, std::span<const std::uint32_t> back) {
+    const auto decoded = DecodeRdnaFrontProgram(front);
+    if (decoded.instructions.empty() || decoded.instructions.back().op != RdnaOpcode::SSetpcB64) throw std::runtime_error("SpliceGeometryHalves: front program does not end in s_setpc_b64");
+    const auto jumpWords = decoded.instructions.back().wordCount;
+    std::vector<std::uint32_t> result(decoded.code.begin(), decoded.code.end() - jumpWords);
+    result.insert(result.end(), back.begin(), back.end());
+    return result;
+}
+
 IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     const auto stageKind = toShaderStageKind(request.shader.stage);
-    const auto inputInfo = BuildShaderStageInputInfo(stageKind, request.context, HostSubgroupSize(request));
+    const auto inputInfo = BuildShaderStageInputInfo(stageKind, request.context, HostSubgroupSize(request), MeshOf(request));
 
     constexpr RdnaInstructionDecoder decoder;
     const auto decoded = decoder.Decode(request.shader.code);
@@ -267,7 +281,7 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
 }
 
 CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, const ResourceSnapshot& resourceSnapshot, const ResourceSpecialization& resourceSpecialization) {
-    const auto inputInfo = BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request));
+    const auto inputInfo = BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), MeshOf(request));
     constexpr DeadCodeEliminator deadCodeEliminator;
     constexpr ResourceMaterializer resourceMaterializer;
     resourceMaterializer.Apply(program, resourceSpecialization);
@@ -388,7 +402,7 @@ RecompileResult materializeVariant(SourceEntry& source, const RecompileRequest& 
 }
 
 RecompileResult RecompileImpl(const RecompileRequest& request) {
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request)));
+    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), MeshOf(request)));
     RequestMemoryView memory(request.context.memory);
     const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
     ResourceSnapshot snapshot;
@@ -433,14 +447,14 @@ RecompileResult recompileReporting(const RecompileRequest& request, Impl&& impl)
 }
 
 std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& request) {
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request)));
+    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), MeshOf(request)));
     if (request.useCache) return getSource(request)->plan;
     return makeResourcePlan(request);
 }
 
 std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime) {
     // Validates the stage inputs once per request, as GetResourcePlan and Recompile(request) do.
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request)));
+    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), MeshOf(request)));
     auto capture = std::make_shared<ResourceCapture>();
     if (request.useCache) {
         capture->source = getSource(request);

@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 namespace AgcDriver::Graphics {
@@ -30,7 +31,8 @@ Pipeline::Pipeline(const Context& context, const State& state, std::span<const R
     if (state.stages.mesh) {
         Require(context.meshShader, "device does not support VK_EXT_mesh_shader");
         const auto& mesh = *state.stages.mesh;
-        Require(mesh.threadsPerGroup <= context.meshLimits.maxMeshWorkGroupInvocations && mesh.threadsPerGroup <= context.meshLimits.maxMeshWorkGroupSize[0], "mesh workgroup exceeds device limits");
+        const auto invocations = MeshInvocations(state, context.subgroup.subgroupSize);
+        Require(invocations <= context.meshLimits.maxMeshWorkGroupInvocations && invocations <= context.meshLimits.maxMeshWorkGroupSize[0], "mesh workgroup exceeds device limits");
         Require(mesh.maxVertices <= context.meshLimits.maxMeshOutputVertices && mesh.maxPrimitives <= context.meshLimits.maxMeshOutputPrimitives && static_cast<std::uint64_t>(mesh.ldsSizeDwords) * 4 <= context.meshLimits.maxMeshSharedMemorySize, "mesh output or LDS exceeds device limits");
     }
     const auto& viewport = state.viewport;
@@ -113,7 +115,13 @@ Pipeline::Pipeline(const Context& context, const State& state, std::span<const R
         framebufferInfo.pAttachments = views.empty() ? nullptr : views.data();
         framebufferInfo.width = state.renderExtent.width;
         framebufferInfo.height = state.renderExtent.height;
-        framebufferInfo.layers = 1;
+        // A layered draw spans the layers every attachment has (depth targets have one).
+        std::uint32_t layers = std::numeric_limits<std::uint32_t>::max();
+        for (std::uint32_t slot = 0; slot < slots; ++slot) {
+            if (targets[slot] != nullptr) layers = std::min(layers, state.colors[slot].Layered() ? state.colors[slot].layers : 1u);
+        }
+        if (state.hasDepthTarget || layers == std::numeric_limits<std::uint32_t>::max()) layers = 1;
+        framebufferInfo.layers = layers;
         Check(context.Function<PFN_vkCreateFramebuffer>("vkCreateFramebuffer")(context.device, &framebufferInfo, nullptr, &framebuffer), "vkCreateFramebuffer");
         VkPipelineVertexInputStateCreateInfo input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
         const auto vertexInput = BuildVertexInputLayout(context, shaders.front().program->vertexAttributes);

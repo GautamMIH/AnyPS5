@@ -129,7 +129,12 @@ void DefineModule(SpirvEmitterState& state) {
     if (state.cullDistanceVariable != 0) {
         state.module.EmitCapability(spv::CapabilityCullDistance);
     }
-    if (state.layerVariable != 0 || InputVariableForKind(state, StageInputKind::Layer) != 0) {
+    // A pixel shader reads its layer under the Geometry capability; vertex-pipeline stages write
+    // it under ShaderLayer (SPIR-V 1.5). Mesh shaders write it under MeshShadingEXT.
+    if (InputVariableForKind(state, StageInputKind::Layer) != 0) {
+        state.module.EmitCapability(spv::CapabilityGeometry);
+    }
+    if (state.layerVariable != 0) {
         state.module.RequireVersion(0x00010500u);
         state.module.EmitCapability(spv::CapabilityShaderLayer);
     }

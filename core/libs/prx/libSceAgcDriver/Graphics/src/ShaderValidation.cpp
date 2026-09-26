@@ -113,7 +113,7 @@ struct Module {
                 return;
             }
             if (!input && value == spv::BuiltInPrimitiveTriangleIndicesEXT) primitiveIndices = true;
-            Require((input && ((value == spv::BuiltInWorkgroupId || value == spv::BuiltInLocalInvocationId || value == spv::BuiltInGlobalInvocationId || value == spv::BuiltInNumWorkgroups) && signature == "u32x3")) || (input && value == spv::BuiltInLocalInvocationIndex && signature == "u32") || (!input && value == spv::BuiltInPrimitiveTriangleIndicesEXT && signature == "u32x3") || (!input && value == spv::BuiltInCullPrimitiveEXT && signature == "bool"), "unsupported mesh built-in");
+            Require((input && ((value == spv::BuiltInWorkgroupId || value == spv::BuiltInLocalInvocationId || value == spv::BuiltInGlobalInvocationId || value == spv::BuiltInNumWorkgroups) && signature == "u32x3")) || (input && value == spv::BuiltInLocalInvocationIndex && signature == "u32") || (!input && value == spv::BuiltInPrimitiveTriangleIndicesEXT && signature == "u32x3") || (!input && value == spv::BuiltInCullPrimitiveEXT && signature == "bool") || (!input && value == spv::BuiltInLayer && (signature == "u32" || signature == "i32")), "unsupported mesh built-in");
             return;
         }
         const auto signature = Signature(type);
@@ -124,7 +124,7 @@ struct Module {
             position = true;
         } else {
             const bool depthOutput = storage == spv::StorageClassOutput && value == spv::BuiltInFragDepth && signature == "f32";
-            Require(depthOutput || (storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || (value == spv::BuiltInFrontFacing && signature == "bool"))), "unsupported fragment built-in");
+            Require(depthOutput || (storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || (value == spv::BuiltInFrontFacing && signature == "bool") || (value == spv::BuiltInLayer && (signature == "u32" || signature == "i32")))), "unsupported fragment built-in");
         }
     }
 };
@@ -218,13 +218,18 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     mesh &&
                     capability == spv::CapabilityMeshShadingEXT;
 
+                const bool isLayerCapability =
+                    fragment && features.geometryShader &&
+                    capability == spv::CapabilityGeometry;
+
                 Require(
                     isBaseCapability ||
                     isBarycentricCapability ||
                     isSubgroupCapability ||
                     isBdaCapability ||
                     isTessellationCapability ||
-                    isMeshCapability,
+                    isMeshCapability ||
+                    isLayerCapability,
                     std::string("SPIR-V requires unsupported device capability ") +
                         std::to_string(static_cast<std::uint32_t>(capability)));
 
@@ -335,12 +340,19 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
     }
     const auto mode = [&](std::uint32_t name, std::vector<std::uint32_t> operands) {
         const auto it = module.modes.find(name);
-        Require(it != module.modes.end() && it->second == operands, "missing or incompatible shader execution mode");
+        if (it == module.modes.end() || it->second != operands) {
+            const auto list = [](const std::vector<std::uint32_t>& values) {
+                std::string text;
+                for (const auto value : values) text += " " + std::to_string(value);
+                return text;
+            };
+            Require(false, "missing or incompatible shader execution mode " + std::to_string(name) + ": expected" + list(operands) + ", module has" + (it == module.modes.end() ? std::string(" none") : list(it->second)));
+        }
     };
     if (mesh) {
         Require(state.stages.mesh.has_value(), "mesh configuration is missing");
         const auto& config = *state.stages.mesh;
-        mode(spv::ExecutionModeLocalSize, {config.threadsPerGroup, 1, 1});
+        mode(spv::ExecutionModeLocalSize, {MeshInvocations(state, subgroup.subgroupSize), 1, 1});
         mode(spv::ExecutionModeOutputVertices, {config.maxVertices});
         mode(spv::ExecutionModeOutputPrimitivesEXT, {config.maxPrimitives});
         mode(spv::ExecutionModeOutputTrianglesEXT, {});

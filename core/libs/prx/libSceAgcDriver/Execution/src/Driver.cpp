@@ -474,6 +474,8 @@ private:
             std::uint32_t firstUserSgpr = 8;
             std::vector<std::uint32_t> userData;
             std::array<ShaderRecompiler::MemoryRegion, 2> memory;
+            // System SGPRs merged stages receive ahead of user data (see initializeMerged).
+            std::uint32_t systemSgprs = 0;
         };
         const auto programAddress = [&](std::uint32_t base) {
             const auto high = readRegister(queue.shader, base + 1);
@@ -513,6 +515,7 @@ private:
         };
         const auto initializeMerged = [&](Program& program, std::uint32_t pointerBase, bool pointerRequired) {
             program.firstUserSgpr = 0;
+            program.systemSgprs = 8;
             program.userData.insert(program.userData.begin(), 8, 0);
             if (pointerRequired) {
                 const auto low = readRegister(queue.shader, pointerBase);
@@ -537,7 +540,10 @@ private:
             const auto type = snapshot->second->type;
             require(type == 2 || type == 4, "invalid geometry front binary type");
             append(0xc8, type, Stage::Mesh, 0x8b, 0x8c, Role::Main);
-            initializeMerged(programs.back(), 0x82, type == 4);
+            // Separately bound halves pass the front half's user-data table in s0:s1
+            // (SPI_SHADER_USER_DATA_ADDR_LO/HI_GS). Halves fused with sceAgcUnknownFuseShaderHalves
+            // share the fused shader's user data and leave the address unset.
+            initializeMerged(programs.back(), 0x82, type == 4 && queue.shader.contains(0x82));
             if (type == 4) append(0x88, 6, Stage::Mesh, 0x8b, 0x8c, Role::GeometryBack);
         } else {
             append(0xc8, 2, Stage::Vertex, 0x8b, 0x8c, Role::Main);
@@ -571,13 +577,28 @@ private:
         results.reserve(programs.size() + (graphics.rectList ? 2u : 0u));
         stages.reserve(programs.size());
         std::uint32_t pushCursorBytes = 0;
+        const auto vertexStageInfo = [&](const auto& program) {
+            auto info = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, program.systemSgprs);
+            info.paClVsOutCntl = readRegister(queue.context, 0x207);
+            return info;
+        };
+        // A geometry front half jumps into its back half; the two compile as one spliced program.
+        std::vector<std::uint32_t> splicedGeometry;
+        for (std::size_t i = 0; i < programs.size(); ++i) {
+            if (roles[i] == Role::GeometryBack) {
+                require(i > 0 && roles[i - 1] == Role::Main, "geometry back half without its front half");
+                splicedGeometry = ShaderRecompiler::SpliceGeometryHalves(programs[i - 1].binary.code, programs[i].binary.code);
+            }
+        }
         for (std::size_t i = 0; i < programs.size(); ++i) {
             if (roles[i] == Role::GeometryBack) continue;
             const auto& program = programs[i];
             const auto waveSize = program.binary.stage == Stage::Fragment ? graphics.stages.fragmentWaveSize : graphics.stages.vertexWaveSize;
+            auto binary = program.binary;
+            if (roles[i] == Role::Main && !splicedGeometry.empty()) binary.code = splicedGeometry;
             ShaderRecompiler::RecompileRequest request{
-                program.binary,
-                {waveSize, program.firstUserSgpr, program.userData, std::nullopt, program.binary.stage == Stage::Fragment ? pixel : std::nullopt, program.binary.stage == Stage::Fragment ? std::nullopt : std::optional(Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData)), memory},
+                binary,
+                {waveSize, program.firstUserSgpr, program.userData, std::nullopt, program.binary.stage == Stage::Fragment ? pixel : std::nullopt, program.binary.stage == Stage::Fragment ? std::nullopt : std::optional(vertexStageInfo(program)), memory},
                 device->Target(),
                 {0, 0, pushCursorBytes, Graphics::PipelinePushConstantBytes - pushCursorBytes},
                 ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}

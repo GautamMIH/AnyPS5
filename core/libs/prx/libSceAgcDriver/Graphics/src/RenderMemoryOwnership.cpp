@@ -6,6 +6,7 @@
 namespace AgcDriver::Graphics {
 
 ResidentColor::ResidentColor(const Context& context, const ColorTarget& color) : context(context), color(color), transfer(context) {
+    if (color.Layered()) layered = std::make_unique<LayeredColorTransfer>(context, color);
     memoryWatch = std::make_unique<GuestMemoryTracking::Watch>(color.address, color.bytes, this, [](void* owner, GuestMemoryTracking::Access access) {
         static_cast<ResidentColor*>(owner)->resolveCpuAccess(access);
     });

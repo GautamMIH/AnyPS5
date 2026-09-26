@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RENDERCACHE_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/LayeredColorTransfer.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <map>
 #include <vector>
@@ -16,7 +17,7 @@ public:
     void Download(VkCommandBuffer commands);
     void Commit();
     void Transition(VkCommandBuffer commands, VkImageLayout layout);
-    RenderTarget& Target() { return transfer.Target(color, false); }
+    RenderTarget& Target() { return layered ? layered->Target() : transfer.Target(color, false); }
     const ColorTarget& Description() const { return color; }
     bool Valid() const { return valid; }
     bool Dirty() const { return dirty; }
@@ -30,6 +31,8 @@ private:
     Context context;
     ColorTarget color;
     GpuColorTransfer transfer;
+    // Array and volume slices use CPU transfers instead of the GPU detile path.
+    std::unique_ptr<LayeredColorTransfer> layered;
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     bool valid = false;
     bool dirty = false;

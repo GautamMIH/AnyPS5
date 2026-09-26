@@ -34,7 +34,10 @@ std::uint32_t blockOffset(std::uint32_t x, std::uint32_t y, std::uint32_t elemen
 }
 
 ColorTileMode DecodeColorTileMode(std::uint32_t attrib3) {
-    require((attrib3 & 0x80002000u) == 0 && (attrib3 & 0x1fffu) == 0 && ((attrib3 >> 24u) & 3u) == 1 && ((attrib3 >> 27u) & 7u) == 1, "AGC graphics: unsupported color depth, dimension, resource level or metadata mode");
+    // MIP0_DEPTH (bits 0-12) counts array or volume slices (see DecodeState); RESOURCE_TYPE
+    // (bits 24-25) is 2D or 3D, whose render-target slices are laid out alike.
+    const auto resourceType = (attrib3 >> 24u) & 3u;
+    require((attrib3 & 0x80002000u) == 0 && (resourceType == 1 || resourceType == 2) && ((attrib3 >> 27u) & 7u) == 1, "AGC graphics: unsupported color dimension, resource level or metadata mode");
     const auto mode = (attrib3 >> 14u) & 0x1fu;
     const auto fmaskMode = (attrib3 >> 19u) & 0x1fu;
     require(fmaskMode == 0 || fmaskMode == 0x18, "AGC graphics: unsupported color FMASK swizzle mode");

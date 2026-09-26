@@ -87,6 +87,9 @@ struct ShaderVertexStageInfo {
     std::uint32_t fetchAttribReg;
     std::uint32_t fetchBufferReg;
     bool fetchEmbedded;
+    // PA_CL_VS_OUT_CNTL: which position-export components carry point size, layer, viewport
+    // index and clip or cull distances.
+    std::uint32_t paClVsOutCntl = 0;
 };
 
 struct GuestContext {
@@ -348,6 +351,12 @@ struct RecompileResult {
 };
 
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);
+
+// Separately compiled geometry halves run as one wave: the front (ES) half ends with
+// s_setpc_b64 into the back (GS) half. The spliced program is the front up to that jump followed
+// by the back, so both halves keep their code-relative addressing (s_getpc and embedded
+// constants resolve within the returned code).
+[[nodiscard]] std::vector<std::uint32_t> SpliceGeometryHalves(std::span<const std::uint32_t> front, std::span<const std::uint32_t> back);
 
 // The resource plan, snapshot and specialization a driver captured for the request (see
 // CaptureResources in Optimization/ResourceProgram.hpp): this overload reuses them instead of
