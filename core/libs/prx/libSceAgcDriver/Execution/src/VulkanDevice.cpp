@@ -21,6 +21,7 @@
 #include <spirv/unified1/spirv.hpp>
 #include <array>
 #include <algorithm>
+#include <map>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -97,6 +98,7 @@ struct VulkanDevice::State {
     VkPhysicalDeviceMeshShaderPropertiesEXT meshLimits{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
     std::unique_ptr<PresentationScaler> scaler;
     std::unique_ptr<PresentationScaler> rgbaScaler;
+    std::map<VkFormat, std::unique_ptr<PresentationScaler>> packedScalers;
 
     template<typename TFunction>
     TFunction InstanceFunction(const char* name) const {
@@ -180,6 +182,7 @@ struct VulkanDevice::State {
             colorTransfer.reset();
             scaler.reset();
             rgbaScaler.reset();
+            packedScalers.clear();
             pipelineCache.reset();
             bufferPool.reset();
             descriptorCache.reset();
@@ -602,7 +605,16 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             state->colorTransfer->Upload(display->address, width, height, Graphics::ColorTileMode::RenderTarget);
         }
     }
-    auto* scaler = resident && display->pixelFormat == 0x8000000022000000ull ? state->rgbaScaler.get() : state->scaler.get();
+    const auto layout = display != nullptr ? DecodeDisplayPixelFormat(display->pixelFormat) : DisplayPixelLayout::Bgra8;
+    auto* scaler = resident && layout == DisplayPixelLayout::Rgba8 ? state->rgbaScaler.get() : state->scaler.get();
+    if (layout == DisplayPixelLayout::Rgb10A2 || layout == DisplayPixelLayout::Bgr10A2) {
+        // The display engine reinterprets the surface bits, so the source image takes the guest
+        // format and the blit converts to the swapchain.
+        const auto format = layout == DisplayPixelLayout::Rgb10A2 ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+        auto& packed = state->packedScalers[format];
+        if (!packed) packed = std::make_unique<PresentationScaler>(graphicsContext(), format, VK_FORMAT_B8G8R8A8_UNORM);
+        scaler = packed.get();
+    }
     if (!pixels.empty()) state->Upload(pixels);
     timing.Mark("pixel_upload");
     auto wait = state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences");
@@ -650,7 +662,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             resident->Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             scaler->RecordImage(commands, resident->Target().Image());
         } else {
-            if (display != nullptr) state->colorTransfer->Detile(commands, display->pixelFormat == 0x8000000022000000ull);
+            if (display != nullptr) state->colorTransfer->Detile(commands, layout == DisplayPixelLayout::Rgba8);
             scaler->RecordUpload(commands, display != nullptr ? state->colorTransfer->LinearBuffer() : state->uploadBuffer);
         }
         VkClearColorValue letterbox{};

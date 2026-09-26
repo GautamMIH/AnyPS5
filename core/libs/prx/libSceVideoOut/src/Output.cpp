@@ -180,13 +180,15 @@ int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoO
     return 0;
 }
 
+// Margins apply only while the system UI shows the title in window mode, which AnyPS5 never
+// does, so they are accepted without effect (as in KytyPS5).
 int APS5_VABI sceVideoOutSetWindowModeMargins(int handle, int top, int bottom) {
     (void)top;
     (void)bottom;
     if (!VideoOutDriver::Get().IsOpen(handle)) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
-    throw std::runtime_error(std::string(__func__) + " not implemented");
+    return 0;
 }
 
 int APS5_VABI sceVideoOutLatencyControlWaitBeforeInput(int handle) {

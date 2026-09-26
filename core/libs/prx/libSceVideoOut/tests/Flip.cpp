@@ -8,6 +8,7 @@
 #include "prx/libc/include/Shutdown.hpp"
 #include <array>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <string>
 #include <limits>
@@ -149,6 +150,23 @@ void testDecode() {
             }
         }
     }
+    for (const auto format : {0x8100000022000000ull, 0x8100000000000000ull}) {
+        buffer.pixelFormat = format;
+        const auto pixels = AgcDriver::ReadDisplayBuffer(buffer);
+        for (uint32_t y = 0; y < buffer.height; ++y) {
+            for (uint32_t x = 0; x < buffer.width; ++x) {
+                uint32_t texel = 0;
+                std::memcpy(&texel, tiled.data() + tiledOffset(x, y, buffer.width), sizeof(texel));
+                const auto low = (texel >> 2u) & 0xffu;
+                const auto high = (texel >> 22u) & 0xffu;
+                const auto blue = format == 0x8100000022000000ull ? high : low;
+                const auto red = format == 0x8100000022000000ull ? low : high;
+                const auto offset = (static_cast<std::size_t>(y) * buffer.width + x) * 4;
+                check(pixels[offset] == static_cast<std::byte>(blue) && pixels[offset + 1] == static_cast<std::byte>((texel >> 12u) & 0xffu) && pixels[offset + 2] == static_cast<std::byte>(red) && pixels[offset + 3] == static_cast<std::byte>((texel >> 30u) * 85u), "10-bit display pixel mismatch");
+            }
+        }
+    }
+    buffer.pixelFormat = 0x8000000000000000ull;
     expectFailure([&] { AgcDriver::DecodeDisplayBuffer(buffer, std::span(tiled).first(tiled.size() - 1)); });
     buffer.pixelFormat = 0;
     expectFailure([&] { AgcDriver::DisplayBufferSize(buffer); });
