@@ -103,7 +103,7 @@ endforeach()
 
 add_custom_target(libs DEPENDS ${PATCHED_OUTPUTS})
 
-add_executable(application_heap_tests EXCLUDE_FROM_ALL tests/ApplicationHeap.cpp prx/libc/src/ApplicationHeap.cpp)
+add_executable(application_heap_tests EXCLUDE_FROM_ALL tests/ApplicationHeap.cpp prx/libc/src/ApplicationHeap.cpp prx/libc/src/ApplicationProcessParameters.cpp)
 target_include_directories(application_heap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(application_heap_tests PROPERTIES CXX_EXTENSIONS OFF)
 
