@@ -270,7 +270,13 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             break;
         case 0x37: {
             require(packet.size() >= 5, "WRITE_DATA has no data");
-            require((packet[1] & ~0x00110f00u) == 0, "WRITE_DATA engine, cache or reserved fields are not implemented");
+            // Cache policy (bits 25-26) only steers GPU cache allocation and PFP engine selection (bit 30)
+            // only picks which micro-engine performs the same write; neither is observable here.
+            if ((packet[1] & ~0x46110f00u) != 0) {
+                char text[96]{};
+                std::snprintf(text, sizeof(text), "WRITE_DATA engine, cache or reserved fields are not implemented (control 0x%08x)", packet[1]);
+                throw std::runtime_error(text);
+            }
             const auto destination = (packet[1] >> 8u) & 0xfu;
             require(destination == 1 || destination == 2 || (queue != 0 && destination == 5), "WRITE_DATA register or GDS destination is not implemented");
             require((packet[2] & 3u) == 0, "misaligned WRITE_DATA destination");

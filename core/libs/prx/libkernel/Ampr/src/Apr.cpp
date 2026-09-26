@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <cstdio>
 #include <atomic>
 #include <cerrno>
 #include <cstdint>
@@ -92,6 +94,14 @@ int resolve(const char* path, std::uint32_t& id, std::uint64_t& size) {
 #endif
 }
 
+bool traceFiles() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_TRACE_FILES");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
 int resolveMany(const char* const* paths, std::uint32_t count, std::uint32_t* ids, std::uint64_t* sizes, std::uint32_t* errorIndex) {
     if (errorIndex) *errorIndex = 0;
     if (count == 0 || count > kMaxResolveCount) return failure(kBsdInvalid);
@@ -99,6 +109,7 @@ int resolveMany(const char* const* paths, std::uint32_t count, std::uint32_t* id
     for (std::uint32_t index = 0; index < count; ++index) {
         std::uint64_t size = 0;
         const int error = paths[index] ? resolve(paths[index], ids[index], size) : kBsdFault;
+        if (traceFiles()) std::fprintf(stderr, "[AnyPS5 file] apr-resolve %s = %d (id %u, %llu bytes)\n", paths[index] ? paths[index] : "(null)", error, error == 0 ? ids[index] : 0u, static_cast<unsigned long long>(size));
         if (error != 0) {
             if (errorIndex) *errorIndex = index;
             return failure(error);

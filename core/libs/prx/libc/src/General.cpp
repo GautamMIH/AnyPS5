@@ -22,7 +22,14 @@ extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {
     while (end > start && (s[end - 1] == '/' || s[end - 1] == '\\')) {
         --end;
     }
-    std::filesystem::path result = std::filesystem::current_path() / std::filesystem::path(s.substr(start, end - start));
+    const std::string relative = s.substr(start, end - start);
+#ifndef _WIN32
+    // Character devices the guest kernel also provides map to the host's devices of the same name.
+    if (relative == "dev/random" || relative == "dev/urandom" || relative == "dev/null" || relative == "dev/zero") {
+        return std::filesystem::path("/") / relative;
+    }
+#endif
+    std::filesystem::path result = std::filesystem::current_path() / std::filesystem::path(relative);
     return result.make_preferred();
 }
 

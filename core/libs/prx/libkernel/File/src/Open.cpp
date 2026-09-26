@@ -6,6 +6,9 @@
 #include "SceTypes.hpp"
 
 #include <cerrno>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
@@ -149,6 +152,23 @@ namespace {
 constexpr int kErrorInvalid = 22;
 constexpr int kErrorFault = 14;
 
+// ANYPS5_TRACE_FILES=1 logs every guest path lookup with its host path and outcome.
+bool traceFiles() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_TRACE_FILES");
+        return value != nullptr && value[0] != '\0' && value[0] != '0';
+    }();
+    return enabled;
+}
+
+void trace(const char* operation, const char* path, const std::filesystem::path& host, int result) {
+    if (!traceFiles()) return;
+    const int error = errno;
+    std::fprintf(stderr, "[AnyPS5 file] %s %s -> %s = %d%s%s\n", operation, path, host.string().c_str(), result,
+        result < 0 ? " " : "", result < 0 ? std::strerror(error) : "");
+    errno = error;
+}
+
 int openFile(const char* path, int flags, int mode) {
     if (path == nullptr) {
         errno = EFAULT;
@@ -159,7 +179,10 @@ int openFile(const char* path, int flags, int mode) {
         errno = EINVAL;
         return -1;
     }
-    return NativeOpen(ResolvePath_nid_no_patch(path), nativeFlags, mode);
+    const auto host = ResolvePath_nid_no_patch(path);
+    const int result = NativeOpen(host, nativeFlags, mode);
+    trace("open", path, host, result);
+    return result;
 }
 
 int sceResult(const int result) {
@@ -183,11 +206,14 @@ int statPath(const char* path, FileStat* sb) {
         errno = EFAULT;
         return -1;
     }
-    const int error = File::FillFileStat(ResolvePath_nid_no_patch(path), sb);
+    const auto host = ResolvePath_nid_no_patch(path);
+    const int error = File::FillFileStat(host, sb);
     if (error != 0) {
         errno = error;
+        trace("stat", path, host, -1);
         return -1;
     }
+    trace("stat", path, host, 0);
     return 0;
 }
 
