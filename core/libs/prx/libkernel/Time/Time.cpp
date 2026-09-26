@@ -2,6 +2,8 @@
 
 #include "prx/libc/include/General.hpp"
 #include <cerrno>
+#include <chrono>
+#include <thread>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -241,17 +243,13 @@ int APS5_VABI clock_getres_nid_postfix(int clockId, KernelTimespec* res) {
 // ---------------------------------------------------------------------------
 
 int APS5_VABI sceKernelClockGetres(KernelClockid clock_id, KernelTimespec* tp) {
- (void)clock_id;
- (void)tp;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!tp) return static_cast<int>(0x8002000E);
+ return clock_getres_nid_postfix(clock_id, tp) == 0 ? 0 : static_cast<int>(0x80020016);
 }
 
 int APS5_VABI sceKernelClockGettime(KernelClockid clock_id, KernelTimespec* tp) {
- (void)clock_id;
- (void)tp;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!tp) return static_cast<int>(0x8002000E);
+ return clock_gettime_nid_postfix(clock_id, tp) == 0 ? 0 : static_cast<int>(0x80020016);
 }
 
 int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserved, int64_t* utc_time, KernelTimezone* timezone, int32_t* dst_seconds) {
@@ -274,30 +272,26 @@ int APS5_VABI sceKernelConvertUtcToLocaltime(int64_t utc_time, int64_t* local_ti
 }
 
 int APS5_VABI sceKernelGettimeofday(KernelTimeval* tp) {
- (void)tp;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!tp) return static_cast<int>(0x8002000E);
+ return gettimeofday_nid_postfix(tp, nullptr) == 0 ? 0 : static_cast<int>(0x80020016);
 }
 
 int APS5_VABI sceKernelGettimezone(KernelTimezone* tz) {
- (void)tz;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!tz) return static_cast<int>(0x8002000E);
+ KernelTimeval now{};
+ return gettimeofday_nid_postfix(&now, tz) == 0 ? 0 : static_cast<int>(0x80020016);
 }
 
 uint64_t APS5_VABI sceKernelReadTsc(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
 }
 
 uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return 1000000000ull;
 }
 
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {
- (void)seconds;
- NotImplemented_nid_no_patch(__func__);
+ std::this_thread::sleep_for(std::chrono::seconds(seconds));
  return 0;
 }
 

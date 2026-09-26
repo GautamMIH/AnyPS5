@@ -1,20 +1,34 @@
+#include <array>
+#include <mutex>
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
+namespace {
+
+constexpr int kMaxSignal = 128;
+constexpr int kErrorInvalid = static_cast<int>(0x80020016);
+constexpr int kErrorAlreadyExists = static_cast<int>(0x80020011);
+std::mutex exceptionMutex;
+std::array<void*, kMaxSignal> exceptionHandlers{};
+
+}
+
 extern "C" {
 
 int APS5_VABI sceKernelInstallExceptionHandler(int signum, void* handler) {
- (void)signum;
- (void)handler;
- NotImplemented_nid_no_patch(__func__);
+ if (signum <= 0 || signum >= kMaxSignal || !handler) return kErrorInvalid;
+ const std::lock_guard lock(exceptionMutex);
+ if (exceptionHandlers[signum] != nullptr) return kErrorAlreadyExists;
+ exceptionHandlers[signum] = handler;
  return 0;
 }
 
 int APS5_VABI sceKernelRemoveExceptionHandler(int signum) {
- (void)signum;
- NotImplemented_nid_no_patch(__func__);
+ if (signum <= 0 || signum >= kMaxSignal) return kErrorInvalid;
+ const std::lock_guard lock(exceptionMutex);
+ exceptionHandlers[signum] = nullptr;
  return 0;
 }
 
