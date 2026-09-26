@@ -98,6 +98,12 @@ inline constexpr std::int64_t DT_RUNPATH = 29;
 inline constexpr std::int64_t DT_FLAGS = 30;
 inline constexpr std::uint64_t DF_BIND_NOW = 0x8;
 inline constexpr std::uint64_t DF_SYMBOLIC = 0x2;
+inline constexpr std::int64_t DT_VERSYM = 0x6ffffff0;
+inline constexpr std::int64_t DT_VERDEF = 0x6ffffffc;
+inline constexpr std::int64_t DT_VERDEFNUM = 0x6ffffffd;
+inline constexpr std::int64_t DT_VERNEED = 0x6ffffffe;
+inline constexpr std::int64_t DT_VERNEEDNUM = 0x6fffffff;
+inline constexpr std::size_t kVersionTableAlignment = 8;
 inline constexpr std::size_t kHashAlignment = 8;
 inline constexpr std::size_t kStubAlignment = 16;
 

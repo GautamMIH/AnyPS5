@@ -30,7 +30,9 @@ constexpr std::int64_t kDtNeeded = 1;
 constexpr std::size_t kDynEntrySize = 16;
 constexpr char kLibraryRunPath[] = "$ORIGIN";
 
-std::vector<std::string> readNeededLibraries(const Domain::SysVDynamicSection& section) {
+}
+
+std::vector<std::string> ReadNeededLibraries(const Domain::SysVDynamicSection& section) {
     std::vector<std::string> result;
     for (std::size_t offset = 0; offset + kDynEntrySize <= section.DynamicSegmentData.size(); offset += kDynEntrySize) {
         std::int64_t tag = 0;
@@ -47,17 +49,34 @@ std::vector<std::string> readNeededLibraries(const Domain::SysVDynamicSection& s
     return result;
 }
 
+void SetNeededLibraries(Domain::SysVDynamicSection& section, const std::vector<std::string>& libraries) {
+    for (std::size_t offset = 0; offset + kDynEntrySize <= section.DynamicSegmentData.size(); offset += kDynEntrySize) {
+        std::int64_t tag = 0;
+        std::memcpy(&tag, section.DynamicSegmentData.data() + offset, 8);
+        if (tag != kDtNeeded)
+            throw Domain::RelinkerException("Rebuilt dependency table contains a non-DT_NEEDED entry");
+    }
+    section.DynamicSegmentData.clear();
+    for (const auto& library : libraries) {
+        const std::uint64_t nameOffset = section.DynStrData.size();
+        for (const char c : library)
+            section.DynStrData.push_back(static_cast<std::uint8_t>(c));
+        section.DynStrData.push_back(0);
+        const std::size_t entry = section.DynamicSegmentData.size();
+        section.DynamicSegmentData.resize(entry + kDynEntrySize);
+        std::memcpy(section.DynamicSegmentData.data() + entry, &kDtNeeded, 8);
+        std::memcpy(section.DynamicSegmentData.data() + entry + 8, &nameOffset, 8);
+    }
 }
 
-ModuleRelinkOutcome RelinkModule(const std::vector<std::uint8_t>& inputBytes, const std::string& absOutputPath, const Args& args) {
+PreparedModule PrepareModule(const std::vector<std::uint8_t>& inputBytes, const Args& args) {
     const Relinker::SelfUnwrapper selfUnwrapper;
     if (selfUnwrapper.IsSelf(inputBytes))
         std::cout << "Input: SELF container; extracting the embedded ELF\n";
-    auto sourceBytes = selfUnwrapper.Unwrap(inputBytes);
+    PreparedModule module;
+    module.Image = selfUnwrapper.Unwrap(inputBytes);
 
-    Io::FileWriter fileWriter;
-    auto elfReader = std::make_shared<Relinker::ElfReader>(sourceBytes);
-
+    auto elfReader = std::make_shared<Relinker::ElfReader>(module.Image);
     const auto pipeline = std::make_shared<Relinker::RelinkerPipeline>(
         elfReader,
         args.skipSyscallCheck ? Relinker::MakeNullSyscallScanner() : Relinker::MakeSyscallScanner(),
@@ -69,13 +88,18 @@ ModuleRelinkOutcome RelinkModule(const std::vector<std::uint8_t>& inputBytes, co
     );
 
     std::cout << "System: " << (args.toWindows ? "Windows" : "Linux") << "; unused-filter=" << args.unusedFilterLevel << "\n";
-    auto result = pipeline->Relink(sourceBytes);
-    for (const auto& patch : result.Patches) {
-        if (patch.Offset > sourceBytes.size() || patch.Bytes.size() > sourceBytes.size() - patch.Offset)
+    module.Result = pipeline->Relink(module.Image);
+    for (const auto& patch : module.Result.Patches) {
+        if (patch.Offset > module.Image.size() || patch.Bytes.size() > module.Image.size() - patch.Offset)
             throw Domain::RelinkerException("Relinker patch exceeds source image", patch.Offset);
-        for (std::size_t index = 0; index < patch.Bytes.size(); ++index) sourceBytes[patch.Offset + index] = patch.Bytes[index];
+        for (std::size_t index = 0; index < patch.Bytes.size(); ++index) module.Image[patch.Offset + index] = patch.Bytes[index];
     }
+    return module;
+}
 
+ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOutputPath, const Args& args) {
+    Io::FileWriter fileWriter;
+    auto& result = module.Result;
     const std::filesystem::path outFsPath(absOutputPath);
     if (args.writeRegistry) {
         const std::string registryPath = (outFsPath.parent_path() / (outFsPath.stem().string() + ".registry.json")).string();
@@ -103,10 +127,15 @@ ModuleRelinkOutcome RelinkModule(const std::vector<std::uint8_t>& inputBytes, co
         );
     }
 
-    fileWriter.Write(absOutputPath, patcher->Patch(sourceBytes, result.OriginalHeaders, result.DynamicSection, result.OriginalPltGotVaddr, runPath, args.lazyBinding, args.windowsDiagnostics, result.LinkInfo));
+    fileWriter.Write(absOutputPath, patcher->Patch(module.Image, result.OriginalHeaders, result.DynamicSection, result.OriginalPltGotVaddr, runPath, args.lazyBinding, args.windowsDiagnostics, result.LinkInfo));
     std::cout << "External prx references: " << result.RegistryEntries.size() << "\nOutput file: " << absOutputPath << '\n';
 
-    return ModuleRelinkOutcome{readNeededLibraries(result.DynamicSection), isLibrary};
+    return ModuleRelinkOutcome{ReadNeededLibraries(result.DynamicSection), isLibrary};
+}
+
+ModuleRelinkOutcome RelinkModule(const std::vector<std::uint8_t>& inputBytes, const std::string& absOutputPath, const Args& args) {
+    auto module = PrepareModule(inputBytes, args);
+    return EmitModule(module, absOutputPath, args);
 }
 
 }

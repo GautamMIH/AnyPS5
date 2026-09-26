@@ -98,6 +98,17 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     for (std::uint8_t b : dynSection.HashData)
         buf.push_back(b);
 
+    const auto appendVersionTable = [&](const std::vector<std::uint8_t>& table) -> std::uint64_t {
+        alignBuf(buf, kVersionTableAlignment);
+        const auto offset = static_cast<std::uint64_t>(buf.size());
+        for (std::uint8_t b : table)
+            buf.push_back(b);
+        return offset;
+    };
+    const std::uint64_t versymOff = dynSection.VersymData.empty() ? 0 : appendVersionTable(dynSection.VersymData);
+    const std::uint64_t verdefOff = dynSection.VerdefData.empty() ? 0 : appendVersionTable(dynSection.VerdefData);
+    const std::uint64_t verneedOff = dynSection.VerneedData.empty() ? 0 : appendVersionTable(dynSection.VerneedData);
+
     const std::uint64_t extraBlockOff = dynStrOff;
     const std::uint64_t extraBlockVaddr = _programHeaderLayoutBuilder->ComputeExtraBlockVaddr(originalHeaders, extraBlockOff);
 
@@ -140,6 +151,16 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     _appendDynEntry(dynSegBuf, DT_STRSZ, dynStrSize);
     _appendDynEntry(dynSegBuf, DT_SYMTAB, vaddrOfExtraBlockOffset(dynSymOff));
     _appendDynEntry(dynSegBuf, DT_SYMENT, kSymEntrySize);
+    if (!dynSection.VersymData.empty())
+        _appendDynEntry(dynSegBuf, DT_VERSYM, vaddrOfExtraBlockOffset(versymOff));
+    if (!dynSection.VerdefData.empty()) {
+        _appendDynEntry(dynSegBuf, DT_VERDEF, vaddrOfExtraBlockOffset(verdefOff));
+        _appendDynEntry(dynSegBuf, DT_VERDEFNUM, dynSection.VerdefCount);
+    }
+    if (!dynSection.VerneedData.empty()) {
+        _appendDynEntry(dynSegBuf, DT_VERNEED, vaddrOfExtraBlockOffset(verneedOff));
+        _appendDynEntry(dynSegBuf, DT_VERNEEDNUM, dynSection.VerneedCount);
+    }
     if (!dynSection.RelaData.empty()) {
         _appendDynEntry(dynSegBuf, DT_RELA, vaddrOfExtraBlockOffset(relaOff));
         _appendDynEntry(dynSegBuf, DT_RELASZ, dynSection.RelaData.size());

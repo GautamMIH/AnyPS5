@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBC_INCLUDE_GENERAL_HPP
 #define CORE_LIBS_PRX_LIBC_INCLUDE_GENERAL_HPP
 
+#include <cstdint>
 #include <stdexcept>
 #include <filesystem>
 
@@ -9,6 +10,8 @@
 #include "general/ExportMacros.hpp"
 
 extern "C" void NotImplemented_nid_no_patch(const char* funcName);
+
+extern "C" std::uint64_t APS5_VABI UnresolvedImport_nid_no_patch(const char* nid, const char* library);
 
 extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path);
 

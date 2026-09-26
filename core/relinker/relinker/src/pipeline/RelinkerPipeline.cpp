@@ -38,6 +38,20 @@ bool RelinkerPipeline::_isTlsRelocation(const std::uint32_t type) {
     return type == R_X86_64_DTPMOD64 || type == R_X86_64_DTPOFF64 || type == R_X86_64_TPOFF64;
 }
 
+bool RelinkerPipeline::_decodeSceIndex(const std::string& text, std::uint64_t& value) {
+    static constexpr char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-";
+    if (text.empty() || text.size() > 4)
+        return false;
+    value = 0;
+    for (const char c : text) {
+        const char* position = std::strchr(kAlphabet, c);
+        if (c == '\0' || position == nullptr)
+            return false;
+        value = value * 64 + static_cast<std::uint64_t>(position - kAlphabet);
+    }
+    return true;
+}
+
 RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf) {
     auto programHeaders = _elfReader->ReadProgramHeaders();
 
@@ -172,6 +186,67 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
         if (policy) policy->RegisterLibraryImport(snd);
     }
 
+    std::map<std::uint64_t, std::string> moduleFiles;
+    std::map<std::uint64_t, std::string> importLibraries;
+    std::map<std::uint64_t, std::string> exportLibraries;
+    {
+        std::vector<std::pair<std::uint64_t, std::string>> moduleNames;
+        for (const auto& tag : dynTags) {
+            const std::uint64_t id = tag.Value >> kSceTableIdShift;
+            if (tag.Tag == DT_SCE_NEEDED_MODULE_PS5 || tag.Tag == DT_SCE_NEEDED_MODULE_PS4)
+                moduleNames.emplace_back(id, readCStr(tag.Value & kSceTableNameMask));
+            else if (tag.Tag == DT_SCE_IMPORT_LIB_PS5 || tag.Tag == DT_SCE_IMPORT_LIB_PS4)
+                importLibraries.emplace(id, readCStr(tag.Value & kSceTableNameMask));
+            else if (tag.Tag == DT_SCE_EXPORT_LIB_PS5 || tag.Tag == DT_SCE_EXPORT_LIB_PS4)
+                exportLibraries.emplace(id, readCStr(tag.Value & kSceTableNameMask));
+        }
+        for (std::size_t index = 0; index < moduleNames.size(); ++index) {
+            const auto& [id, name] = moduleNames[index];
+            if (moduleNames.size() == neededLibraries.size()) {
+                moduleFiles.emplace(id, neededLibraries[index]);
+                continue;
+            }
+            for (const auto& file : neededLibraries) {
+                if (file.substr(0, file.find('.')) == name) {
+                    moduleFiles.emplace(id, file);
+                    break;
+                }
+            }
+        }
+    }
+
+    auto splitSymbolName = [&](const std::string& fullName, std::string& libraryIndex, std::string& moduleIndex) {
+        const auto first = fullName.find('#');
+        const auto second = first == std::string::npos ? std::string::npos : fullName.find('#', first + 1);
+        if (second == std::string::npos)
+            return false;
+        libraryIndex = fullName.substr(first + 1, second - first - 1);
+        moduleIndex = fullName.substr(second + 1);
+        return true;
+    };
+
+    auto exportVersionOf = [&](const std::string& fullName) -> std::string {
+        std::string libraryText, moduleText;
+        std::uint64_t libraryId = 0, moduleId = 0;
+        if (!splitSymbolName(fullName, libraryText, moduleText) || !_decodeSceIndex(libraryText, libraryId) || !_decodeSceIndex(moduleText, moduleId) || moduleId != 0)
+            return {};
+        const auto library = exportLibraries.find(libraryId);
+        return library == exportLibraries.end() ? std::string() : library->second;
+    };
+
+    auto assignImportVersion = [&](NidReference& ref) {
+        std::string libraryText, moduleText;
+        std::uint64_t libraryId = 0, moduleId = 0;
+        if (!splitSymbolName(ref.Nid, libraryText, moduleText) || !_decodeSceIndex(libraryText, libraryId) || !_decodeSceIndex(moduleText, moduleId) || moduleId == 0)
+            return;
+        const auto library = importLibraries.find(libraryId);
+        const auto file = moduleFiles.find(moduleId);
+        if (library == importLibraries.end() || file == moduleFiles.end())
+            return;
+        ref.Library = library->second;
+        ref.LibraryFile = file->second;
+    };
+
     struct SymbolEntry {
         std::uint32_t NameOffset;
         std::uint8_t Info;
@@ -207,7 +282,8 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
         const std::uint8_t binding = symbol.Info >> 4;
         if (symbol.SectionIndex == 0 || (binding != STB_GLOBAL && binding != STB_WEAK))
             continue;
-        const std::string name = stripNidSuffix(readCStr(symbol.NameOffset));
+        const std::string fullName = readCStr(symbol.NameOffset);
+        const std::string name = stripNidSuffix(fullName);
         if (name.empty())
             continue;
         const auto [existing, inserted] = exportValues.emplace(name, symbol.Value);
@@ -216,7 +292,7 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
                 throw RelinkerException("Module exports " + name + " at two different addresses");
             continue;
         }
-        exports.push_back({name, symbol.Info, symbol.Value, symbol.Size});
+        exports.push_back({name, symbol.Info, symbol.Value, symbol.Size, exportVersionOf(fullName)});
     }
 
     auto extractRela = [&](const FileByteOffset relaOff, const ByteCount relaSize) {
@@ -249,7 +325,10 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
             if (symbol.SectionIndex != 0 && (symbol.Info >> 4) == STB_LOCAL)
                 throw RelinkerException("Relocation against a local defined symbol is not supported", pos);
 
-            nidRefs.push_back({readCStr(symbol.NameOffset), {}, relType, pos, rOffset, rAddend, symbol.Info});
+            NidReference ref{readCStr(symbol.NameOffset), {}, relType, pos, rOffset, rAddend, symbol.Info};
+            if (symbol.SectionIndex == 0)
+                assignImportVersion(ref);
+            nidRefs.push_back(std::move(ref));
         }
     };
 
@@ -341,6 +420,7 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
     extractRelative(dynJmpRelOffset, dynJmpRelSize);
 
     _dynamicSectionBuilder->AppendExportsAndHash(dynSection, exports);
+    _dynamicSectionBuilder->BuildVersionTables(dynSection, exportLibraries.empty() ? std::string(kDefaultBaseVersionName) : exportLibraries.begin()->second);
 
     ModuleLinkInfo linkInfo;
     if (_elfReader->ReadHeader().Type == ET_SCE_DYNAMIC) {

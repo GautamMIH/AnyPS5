@@ -21,6 +21,7 @@ using CallRegistryEntry = Domain::CallRegistryEntry;
 using ExportedSymbol = Domain::ExportedSymbol;
 using ModuleKind = Domain::ModuleKind;
 using ModuleLinkInfo = Domain::ModuleLinkInfo;
+using SymbolVersion = Domain::SymbolVersion;
 
 }
 

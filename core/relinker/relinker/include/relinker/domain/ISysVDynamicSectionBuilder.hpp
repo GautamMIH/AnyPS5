@@ -21,6 +21,11 @@ public:
         SysVDynamicSection& section,
         const std::vector<ExportedSymbol>& exports
     ) = 0;
+
+    virtual void BuildVersionTables(
+        SysVDynamicSection& section,
+        const std::string& baseVersionName
+    ) = 0;
 };
 
 }

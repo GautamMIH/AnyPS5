@@ -1,5 +1,7 @@
 #include <relinker/output/SysVDynamicSectionBuilder.hpp>
+#include <algorithm>
 #include <cstring>
+#include <map>
 
 namespace Relinker {
 
@@ -72,6 +74,12 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
         neededOffsets.push_back(_appendStr(result.DynStrData, lib));
 
     _appendElfSym(result.DynSymData, 0, 0, 0, 0, 0, 0);
+    result.SymbolVersions.push_back({});
+
+    auto importVersion = [](const NidReference& ref) -> SymbolVersion {
+        if (ref.Library.empty() || ref.LibraryFile.empty()) return {};
+        return {ref.Library, ref.LibraryFile};
+    };
 
     auto stripHashSuffix = [](const std::string& value) -> std::string {
         const auto hashPos = value.find('#');
@@ -129,6 +137,7 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
         const NidReference& ref = *slot;
         const std::uint32_t nameOff = _appendStr(result.DynStrData, stripHashSuffix(ref.Nid));
         _appendElfSym(result.DynSymData, nameOff, ref.SymbolInfo, STV_DEFAULT, 0, 0, 0);
+        result.SymbolVersions.push_back(importVersion(ref));
 
         const std::uint64_t relaInfo = (static_cast<std::uint64_t>(symIdx) << 32) | R_X86_64_JUMP_SLOT;
         _appendRela(result.RelaPltData, ref.RelocationAddress, relaInfo, ref.Addend);
@@ -139,6 +148,7 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
         const NidReference& ref = *slotPtr;
         const std::uint32_t nameOff = _appendStr(result.DynStrData, stripHashSuffix(ref.Nid));
         _appendElfSym(result.DynSymData, nameOff, ref.SymbolInfo, STV_DEFAULT, 0, 0, 0);
+        result.SymbolVersions.push_back(importVersion(ref));
 
         const std::uint64_t relaInfo = (static_cast<std::uint64_t>(symIdx) << 32) | ref.RelocationTypeValue;
         _appendRela(result.RelaData, ref.RelocationAddress, relaInfo, ref.Addend);
@@ -184,6 +194,7 @@ void SysVDynamicSectionBuilder::AppendExportsAndHash(
             throw RelinkerException("Exported symbol has an empty name");
         const std::uint32_t nameOff = _appendStr(section.DynStrData, symbol.Name);
         _appendElfSym(section.DynSymData, nameOff, symbol.Info, STV_DEFAULT, kDefinedSymbolSectionIndex, symbol.Value, symbol.Size);
+        section.SymbolVersions.push_back({symbol.Version, {}});
     }
 
     const auto symbolCount = static_cast<std::uint32_t>(section.DynSymData.size() / kSymbolEntrySize);
@@ -212,6 +223,110 @@ void SysVDynamicSectionBuilder::AppendExportsAndHash(
     appendU32(symbolCount);
     for (const std::uint32_t value : buckets) appendU32(value);
     for (const std::uint32_t value : chains) appendU32(value);
+}
+
+void SysVDynamicSectionBuilder::BuildVersionTables(
+    SysVDynamicSection& section,
+    const std::string& baseVersionName)
+{
+    const std::size_t symbolCount = section.DynSymData.size() / kSymbolEntrySize;
+    if (section.SymbolVersions.size() != symbolCount)
+        throw RelinkerException("Symbol version list does not match the dynamic symbol table");
+
+    const auto appendU16 = [](std::vector<std::uint8_t>& buf, const std::uint16_t value) {
+        const std::size_t pos = buf.size();
+        buf.resize(pos + 2);
+        std::memcpy(buf.data() + pos, &value, 2);
+    };
+    const auto appendU32 = [](std::vector<std::uint8_t>& buf, const std::uint32_t value) {
+        const std::size_t pos = buf.size();
+        buf.resize(pos + 4);
+        std::memcpy(buf.data() + pos, &value, 4);
+    };
+
+    std::vector<std::string> definedNames;
+    std::vector<std::string> neededFiles;
+    std::vector<std::vector<std::string>> neededNames;
+    for (const auto& version : section.SymbolVersions) {
+        if (version.Name.empty())
+            continue;
+        if (version.File.empty()) {
+            if (std::find(definedNames.begin(), definedNames.end(), version.Name) == definedNames.end())
+                definedNames.push_back(version.Name);
+            continue;
+        }
+        auto file = std::find(neededFiles.begin(), neededFiles.end(), version.File);
+        if (file == neededFiles.end()) {
+            neededFiles.push_back(version.File);
+            neededNames.emplace_back();
+            file = neededFiles.end() - 1;
+        }
+        auto& names = neededNames[static_cast<std::size_t>(file - neededFiles.begin())];
+        if (std::find(names.begin(), names.end(), version.Name) == names.end())
+            names.push_back(version.Name);
+    }
+
+    section.VersymData.clear();
+    section.VerdefData.clear();
+    section.VerneedData.clear();
+    section.VerdefCount = 0;
+    section.VerneedCount = 0;
+    if (definedNames.empty() && neededFiles.empty())
+        return;
+
+    std::map<std::string, std::uint16_t> definedIndex;
+    std::map<std::pair<std::string, std::string>, std::uint16_t> neededIndex;
+    std::uint16_t nextIndex = static_cast<std::uint16_t>(kVersionIndexGlobal + 1);
+
+    if (!definedNames.empty()) {
+        std::vector<std::string> entries = {baseVersionName};
+        entries.insert(entries.end(), definedNames.begin(), definedNames.end());
+        for (std::size_t index = 0; index < entries.size(); ++index) {
+            const bool isBase = index == 0;
+            const std::uint16_t versionIndex = isBase ? kVersionIndexGlobal : nextIndex++;
+            if (!isBase)
+                definedIndex[entries[index]] = versionIndex;
+            const bool isLast = index + 1 == entries.size();
+            appendU16(section.VerdefData, kVersionRevision);
+            appendU16(section.VerdefData, isBase ? kVersionFlagBase : 0);
+            appendU16(section.VerdefData, versionIndex);
+            appendU16(section.VerdefData, 1);
+            appendU32(section.VerdefData, _sysvHash(entries[index]));
+            appendU32(section.VerdefData, kVerdefSize);
+            appendU32(section.VerdefData, isLast ? 0 : kVerdefSize + kVerdauxSize);
+            appendU32(section.VerdefData, _appendStr(section.DynStrData, entries[index]));
+            appendU32(section.VerdefData, 0);
+        }
+        section.VerdefCount = entries.size();
+    }
+
+    for (std::size_t fileIndex = 0; fileIndex < neededFiles.size(); ++fileIndex) {
+        const auto& names = neededNames[fileIndex];
+        const bool isLastFile = fileIndex + 1 == neededFiles.size();
+        appendU16(section.VerneedData, kVersionRevision);
+        appendU16(section.VerneedData, static_cast<std::uint16_t>(names.size()));
+        appendU32(section.VerneedData, _appendStr(section.DynStrData, neededFiles[fileIndex]));
+        appendU32(section.VerneedData, kVerneedSize);
+        appendU32(section.VerneedData, isLastFile ? 0 : kVerneedSize + kVernauxSize * static_cast<std::uint32_t>(names.size()));
+        for (std::size_t nameIndex = 0; nameIndex < names.size(); ++nameIndex) {
+            const std::uint16_t versionIndex = nextIndex++;
+            neededIndex[{neededFiles[fileIndex], names[nameIndex]}] = versionIndex;
+            appendU32(section.VerneedData, _sysvHash(names[nameIndex]));
+            appendU16(section.VerneedData, kVersionFlagWeak);
+            appendU16(section.VerneedData, versionIndex);
+            appendU32(section.VerneedData, _appendStr(section.DynStrData, names[nameIndex]));
+            appendU32(section.VerneedData, nameIndex + 1 == names.size() ? 0 : kVernauxSize);
+        }
+    }
+    section.VerneedCount = neededFiles.size();
+
+    for (std::size_t index = 0; index < symbolCount; ++index) {
+        const auto& version = section.SymbolVersions[index];
+        std::uint16_t value = index == 0 ? 0 : kVersionIndexGlobal;
+        if (!version.Name.empty())
+            value = version.File.empty() ? definedIndex.at(version.Name) : neededIndex.at({version.File, version.Name});
+        appendU16(section.VersymData, value);
+    }
 }
 
 }

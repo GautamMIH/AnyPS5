@@ -62,6 +62,7 @@ struct NidReference {
     VirtualAddress RelocationAddress;
     std::int64_t Addend;
     std::uint8_t SymbolInfo = kGlobalFunctionSymbolInfo;
+    std::string LibraryFile;
 };
 
 struct ExportedSymbol {
@@ -69,6 +70,12 @@ struct ExportedSymbol {
     std::uint8_t Info;
     std::uint64_t Value;
     std::uint64_t Size;
+    std::string Version;
+};
+
+struct SymbolVersion {
+    std::string Name;
+    std::string File;
 };
 
 enum class ModuleKind {
@@ -115,6 +122,12 @@ struct SysVDynamicSection {
     std::vector<std::uint8_t> RelaData;
     std::vector<std::uint8_t> RelaPltData;
     std::vector<std::uint8_t> HashData;
+    std::vector<SymbolVersion> SymbolVersions;
+    std::vector<std::uint8_t> VersymData;
+    std::vector<std::uint8_t> VerdefData;
+    std::vector<std::uint8_t> VerneedData;
+    std::uint64_t VerdefCount = 0;
+    std::uint64_t VerneedCount = 0;
 };
 
 struct CallRegistryEntry {

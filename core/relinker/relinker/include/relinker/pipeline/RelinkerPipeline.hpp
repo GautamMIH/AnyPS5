@@ -68,7 +68,18 @@ private:
     static constexpr std::uint8_t STB_GLOBAL = 1;
     static constexpr std::uint8_t STB_WEAK = 2;
 
+    static constexpr std::int64_t DT_SCE_NEEDED_MODULE_PS4 = 0x6100000f;
+    static constexpr std::int64_t DT_SCE_EXPORT_LIB_PS4 = 0x61000013;
+    static constexpr std::int64_t DT_SCE_IMPORT_LIB_PS4 = 0x61000015;
+    static constexpr std::int64_t DT_SCE_NEEDED_MODULE_PS5 = 0x61000045;
+    static constexpr std::int64_t DT_SCE_EXPORT_LIB_PS5 = 0x61000047;
+    static constexpr std::int64_t DT_SCE_IMPORT_LIB_PS5 = 0x61000049;
+    static constexpr std::uint32_t kSceTableIdShift = 48;
+    static constexpr std::uint64_t kSceTableNameMask = 0xffffffff;
+    static constexpr char kDefaultBaseVersionName[] = "module";
+
     static bool _isTlsRelocation(std::uint32_t type);
+    static bool _decodeSceIndex(const std::string& text, std::uint64_t& value);
 
     static std::string _relocationTypeName(std::uint32_t type);
 };

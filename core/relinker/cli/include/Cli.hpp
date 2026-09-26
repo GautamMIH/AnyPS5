@@ -4,6 +4,7 @@
 #include <string>
 #include <cstdint>
 #include <vector>
+#include <relinker/domain/RelinkResult.hpp>
 
 namespace Cli {
 
@@ -24,6 +25,11 @@ struct Args {
     std::string libsPath;
 };
 
+struct PreparedModule {
+    std::vector<std::uint8_t> Image;
+    Relinker::RelinkResult Result;
+};
+
 struct ModuleRelinkOutcome {
     std::vector<std::string> NeededLibraries;
     bool IsLibrary = false;
@@ -32,6 +38,14 @@ struct ModuleRelinkOutcome {
 Args ParseArgs(int argc, char* argv[]);
 
 int Autorun(const std::string& absPath, bool toWindows);
+
+PreparedModule PrepareModule(const std::vector<std::uint8_t>& inputBytes, const Args& args);
+
+ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOutputPath, const Args& args);
+
+std::vector<std::string> ReadNeededLibraries(const Domain::SysVDynamicSection& section);
+
+void SetNeededLibraries(Domain::SysVDynamicSection& section, const std::vector<std::string>& libraries);
 
 ModuleRelinkOutcome RelinkModule(const std::vector<std::uint8_t>& inputBytes, const std::string& absOutputPath, const Args& args);
 

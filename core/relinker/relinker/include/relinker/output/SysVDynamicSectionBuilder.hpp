@@ -19,6 +19,11 @@ public:
         const std::vector<ExportedSymbol>& exports
     ) override;
 
+    void BuildVersionTables(
+        SysVDynamicSection& section,
+        const std::string& baseVersionName
+    ) override;
+
 private:
     static constexpr std::uint32_t STB_GLOBAL = 1;
     static constexpr std::uint32_t STT_FUNC = 2;
@@ -40,6 +45,14 @@ private:
     static constexpr std::int64_t DT_NULL = 0;
 
     static constexpr std::uint16_t kDefinedSymbolSectionIndex = 5;
+    static constexpr std::uint16_t kVersionRevision = 1;
+    static constexpr std::uint16_t kVersionFlagBase = 1;
+    static constexpr std::uint16_t kVersionFlagWeak = 2;
+    static constexpr std::uint16_t kVersionIndexGlobal = 1;
+    static constexpr std::uint32_t kVerdefSize = 20;
+    static constexpr std::uint32_t kVerdauxSize = 8;
+    static constexpr std::uint32_t kVerneedSize = 16;
+    static constexpr std::uint32_t kVernauxSize = 16;
     static constexpr std::size_t kSymbolEntrySize = 24;
     static constexpr std::uint32_t kHashBucketPrimes[] = {1, 3, 17, 37, 67, 97, 131, 197, 263, 521, 1031, 2053, 4099, 8209, 16411, 32771, 65537};
 
