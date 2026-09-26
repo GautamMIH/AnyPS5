@@ -101,21 +101,6 @@ int APS5_VABI atoi_nid_postfix(const char* str) {
     return std::atoi(str);
 }
 
-const wchar_t* APS5_VABI wmemchr_nid_postfix(const wchar_t* s, wchar_t c, size_t n) {
-    return std::wmemchr(s, c, n);
-}
-
-int APS5_VABI wmemcmp_nid_postfix(const wchar_t* s1, const wchar_t* s2, size_t n) {
-    return std::wmemcmp(s1, s2, n);
-}
-
-wchar_t* APS5_VABI wmemcpy_nid_postfix(wchar_t* dest, const wchar_t* src, size_t n) {
-    return std::wmemcpy(dest, src, n);
-}
-
-wchar_t* APS5_VABI wmemmove_nid_postfix(wchar_t* dest, const wchar_t* src, size_t n) {
-    return std::wmemmove(dest, src, n);
-}
 
 }
 
