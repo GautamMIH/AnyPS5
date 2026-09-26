@@ -13,7 +13,7 @@ Pipeline::Pipeline(const Context& context, const State& state, const RenderTarge
     Require(!state.hasDepthTarget || !state.depthState.depthBias || state.depthState.depthBiasClamp == 0.0f || context.depthBiasClamp, "clamped depth bias requires the depthBiasClamp device feature");
     Require(state.renderExtent.width != 0 && state.renderExtent.height != 0 && state.renderExtent.width <= context.limits.maxFramebufferWidth && state.renderExtent.height <= context.limits.maxFramebufferHeight, "framebuffer extent exceeds device limits");
     Require(state.hasColorTarget || state.hasDepthTarget || (context.limits.framebufferNoAttachmentsSampleCounts & VK_SAMPLE_COUNT_1_BIT) != 0, "device does not support single-sample rendering without attachments");
-    ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric);
+    ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, context.imageGatherExtended);
     Require(!state.negativeOneToOne || context.depthClipControl, "negative-one-to-one depth clipping requires VK_EXT_depth_clip_control with depthClipControl enabled");
     if (state.rectList) Require(context.tessellationShader && context.limits.maxTessellationPatchSize >= 4, "rect-list requires tessellation with four output control points");
     if (state.stages.tessellation) {

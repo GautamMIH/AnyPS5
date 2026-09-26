@@ -220,6 +220,10 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
     Require(binding.count != 0, "empty descriptor binding");
     const bool sampledImage = binding.kind == ShaderRecompiler::DescriptorKind::SampledImage;
     const bool samplerKind = binding.kind == ShaderRecompiler::DescriptorKind::Sampler;
+    if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage && binding.guestDescriptor.size() >= 8) {
+        const auto resource = DecodeTextureResource(std::span<const std::uint32_t>(binding.guestDescriptor).first(8));
+        throw std::runtime_error("AGC graphics: storage images are not implemented (format " + std::to_string(resource.format) + ", tile mode " + std::to_string(static_cast<int>(resource.tileMode)) + ", " + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ", dimension " + std::to_string(static_cast<int>(resource.dimension)) + ", mips " + std::to_string(resource.mipCount) + ", base level " + std::to_string(resource.baseLevel) + ", count " + std::to_string(binding.count) + ", stages 0x" + std::to_string(flags) + ")");
+    }
     Require(sampledImage || samplerKind, std::string("unsupported descriptor kind ") + kindName(binding.kind) + " for role " + roleName(binding.role));
     Require((sampledImage && binding.role == ShaderRecompiler::DescriptorRole::GuestImages) || (samplerKind && binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers), "guest image descriptor role disagrees with its kind");
     Require(binding.guestDescriptor.size() % binding.count == 0, "guest image descriptor size is not a multiple of the binding count");

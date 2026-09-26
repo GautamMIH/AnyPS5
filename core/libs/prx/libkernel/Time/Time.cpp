@@ -94,6 +94,12 @@ int APS5_VABI nanosleep_nid_postfix(const KernelTimespec* rqtp, KernelTimespec* 
     return sceKernelNanosleep(rqtp, rmtp);
 }
 
+// FreeBSD usleep: no upper bound on the interval.
+int APS5_VABI usleep_nid_postfix(unsigned int microseconds) {
+    SleepNanos(static_cast<std::uint64_t>(microseconds) * 1000ULL);
+    return 0;
+}
+
 int APS5_VABI clock_gettime_nid_postfix(int clockId, KernelTimespec* tp) {
     if (tp == nullptr) {
         APS5_INVALID_ARG_EX;

@@ -411,8 +411,13 @@ State DecodeState(const QueueState& queue) {
         message << "AGC graphics: only color target zero is supported: CB_TARGET_MASK=0x" << std::hex << targetMask << ", CB_SHADER_MASK=0x" << shaderMask;
         throw std::runtime_error(message.str());
     }
-    result.hasColorTarget = targetMask != 0;
-    Require(!result.hasColorTarget || shaderMask == 0xfu, "partial shader color exports are unsupported");
+    const auto psLow = queue.shader.find(0x8);
+    const auto psHigh = queue.shader.find(0x9);
+    result.hasFragmentShader = (psLow != queue.shader.end() && psLow->second != 0) || (psHigh != queue.shader.end() && psHigh->second != 0);
+    // The colour block writes a component only when both CB_TARGET_MASK and CB_SHADER_MASK enable it,
+    // and only a pixel shader produces colour.
+    const auto writeMask = result.hasFragmentShader ? targetMask & shaderMask : 0u;
+    result.hasColorTarget = writeMask != 0;
     // CB_COLOR_CONTROL: MODE (bits 4-6) is NORMAL, or DISABLE for draws without color targets; copy ROP.
     const auto colorControl = read(cx, 0x202);
     if (!(colorControl == 0xcc0010u || (colorControl == 0xcc0000u && !result.hasColorTarget))) {
@@ -476,10 +481,6 @@ State DecodeState(const QueueState& queue) {
     }
     decodeDepth(cx, result);
     decodeDepthBias(cx, result);
-    const auto psLow = queue.shader.find(0x8);
-    const auto psHigh = queue.shader.find(0x9);
-    result.hasFragmentShader = (psLow != queue.shader.end() && psLow->second != 0) || (psHigh != queue.shader.end() && psHigh->second != 0);
-    Require(result.hasFragmentShader || !result.hasColorTarget, "color writes without a pixel shader");
     if (result.hasColorTarget) {
         if (result.hasDepthTarget) result.renderExtent = {std::min(result.color.extent.width, result.depth.extent.width), std::min(result.color.extent.height, result.depth.extent.height)};
     } else if (result.hasDepthTarget) {
@@ -519,7 +520,7 @@ State DecodeState(const QueueState& queue) {
     if (result.hasColorTarget) {
         const auto blend = read(cx, 0x1e0);
         Require((blend & 0x0000e000u) == 0, "reserved blend control bits");
-        result.blend.colorWriteMask = targetMask;
+        result.blend.colorWriteMask = writeMask;
         result.blend.blendEnable = (blend >> 30u) & 1u;
         if (result.blend.blendEnable) {
             Require((read(cx, 0x31c) & 0x10000u) == 0, "blend bypass conflicts with enabled blending");

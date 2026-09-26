@@ -22,6 +22,8 @@
 #include <array>
 #include <algorithm>
 #include <map>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -84,6 +86,7 @@ struct VulkanDevice::State {
     bool depthRangeUnrestricted = false;
     bool depthBounds = false;
     bool depthBiasClamp = false;
+    bool imageGatherExtended = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
     std::unique_ptr<Graphics::TextureDetiler> detiler;
@@ -408,6 +411,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->depthBounds = enabled.depthBounds == VK_TRUE;
     enabled.depthBiasClamp = available.depthBiasClamp;
     state->depthBiasClamp = enabled.depthBiasClamp == VK_TRUE;
+    enabled.shaderImageGatherExtended = available.shaderImageGatherExtended;
+    state->imageGatherExtended = enabled.shaderImageGatherExtended == VK_TRUE;
     state->samplerAnisotropy = true;
     state->textureCompressionBC = true;
     deviceInfo.pEnabledFeatures = &enabled;
@@ -584,7 +589,47 @@ void VulkanDevice::PresentPixels(std::uint32_t width, std::uint32_t height, std:
     present(width, height, true, pixels);
 }
 
+namespace {
+
+// ANYPS5_DUMP_FRAMES=N writes every Nth presented display buffer to anyps5-frame-<n>.ppm in the
+// working directory, for checking what a title renders.
+std::uint32_t frameDumpInterval() {
+    static const std::uint32_t interval = [] {
+        const char* value = std::getenv("ANYPS5_DUMP_FRAMES");
+        return value ? static_cast<std::uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+    }();
+    return interval;
+}
+
+void writeFrame(const DisplayBuffer& buffer, std::span<const std::byte> bgra, std::uint64_t index) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "anyps5-frame-%06llu.ppm", static_cast<unsigned long long>(index));
+    std::FILE* file = std::fopen(name, "wb");
+    if (file == nullptr) return;
+    std::fprintf(file, "P6\n%u %u\n255\n", buffer.width, buffer.height);
+    std::vector<unsigned char> row(static_cast<std::size_t>(buffer.width) * 3u);
+    for (std::uint32_t y = 0; y < buffer.height; ++y) {
+        for (std::uint32_t x = 0; x < buffer.width; ++x) {
+            const auto* pixel = bgra.data() + (static_cast<std::size_t>(y) * buffer.width + x) * 4u;
+            row[x * 3u] = static_cast<unsigned char>(pixel[2]);
+            row[x * 3u + 1u] = static_cast<unsigned char>(pixel[1]);
+            row[x * 3u + 2u] = static_cast<unsigned char>(pixel[0]);
+        }
+        std::fwrite(row.data(), 1, row.size(), file);
+    }
+    std::fclose(file);
+}
+
+}
+
 void VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
+    if (const auto interval = frameDumpInterval(); interval != 0) {
+        static std::uint64_t presented = 0;
+        if (presented++ % interval == 0) {
+            ResolveMemory(buffer.address, DisplayBufferSize(buffer), false);
+            writeFrame(buffer, ReadDisplayBuffer(buffer), presented - 1);
+        }
+    }
     present(buffer.width, buffer.height, true, {}, &buffer);
 }
 
@@ -754,6 +799,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     };
     context.depthBounds = state->depthBounds;
     context.depthBiasClamp = state->depthBiasClamp;
+    context.imageGatherExtended = state->imageGatherExtended;
     return context;
 }
 

@@ -66,6 +66,7 @@ struct Context {
     mutable std::shared_ptr<SamplerCache> samplerCache;
     bool depthBounds = false;
     bool depthBiasClamp = false;
+    bool imageGatherExtended = false;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {

@@ -129,7 +129,7 @@ struct Module {
     }
 };
 
-Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric) {
+Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool imageGatherExtended) {
     using Stage = ShaderRecompiler::ShaderStage;
     Require(compiled.program != nullptr, "missing compiled shader");
     const auto& shader = *compiled.program;
@@ -199,7 +199,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     capability == spv::CapabilitySampledBuffer ||
                     capability == spv::CapabilityImageBuffer ||
                     capability == spv::CapabilityImageQuery ||
-                    capability == spv::CapabilityDerivativeControl;
+                    capability == spv::CapabilityDerivativeControl ||
+                    (imageGatherExtended && capability == spv::CapabilityImageGatherExtended);
 
                 const bool isBdaCapability =
                     shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version &&
@@ -487,7 +488,7 @@ struct ValidatedInterface {
     std::map<std::uint32_t, std::string> outputs;
 };
 
-std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric) {
+std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool imageGatherExtended) {
     PerformanceTimer timing("Graphics.ShaderValidation");
     Require(compiled.program != nullptr, "missing compiled shader");
     const auto& shader = *compiled.program;
@@ -512,6 +513,7 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
     append(subgroup.supportedStages);
     append(subgroup.supportedOperations);
     append(fragmentShaderBarycentric);
+    append(imageGatherExtended);
     append(shader.bdaAbiVersion);
     append(shader.pushConstants.empty());
     append(shader.bindings.size());
@@ -540,7 +542,7 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
         timing.Mark("hit");
         return found->second;
     }
-    auto module = Inspect(compiled, state, subgroup, fragmentShaderBarycentric);
+    auto module = Inspect(compiled, state, subgroup, fragmentShaderBarycentric, imageGatherExtended);
     auto result = std::make_shared<const ValidatedInterface>(ValidatedInterface{std::move(module.inputs), std::move(module.outputs)});
     if (cache.size() >= 128) cache.clear();
     cache.emplace(std::move(key), result);
@@ -550,7 +552,7 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
 
 }
 
-void ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric) {
+void ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, bool imageGatherExtended) {
     using Stage = ShaderRecompiler::ShaderStage;
     const bool tessellation = state.stages.path == ShaderPath::Tessellation;
     const bool mesh = state.stages.path == ShaderPath::Geometry;
@@ -568,7 +570,7 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
         for (const auto& binding : shaders[i].program->bindings) Require(binding.descriptorSet == 0, "graphics resource uses a descriptor set other than zero");
         std::shared_ptr<const ValidatedInterface> current;
         try {
-            current = inspectCached(shaders[i], state, subgroup, fragmentShaderBarycentric);
+            current = inspectCached(shaders[i], state, subgroup, fragmentShaderBarycentric, imageGatherExtended);
         } catch (const std::runtime_error& error) {
             throw std::runtime_error(std::string(error.what()) + " in graphics stage " + std::to_string(i) + " (shader stage " + std::to_string(static_cast<int>(shaders[i].stage)) + ")");
         }

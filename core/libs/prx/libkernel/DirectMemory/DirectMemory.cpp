@@ -75,8 +75,10 @@ bool GuestReadable(int prot) {
     return (prot & (kCpuRead | kGpuRead)) != 0 || GuestWritable(prot);
 }
 
+// Bits 0x40-0x200 grant access to other on-chip agents; like KytyPS5 only the CPU and GPU bits
+// shape the host mapping.
 int LinuxProtFromSce(int prot) {
-    if ((prot & ~0xf7) != 0) {
+    if ((prot & ~0x3f7) != 0) {
         // return SCE_KERNEL_ERROR_EINVAL;
         throw std::invalid_argument("Unsupported memory protection bits 0x" + [prot] {
             char text[16];

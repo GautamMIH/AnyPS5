@@ -47,7 +47,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     };
     Require(!draw.indexed || !aliasesTargets(draw.indexAddress, indexBytes), "index buffer aliases a render target");
     if (state.rectList) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
-    ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric);
+    ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, context.imageGatherExtended);
     const auto shaderStages = PipelineStages(shaders);
     std::uint32_t meshGroups = 0;
     if (state.stages.mesh) {
