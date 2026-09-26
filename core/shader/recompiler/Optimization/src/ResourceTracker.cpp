@@ -32,7 +32,7 @@ std::string formatHex32(std::uint32_t value) {
 std::string describeValueChain(const IrValue* value, std::uint32_t depth) {
     value = value->Resolve();
     if (value->HasImmediate()) {
-        return "Immediate";
+        return value->Type() == IrType::U32 ? "0x" + formatHex32(value->ImmediateU32()) : "Immediate";
     }
     std::string text = std::string(IrOpcodeName(value->Opcode()));
     if (value->Opcode() == IrOpcode::LoadAddressU32 || value->Opcode() == IrOpcode::ReadConstBuffer) {

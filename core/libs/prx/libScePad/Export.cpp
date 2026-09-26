@@ -89,12 +89,15 @@ int APS5_VABI scePadOpen_nid_postfix(int userId, int type, int index, const void
  return PAD_HANDLE;
 }
 
+// The pad layer keeps only the current state, so each read returns one sample: the latest.
 int APS5_VABI scePadRead_nid_postfix(int handle, PadData* data, int num) {
- (void)handle;
- (void)data;
- (void)num;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ constexpr int kPadErrorInvalidArgument = static_cast<int>(0x80920001);
+ constexpr int kPadErrorInvalidHandle = static_cast<int>(0x80920003);
+ constexpr int kMaxSamples = 64;
+ if (handle != 1) return kPadErrorInvalidHandle;
+ if (data == nullptr || num < 1 || num > kMaxSamples) return kPadErrorInvalidArgument;
+ data[0] = Pad::ReadState();
+ return 1;
 }
 
 int APS5_VABI scePadReadState(int handle, PadData* data) {

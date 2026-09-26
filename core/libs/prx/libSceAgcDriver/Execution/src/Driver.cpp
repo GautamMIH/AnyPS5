@@ -379,7 +379,16 @@ private:
         const auto captured = shaderMemory.Regions();
         request.context.memory = captured;
         timing.Mark("request_memory");
-        const auto compiled = ShaderRecompiler::Recompile(request);
+        const auto compiled = [&] {
+            try {
+                return ShaderRecompiler::Recompile(request);
+            } catch (const std::exception& error) {
+                char context[160]{};
+                std::snprintf(context, sizeof(context), "compute shader 0x%llx (header 0x%llx, PGM_RSRC2 0x%08x, %u user SGPRs): ",
+                    static_cast<unsigned long long>(address), static_cast<unsigned long long>(snapshot.headerAddress), readRegister(queue.shader, 0x213), userCount);
+                throw std::runtime_error(std::string(context) + error.what());
+            }
+        }();
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
