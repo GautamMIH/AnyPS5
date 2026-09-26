@@ -62,6 +62,19 @@ void ValidateRange(const void* addr, size_t len, size_t alignment) {
     }
 }
 
+constexpr int kCpuRead = 0x1;
+constexpr int kCpuWrite = 0x2;
+constexpr int kGpuRead = 0x10 | 0x40;
+constexpr int kGpuWrite = 0x20 | 0x80;
+
+bool GuestWritable(int prot) {
+    return (prot & (kCpuWrite | kGpuWrite)) != 0;
+}
+
+bool GuestReadable(int prot) {
+    return (prot & (kCpuRead | kGpuRead)) != 0 || GuestWritable(prot);
+}
+
 int LinuxProtFromSce(int prot) {
     if ((prot & ~0xf7) != 0) {
         // return SCE_KERNEL_ERROR_EINVAL;
@@ -72,8 +85,8 @@ int LinuxProtFromSce(int prot) {
         }());
     }
     int result = PROT_NONE;
-    if (prot & 1) result |= PROT_READ;
-    if (prot & 2) result |= PROT_WRITE;
+    if (GuestReadable(prot)) result |= PROT_READ;
+    if (GuestWritable(prot)) result |= PROT_WRITE;
     if (prot & 4) result |= PROT_EXEC;
     return result;
 }
@@ -125,7 +138,7 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
     PrepareFixedMapping(mutation, *addr, len, flags);
     void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, alignment);
     try {
-        mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0);
+        mutation.Add(mapped, len, GuestReadable(prot), GuestWritable(prot));
     } catch (...) {
         Unmap(mapped, len);
         throw;
@@ -141,7 +154,7 @@ int DoMapAnon(void** addr, size_t len, int prot, int flags) {
     PrepareFixedMapping(mutation, *addr, len, flags);
     void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, PS5_PAGE_SIZE);
     try {
-        mutation.Add(mapped, len, (prot & 3) != 0, (prot & 2) != 0);
+        mutation.Add(mapped, len, GuestReadable(prot), GuestWritable(prot));
     } catch (...) {
         Unmap(mapped, len);
         throw;
@@ -169,7 +182,7 @@ int DoMprotect(const void* addr, size_t len, int prot) {
         mutation.RegisterMainImage();
     }
 #endif
-    mutation.Protect(pointer, bytes, (prot & 3) != 0, (prot & 2) != 0, [&] {
+    mutation.Protect(pointer, bytes, GuestReadable(prot), GuestWritable(prot), [&] {
         if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
     });
     return 0;

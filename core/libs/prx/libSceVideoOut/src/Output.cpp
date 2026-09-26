@@ -30,8 +30,13 @@ static int validateOutputConfig(int handle, uint64_t mode, const VideoOutOutputO
 extern "C" {
 
 int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* param) {
+    constexpr std::uint32_t kOpenParamSize = 16;
     if (param != nullptr) {
-        throw std::runtime_error(std::string(__func__) + ": param not implemented");
+        std::uint32_t size = 0;
+        std::memcpy(&size, param, sizeof(size));
+        if (size != kOpenParamSize) {
+            throw std::runtime_error(std::string(__func__) + ": unsupported open parameter size " + std::to_string(size));
+        }
     }
     if (userId != 255 && userId != 0) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
