@@ -1,8 +1,11 @@
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
+#include <stdexcept>
 #include <string>
 #include <vector>
 #include <cstdarg>
@@ -119,6 +122,167 @@ std::size_t toUtf8(char* destination, const GuestWchar** source, std::size_t lim
             std::memcpy(destination + written, buffer, size);
         written += size;
     }
+}
+
+std::string utf8FromGuest(const GuestWchar* text, std::size_t limit) {
+    std::string result;
+    char buffer[4];
+    const GuestWchar* cursor = text;
+    const GuestWchar* end = text;
+    while (static_cast<std::size_t>(end - text) < limit && *end != 0)
+        ++end;
+    while (cursor < end) {
+        char32_t codePoint = 0;
+        if (!decodeUtf16(cursor, codePoint))
+            codePoint = 0xfffd;
+        result.append(buffer, encodeUtf8(codePoint, buffer));
+    }
+    return result;
+}
+
+void appendFormatted(std::string& output, const std::string& specification, auto value) {
+    const int length = std::snprintf(nullptr, 0, specification.c_str(), value);
+    if (length < 0)
+        throw std::runtime_error("vswprintf: invalid conversion " + specification);
+    std::string buffer(static_cast<std::size_t>(length) + 1, '\0');
+    std::snprintf(buffer.data(), buffer.size(), specification.c_str(), value);
+    output.append(buffer.data(), static_cast<std::size_t>(length));
+}
+
+int formatWide(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list arguments) {
+    if (destination == nullptr || format == nullptr || count == 0) {
+        errno = kErrorInvalid;
+        return -1;
+    }
+    std::string output;
+    const GuestWchar* cursor = format;
+    while (*cursor != 0) {
+        if (*cursor != u'%') {
+            char32_t codePoint = 0;
+            if (!decodeUtf16(cursor, codePoint))
+                codePoint = 0xfffd;
+            char buffer[4];
+            output.append(buffer, encodeUtf8(codePoint, buffer));
+            continue;
+        }
+        ++cursor;
+        if (*cursor == u'%') {
+            output.push_back('%');
+            ++cursor;
+            continue;
+        }
+        std::string flags;
+        while (*cursor == u'-' || *cursor == u'+' || *cursor == u' ' || *cursor == u'#' || *cursor == u'0')
+            flags.push_back(static_cast<char>(*cursor++));
+        std::string width;
+        if (*cursor == u'*') {
+            width = std::to_string(va_arg(arguments, int));
+            ++cursor;
+        } else {
+            while (*cursor >= u'0' && *cursor <= u'9') width.push_back(static_cast<char>(*cursor++));
+        }
+        std::string precision;
+        bool hasPrecision = false;
+        if (*cursor == u'.') {
+            hasPrecision = true;
+            ++cursor;
+            if (*cursor == u'*') {
+                precision = std::to_string(va_arg(arguments, int));
+                ++cursor;
+            } else {
+                while (*cursor >= u'0' && *cursor <= u'9') precision.push_back(static_cast<char>(*cursor++));
+            }
+        }
+        std::string length;
+        while (*cursor == u'h' || *cursor == u'l' || *cursor == u'j' || *cursor == u'z' || *cursor == u't' || *cursor == u'L' || *cursor == u'q')
+            length.push_back(static_cast<char>(*cursor++));
+        const GuestWchar conversion = *cursor++;
+        const std::string prefix = "%" + flags + width + (hasPrecision ? "." + precision : "");
+        switch (conversion) {
+        case u'd': case u'i':
+            if (length == "hh") appendFormatted(output, prefix + "hhd", static_cast<signed char>(va_arg(arguments, int)));
+            else if (length == "h") appendFormatted(output, prefix + "hd", static_cast<short>(va_arg(arguments, int)));
+            else if (length == "l") appendFormatted(output, prefix + "ld", va_arg(arguments, long));
+            else if (length == "ll" || length == "q" || length == "j") appendFormatted(output, prefix + "lld", va_arg(arguments, long long));
+            else if (length == "z" || length == "t") appendFormatted(output, prefix + "ld", va_arg(arguments, long));
+            else appendFormatted(output, prefix + "d", va_arg(arguments, int));
+            break;
+        case u'u': case u'o': case u'x': case u'X': {
+            const std::string kind(1, static_cast<char>(conversion));
+            if (length == "hh") appendFormatted(output, prefix + "hh" + kind, static_cast<unsigned char>(va_arg(arguments, unsigned int)));
+            else if (length == "h") appendFormatted(output, prefix + "h" + kind, static_cast<unsigned short>(va_arg(arguments, unsigned int)));
+            else if (length == "l" || length == "z" || length == "t") appendFormatted(output, prefix + "l" + kind, va_arg(arguments, unsigned long));
+            else if (length == "ll" || length == "q" || length == "j") appendFormatted(output, prefix + "ll" + kind, va_arg(arguments, unsigned long long));
+            else appendFormatted(output, prefix + kind, va_arg(arguments, unsigned int));
+            break;
+        }
+        case u'f': case u'F': case u'e': case u'E': case u'g': case u'G': case u'a': case u'A': {
+            const std::string kind(1, static_cast<char>(conversion));
+            if (length == "L") appendFormatted(output, prefix + "L" + kind, va_arg(arguments, long double));
+            else appendFormatted(output, prefix + kind, va_arg(arguments, double));
+            break;
+        }
+        case u'c':
+            if (length == "l") {
+                const GuestWchar unit[2] = {static_cast<GuestWchar>(va_arg(arguments, int)), 0};
+                appendFormatted(output, "%" + flags + width + "s", utf8FromGuest(unit, 1).c_str());
+            } else {
+                appendFormatted(output, prefix + "c", va_arg(arguments, int));
+            }
+            break;
+        case u'C': {
+            const GuestWchar unit[2] = {static_cast<GuestWchar>(va_arg(arguments, int)), 0};
+            appendFormatted(output, "%" + flags + width + "s", utf8FromGuest(unit, 1).c_str());
+            break;
+        }
+        case u's':
+            if (length == "l") {
+                const auto* text = va_arg(arguments, const GuestWchar*);
+                const std::string converted = text == nullptr ? std::string("(null)") : utf8FromGuest(text, hasPrecision ? static_cast<std::size_t>(std::stoul(precision.empty() ? "0" : precision)) : SIZE_MAX);
+                appendFormatted(output, "%" + flags + width + "s", converted.c_str());
+            } else {
+                const char* text = va_arg(arguments, const char*);
+                appendFormatted(output, prefix + "s", text == nullptr ? "(null)" : text);
+            }
+            break;
+        case u'S': {
+            const auto* text = va_arg(arguments, const GuestWchar*);
+            const std::string converted = text == nullptr ? std::string("(null)") : utf8FromGuest(text, hasPrecision ? static_cast<std::size_t>(std::stoul(precision.empty() ? "0" : precision)) : SIZE_MAX);
+            appendFormatted(output, "%" + flags + width + "s", converted.c_str());
+            break;
+        }
+        case u'p':
+            appendFormatted(output, prefix + "p", va_arg(arguments, void*));
+            break;
+        case u'n':
+            *va_arg(arguments, int*) = static_cast<int>(output.size());
+            break;
+        default:
+            throw std::runtime_error("vswprintf: unsupported conversion");
+        }
+    }
+    std::size_t written = 0;
+    const char* source = output.c_str();
+    while (*source != '\0') {
+        char32_t codePoint = 0;
+        if (!decodeUtf8(source, codePoint))
+            codePoint = 0xfffd;
+        const std::size_t units = codePoint >= 0x10000 ? 2 : 1;
+        if (written + units >= count) {
+            destination[written] = 0;
+            errno = kErrorRange;
+            return -1;
+        }
+        if (units == 2) {
+            destination[written] = static_cast<GuestWchar>(0xd800 + ((codePoint - 0x10000) >> 10));
+            destination[written + 1] = static_cast<GuestWchar>(0xdc00 + ((codePoint - 0x10000) & 0x3ff));
+        } else {
+            destination[written] = static_cast<GuestWchar>(codePoint);
+        }
+        written += units;
+    }
+    destination[written] = 0;
+    return static_cast<int>(written);
 }
 
 }
@@ -272,33 +436,49 @@ std::size_t APS5_VABI wcsrtombs_nid_postfix(char* destination, const GuestWchar*
 }
 
 int APS5_VABI vswprintf_nid_postfix(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list* arguments) {
-#ifdef _WIN32
-    (void)destination; (void)count; (void)format; (void)arguments;
-    NotImplemented_nid_no_patch(__func__);
-    return -1;
-#else
-    if (destination == nullptr || format == nullptr || count == 0) {
-        errno = kErrorInvalid;
-        return -1;
+    return formatWide(destination, count, format, *arguments);
+}
+
+int APS5_VABI swprintf_nid_postfix(GuestWchar* destination, std::size_t count, const GuestWchar* format, ...) {
+    std::va_list arguments;
+    va_start(arguments, format);
+    const int result = formatWide(destination, count, format, arguments);
+    va_end(arguments);
+    return result;
+}
+
+int APS5_VABI _Iswctype_nid_postfix(std::uint32_t character, short description) {
+    const bool upper = character >= 'A' && character <= 'Z';
+    const bool lower = character >= 'a' && character <= 'z';
+    const bool digit = character >= '0' && character <= '9';
+    const bool graph = character >= 0x21 && character <= 0x7e;
+    switch (description) {
+    case 1: return upper || lower || digit;
+    case 2: return upper || lower;
+    case 3: return character <= 0x1f || character == 0x7f;
+    case 4: return digit;
+    case 5: return graph;
+    case 6: return lower;
+    case 7: return character >= 0x20 && character <= 0x7e;
+    case 8: return graph && !upper && !lower && !digit;
+    case 9: return character == 0x20 || (character >= 0x09 && character <= 0x0d);
+    case 10: return upper;
+    case 11: return digit || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F');
+    case 12: return character == 0x20 || character == 0x09;
+    default: return 0;
     }
-    std::wstring hostFormat;
-    for (const GuestWchar* cursor = format; *cursor != 0; ++cursor) {
-        if (cursor[0] == u'%' && (cursor[1] == u'l' || cursor[1] == u'S') && (cursor[1] == u'S' || cursor[2] == u's'))
-            throw std::runtime_error("vswprintf: wide string arguments are not implemented");
-        hostFormat.push_back(static_cast<wchar_t>(*cursor));
-    }
-    std::vector<wchar_t> buffer(count);
-    const int written = std::vswprintf(buffer.data(), count, hostFormat.c_str(), *arguments);
-    const std::size_t copy = written < 0 ? count - 1 : std::min<std::size_t>(static_cast<std::size_t>(written), count - 1);
-    for (std::size_t index = 0; index < copy; ++index)
-        destination[index] = static_cast<GuestWchar>(buffer[index]);
-    destination[copy] = 0;
-    if (written < 0 || static_cast<std::size_t>(written) >= count) {
-        errno = kErrorRange;
-        return -1;
-    }
-    return written;
-#endif
+}
+
+short APS5_VABI wctype_nid_postfix(const char* name) {
+    static constexpr const char* kClasses[] = {"alnum", "alpha", "cntrl", "digit", "graph", "lower", "print", "punct", "space", "upper", "xdigit", "blank"};
+    if (name == nullptr) return 0;
+    for (short index = 0; index < static_cast<short>(sizeof(kClasses) / sizeof(kClasses[0])); ++index)
+        if (std::strcmp(name, kClasses[index]) == 0) return static_cast<short>(index + 1);
+    return 0;
+}
+
+int APS5_VABI iswctype_nid_postfix(std::uint32_t character, short description) {
+    return _Iswctype_nid_postfix(character, description);
 }
 
 }

@@ -38,6 +38,8 @@ The relinker accepts plain ELF files as well as PS4/PS5 SELF containers with dec
 cd <output-dir> && ./eboot.elf
 ```
 
+Imports are bound per PS library through ELF symbol versions. Imports that no library provides are bound to the generated `libs/aps5_unresolved.prx`; `<output-dir>/unresolved.txt` lists them grouped by PS library with the modules that use them. Calling an unimplemented or unresolved function throws; set `ANYPS5_REPORT_UNIMPLEMENTED=1` to log each one once and continue, which collects everything a game reaches in one run.
+
 `--libs <dir>` selects the AnyPS5 prx directory when it is not found next to the relinker. A single module can still be relinked with `relinker <input> <output>`; library modules become shared objects with their exports, `DT_SONAME` and init/fini entry points.
 
 ## Disclaimer
