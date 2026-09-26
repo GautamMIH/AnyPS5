@@ -88,8 +88,6 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         // Hardware loads the workgroup IDs (and TG_SIZE) into the SGPRs right after the user data.
         computeStorage.workgroupRegister = static_cast<int>(context.userDataBaseRegister + context.userData.size());
         computeStorage.threadIdsNum = static_cast<int>(compute.threadIdComponentCount);
-        // Workgroup ids (and the thread-group size word) follow the user SGPRs.
-        computeStorage.workgroupRegister = static_cast<int>(context.userDataBaseRegister + context.userData.size());
         ShaderStageInputInfo result;
         result.compute = &computeStorage;
         return result;
