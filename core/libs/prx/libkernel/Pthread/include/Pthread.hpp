@@ -51,6 +51,9 @@ struct PthreadRwlockPrivate {
     std::atomic<std::thread::id> writer;
 };
 
+inline constexpr KernelCpumask kDefaultThreadAffinity = 0x3fff;
+inline constexpr int kDefaultThreadPriority = 700;
+
 struct PthreadAttrPrivate {
     void* stackAddress = nullptr;
     std::size_t _stacksize;
@@ -58,6 +61,9 @@ struct PthreadAttrPrivate {
     int _schedpriority;
     int _schedpolicy;
     int _inheritsched;
+    KernelCpumask affinity = kDefaultThreadAffinity;
+    std::size_t guardSize = 0x1000;
+    int solosched = 0;
 };
 
 struct PthreadPrivate {
@@ -70,6 +76,10 @@ struct PthreadPrivate {
 #endif
     void* stackAddress = nullptr;
     std::size_t stackSize = 0;
+    KernelCpumask affinity = kDefaultThreadAffinity;
+    int priority = kDefaultThreadPriority;
+    int policy = 1;
+    std::string name;
     std::atomic<bool> _finished;
     void* _retval;
     bool _detached;
