@@ -2,7 +2,11 @@
 #include <bit>
 #include <cstring>
 #include <limits>
+#include <cinttypes>
+#include <cstdio>
+#include <fstream>
 #include <sstream>
+#include <string>
 
 namespace AgcDriver::Graphics {
 
@@ -45,6 +49,33 @@ void BdaResources::CheckFault() const {
     Require(report.reason != ShaderRecompiler::BdaAbi::FaultReason::InvalidRectangle, "rect-list requires finite nondegenerate axis-aligned positions with equal positive W");
     std::ostringstream message;
     message << "BDA access failed: address=0x" << std::hex << report.address << " instruction=0x" << report.instruction << std::dec << " bytes=" << report.bytes << " stage=" << report.stage << " reason=" << static_cast<std::uint32_t>(report.reason);
+    // Name the host mapping holding the address, to tell unregistered guest memory from garbage.
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    bool mapped = false;
+    while (std::getline(maps, line)) {
+        std::uint64_t begin = 0;
+        std::uint64_t end = 0;
+        if (std::sscanf(line.c_str(), "%" SCNx64 "-%" SCNx64, &begin, &end) == 2 && report.address >= begin && report.address < end) {
+            message << " (host mapping " << line << ")";
+            mapped = true;
+            break;
+        }
+    }
+    if (!mapped) message << " (no host mapping)";
+    // The table ranges around the address.
+    if (table != nullptr) {
+        ShaderRecompiler::BdaAbi::Header header{};
+        std::memcpy(&header, table->Bytes().data(), sizeof(header));
+        const auto* ranges = reinterpret_cast<const ShaderRecompiler::BdaAbi::Range*>(table->Bytes().data() + sizeof(header));
+        message << " (" << header.count << " table ranges";
+        for (std::uint32_t i = 0; i < header.count; ++i) {
+            const auto& range = ranges[i];
+            const auto near = range.end + 0x100000u > report.address && range.begin < report.address + 0x100000u;
+            if (near) message << std::hex << " [0x" << range.begin << ", 0x" << range.end << ")" << std::dec;
+        }
+        message << ")";
+    }
     throw std::runtime_error(message.str());
 }
 

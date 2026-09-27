@@ -64,6 +64,13 @@ ShaderResources::ShaderResources(const Context& context, const ShaderRecompiler:
 
 ShaderResources::ShaderResources(const Context& context, std::span<const CompiledShader> shaders, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes, std::span<const GuestMemorySnapshot> snapshots) : context(context), guestMemory(context) {
     prepareAddressBindings(shaders, snapshots);
+    // Mesh stages fetch the draw's indices by address, so the index buffer must be addressable
+    // whatever allocation it lives in.
+    if (usesBda && indexBytes != 0) {
+        std::vector<std::byte> indices(indexBytes);
+        GuestMemory::Read(indexAddress, indices, 1);
+        guestMemory.AddSnapshot({indexAddress, indices});
+    }
     build(shaders, targets, indexAddress, indexBytes);
 }
 

@@ -6,6 +6,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <cstdio>
 #include <map>
 #include <stdexcept>
 
@@ -47,17 +48,50 @@ std::map<std::uint64_t, Allocation>& allocations() {
     return *value;
 }
 
-Allocation& find(std::uint64_t address, std::size_t bytes) {
+std::atomic<std::uint64_t> mappingGeneration{0};
+
+// Mapped pieces by start address, with their end and owning allocation. Allocations are keyed by
+// their first owned address, and a fixed mapping carved into the middle of one leaves its tail
+// after the new allocation's key, so the owner of an address is found through its piece, not by
+// the nearest allocation key. Rebuilt whenever the mapping generation changes; map nodes keep
+// their addresses across re-keying.
+struct PieceIndex {
+    std::uint64_t generation = ~0ull;
+    std::map<std::uint64_t, std::pair<std::uint64_t, Allocation*>> pieces;
+};
+
+// Visits the mapped pieces covering [address, address + bytes) in order, as (allocation, begin,
+// end) clipped to the range. Contiguous guest memory may span several mappings (the PS5 lets a
+// game treat adjacent mappings as one object), so pieces of different allocations are joined.
+template<typename TVisit>
+void forEachPiece(std::uint64_t address, std::size_t bytes, TVisit&& visit) {
     if (address == 0 || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) throw std::invalid_argument("invalid guest backing range");
-    auto found = allocations().upper_bound(address);
-    if (found == allocations().begin()) throw std::runtime_error("guest memory has no shared backing");
-    auto& allocation = std::prev(found)->second;
-    auto range = allocation.ranges.upper_bound(address);
-    if (range == allocation.ranges.begin() || address + bytes > std::prev(range)->second) throw std::runtime_error("guest memory backing range is unmapped");
-    return allocation;
+    static PieceIndex index;
+    const auto generation = mappingGeneration.load(std::memory_order_acquire);
+    if (index.generation != generation) {
+        index.pieces.clear();
+        for (auto& [key, allocation] : allocations()) {
+            for (const auto& [begin, end] : allocation.ranges) index.pieces[begin] = {end, &allocation};
+        }
+        index.generation = generation;
+    }
+    const auto last = address + bytes;
+    const auto unmapped = [&] {
+        char message[96];
+        std::snprintf(message, sizeof(message), "guest memory backing range 0x%llx+0x%zx is unmapped", static_cast<unsigned long long>(address), bytes);
+        throw std::runtime_error(message);
+    };
+    auto piece = index.pieces.upper_bound(address);
+    if (piece == index.pieces.begin()) unmapped();
+    --piece;
+    for (auto cursor = address; cursor < last; ++piece) {
+        if (piece == index.pieces.end() || piece->first > cursor || piece->second.first <= cursor) unmapped();
+        const auto end = std::min(last, piece->second.first);
+        visit(*piece->second.second, cursor, end);
+        cursor = end;
+    }
 }
 
-std::atomic<std::uint64_t> mappingGeneration{0};
 
 }
 
@@ -162,15 +196,16 @@ void GuestMemoryBackingCarve_nid_postfix(void* pointer, std::size_t bytes) {
 
 void GuestMemoryBackingRequire_nid_postfix(std::uint64_t address, std::size_t bytes) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
-    static_cast<void>(find(address, bytes));
+    forEachPiece(address, bytes, [](Allocation&, std::uint64_t, std::uint64_t) {});
 }
 
 void GuestMemoryBackingWrite_nid_postfix(std::uint64_t address, const void* source, std::size_t bytes) {
     if (source == nullptr) throw std::invalid_argument("missing guest backing write source");
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
-    auto& allocation = find(address, bytes);
-    auto* destination = static_cast<std::byte*>(allocation.mapping.alias) + (address - allocation.mapping.address);
-    std::memcpy(destination, source, bytes);
+    forEachPiece(address, bytes, [&](Allocation& allocation, std::uint64_t begin, std::uint64_t end) {
+        auto* destination = static_cast<std::byte*>(allocation.mapping.alias) + (begin - allocation.mapping.address);
+        std::memcpy(destination, static_cast<const std::byte*>(source) + (begin - address), static_cast<std::size_t>(end - begin));
+    });
 }
 
 }

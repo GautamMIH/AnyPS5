@@ -1,4 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include <stdexcept>
+#include <string>
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
 #include <cstdio>
@@ -78,7 +80,13 @@ void GuestBufferMemory::Upload(bool addressable) {
         const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
         region.buffer = std::make_unique<Buffer>(context, static_cast<std::size_t>(bytes), usage);
         if (region.writable) {
-            GuestMemory::Read(region.begin, region.buffer->Bytes());
+            try {
+                GuestMemory::Read(region.begin, region.buffer->Bytes());
+            } catch (const std::exception& error) {
+                char context[96];
+                std::snprintf(context, sizeof(context), " (uploading writable guest region 0x%llx+0x%llx)", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes));
+                throw std::runtime_error(std::string(error.what()) + context);
+            }
         } else {
             std::memset(region.buffer->Bytes().data(), 0, static_cast<std::size_t>(padding));
             std::memcpy(region.buffer->Bytes().data() + padding, region.snapshot.data(), region.snapshot.size());

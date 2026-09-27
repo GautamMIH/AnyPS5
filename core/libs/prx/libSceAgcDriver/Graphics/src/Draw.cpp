@@ -152,6 +152,16 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     resources->Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout());
     pipeline.PushConstants(commands, shaders);
     if (state.stages.mesh) {
+        const std::array<std::uint32_t, MeshDrawParameterBytes / sizeof(std::uint32_t)> parameters{
+            draw.indexCount,
+            draw.indexed ? 0u : draw.firstVertex,
+            draw.firstInstance,
+            draw.indexed ? draw.indexSize : 0u,
+            static_cast<std::uint32_t>(draw.indexAddress),
+            static_cast<std::uint32_t>(draw.indexAddress >> 32u)};
+        context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipeline.Layout(), PushConstantStages(shaders), 0, MeshDrawParameterBytes, parameters.data());
+    }
+    if (state.stages.mesh) {
         context.Function<PFN_vkCmdDrawMeshTasksEXT>("vkCmdDrawMeshTasksEXT")(commands, meshGroups, draw.instanceCount, 1);
     } else {
         if (!vertexHandles.empty()) context.Function<PFN_vkCmdBindVertexBuffers>("vkCmdBindVertexBuffers")(commands, 0, static_cast<std::uint32_t>(vertexHandles.size()), vertexHandles.data(), vertexOffsets.data());

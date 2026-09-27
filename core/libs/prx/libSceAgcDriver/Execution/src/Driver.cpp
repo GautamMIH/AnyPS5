@@ -9,6 +9,7 @@
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
@@ -576,7 +577,9 @@ private:
         std::vector<Graphics::CompiledShader> stages;
         results.reserve(programs.size() + (graphics.rectList ? 2u : 0u));
         stages.reserve(programs.size());
-        std::uint32_t pushCursorBytes = 0;
+        // Mesh stages read the draw's parameters from the first push-constant dwords
+        // (MeshDrawDwordCount, pushed by Graphics::Draw); stage push data follows them.
+        std::uint32_t pushCursorBytes = graphics.stages.mesh.has_value() ? Graphics::MeshDrawParameterBytes : 0u;
         const auto vertexStageInfo = [&](const auto& program) {
             auto info = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, program.systemSgprs);
             info.paClVsOutCntl = readRegister(queue.context, 0x207);
@@ -752,6 +755,17 @@ private:
                     }
                     timing.Mark(gpuCacheBarrier ? "gpu_cache_barrier" : waitDraws ? "draw_wait" : "device_idle_wait");
                 }
+                // Errors name the packet that raised them: the worker's failure is reported on
+                // another thread, far from the throw.
+                const auto withContext = [&](auto&& run) {
+                    try {
+                        run();
+                    } catch (const std::exception& error) {
+                        char context[80];
+                        std::snprintf(context, sizeof(context), " (PM4 opcode 0x%02x, queue %u, dword %zu)", static_cast<unsigned>(opcode), static_cast<unsigned>(submission.queue), cursor);
+                        throw std::runtime_error(std::string(error.what()) + context);
+                    }
+                };
                 if (header == RenderingWaitPacketHeader) {
                     submission.renderingWaits.at(cursor)->Wait();
                     timing.Mark("rendering_wait");
@@ -759,7 +773,7 @@ private:
                     CheckFailure();
                     timing.Mark("flip_prepare");
                 } else if (opcode == 0x15) {
-                    dispatch(queue, packet, submission);
+                    withContext([&] { dispatch(queue, packet, submission); });
                 } else if (opcode == 0x16) {
                     std::array<std::uint32_t, 5> direct;
                     {
@@ -769,15 +783,15 @@ private:
                         });
                         direct = Pm4::ResolveDispatch(packet, queue);
                     }
-                    dispatch(queue, direct, submission);
+                    withContext([&] { dispatch(queue, direct, submission); });
                 } else if (opcode == 0x35 || opcode == 0x27 || opcode == 0x2d) {
-                    draw(queue, packet, submission);
+                    withContext([&] { draw(queue, packet, submission); });
                 } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
                     std::lock_guard gpuLock(gpuMutex);
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                     });
-                    Pm4::Execute(packet, queue);
+                    withContext([&] { Pm4::Execute(packet, queue); });
                     timing.Mark("pm4_execute");
                 }
                 if (opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0) {

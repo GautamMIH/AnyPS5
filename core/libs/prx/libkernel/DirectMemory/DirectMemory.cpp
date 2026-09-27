@@ -3,6 +3,7 @@
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <limits>
 #include <stdexcept>
@@ -109,6 +110,12 @@ void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) 
     return GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(addr, len, alignment, prot);
 }
 
+// Debug aid: ANYPS5_TRACE_MEMORY=1 logs every guest mapping operation.
+void TraceMemory(const char* operation, const void* addr, size_t len, int prot, int flags) {
+    static const bool enabled = std::getenv("ANYPS5_TRACE_MEMORY") != nullptr;
+    if (enabled) std::fprintf(stderr, "[memory] %s 0x%llx+0x%zx prot=0x%x flags=0x%x\n", operation, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(addr)), len, prot, flags);
+}
+
 void PrepareFixedMapping(GuestAllocations::Mutation& mutation, void* addr, size_t len, int flags) {
     constexpr int guestMapNoOverwrite = 0x80;
     if (addr == nullptr) return;
@@ -116,6 +123,7 @@ void PrepareFixedMapping(GuestAllocations::Mutation& mutation, void* addr, size_
         mutation.RequireAvailable(addr, len);
         return;
     }
+    TraceMemory("carve", addr, len, 0, flags);
     mutation.Carve(addr, len, [&] {
         GuestMemoryBacking::GuestMemoryBackingCarve_nid_postfix(addr, len);
     });
@@ -129,6 +137,7 @@ void ValidateOutput(void** addr) {
 }
 
 }
+
 
 int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) {
     ValidateOutput(addr);
@@ -146,6 +155,7 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
         throw;
     }
     *addr = mapped;
+    TraceMemory("map-direct", mapped, len, prot, flags);
     return 0;
 }
 
@@ -162,10 +172,12 @@ int DoMapAnon(void** addr, size_t len, int prot, int flags) {
         throw;
     }
     *addr = mapped;
+    TraceMemory("map-anon", mapped, len, prot, flags);
     return 0;
 }
 
 int DoMprotect(const void* addr, size_t len, int prot) {
+    TraceMemory("protect", addr, len, prot, 0);
     const auto address = reinterpret_cast<std::uintptr_t>(addr);
     constexpr auto pageMask = static_cast<std::uintptr_t>(PS5_PAGE_SIZE - 1);
     const auto limit = std::numeric_limits<std::uintptr_t>::max();
@@ -201,6 +213,7 @@ int DoMprotect(const void* addr, size_t len, int prot) {
 }
 
 int DoMunmap(void* addr, size_t len) {
+    TraceMemory("unmap", addr, len, 0, 0);
     if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0 || !addr) return SCE_KERNEL_ERROR_EINVAL;
     GuestAllocations::Mutation mutation;
     bool released = false;
@@ -224,5 +237,6 @@ int DoReserveVirtual(void** addr, size_t len, size_t alignment) {
         throw;
     }
     *addr = mapped;
+    TraceMemory("reserve", mapped, len, 0, 0);
     return 0;
 }

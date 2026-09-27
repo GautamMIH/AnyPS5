@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "prx/libSceAgcDriver/Graphics/include/LayeredColorTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"

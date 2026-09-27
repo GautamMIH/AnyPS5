@@ -1,3 +1,4 @@
+#include <cstdio>
 #include "prx/libSceAgcDriver/Graphics/include/StorageImage.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
