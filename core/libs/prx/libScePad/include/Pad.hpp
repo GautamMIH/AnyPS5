@@ -2,8 +2,11 @@
 #define CORE_LIBS_PRX_LIBSCEPAD_PAD_HPP
 
 constexpr int PAD_OK = 0;
-constexpr int PAD_ERROR_INVALID_ARG = -2137915390;
-constexpr int PAD_ERROR_INVALID_HANDLE = -2137915384;
+// Error codes as in shadPS4's pad library.
+constexpr int PAD_ERROR_INVALID_ARG = static_cast<int>(0x80920001);
+constexpr int PAD_ERROR_INVALID_HANDLE = static_cast<int>(0x80920003);
+constexpr int PAD_ERROR_NOT_INITIALIZED = static_cast<int>(0x80920005);
+constexpr int PAD_ERROR_NO_HANDLE = static_cast<int>(0x80920008);
 
 constexpr int PAD_PORT_TYPE_STANDARD = 0;
 constexpr int PAD_PORT_TYPE_SPECIAL = 2;

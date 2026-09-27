@@ -5,16 +5,16 @@
 #include <cstdint>
 #include <string>
 
+// Error codes as in shadPS4's savedata_error.h.
 constexpr int SAVE_DATA_OK = 0;
-constexpr int SAVE_DATA_ERROR_PARAMETER = -2137063424;
-constexpr int SAVE_DATA_ERROR_NOT_INITIALIZED = -2137063423;
-constexpr int SAVE_DATA_ERROR_ALREADY_INITIALIZED = -2137063422;
-constexpr int SAVE_DATA_ERROR_OUT_OF_MEMORY = -2137063421;
-constexpr int SAVE_DATA_ERROR_BUSY = -2137063420;
-constexpr int SAVE_DATA_ERROR_NOT_MOUNTED = -2137063419;
-constexpr int SAVE_DATA_ERROR_MOUNT_FULL = -2137063418;
-constexpr int SAVE_DATA_ERROR_EXISTS = -2137063414;
-constexpr int SAVE_DATA_ERROR_NOT_FOUND = -2137063413;
+constexpr int SAVE_DATA_ERROR_PARAMETER = static_cast<int>(0x809F0000);
+constexpr int SAVE_DATA_ERROR_NOT_INITIALIZED = static_cast<int>(0x809F0001);
+constexpr int SAVE_DATA_ERROR_OUT_OF_MEMORY = static_cast<int>(0x809F0002);
+constexpr int SAVE_DATA_ERROR_BUSY = static_cast<int>(0x809F0003);
+constexpr int SAVE_DATA_ERROR_NOT_MOUNTED = static_cast<int>(0x809F0004);
+constexpr int SAVE_DATA_ERROR_EXISTS = static_cast<int>(0x809F0007);
+constexpr int SAVE_DATA_ERROR_NOT_FOUND = static_cast<int>(0x809F0008);
+constexpr int SAVE_DATA_ERROR_MOUNT_FULL = static_cast<int>(0x809F000C);
 
 constexpr std::uint32_t SAVE_DATA_MOUNT_MODE_RDONLY = 1;
 constexpr std::uint32_t SAVE_DATA_MOUNT_MODE_RDWR = 2;

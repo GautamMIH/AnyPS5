@@ -67,7 +67,7 @@ void _detectVertexBuffers(ShaderVertexInputInfo& info) {
 
 }
 
-ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const GuestContext& context) {
+ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const GuestContext& context, std::uint32_t hostSubgroupSize, const MeshConfiguration* mesh) {
     switch (stage) {
     case ShaderStageKind::Compute: {
         if (!context.compute.has_value()) {
@@ -80,10 +80,13 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         computeStorage.threadsNum[2] = compute.numThreads[2];
         computeStorage.ldsSizeDwords = compute.ldsSizeDwords;
         computeStorage.waveSize = context.waveSize;
+        computeStorage.hostSubgroupSize = hostSubgroupSize;
         computeStorage.groupId[0] = compute.groupIdEnable[0];
         computeStorage.groupId[1] = compute.groupIdEnable[1];
         computeStorage.groupId[2] = compute.groupIdEnable[2];
         computeStorage.tgSizeEn = compute.tgSizeEnable;
+        // Hardware loads the workgroup IDs (and TG_SIZE) into the SGPRs right after the user data.
+        computeStorage.workgroupRegister = static_cast<int>(context.userDataBaseRegister + context.userData.size());
         computeStorage.threadIdsNum = static_cast<int>(compute.threadIdComponentCount);
         ShaderStageInputInfo result;
         result.compute = &computeStorage;
@@ -136,6 +139,7 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         vertexStorage = ShaderVertexInputInfo{};
         vertexStorage.logicalStage = _toIrShaderStage(stage);
         vertexStorage.fetchEmbedded = vertex.fetchEmbedded;
+        vertexStorage.paClVsOutCntl = vertex.paClVsOutCntl;
         vertexStorage.fetchExternal = false;
         vertexStorage.fetchAttribReg = static_cast<int>(vertex.fetchAttribReg);
         vertexStorage.fetchBufferReg = static_cast<int>(vertex.fetchBufferReg);
@@ -148,6 +152,22 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
             vertexStorage.resourcesDst[i].fetchIndex = vertex.resourcesDst[i].fetchIndex;
         }
         _detectVertexBuffers(vertexStorage);
+        if (stage == ShaderStageKind::Mesh) {
+            if (mesh == nullptr) throw std::runtime_error("ShaderInputInfoBuilder: a mesh stage needs the draw's mesh configuration");
+            auto& info = vertexStorage.mesh;
+            info.threadsNum[0] = mesh->threadsPerGroup;
+            info.threadsNum[1] = 1u;
+            info.threadsNum[2] = 1u;
+            info.ldsSizeDwords = mesh->ldsSizeDwords;
+            info.hostSubgroupSize = hostSubgroupSize;
+            info.waveSize = context.waveSize;
+            info.inputPrimitive = mesh->inputPrimitive;
+            info.primitivesPerGroup = mesh->primitivesPerGroup;
+            info.verticesPerGroup = mesh->verticesPerGroup;
+            info.maxVertices = mesh->maxVertices;
+            info.maxPrimitives = mesh->maxPrimitives;
+            info.provokingVertex = mesh->provokingVertex;
+        }
         ShaderStageInputInfo result;
         result.vertex = &vertexStorage;
         return result;

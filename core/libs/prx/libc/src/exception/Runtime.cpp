@@ -1,5 +1,6 @@
 #include "prx/libc/include/exceptions/Runtime.hpp"
 #include <cstdio>
+#include <exception>
 #include <limits>
 
 namespace LibcException {
@@ -9,17 +10,19 @@ namespace LibcException {
         Header* primary = Primary(globals.caught);
         const char* typeName = primary->type ? primary->type->name() : nullptr;
         const char* what = nullptr;
-        if (primary->adjusted) {
+        // Only objects a catch (std::exception&) would match have what() in their vtable.
+        void* exception = primary->adjusted;
+        if (exception && primary->type && Match(&typeid(std::exception), primary->type, exception)) {
             struct VtableLayout { std::ptrdiff_t offset; const void* type; void (*destroy)(void*); void (*del)(void*); const char* (*whatFn)(const void*); };
-            const void* vtable = *static_cast<const void* const*>(primary->adjusted);
+            const void* vtable = *static_cast<const void* const*>(exception);
             auto* layout = reinterpret_cast<const VtableLayout*>(static_cast<const char*>(vtable) - offsetof(VtableLayout, destroy));
 #ifdef _WIN32
             if (!primary->_pad) {
                 using GuestWhat = const char* (__attribute__((sysv_abi)) *)(const void*);
-                what = reinterpret_cast<GuestWhat>(layout->whatFn)(primary->adjusted);
+                what = reinterpret_cast<GuestWhat>(layout->whatFn)(exception);
             } else
 #endif
-            what = layout->whatFn(primary->adjusted);
+            what = layout->whatFn(exception);
         }
         int status = 0;
         char* demangled = abi::__cxa_demangle(typeName, nullptr, nullptr, &status);
@@ -219,6 +222,18 @@ void APS5_VABI __cxa_free_exception_nid_postfix(void* object) {
     _Unwind_RaiseException_nid_postfix(&header->unwind);
     __cxa_begin_catch_nid_postfix(&header->unwind);
     InvokeTerminate(header->terminate);
+}
+
+LibcException::Header* __cxa_init_primary_exception_nid_postfix(void* object, std::type_info* type, void (*destructor)(void*)) {
+    using namespace LibcException;
+    auto* header = FromObject(object);
+    header->type = type;
+    header->destructor = destructor;
+    header->terminate = terminateHandler.load(std::memory_order_acquire);
+    header->adjusted = object;
+    header->unwind.exception_class = PrimaryClass;
+    header->unwind.exception_cleanup = Cleanup;
+    return header;
 }
 
 void* APS5_VABI __cxa_begin_catch_nid_postfix(void* exception) {

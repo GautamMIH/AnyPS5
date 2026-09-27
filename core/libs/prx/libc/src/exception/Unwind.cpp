@@ -1,4 +1,6 @@
 #include "prx/libc/include/exceptions/Unwind.hpp"
+#include <cstdio>
+#include <cstdlib>
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
 #include "prx/libc/src/specifics/x86_64/RegisterContext.cpp"
 
@@ -8,9 +10,7 @@
 
 #if defined(__linux__) || defined(_WIN32)
 
-#ifdef _WIN32
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
-#endif
 
 namespace LibcUnwind {
 bool OwnPersonality(Word personality) {
@@ -23,9 +23,8 @@ bool OwnPersonality(Word personality) {
     }
 #endif
     if (personality == reinterpret_cast<Word>(__gxx_personality_v0_nid_postfix)) return true;
-#ifdef _WIN32
+    // This library's own frames reference its host-name personality (see Personality.cpp).
     if (personality == reinterpret_cast<Word>(__gxx_personality_v0)) return true;
-#endif
     return false;
 }
 struct Lookup { Word pc; const Byte* fde {}; Word text {}; Word data {}; };
@@ -411,6 +410,24 @@ _Unwind_Reason_Code PhaseTwo(_Unwind_Context context, _Unwind_Exception* excepti
 }
 }
 
+namespace LibcUnwind {
+// ANYPS5_TRACE_UNWIND=1 logs every frame the search phase visits.
+bool TraceEnabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_TRACE_UNWIND");
+        return value && *value && *value != '0';
+    }();
+    return enabled;
+}
+
+void Trace(const char* event, const _Unwind_Context& context, const Frame* frame, int result = -1) {
+    if (!TraceEnabled()) return;
+    std::fprintf(stderr, "[AnyPS5 unwind] %s pc=%#llx region=%#llx personality=%#llx lsda=%#llx result=%d\n", event,
+        static_cast<unsigned long long>(context.registers[16]), static_cast<unsigned long long>(frame ? frame->start : 0),
+        static_cast<unsigned long long>(frame ? frame->personality : 0), static_cast<unsigned long long>(frame ? frame->lsda : 0), result);
+}
+}
+
 extern "C" {
 _Unwind_Reason_Code APS5_VABI _Unwind_RaiseException_nid_postfix(_Unwind_Exception* exception) {
     _Unwind_Context start;
@@ -420,17 +437,29 @@ _Unwind_Reason_Code APS5_VABI _Unwind_RaiseException_nid_postfix(_Unwind_Excepti
     exception->private_1 = 0;
     for (unsigned depth = 0; depth < 65536; ++depth) {
         LibcUnwind::Frame frame; LibcUnwind::Rules rules;
-        if (!LibcUnwind::GetRules(context, frame, rules)) return _URC_END_OF_STACK;
+        if (!LibcUnwind::GetRules(context, frame, rules)) {
+            LibcUnwind::Trace("no-frame-info", context, nullptr);
+            return _URC_END_OF_STACK;
+        }
         if (frame.personality) {
-            if (!LibcUnwind::OwnPersonality(frame.personality)) return _URC_FATAL_PHASE1_ERROR;
+            if (!LibcUnwind::OwnPersonality(frame.personality)) {
+                LibcUnwind::Trace("foreign-personality", context, &frame);
+                return _URC_FATAL_PHASE1_ERROR;
+            }
             auto result = __gxx_personality_v0_nid_postfix(1, _UA_SEARCH_PHASE, exception->exception_class, exception, &context);
+            LibcUnwind::Trace("search", context, &frame, result);
             if (result == _URC_HANDLER_FOUND) {
                 exception->private_2 = context.cfa;
                 return LibcUnwind::PhaseTwo(start, exception);
             }
             if (result != _URC_CONTINUE_UNWIND) return _URC_FATAL_PHASE1_ERROR;
+        } else {
+            LibcUnwind::Trace("no-personality", context, &frame);
         }
-        if (!LibcUnwind::Step(context)) return _URC_END_OF_STACK;
+        if (!LibcUnwind::Step(context)) {
+            LibcUnwind::Trace("step-failed", context, &frame);
+            return _URC_END_OF_STACK;
+        }
     }
     return _URC_FATAL_PHASE1_ERROR;
 }

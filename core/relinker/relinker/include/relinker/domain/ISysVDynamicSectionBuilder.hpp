@@ -16,6 +16,16 @@ public:
         FileByteOffset originalJmprelOffset,
         std::uint32_t originalJmprelCount
     ) = 0;
+
+    virtual void AppendExportsAndHash(
+        SysVDynamicSection& section,
+        const std::vector<ExportedSymbol>& exports
+    ) = 0;
+
+    virtual void BuildVersionTables(
+        SysVDynamicSection& section,
+        const std::string& baseVersionName
+    ) = 0;
 };
 
 }

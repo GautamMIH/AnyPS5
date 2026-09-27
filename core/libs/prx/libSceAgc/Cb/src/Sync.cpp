@@ -37,11 +37,10 @@ std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer* buf, std::uint8_t act
     } else if (dataSelect == 5) {
         Agc::Command::Require(data == 0, __func__, "GDS release cannot use immediate data");
         value = gdsOffset | (static_cast<std::uint64_t>(gdsSize) << 16u);
-    } else {
-        Agc::Command::Require(gdsOffset == 0 && gdsSize == 0, __func__, "GDS parameters supplied for a non-GDS release");
     }
+    // gdsOffset and gdsSize only take effect for a GDS release; hardware ignores them otherwise.
     if (dataSelect != 0 && interrupt != 4) {
-        Agc::Command::CheckAddress(guestAddress, dataSelect == 2 || dataSelect == 3 ? 8 : 4, __func__);
+        Agc::Command::CheckGpuAddress(guestAddress, dataSelect == 2 || dataSelect == 3 ? 8 : 4, __func__);
     }
     if (dataSelect == 1) {
         Agc::Command::CheckBits(data, 0xffffffffu, __func__);

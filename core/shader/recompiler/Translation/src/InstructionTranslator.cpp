@@ -229,7 +229,7 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
     } else if (options.stage == ShaderStageKind::Mesh) {
         const auto& mesh = options.inputInfo.vertex->mesh;
         if (options.waveSize != 64u || mesh.primitivesPerGroup == 0u || mesh.verticesPerGroup > 64u || totalThreads > 15u * 64u) {
-            throw std::runtime_error("mesh shader translation configuration is not supported");
+            throw std::runtime_error("mesh shader translation configuration is not supported: wave " + std::to_string(options.waveSize) + ", primitives per group " + std::to_string(mesh.primitivesPerGroup) + ", vertices per group " + std::to_string(mesh.verticesPerGroup) + ", threads " + std::to_string(totalThreads));
         }
         constexpr std::uint32_t kTriStripPrimitiveType = 6u;
         const auto u32 = [&entryIr](std::uint32_t value) -> IrValue& {
@@ -320,7 +320,11 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
             entryIr.SetVectorReg(static_cast<VectorReg>(reg++), builtin(StageInputKind::FrontFacing));
         }
         if (ps->psAncillary) {
-            entryIr.SetVectorReg(static_cast<VectorReg>(reg), builtin(StageInputKind::PackedAncillary));
+            // The ancillary VGPR packs the render-target array index in bits 16-28 and the sample
+            // index in bits 8-11 (gfx10 layout, as Mesa unpacks it). Rendering is single-sample,
+            // so the sample index is zero.
+            IrValue& layer = entryIr.BitwiseAnd(builtin(StageInputKind::Layer), entryIr.Constant(0x1fffu));
+            entryIr.SetVectorReg(static_cast<VectorReg>(reg), entryIr.ShiftLeftLogical(layer, entryIr.Constant(16u)));
         }
     } else if (options.stage == ShaderStageKind::Vertex) {
         entryIr.SetVectorReg(static_cast<VectorReg>(5), builtin(StageInputKind::VertexIndex));

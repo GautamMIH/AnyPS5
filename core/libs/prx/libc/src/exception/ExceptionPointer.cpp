@@ -1,5 +1,7 @@
 #include <exception>
 
+#ifdef _WIN32
+
 extern "C" {
 void ExceptionPointerAddref(std::exception_ptr* self) noexcept asm("_ZNSt15__exception_ptr13exception_ptr9_M_addrefEv");
 void ExceptionPointerRelease(std::exception_ptr* self) noexcept asm("_ZNSt15__exception_ptr13exception_ptr10_M_releaseEv");
@@ -79,3 +81,55 @@ const type_info* exception_ptr::__cxa_exception_type() const noexcept {
 }
 
 }
+#else
+
+// On Linux the host C++ runtime owns the std:: exception_ptr symbols for host-compiled code, so the
+// guest-facing entry points operate on libc's exception objects directly instead of redefining std::
+// members. std::exception_ptr is a single object pointer; by-value returns use a hidden result pointer
+// and by-value parameters are passed by invisible reference, as the SysV ABI requires for this type.
+namespace {
+void*& ExceptionObject(const void* self) noexcept { return *const_cast<void**>(static_cast<void* const*>(self)); }
+}
+
+extern "C" {
+
+void APS5_VABI _ZNSt15__exception_ptr13exception_ptr9_M_addrefEv_nid_postfix(void* self) noexcept {
+    __cxa_increment_exception_refcount_nid_postfix(ExceptionObject(self));
+}
+
+void APS5_VABI _ZNSt15__exception_ptr13exception_ptr10_M_releaseEv_nid_postfix(void* self) noexcept {
+    __cxa_decrement_exception_refcount_nid_postfix(ExceptionObject(self));
+    ExceptionObject(self) = nullptr;
+}
+
+void* APS5_VABI _ZNKSt15__exception_ptr13exception_ptr6_M_getEv_nid_postfix(const void* self) noexcept {
+    return ExceptionObject(self);
+}
+
+void APS5_VABI _ZNSt15__exception_ptr13exception_ptrC1EPv_nid_postfix(void* self, void* exception) noexcept {
+    ExceptionObject(self) = exception;
+    __cxa_increment_exception_refcount_nid_postfix(exception);
+}
+
+void APS5_VABI _ZNSt15__exception_ptr13exception_ptrC2EPv_nid_postfix(void* self, void* exception) noexcept {
+    ExceptionObject(self) = exception;
+    __cxa_increment_exception_refcount_nid_postfix(exception);
+}
+
+const std::type_info* APS5_VABI _ZNKSt15__exception_ptr13exception_ptr20__cxa_exception_typeEv_nid_postfix(const void* self) noexcept {
+    return LibcException::FromObject(ExceptionObject(self))->type;
+}
+
+void** APS5_VABI _ZSt17current_exceptionv_nid_postfix(void** result) noexcept {
+    *result = __cxa_current_primary_exception_nid_postfix();
+    return result;
+}
+
+[[noreturn]] void APS5_VABI _ZSt17rethrow_exceptionNSt15__exception_ptr13exception_ptrE_nid_postfix(void* const* exception) {
+    __cxa_rethrow_primary_exception_nid_postfix(*exception);
+    LibcException::Terminate();
+}
+
+}
+
+#endif

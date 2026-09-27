@@ -13,12 +13,23 @@ std::uint32_t* APS5_VABI sceAgcDcbAcquireMem(CommandBuffer* buf, std::uint8_t en
     Agc::Command::CheckBits(engine, 1, __func__);
     Agc::Command::CheckBits(cbDbOp, 0x7fffffffu, __func__);
     Agc::Command::CheckBits(gcrControl, 0x7ffffu, __func__);
-    const auto address = reinterpret_cast<std::uintptr_t>(base);
-    Agc::Command::Require((address & 0xffu) == 0 && (address >> 40u) == 0, __func__, "invalid acquire memory base address");
-    const auto wholeAddressSpace = sizeBytes == 0xffffffffffffffffull;
-    Agc::Command::Require(wholeAddressSpace || ((sizeBytes & 0xffu) == 0 && (sizeBytes >> 40u) == 0), __func__, "invalid acquire memory range size");
+    // Coherence ranges have 256-byte granularity and a 40-bit reach. Acquiring more than requested is
+    // always safe, so unaligned ranges widen outwards and out-of-reach ranges cover everything.
+    constexpr std::uint64_t reach = 1ull << 40u;
+    const auto requested = reinterpret_cast<std::uintptr_t>(base);
+    const auto first = requested & ~0xffull;
+    auto wholeAddressSpace = sizeBytes == 0xffffffffffffffffull || first >= reach || sizeBytes > reach;
+    std::uint64_t address = 0;
+    std::uint64_t size = 0;
+    if (!wholeAddressSpace) {
+        const auto last = (requested + sizeBytes + 0xffu) & ~0xffull;
+        wholeAddressSpace = last > reach;
+        address = first;
+        size = last - first;
+    }
+    if (wholeAddressSpace) address = 0;
     Agc::Command::Require(pollCycles / 40u <= 0xffffu, __func__, "acquire poll interval overflow");
-    return Agc::Command::Emit(buf, 0x58u, {(static_cast<std::uint32_t>(engine) << 31u) | cbDbOp, wholeAddressSpace ? 0u : static_cast<std::uint32_t>(sizeBytes >> 8u), 0, static_cast<std::uint32_t>(address >> 8u), 0, pollCycles / 40u, gcrControl}, __func__);
+    return Agc::Command::Emit(buf, 0x58u, {(static_cast<std::uint32_t>(engine) << 31u) | cbDbOp, wholeAddressSpace ? 0u : static_cast<std::uint32_t>(size >> 8u), 0, static_cast<std::uint32_t>(address >> 8u), 0, pollCycles / 40u, gcrControl}, __func__);
 }
 
 uint32_t APS5_VABI sceAgcDcbAcquireMemGetSize(void) {

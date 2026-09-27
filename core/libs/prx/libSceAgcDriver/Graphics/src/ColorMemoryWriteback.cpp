@@ -16,7 +16,7 @@ void GpuColorTransfer::WriteBackTracked(std::uint64_t address) {
 void GpuColorTransfer::writeBack(std::uint64_t address, bool tracked) {
     PerformanceTimer timing("ColorTransfer.WriteBack");
     Require(tiled != nullptr && readback != nullptr, "color transfer is not prepared for writeback");
-    const ColorTargetLayout layout(width, height, mode);
+    const ColorTargetLayout layout(width, height, mode, elementBytes, tail);
     Require(address != 0 && address % layout.Alignment() == 0, "misaligned color writeback address");
     timing.Mark("validate");
     readback->Invalidate();

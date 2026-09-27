@@ -24,9 +24,7 @@ using Lease = std::vector<std::shared_ptr<const Range>>;
 
 extern "C" {
 void* GuestAllocationsBegin_nid_postfix();
-#ifdef _WIN32
 void GuestAllocationsRegisterMainImage_nid_postfix(void* mutation);
-#endif
 void GuestAllocationsEnd_nid_postfix(void* mutation) noexcept;
 void GuestAllocationsAdd_nid_postfix(void* mutation, void* pointer, std::size_t bytes, bool readable, bool writable);
 void GuestAllocationsRequireUnpinned_nid_postfix(void* mutation, const void* pointer, std::size_t bytes);
@@ -35,6 +33,8 @@ Range GuestAllocationsFind_nid_postfix(void* mutation, const void* pointer);
 void GuestAllocationsRemove_nid_postfix(void* mutation, const void* pointer);
 void GuestAllocationsProtect_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, bool readable, bool writable, const std::function<void()>& apply);
 void GuestAllocationsUnmap_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply);
+bool GuestAllocationsQuery_nid_postfix(void* mutation, const void* pointer, bool findNext, Range* result);
+void GuestAllocationsCarve_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void()>& apply);
 Lease GuestAllocationsAcquire_nid_postfix();
 }
 
@@ -44,9 +44,7 @@ public:
     ~Mutation() { GuestAllocationsEnd_nid_postfix(handle); }
     Mutation(const Mutation&) = delete;
     Mutation& operator=(const Mutation&) = delete;
-#ifdef _WIN32
     void RegisterMainImage() { GuestAllocationsRegisterMainImage_nid_postfix(handle); }
-#endif
     void Add(void* pointer, std::size_t bytes, bool readable, bool writable) { GuestAllocationsAdd_nid_postfix(handle, pointer, bytes, readable, writable); }
     void RequireUnpinned(const void* pointer, std::size_t bytes) const { GuestAllocationsRequireUnpinned_nid_postfix(handle, pointer, bytes); }
     void RequireAvailable(const void* pointer, std::size_t bytes) const { GuestAllocationsRequireAvailable_nid_postfix(handle, pointer, bytes); }
@@ -54,6 +52,8 @@ public:
     void Remove(const void* pointer) { GuestAllocationsRemove_nid_postfix(handle, pointer); }
     void Unmap(const void* pointer, std::size_t bytes, const std::function<void(const void*, bool)>& apply) { GuestAllocationsUnmap_nid_postfix(handle, pointer, bytes, apply); }
     void Protect(const void* pointer, std::size_t bytes, bool readable, bool writable, const std::function<void()>& apply) { GuestAllocationsProtect_nid_postfix(handle, pointer, bytes, readable, writable, apply); }
+    void Carve(const void* pointer, std::size_t bytes, const std::function<void()>& apply) { GuestAllocationsCarve_nid_postfix(handle, pointer, bytes, apply); }
+    bool Query(const void* pointer, bool findNext, Range* result) const { return GuestAllocationsQuery_nid_postfix(handle, pointer, findNext, result); }
 
 private:
     void* handle;

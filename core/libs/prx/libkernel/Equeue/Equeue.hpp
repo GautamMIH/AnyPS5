@@ -16,6 +16,8 @@
 static constexpr int16_t EVFILT_USER = -11;
 static constexpr int16_t EVFILT_VIDEO_OUT = -13;
 static constexpr int16_t EVFILT_HRTIMER = -15;
+static constexpr int16_t EVFILT_AMPR = -25;
+static constexpr int16_t EVFILT_AMPR_SYSTEM = -30;
 
 static constexpr uint16_t EV_ADD = 0x0001;
 static constexpr uint16_t EV_ONESHOT = 0x0010;
@@ -23,11 +25,11 @@ static constexpr uint16_t EV_CLEAR = 0x0020;
 static constexpr uint16_t EV_ERROR = 0x4000;
 
 static constexpr int EQUEUE_OK = 0;
-static constexpr int EQUEUE_ERROR_EBADF = -2147418090;
-static constexpr int EQUEUE_ERROR_EFAULT = -2147418103;
-static constexpr int EQUEUE_ERROR_EINVAL = -2147418107;
-static constexpr int EQUEUE_ERROR_ENOENT = -2147418095;
-static constexpr int EQUEUE_ERROR_ETIMEDOUT = -2147418077;
+static constexpr int EQUEUE_ERROR_EBADF = static_cast<int>(0x80020009);
+static constexpr int EQUEUE_ERROR_EFAULT = static_cast<int>(0x8002000E);
+static constexpr int EQUEUE_ERROR_EINVAL = static_cast<int>(0x80020016);
+static constexpr int EQUEUE_ERROR_ENOENT = static_cast<int>(0x80020002);
+static constexpr int EQUEUE_ERROR_ETIMEDOUT = static_cast<int>(0x8002003C);
 
 struct KernelEqueueEvent;
 

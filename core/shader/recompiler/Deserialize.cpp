@@ -152,7 +152,7 @@ int main(int argc, char** argv) {
         std::cout << "Disassembly written to disasm.txt (" << disasm.size() << " bytes)\n";
 
         const ShaderStageKind stageKind = ToShaderStageKind(request.shader.stage);
-        const auto inputInfo = BuildShaderStageInputInfo(stageKind, request.context);
+        const auto inputInfo = BuildShaderStageInputInfo(stageKind, request.context, request.target.subgroupSize, request.graphics.has_value() && request.graphics->mesh.has_value() ? &*request.graphics->mesh : nullptr);
 
         GraphBuilder graphBuilder;
         auto cfg = graphBuilder.Build(decoded);

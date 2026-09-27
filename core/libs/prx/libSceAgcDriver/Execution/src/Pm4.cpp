@@ -2,6 +2,8 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
+#include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -91,27 +93,30 @@ std::string_view UnsupportedReason(std::uint32_t header) {
     const auto opcode = (header >> 8u) & 0xffu;
     if (opcode == 0x10) {
         switch ((header >> 2u) & 0x3fu) {
-            case 0: case 0x09: case 0x0b: case 0x0c: case 0x17: case 0x1a: return {};
-            case 0x06: return "VideoOut buffer-completion wait interface is not implemented";
+            case 0: case 0x06: case 0x09: case 0x0b: case 0x0c: case 0x17: case 0x1a: return {};
             case 0x14: case 0x18: return "guest cache actions and GPU release events are not implemented";
             default: return "custom packet has no implemented contract in the reference dispatch table";
         }
     }
     switch (opcode) {
         case 0x11: case 0x12: case 0x13: case 0x15: case 0x16: case 0x26:
-        case 0x2a: case 0x2d: case 0x2f: case 0x35: case 0x37: case 0x40: case 0x42: case 0x46: case 0x50:
+        case 0x27: case 0x2a: case 0x2d: case 0x2f: case 0x35: case 0x37: case 0x40: case 0x42: case 0x46: case 0x50:
         case 0x58: case 0x63: case 0x64: case 0x69: case 0x76: case 0x79: case 0x7a:
         case 0x81: case 0x83: case 0x9f: return {};
-        case 0x24: case 0x25: case 0x27: case 0x2c: case 0x38: case 0x3a: case 0x8d:
+        case 0x24: case 0x25: case 0x2c: case 0x38: return {};
+        case 0x3a: case 0x8d:
             return "graphics draw, shader stages and guest render-target materialization are not implemented";
-        case 0x20: return "GPU query predication is not implemented";
+        case 0x20: return {};
         case 0x22: return "conditional command execution and conditional flip reservation are not implemented";
-        case 0x33: case 0x3f: return "nested command buffers, branching and nested flip reservation are not implemented";
-        case 0x39: case 0x3c: case 0x59: case 0x93:
+        case 0x3f: return {};
+        case 0x33: return "command-buffer branching is not implemented";
+        case 0x3c: case 0x93: return {};
+        case 0x39: case 0x59:
             return "cooperative command-queue waits are not implemented";
         case 0x84: case 0x85: case 0x86: case 0x88:
             return "separate CE/DE execution and counter synchronization are not implemented";
-        case 0x43: case 0x47: case 0x48: case 0x49:
+        case 0x49: return {};
+        case 0x43: case 0x47: case 0x48:
             return "guest cache actions, GPU events and interrupt delivery are not implemented";
         case 0x8e: return "GPU LOD statistics are not implemented; synthetic results are forbidden";
         case 0x28: case 0x41: case 0x68: case 0x78:
@@ -137,6 +142,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
                 require((packet[1] & 0xffff0000u) != 0x68750000u, "typed user-data and legacy flip markers are not implemented");
                 break;
             case 0x09: size(2); break;
+            case 0x06: graphics(); size(4); require(packet[3] == 0, "unsupported rendering wait mode"); break;
             case 0x0b: {
                 const auto data = std::as_bytes(packet.subspan(1));
                 require(std::find(data.begin(), data.end(), std::byte{}) != data.end(), "unterminated marker text");
@@ -153,7 +159,9 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         }
         return;
     }
-    require((header & 0xffu) == 0 || (opcode == 0x11 && (header & 0xffu) == 2), "PM4 header flags are not implemented");
+    // Bit 0 is PREDICATE: the executor skips such packets while SET_PREDICATION's predicate is set.
+    if ((header & 0xfeu) != 0 && !(opcode == 0x11 && (header & 0xfeu) == 2))
+        throw std::runtime_error("PM4 header flags are not implemented for " + Name(header) + " (header 0x" + [&] { char text[12]{}; std::snprintf(text, sizeof(text), "%08x", header); return std::string(text); }() + ")");
     switch (opcode) {
         case 0x11:
             size(4);
@@ -169,18 +177,87 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             size(3);
             require((packet[2] & ~0x20u) == 2u, "unsupported auto draw flags");
             break;
+        case 0x27:
+            graphics();
+            size(6);
+            require(packet[4] <= packet[1], "index count exceeds maximum index size");
+            require((packet[5] & ~0x20u) == 0, "unsupported indexed draw flags");
+            break;
         case 0x35:
             graphics();
             size(5);
             require(packet[3] <= packet[1], "index count exceeds maximum index size");
             require((packet[4] & ~0x20u) == 0, "unsupported indexed draw flags");
             break;
+        // Indirect draws (KytyPS5 CpOpDrawIndirect/CpOpDrawIndirectMulti): DW2 holds the base
+        // vertex SGPR (and, indexed, the start index SGPR in bits 16-31), DW3 the start instance
+        // SGPR (bit 27 enables the start index SGPR); 0x280 means no SGPR.
+        case 0x24: case 0x25: case 0x2c: case 0x38: {
+            graphics();
+            const bool multi = opcode == 0x2c || opcode == 0x38;
+            const bool indexed = opcode == 0x25 || opcode == 0x38;
+            size(multi ? 10 : 5);
+            require((packet[1] & 3u) == 0, "misaligned indirect draw argument offset");
+            require(indexed ? (packet[3] & ~0x0800ffffu) == 0 && ((packet[3] & 0x08000000u) != 0 || (packet[2] >> 16u) == 0) : (packet[2] >> 16u) == 0 && (packet[3] >> 16u) == 0, "unsupported indirect draw patch locations");
+            require((packet.back() & ~0x20u) == 2u, "unsupported indirect draw initiator");
+            if (multi) {
+                require((packet[4] & ~(opcode == 0x2c ? 0xc000ffffu : 0x40000000u)) == 0, "unsupported indirect multi-draw control bits");
+                require((packet[8] & 3u) == 0 && packet[8] >= (indexed ? 20u : 16u), "invalid indirect multi-draw stride");
+                require((packet[4] & 0x40000000u) == 0 ? packet[6] == 0 && packet[7] == 0 : (packet[6] & 3u) == 0 && address(packet[6], packet[7]) != 0, "invalid indirect multi-draw count address");
+            }
+            break;
+        }
         case 0x15: size(5); require((packet[4] & ~0x8000u) == 0x41u, "dispatch modifiers are not implemented"); break;
         case 0x16:
             require(packet.size() == 3 || packet.size() == 4, "invalid indirect dispatch size");
             require((packet.back() & ~0x8000u) == 0x41u, "indirect dispatch modifiers are not implemented");
             break;
         case 0x42: size(2); require(packet[1] == 0, "unsupported PFP_SYNC_ME payload"); break;
+        case 0x20: {
+            size(4);
+            require((packet[1] & ~0x00071100u) == 0, "unsupported SET_PREDICATION fields");
+            const auto operation = (packet[1] >> 16u) & 7u;
+            require(operation == 0 || operation == 1 || operation == 3, "only clear, occlusion and boolean predication are implemented");
+            require(operation == 0 || ((packet[2] & 0xfu) == 0 && (packet[2] != 0 || packet[3] != 0)), "predication requires an aligned address");
+            break;
+        }
+        case 0x3f:
+            if (packet.size() == 14) {
+                require((packet[1] & ~0x703u) == 0 && (packet[1] & 3u) != 0 && (packet[1] & 3u) != 3 && ((packet[1] >> 8u) & 7u) <= 6, "unsupported conditional branch mode or compare function");
+                require((packet[2] & 7u) == 0 && address(packet[2], packet[3]) != 0, "null or misaligned conditional branch compare address");
+                require((packet[8] & 3u) == 0 && (packet[11] & 3u) == 0, "misaligned conditional branch buffer");
+                require((packet[10] & ~0x300fffffu) == 0 && (packet[13] & ~0x300fffffu) == 0, "unsupported conditional branch buffer fields");
+                break;
+            }
+            size(4);
+            require((packet[1] & 3u) == 0, "misaligned nested command buffer");
+            require((packet[3] & 0x0fe00000u) == 0x0f200000u, "unsupported INDIRECT_BUFFER control fields");
+            break;
+        case 0x3c: case 0x93: {
+            size(opcode == 0x3c ? 7 : 9);
+            require((packet[1] & ~0x060003f7u) == 0, "unsupported WAIT_REG_MEM control fields");
+            require((packet[1] & 0x30u) == 0x10u, "register WAIT_REG_MEM is not implemented");
+            require((packet[1] & 0xc0u) == 0, "WAIT_REG_MEM write operations are not implemented");
+            require((packet[1] & 7u) <= 6, "invalid WAIT_REG_MEM comparison");
+            const auto target = address(packet[2], packet[3]);
+            require(target != 0 && (target & (opcode == 0x3c ? 3u : 7u)) == 0, "null or misaligned WAIT_REG_MEM address");
+            require(packet.back() <= 0xffffu, "invalid WAIT_REG_MEM poll interval");
+            break;
+        }
+        case 0x49: {
+            size(8);
+            require((packet[1] & ~0x07fff73fu) == 0, "unsupported RELEASE_MEM event fields");
+            const auto eventIndex = (packet[1] >> 8u) & 7u;
+            require(eventIndex == 5 || eventIndex == 6, "invalid RELEASE_MEM event index");
+            require((packet[2] & ~0xe7030000u) == 0, "unsupported RELEASE_MEM control fields");
+            const auto interrupt = (packet[2] >> 24u) & 7u;
+            const auto dataSelect = packet[2] >> 29u;
+            require(interrupt <= 4, "invalid RELEASE_MEM interrupt selector");
+            require(dataSelect <= 3, "GDS and system-clock RELEASE_MEM data sources are not implemented");
+            require(packet[7] <= 0x7ffffffu, "invalid RELEASE_MEM interrupt context");
+            if (dataSelect != 0) require((address(packet[3], packet[4]) & (dataSelect == 1 ? 3u : 7u)) == 0, "misaligned RELEASE_MEM destination");
+            break;
+        }
         case 0x46: {
             require((packet[1] & ~0x73fu) == 0, "unsupported EVENT_WRITE flags or reserved bits");
             const auto eventType = packet[1] & 0x3fu;
@@ -222,8 +299,15 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             require((packet[1] & 3u) == 0 && packet[3] == 0x80000000u && packet[4] <= 0x3fffu, "unsupported indirect-register address or control fields");
             break;
         case 0x69: case 0x76: case 0x79: case 0x7a: {
-            if (opcode != 0x76) graphics();
             require(packet.size() >= 3, "register packet has no values");
+            // AGC tags memory waits with writes to its internal data register (UCONFIG 0x342),
+            // which has no hardware effect; compute queues carry those tags too.
+            const auto waitTag = opcode == 0x79 && registerOffset(packet[1]) == 0x342u;
+            if (opcode != 0x76 && queue != 0 && !waitTag) {
+                char message[64];
+                std::snprintf(message, sizeof(message), "graphics packet in compute queue (register 0x%x)", registerOffset(packet[1]));
+                require(false, message);
+            }
             if (opcode == 0x7a) require((packet[1] & 0xf0000000u) == 0 || (packet.size() == 3 && packet[1] == 0x20000243u), "indexed register bank selection is not implemented");
             const auto offset = registerOffset(packet[1]);
             require(packet.size() - 2 <= 0x10000u - offset, "register range overflow");
@@ -239,7 +323,13 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             break;
         case 0x37: {
             require(packet.size() >= 5, "WRITE_DATA has no data");
-            require((packet[1] & ~0x00110f00u) == 0, "WRITE_DATA engine, cache or reserved fields are not implemented");
+            // Cache policy (bits 25-26) only steers GPU cache allocation and PFP engine selection (bit 30)
+            // only picks which micro-engine performs the same write; neither is observable here.
+            if ((packet[1] & ~0x46110f00u) != 0) {
+                char text[96]{};
+                std::snprintf(text, sizeof(text), "WRITE_DATA engine, cache or reserved fields are not implemented (control 0x%08x)", packet[1]);
+                throw std::runtime_error(text);
+            }
             const auto destination = (packet[1] >> 8u) & 0xfu;
             require(destination == 1 || destination == 2 || (queue != 0 && destination == 5), "WRITE_DATA register or GDS destination is not implemented");
             require((packet[2] & 3u) == 0, "misaligned WRITE_DATA destination");
@@ -257,7 +347,9 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         }
         case 0x50:
             size(7);
-            require((packet[1] & ~0xe0300001u) == 0, "DMA_DATA cache or reserved fields are not implemented");
+            // Source/destination cache policy (bits 13-14, 25-26) and volatile hints (15, 27) do not
+            // change results because copies go through coherent host memory.
+            require((packet[1] & ~0xee30e001u) == 0, "DMA_DATA reserved control fields are not implemented");
             require(memorySelector(dmaDestination(packet)), "DMA_DATA register, GDS or prefetch destination is not implemented");
             require(memorySelector(dmaSource(packet)) || dmaSource(packet) == 2, "DMA_DATA register or GDS source is not implemented");
             require(dmaSource(packet) != 2 || packet[3] == 0, "DMA_DATA immediate exceeds 32 bits");
@@ -272,9 +364,70 @@ bool UsesGpuCacheBarrier(std::span<const std::uint32_t> packet) {
     return packet.size() == 8 && (packet[7] & 0xfc00u) == 0;
 }
 
+bool WaitSatisfied(std::span<const std::uint32_t> packet) {
+    Validate(packet, 0x20);
+    const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93;
+    const auto target = address(packet[2], packet[3]);
+    std::uint64_t value = 0;
+    GuestMemory::Read(target, std::as_writable_bytes(std::span(&value, 1)).first(wide ? 8 : 4), wide ? 8 : 4);
+    const auto reference = wide ? address(packet[4], packet[5]) : packet[4];
+    const auto mask = wide ? address(packet[6], packet[7]) : packet[5];
+    const auto masked = value & mask;
+    switch (packet[1] & 7u) {
+        case 0: return true;
+        case 1: return masked < reference;
+        case 2: return masked <= reference;
+        case 3: return masked == reference;
+        case 4: return masked != reference;
+        case 5: return masked >= reference;
+        default: return masked > reference;
+    }
+}
+
+std::optional<BranchTarget> ResolveBranch(std::span<const std::uint32_t> packet) {
+    Validate(packet, 0x20);
+    require(packet.size() == 14, "expected a conditional INDIRECT_BUFFER");
+    std::uint64_t value = 0;
+    GuestMemory::Read(address(packet[2], packet[3]), std::as_writable_bytes(std::span(&value, 1)), 8);
+    const auto masked = value & address(packet[4], packet[5]);
+    const auto reference = address(packet[6], packet[7]);
+    bool taken = true;
+    switch ((packet[1] >> 8u) & 7u) {
+        case 0: taken = true; break;
+        case 1: taken = masked < reference; break;
+        case 2: taken = masked <= reference; break;
+        case 3: taken = masked == reference; break;
+        case 4: taken = masked != reference; break;
+        case 5: taken = masked >= reference; break;
+        default: taken = masked > reference; break;
+    }
+    if (taken) return BranchTarget{address(packet[8], packet[9]), packet[10] & 0xfffffu};
+    if ((packet[1] & 3u) == 2 && (packet[13] & 0xfffffu) != 0) return BranchTarget{address(packet[11], packet[12]), packet[13] & 0xfffffu};
+    return std::nullopt;
+}
+
+std::string DescribeWait(std::span<const std::uint32_t> packet) {
+    const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93;
+    const auto target = address(packet[2], packet[3]);
+    std::uint64_t value = 0;
+    GuestMemory::Read(target, std::as_writable_bytes(std::span(&value, 1)).first(wide ? 8 : 4), wide ? 8 : 4);
+    static constexpr const char* comparisons[] = {"always", "<", "<=", "==", "!=", ">=", ">"};
+    char text[160]{};
+    std::snprintf(text, sizeof(text), "(value 0x%llx at 0x%llx) & 0x%llx %s 0x%llx",
+        static_cast<unsigned long long>(value), static_cast<unsigned long long>(target),
+        static_cast<unsigned long long>(wide ? address(packet[6], packet[7]) : packet[5]), comparisons[packet[1] & 7u],
+        static_cast<unsigned long long>(wide ? address(packet[4], packet[5]) : packet[4]));
+    return text;
+}
+
+std::uint64_t GpuClock() {
+    const auto elapsed = std::chrono::steady_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count() / 10);
+}
+
 bool AccessesMemory(std::uint32_t header) {
     switch ((header >> 8u) & 0xffu) {
-        case 0x16: case 0x2d: case 0x35: case 0x37: case 0x40: case 0x50: case 0x63: case 0x64: case 0x83: case 0x9f: return true;
+        case 0x16: case 0x20: case 0x24: case 0x25: case 0x27: case 0x2c: case 0x2d: case 0x35: case 0x38: case 0x37: case 0x3c: case 0x40: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
         default: return false;
     }
 }
@@ -301,17 +454,91 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
         require(packet[1] == 0 || firstVertex <= std::numeric_limits<std::uint32_t>::max() - (packet[1] - 1u), "auto draw vertex range overflow");
         return {0, packet[1], 0, queue.instanceCount, packet[2] & 0x20u, false, firstVertex, 0};
     }
-    require(((packet[0] >> 8u) & 0xffu) == 0x35, "expected DRAW_INDEX_OFFSET_2 packet");
+    const auto opcode = (packet[0] >> 8u) & 0xffu;
+    require(opcode == 0x35 || opcode == 0x27, "expected DRAW_INDEX_OFFSET_2 or DRAW_INDEX_2 packet");
     require(queue.indexType <= 2, "unsupported index type");
     const std::uint32_t indexSize = queue.indexType == 0 ? 2 : queue.indexType == 1 ? 4 : 1;
-    require(queue.indexBase != 0 && queue.indexBase % indexSize == 0, "null or misaligned index base");
-    const auto offset = static_cast<std::uint64_t>(packet[2]) * indexSize;
-    require(offset <= std::numeric_limits<std::uint64_t>::max() - queue.indexBase, "index address overflow");
-    const auto address = queue.indexBase + offset;
-    const auto bytes = static_cast<std::uint64_t>(packet[3]) * indexSize;
+    std::uint64_t indexAddress = 0;
+    std::uint32_t indexCount = 0;
+    std::uint32_t initiator = 0;
+    if (opcode == 0x27) {
+        // DRAW_INDEX_2 carries its own index buffer address instead of an offset into INDEX_BASE.
+        indexAddress = address(packet[2], packet[3]);
+        require(indexAddress != 0 && indexAddress % indexSize == 0, "null or misaligned index buffer");
+        indexCount = packet[4];
+        initiator = packet[5];
+    } else {
+        require(queue.indexBase != 0 && queue.indexBase % indexSize == 0, "null or misaligned index base");
+        const auto offset = static_cast<std::uint64_t>(packet[2]) * indexSize;
+        require(offset <= std::numeric_limits<std::uint64_t>::max() - queue.indexBase, "index address overflow");
+        indexAddress = queue.indexBase + offset;
+        indexCount = packet[3];
+        initiator = packet[4];
+    }
+    const auto bytes = static_cast<std::uint64_t>(indexCount) * indexSize;
     require(bytes <= std::numeric_limits<std::size_t>::max(), "index range size overflow");
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(bytes), indexSize);
-    return {address, packet[3], indexSize, queue.instanceCount, packet[4]};
+    GuestMemory::CheckRange(reinterpret_cast<const void*>(indexAddress), static_cast<std::size_t>(bytes), indexSize);
+    return {indexAddress, indexCount, indexSize, queue.instanceCount, initiator};
+}
+
+std::vector<IndirectDraw> ResolveIndirectDraws(std::span<const std::uint32_t> packet, const QueueState& queue) {
+    Validate(packet, 0);
+    const auto opcode = (packet[0] >> 8u) & 0xffu;
+    const bool multi = opcode == 0x2c || opcode == 0x38;
+    const bool indexed = opcode == 0x25 || opcode == 0x38;
+    require(queue.drawIndirectBase != 0, "indirect draw base has not been set");
+    constexpr std::uint32_t noRegister = 0x280;
+    const auto baseVertexRegister = packet[2] & 0xffffu;
+    const auto startIndexRegister = indexed && (packet[3] & 0x08000000u) != 0 ? packet[2] >> 16u : noRegister;
+    const auto startInstanceRegister = packet[3] & 0xffffu;
+    const auto drawIndexRegister = opcode == 0x2c && (packet[4] & 0x80000000u) != 0 ? packet[4] & 0xffffu : noRegister;
+    std::uint32_t count = 1;
+    std::uint32_t stride = 0;
+    if (multi) {
+        count = packet[5];
+        stride = packet[8];
+        if ((packet[4] & 0x40000000u) != 0) {
+            std::uint32_t stored = 0;
+            GuestMemory::Read(address(packet[6], packet[7]), std::as_writable_bytes(std::span(&stored, 1)), 4);
+            count = std::min(count, stored);
+        }
+    }
+    std::uint32_t indexSize = 0;
+    if (indexed) {
+        require(queue.indexType <= 2, "unsupported index type");
+        indexSize = queue.indexType == 0 ? 2 : queue.indexType == 1 ? 4 : 1;
+        require(queue.indexBase != 0 && queue.indexBase % indexSize == 0, "null or misaligned index base");
+    }
+    std::vector<IndirectDraw> draws;
+    draws.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const auto offset = static_cast<std::uint64_t>(packet[1]) + static_cast<std::uint64_t>(i) * stride;
+        require(offset <= std::numeric_limits<std::uint64_t>::max() - queue.drawIndirectBase, "indirect draw address overflow");
+        // {count, instances, start vertex or index, [base vertex,] start instance}
+        std::array<std::uint32_t, 5> arguments{};
+        GuestMemory::Read(queue.drawIndirectBase + offset, std::as_writable_bytes(std::span(arguments).first(indexed ? 5 : 4)), 4);
+        IndirectDraw draw;
+        const auto patch = [&](std::uint32_t location, std::uint32_t value) {
+            if (location != noRegister) draw.registers.emplace_back(location, value);
+        };
+        patch(baseVertexRegister, indexed ? arguments[3] : arguments[2]);
+        patch(startInstanceRegister, indexed ? arguments[4] : arguments[3]);
+        patch(startIndexRegister, arguments[2]);
+        patch(drawIndexRegister, i);
+        // Base vertex and start instance reach vertices only through those SGPRs, as on hardware.
+        if (indexed) {
+            // INDEX_BUFFER_SIZE bounds the indices a draw may read (KytyPS5).
+            const auto indexCount = queue.indexBufferSize != 0 ? std::min(arguments[0], queue.indexBufferSize) : arguments[0];
+            const auto start = static_cast<std::uint64_t>(arguments[2]) * indexSize;
+            require(start <= std::numeric_limits<std::uint64_t>::max() - queue.indexBase, "index address overflow");
+            draw.parameters = {queue.indexBase + start, indexCount, indexSize, arguments[1], packet.back() & 0x20u};
+            if (indexCount != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.parameters.indexAddress), static_cast<std::size_t>(static_cast<std::uint64_t>(indexCount) * indexSize), indexSize);
+        } else {
+            draw.parameters = {0, arguments[0], 0, arguments[1], packet.back() & 0x20u, false};
+        }
+        draws.push_back(std::move(draw));
+    }
+    return draws;
 }
 
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
@@ -348,6 +575,33 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             return;
         case 0x12:
             queue.ClearContext(); return;
+        case 0x20: {
+            // Predicate semantics follow KytyPS5: condition 0 skips when the value is non-zero,
+            // condition 1 when it is zero.
+            const auto flags = packet[1];
+            const auto operation = (flags >> 16u) & 7u;
+            if (operation == 0) {
+                queue.predicateSkip = false;
+                return;
+            }
+            const auto source = address(packet[2] & ~0xfu, packet[3]);
+            std::uint64_t value = 0;
+            if (operation == 3) {
+                GuestMemory::Read(source, std::as_writable_bytes(std::span(&value, 1)), 8);
+            } else {
+                // Occlusion: one begin/end pair of ZPASS counters per depth block, each marked
+                // ready by bit 63.
+                std::array<std::uint64_t, 32> counters{};
+                GuestMemory::Read(source, std::as_writable_bytes(std::span(counters)), 8);
+                constexpr std::uint64_t ready = 1ull << 63u;
+                for (std::size_t block = 0; block < 16; ++block) {
+                    require((counters[block * 2] & counters[block * 2 + 1] & ready) != 0, "occlusion predication results are not available (occlusion queries are not implemented)");
+                    value += (counters[block * 2 + 1] & ~ready) - (counters[block * 2] & ~ready);
+                }
+            }
+            queue.predicateSkip = ((flags >> 8u) & 1u) == 0 ? value != 0 : value == 0;
+            return;
+        }
         case 0x13: queue.indexBufferSize = packet[1]; return;
         case 0x26: queue.indexBase = address(packet[1], packet[2]); return;
         case 0x2a: queue.indexType = packet[1]; return;
@@ -385,6 +639,16 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         case 0x50:
             copyMemory(address(packet[2], packet[3]), address(packet[4], packet[5]), packet[6] & 0x3ffffffu, dmaSource(packet) == 2);
             return;
+        case 0x49: {
+            const auto dataSelect = packet[2] >> 29u;
+            const auto destination = address(packet[3], packet[4]);
+            if (dataSelect == 1) GuestMemory::Write(destination, std::as_bytes(packet.subspan(5, 1)), 4);
+            else if (dataSelect == 2 || dataSelect == 3) {
+                const std::uint64_t value = dataSelect == 3 ? GpuClock() : address(packet[5], packet[6]);
+                GuestMemory::Write(destination, std::as_bytes(std::span(&value, 1)), 8);
+            }
+            return;
+        }
         default: throw std::runtime_error("packet requires driver execution");
     }
 }

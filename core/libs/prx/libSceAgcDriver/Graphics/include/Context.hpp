@@ -21,6 +21,7 @@ class DrawQueue;
 class GraphicsPipelineCache;
 class DescriptorCache;
 class SamplerCache;
+class GuestGpuMemory;
 
 inline void Require(bool condition, const std::string& reason) {
     if (!condition) throw std::runtime_error("AGC graphics: " + reason);
@@ -64,6 +65,15 @@ struct Context {
     GraphicsPipelineCache* graphicsPipelines = nullptr;
     mutable std::shared_ptr<DescriptorCache> descriptorCache;
     mutable std::shared_ptr<SamplerCache> samplerCache;
+    bool depthBounds = false;
+    bool depthBiasClamp = false;
+    bool independentBlend = false;
+    bool geometryShader = false;
+    bool imageGatherExtended = false;
+    bool storageImageReadWithoutFormat = false;
+    bool storageImageWriteWithoutFormat = false;
+    bool externalMemoryHost = false;
+    GuestGpuMemory* guestGpuMemory = nullptr;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {
@@ -78,6 +88,14 @@ struct Context {
             if ((mask & (1u << i)) != 0 && (memory.memoryTypes[i].propertyFlags & flags) == flags) return i;
         }
         throw std::runtime_error("AGC graphics: required Vulkan memory type is unavailable");
+    }
+
+    // A type with the preferred flags if one exists, otherwise one with the required flags.
+    std::uint32_t MemoryType(std::uint32_t mask, VkMemoryPropertyFlags required, VkMemoryPropertyFlags preferred) const {
+        for (std::uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+            if ((mask & (1u << i)) != 0 && (memory.memoryTypes[i].propertyFlags & (required | preferred)) == (required | preferred)) return i;
+        }
+        return MemoryType(mask, required);
     }
 };
 

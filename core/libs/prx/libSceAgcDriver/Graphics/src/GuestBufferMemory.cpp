@@ -1,6 +1,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include <stdexcept>
+#include <string>
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -18,15 +21,23 @@ void GuestBufferMemory::validate(std::uint64_t address, std::size_t bytes) const
     Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "guest memory range overflow");
 }
 
-void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes) {
+void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes, std::size_t leading) {
     validate(address, bytes);
+    Require(leading <= address, "guest memory range underflow");
     GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
-    regions.push_back({address, address + bytes, true, {}, nullptr});
+    if (leading != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), leading, 1, false);
+    regions.push_back({address - leading, address + bytes, true, {}, nullptr});
     writes.emplace_back(address, address + bytes);
 }
 
 void GuestBufferMemory::AddSnapshot(const GuestMemorySnapshot& snapshot) {
     validate(snapshot.address, snapshot.bytes.size());
+    // With a mirror the GPU reads memory as it is at execution, like the console; the capture
+    // taken for recompilation only names the range.
+    if (context.guestGpuMemory != nullptr) {
+        regions.push_back({snapshot.address, snapshot.address + snapshot.bytes.size(), false, {}, nullptr, true});
+        return;
+    }
     for (const auto& region : regions) {
         if (region.begin <= snapshot.address && snapshot.address + snapshot.bytes.size() <= region.end) {
             const auto offset = static_cast<std::size_t>(snapshot.address - region.begin);
@@ -46,12 +57,18 @@ void GuestBufferMemory::Upload(bool addressable) {
     for (auto& region : regions) {
         if (!merged.empty() && region.begin < merged.back().end) {
             auto& previous = merged.back();
-            Require(previous.writable == region.writable, "writable guest memory overlaps an immutable snapshot");
-            if (!region.writable) {
+            const bool captured = !previous.writable && !previous.live && !region.writable && !region.live;
+            Require(captured || previous.live || region.live || previous.writable == region.writable, "writable guest memory overlaps an immutable snapshot");
+            if (captured) {
                 const auto offset = static_cast<std::size_t>(region.begin - previous.begin);
                 const auto overlap = static_cast<std::size_t>(std::min(previous.end, region.end) - region.begin);
                 Require(std::memcmp(previous.snapshot.data() + offset, region.snapshot.data(), overlap) == 0, "inconsistent overlapping guest snapshots");
                 if (region.end > previous.end) previous.snapshot.insert(previous.snapshot.end(), region.snapshot.begin() + overlap, region.snapshot.end());
+            } else {
+                // Contents are read from guest memory at upload, which covers both.
+                previous.writable = previous.writable || region.writable;
+                previous.live = true;
+                previous.snapshot.clear();
             }
             previous.end = std::max(previous.end, region.end);
         } else {
@@ -59,13 +76,40 @@ void GuestBufferMemory::Upload(bool addressable) {
         }
     }
     regions = std::move(merged);
+    // Storage buffer views must start at multiples of minStorageBufferOffsetAlignment from their
+    // buffer, so each buffer starts at an aligned guest address: the region is extended down to
+    // it unless that would reach into the previous region (addresses keep a single owner). The
+    // padding stays within the region's first page; it is never written back.
+    const auto alignment = std::max<std::uint64_t>(context.limits.minStorageBufferOffsetAlignment, 1u);
+    std::uint64_t previousEnd = 0;
     for (auto& region : regions) {
+        const auto aligned = region.begin & ~(alignment - 1u);
+        const auto padding = aligned >= previousEnd ? region.begin - aligned : 0u;
+        previousEnd = region.end;
+        region.begin -= padding;
         const auto bytes = region.end - region.begin;
         Require(bytes <= std::numeric_limits<std::size_t>::max(), "guest GPU allocation size overflow");
+        if (context.guestGpuMemory != nullptr && (region.writable || region.live)) {
+            // Resident render targets over the range reach guest memory first, as a read would.
+            GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(bytes), 1, region.writable);
+            region.view = context.guestGpuMemory->Resolve(region.begin, bytes);
+            if (region.view && region.view->bytes == bytes) continue;
+            region.view.reset();
+        }
         const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
         region.buffer = std::make_unique<Buffer>(context, static_cast<std::size_t>(bytes), usage);
-        if (region.writable) GuestMemory::Read(region.begin, region.buffer->Bytes());
-        else std::memcpy(region.buffer->Bytes().data(), region.snapshot.data(), region.snapshot.size());
+        if (region.writable || region.live) {
+            try {
+                GuestMemory::Read(region.begin, region.buffer->Bytes());
+            } catch (const std::exception& error) {
+                char context[96];
+                std::snprintf(context, sizeof(context), " (uploading writable guest region 0x%llx+0x%llx)", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes));
+                throw std::runtime_error(std::string(error.what()) + context);
+            }
+        } else {
+            std::memset(region.buffer->Bytes().data(), 0, static_cast<std::size_t>(padding));
+            std::memcpy(region.buffer->Bytes().data() + padding, region.snapshot.data(), region.snapshot.size());
+        }
         region.snapshot.clear();
     }
 }
@@ -76,19 +120,23 @@ VkDescriptorBufferInfo GuestBufferMemory::Descriptor(std::uint64_t address, std:
     const auto found = std::upper_bound(regions.begin(), regions.end(), address, [](std::uint64_t value, const Region& region) { return value < region.begin; });
     Require(found != regions.begin(), "guest buffer has no GPU owner");
     const auto& region = *std::prev(found);
-    Require(address >= region.begin && address + bytes <= region.end && region.buffer != nullptr, "guest buffer view exceeds its GPU owner");
-    const auto offset = address - region.begin;
-    Require(context.limits.minStorageBufferOffsetAlignment != 0 && offset % context.limits.minStorageBufferOffsetAlignment == 0, "guest buffer view violates storage buffer offset alignment");
+    Require(address >= region.begin && address + bytes <= region.end && (region.buffer != nullptr || region.view), "guest buffer view exceeds its GPU owner");
+    const auto offset = (region.view ? region.view->offset : 0u) + (address - region.begin);
+    if (context.limits.minStorageBufferOffsetAlignment == 0 || offset % context.limits.minStorageBufferOffsetAlignment != 0) {
+        char message[200];
+        std::snprintf(message, sizeof(message), "guest buffer view at 0x%llx (region 0x%llx) violates storage buffer offset alignment %llu", static_cast<unsigned long long>(address), static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(context.limits.minStorageBufferOffsetAlignment));
+        Require(false, message);
+    }
     Require(bytes <= context.limits.maxStorageBufferRange, "guest buffer view exceeds descriptor range limit");
-    return {region.buffer->Handle(), offset, bytes};
+    return {region.view ? region.view->buffer : region.buffer->Handle(), offset, bytes};
 }
 
 std::vector<ShaderRecompiler::BdaAbi::Range> GuestBufferMemory::AddressRanges() const {
     Require(uploaded && !committed, "guest GPU address ranges are not available");
     std::vector<ShaderRecompiler::BdaAbi::Range> result;
     for (const auto& region : regions) {
-        Require(region.buffer != nullptr, "incomplete guest GPU upload");
-        const auto address = region.buffer->DeviceAddress();
+        Require(region.buffer != nullptr || region.view, "incomplete guest GPU upload");
+        const auto address = region.view ? region.view->address : region.buffer->DeviceAddress();
         Require(region.end - region.begin <= std::numeric_limits<std::uint64_t>::max() - address, "GPU address range overflow");
         result.push_back({region.begin, region.end, address, ShaderRecompiler::BdaAbi::Read, 0});
     }
@@ -109,10 +157,17 @@ void GuestBufferMemory::WriteBack() {
         const auto found = std::upper_bound(regions.begin(), regions.end(), begin, [](auto address, const auto& region) { return address < region.begin; });
         Require(found != regions.begin(), "write-back range has no GPU owner");
         const auto& region = *std::prev(found);
-        Require(region.buffer != nullptr && region.writable && end <= region.end, "write-back range exceeds its GPU owner");
+        Require((region.buffer != nullptr || region.view) && region.writable && end <= region.end, "write-back range exceeds its GPU owner");
+        // Mirrored memory already holds what the GPU wrote.
+        if (region.view) {
+            sources.emplace_back();
+            continue;
+        }
         sources.push_back(region.buffer->Bytes().subspan(static_cast<std::size_t>(begin - region.begin), static_cast<std::size_t>(end - begin)));
     }
-    for (std::size_t i = 0; i < merged.size(); ++i) GuestMemory::Write(merged[i].first, sources[i]);
+    for (std::size_t i = 0; i < merged.size(); ++i) {
+        if (!sources[i].empty()) GuestMemory::Write(merged[i].first, sources[i]);
+    }
     committed = true;
     lease.clear();
 }

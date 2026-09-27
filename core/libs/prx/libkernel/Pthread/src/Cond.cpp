@@ -1,18 +1,17 @@
 #include "../include/Pthread.hpp"
+#include "../include/PthreadSync.hpp"
 #include "prx/libc/include/General.hpp"
-#include <chrono>
+#include <new>
 #include <stdexcept>
 
 static constexpr int SCE_OK = 0;
-static constexpr int SCE_KERNEL_ERROR_ENOMEM = 0x8002000C;
-static constexpr int SCE_KERNEL_ERROR_ETIMEDOUT = 0x80020062;
 
 extern "C" {
 
 int APS5_VABI scePthreadCondattrInit(PthreadCondattr* attr) {
     if (!attr) throw std::runtime_error("scePthreadCondattrInit: null attr");
-    auto* p = new (std::nothrow) PthreadCondattrPrivate{0};
-    if (!p) return SCE_KERNEL_ERROR_ENOMEM;
+    auto* p = new (std::nothrow) PthreadCondattrPrivate{PthreadSync::kClockRealtime};
+    if (!p) return PthreadSync::SceError(PthreadSync::kErrorNoMemory);
     *attr = p;
     return SCE_OK;
 }
@@ -24,62 +23,32 @@ int APS5_VABI scePthreadCondattrDestroy(PthreadCondattr* attr) {
     return SCE_OK;
 }
 
-int APS5_VABI scePthreadCondInit(PthreadCond* cond, const PthreadCondattr*, const char*) {
-    if (!cond) throw std::runtime_error("scePthreadCondInit: null cond");
-    auto* p = new (std::nothrow) PthreadCondPrivate{};
-    if (!p) return SCE_KERNEL_ERROR_ENOMEM;
-    *cond = p;
-    return SCE_OK;
+int APS5_VABI scePthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr, const char*) {
+    return PthreadSync::SceError(PthreadSync::CondCreate(cond, attr && *attr ? (*attr)->_clockid : PthreadSync::kClockRealtime));
 }
 
 int APS5_VABI scePthreadCondDestroy(PthreadCond* cond) {
-    if (!cond || !*cond) throw std::runtime_error("scePthreadCondDestroy: null cond");
-    delete *cond;
-    *cond = nullptr;
-    return SCE_OK;
+    return PthreadSync::SceError(PthreadSync::CondDestroy(cond));
 }
 
 int APS5_VABI scePthreadCondSignal(PthreadCond* cond) {
-    if (!cond || !*cond) throw std::runtime_error("scePthreadCondSignal: null cond");
-    (*cond)->_cv.notify_one();
-    return SCE_OK;
+    return PthreadSync::SceError(PthreadSync::CondSignal(cond));
 }
 
 int APS5_VABI scePthreadCondBroadcast(PthreadCond* cond) {
-    if (!cond || !*cond) throw std::runtime_error("scePthreadCondBroadcast: null cond");
-    (*cond)->_cv.notify_all();
-    return SCE_OK;
+    return PthreadSync::SceError(PthreadSync::CondBroadcast(cond));
 }
 
-int APS5_VABI scePthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, unsigned int usec) {
-    if (!cond || !*cond || !mutex || !*mutex)
-        throw std::runtime_error("scePthreadCondTimedwait: null arg");
-    auto* m = *mutex;
-    auto* c = *cond;
-    if (m->_type == MutexType::Recursive) {
-        std::unique_lock<std::recursive_timed_mutex> lk(m->_rmtx, std::adopt_lock);
-        auto res = c->_cv.wait_for(lk, std::chrono::microseconds(usec));
-        lk.release();
-        return res == std::cv_status::timeout ? SCE_KERNEL_ERROR_ETIMEDOUT : SCE_OK;
-    }
-    std::unique_lock<std::timed_mutex> lk(m->_mtx, std::adopt_lock);
-    auto res = c->_cv.wait_for(lk, std::chrono::microseconds(usec));
-    lk.release();
-    return res == std::cv_status::timeout ? SCE_KERNEL_ERROR_ETIMEDOUT : SCE_OK;
-}
-
-int APS5_VABI scePthreadCondSignalto(PthreadCond* cond, Pthread thread) {
- (void)cond;
- (void)thread;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI scePthreadCondSignalto(PthreadCond* cond, Pthread) {
+    return PthreadSync::SceError(PthreadSync::CondBroadcast(cond));
 }
 
 int APS5_VABI scePthreadCondWait(PthreadCond* cond, PthreadMutex* mutex) {
- (void)cond;
- (void)mutex;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return PthreadSync::SceError(PthreadSync::CondWait(cond, mutex, std::nullopt));
+}
+
+int APS5_VABI scePthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, unsigned int usec) {
+    return PthreadSync::SceError(PthreadSync::CondWait(cond, mutex, PthreadSync::DeadlineAfterMicroseconds(usec)));
 }
 
 }

@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
@@ -18,7 +19,8 @@ namespace {
 struct DrawStorage {
     std::unique_ptr<Buffer> indices;
     std::vector<std::unique_ptr<Buffer>> vertices;
-    std::shared_ptr<ResidentColor> color;
+    std::array<std::shared_ptr<ResidentColor>, MaxColorTargets> colors;
+    std::shared_ptr<ResidentDepth> depth;
     std::shared_ptr<Pipeline> pipeline;
 };
 
@@ -26,10 +28,14 @@ struct DrawStorage {
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
     PerformanceTimer timing("Graphics.Draw");
+    ApplyFastClears(state);
+    // With surfaces kept uncompressed, resolving the fast clear is all an elimination pass does.
+    if (state.eliminateFastClear) return;
     Require(draw.indexed ? draw.flags == 0 : (draw.flags & ~0x20u) == 0, "draw modifiers are unsupported");
     if (draw.indexed) {
         Require(draw.indexSize == 2 || draw.indexSize == 4, "only uint16 and uint32 index buffers are supported");
-        Require(draw.firstVertex == 0 && draw.firstInstance == 0, "indexed draw offsets are unsupported");
+        // firstVertex is the signed base vertex added to every index.
+        Require(draw.firstInstance <= std::numeric_limits<std::uint32_t>::max() - (draw.instanceCount - 1u), "indexed draw instance range overflow");
     } else {
         Require(draw.indexAddress == 0 && draw.indexSize == 0, "auto draw must not reference an index buffer");
         if (draw.indexCount == 0 || draw.instanceCount == 0) return;
@@ -40,13 +46,25 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     const auto indexBytes = static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize;
     Require(indexBytes <= std::numeric_limits<std::size_t>::max(), "index buffer size overflow");
     if (draw.indexed) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
-    Require(!draw.indexed || !state.hasColorTarget || draw.indexAddress + indexBytes <= state.color.address || state.color.address + state.color.bytes <= draw.indexAddress, "index buffer aliases the render target");
+    std::vector<ColorTarget> colorTargets;
+    for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+        if ((state.colorTargetMask & (1u << slot)) != 0) colorTargets.push_back(state.colors[slot]);
+    }
+    const auto aliasesTargets = [&](std::uint64_t address, std::uint64_t bytes) {
+        const auto overlaps = [&](std::uint64_t base, std::uint64_t size) { return size != 0 && address < base + size && base < address + bytes; };
+        for (const auto& color : colorTargets) {
+            if (overlaps(color.address, color.bytes)) return true;
+        }
+        return (state.hasDepthTarget && (overlaps(state.depth.depthAddress, state.depth.depthBytes) || overlaps(state.depth.stencilAddress, state.depth.stencilBytes)));
+    };
+    Require(!draw.indexed || !aliasesTargets(draw.indexAddress, indexBytes), "index buffer aliases a render target");
     if (state.rectList) Require(draw.indexCount % 3 == 0, "incomplete rect-list primitive");
-    ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric);
+    ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, ShaderDeviceFeatures::Of(context));
     const auto shaderStages = PipelineStages(shaders);
     std::uint32_t meshGroups = 0;
     if (state.stages.mesh) {
-        Require(draw.firstVertex == 0 && draw.firstInstance == 0, "mesh draw offsets are unsupported");
+        // Auto draws pass their offsets in the mesh draw parameters; indexed ones have none.
+        Require(!draw.indexed || (draw.firstVertex == 0 && draw.firstInstance == 0), "indexed mesh draw offsets are unsupported");
         Require(context.meshShader, "device does not support mesh shaders");
         const auto& mesh = *state.stages.mesh;
         const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
@@ -77,6 +95,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             Require(index <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
             maxIndex = std::max(maxIndex, index);
         }
+        const auto highest = static_cast<std::int64_t>(maxIndex) + static_cast<std::int32_t>(draw.firstVertex);
+        Require(highest >= 0 && highest <= std::numeric_limits<std::uint32_t>::max(), "base vertex moves indices out of range");
+        maxIndex = static_cast<std::uint32_t>(highest);
     }
     timing.Mark("index_upload");
     const auto& attributes = shaders.front().program->vertexAttributes;
@@ -88,7 +109,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         const auto bytes = VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance);
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
-        Require(!state.hasColorTarget || address + bytes <= state.color.address || state.color.address + state.color.bytes <= address, "vertex buffer aliases the render target");
+        Require(!aliasesTargets(address, bytes), "vertex buffer aliases a render target");
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
         auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         GuestMemory::Read(address, buffer->Bytes(), 1);
@@ -96,15 +117,21 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         vertexBuffers.push_back(std::move(buffer));
     }
     timing.Mark("vertex_upload");
-    auto resources = std::make_shared<ShaderResources>(context, shaders, state.color, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+    auto resources = std::make_shared<ShaderResources>(context, shaders, colorTargets, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
     timing.Mark("shader_resources");
-    if (state.hasColorTarget) {
-        const ColorTargetLayout colorLayout(state.color.extent.width, state.color.extent.height, state.color.tileMode);
-        Require(state.color.bytes == colorLayout.Bytes(), "color target transfer size mismatch");
-        storage->color = context.renderCache->Get(state.color, state.blend.blendEnable != 0);
+    for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+        if ((state.colorTargetMask & (1u << slot)) == 0) continue;
+        const auto& color = state.colors[slot];
+        const ColorTargetLayout colorLayout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
+        Require(color.bytes == (color.Layered() ? color.sliceBytes * color.layers : colorLayout.Bytes()), "color target transfer size mismatch");
+        // The render cache evicts residents that share pages with a new target, so the targets of
+        // one draw must be disjoint.
+        for (std::uint32_t other = 0; other < slot; ++other) Require(!storage->colors[other] || !storage->colors[other]->SharesPages(color), "color targets of one draw share memory pages");
+        storage->colors[slot] = context.renderCache->Get(color, state.blends[slot].blendEnable != 0);
     }
+    if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
     timing.Mark("render_target_cache");
-    storage->pipeline = context.graphicsPipelines->Get(state, storage->color, *resources, shaders);
+    storage->pipeline = context.graphicsPipelines->Get(state, storage->colors, storage->depth, *resources, shaders);
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
     const auto commands = context.drawQueue->Begin(context);
@@ -112,22 +139,46 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
     upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
-    if (storage->color) storage->color->Begin(commands);
+    resources->RecordUploads(commands);
+    for (const auto& color : storage->colors) {
+        if (color) color->Begin(commands);
+    }
+    if (storage->depth) storage->depth->Begin(commands);
     pipeline.Begin(commands, state.renderExtent);
+    if (state.hasDepthTarget && (state.depthState.clearDepth || state.depthState.clearStencil) && state.scissor.extent.width != 0 && state.scissor.extent.height != 0) {
+        // DB_RENDER_CONTROL clears replace the draw's depth/stencil results with the clear values
+        // wherever it rasterizes; clear draws cover the scissor rectangle.
+        VkClearAttachment clear{};
+        clear.aspectMask = (state.depthState.clearDepth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) | (state.depthState.clearStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+        clear.clearValue.depthStencil = {state.depthState.depthClearValue, state.depthState.stencilClearValue};
+        const VkClearRect rect{state.scissor, 0, 1};
+        context.Function<PFN_vkCmdClearAttachments>("vkCmdClearAttachments")(commands, 1, &clear, 1, &rect);
+    }
     resources->Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout());
     pipeline.PushConstants(commands, shaders);
+    if (state.stages.mesh) {
+        const std::array<std::uint32_t, MeshDrawParameterBytes / sizeof(std::uint32_t)> parameters{
+            draw.indexCount,
+            draw.indexed ? 0u : draw.firstVertex,
+            draw.firstInstance,
+            draw.indexed ? draw.indexSize : 0u,
+            static_cast<std::uint32_t>(draw.indexAddress),
+            static_cast<std::uint32_t>(draw.indexAddress >> 32u)};
+        context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipeline.Layout(), PushConstantStages(shaders), 0, MeshDrawParameterBytes, parameters.data());
+    }
     if (state.stages.mesh) {
         context.Function<PFN_vkCmdDrawMeshTasksEXT>("vkCmdDrawMeshTasksEXT")(commands, meshGroups, draw.instanceCount, 1);
     } else {
         if (!vertexHandles.empty()) context.Function<PFN_vkCmdBindVertexBuffers>("vkCmdBindVertexBuffers")(commands, 0, static_cast<std::uint32_t>(vertexHandles.size()), vertexHandles.data(), vertexOffsets.data());
         if (draw.indexed) {
             context.Function<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer")(commands, indices->Handle(), 0, draw.indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-            context.Function<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed")(commands, draw.indexCount, draw.instanceCount, 0, 0, 0);
+            context.Function<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed")(commands, draw.indexCount, draw.instanceCount, 0, static_cast<std::int32_t>(draw.firstVertex), draw.firstInstance);
         } else {
             context.Function<PFN_vkCmdDraw>("vkCmdDraw")(commands, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);
         }
     }
     context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(commands);
+    resources->RecordDownloads(commands);
     VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     download.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     download.dstAccessMask = VK_ACCESS_HOST_READ_BIT;

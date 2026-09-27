@@ -404,13 +404,15 @@ int APS5_VABI sceKernelDeleteHRTimerEvent(KernelEqueue eq, int id) {
     return EqueueDeleteEvent_nid_postfix(eq, static_cast<uintptr_t>(id), EVFILT_HRTIMER);
 }
 
-int APS5_VABI sceKernelAddAmprEvent(KernelEqueue eq, int id, void* udata) {
+namespace {
+
+int addAmprEvent(KernelEqueue eq, int id, void* udata, int16_t filter) {
     if (eq == 0) {
-        return EQUEUE_OK;
+        return EQUEUE_ERROR_EBADF;
     }
     KernelEqueueEvent event{};
     event.event.ident = static_cast<uintptr_t>(id);
-    event.event.filter = EVFILT_USER;
+    event.event.filter = filter;
     event.event.flags = EV_ADD | EV_CLEAR;
     event.event.udata = udata;
     event.filter.triggerFunc = [](KernelEqueueEvent* e, void* data) {
@@ -430,24 +432,25 @@ int APS5_VABI sceKernelAddAmprEvent(KernelEqueue eq, int id, void* udata) {
             e->event.data = 0;
         }
     };
-    EqueueAddEvent_nid_postfix(eq, event);
-    return EQUEUE_OK;
+    return EqueueAddEvent_nid_postfix(eq, event);
+}
+
+}
+
+int APS5_VABI sceKernelAddAmprEvent(KernelEqueue eq, int id, void* udata) {
+    return addAmprEvent(eq, id, udata, EVFILT_AMPR);
 }
 
 int APS5_VABI sceKernelAddAmprSystemEvent(KernelEqueue eq, int id, void* udata) {
-    return sceKernelAddAmprEvent(eq, id, udata);
+    return addAmprEvent(eq, id, udata, EVFILT_AMPR_SYSTEM);
 }
 
 int APS5_VABI sceKernelDeleteAmprEvent(KernelEqueue eq, int id) {
-    if (eq == 0) {
-        return EQUEUE_OK;
-    }
-    EqueueDeleteEvent_nid_postfix(eq, static_cast<uintptr_t>(id), EVFILT_USER);
-    return EQUEUE_OK;
+    return EqueueDeleteEvent_nid_postfix(eq, static_cast<uintptr_t>(id), EVFILT_AMPR);
 }
 
 int APS5_VABI sceKernelDeleteAmprSystemEvent(KernelEqueue eq, int id) {
-    return sceKernelDeleteAmprEvent(eq, id);
+    return EqueueDeleteEvent_nid_postfix(eq, static_cast<uintptr_t>(id), EVFILT_AMPR_SYSTEM);
 }
 
 }

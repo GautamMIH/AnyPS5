@@ -153,6 +153,12 @@ void DecodeRdnaProgram(std::span<const std::uint32_t> code, RdnaProgram& program
 
     std::vector<bool> branchTargets;
     for (std::uint32_t wordIndex = 0; wordIndex < code.size();) {
+        // s_code_end (SOPP opcode 31) pads the end of shader code for instruction prefetch and
+        // traps if executed: nothing from it on is part of the program.
+        if ((code[wordIndex] >> 23u) == 0x17fu && ((code[wordIndex] >> 16u) & 0x7fu) == 0x1fu) {
+            code = code.first(wordIndex);
+            break;
+        }
         const std::uint32_t programCounter = wordIndex * static_cast<std::uint32_t>(sizeof(std::uint32_t));
         program.instructions.push_back(DecodeRdnaInstruction(programCounter, code, wordIndex));
 

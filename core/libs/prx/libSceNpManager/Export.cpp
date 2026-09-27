@@ -2,6 +2,32 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libSceUserService/UserService.hpp"
+#include <mutex>
+#include <vector>
+
+static constexpr int NP_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80550003);
+static constexpr int NP_ERROR_SIGNED_OUT = static_cast<int>(0x80550006);
+static constexpr uint32_t NP_STATE_SIGNED_OUT = 1;
+static constexpr uint32_t NP_REACHABILITY_STATE_UNAVAILABLE = 0;
+static constexpr int NP_ERROR_CALLBACK_ALREADY_REGISTERED = static_cast<int>(0x80550008);
+
+namespace {
+
+// The console is offline: each registered state callback learns once, from sceNpCheckCallback, that
+// the user is signed out.
+using NpStateCallbackA = void (APS5_VABI*)(int userId, uint32_t state, void* userdata);
+
+struct StateCallback {
+    NpStateCallbackA callback;
+    void* userdata;
+    bool pending;
+};
+
+std::mutex stateMutex;
+std::vector<StateCallback> stateCallbacks;
+
+}
 
 extern "C" {
 
@@ -12,8 +38,35 @@ int APS5_VABI sceNpAbortRequest(int req_id) {
 }
 
 int APS5_VABI sceNpCheckCallback(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    std::vector<StateCallback> pending;
+    {
+        std::lock_guard lock(stateMutex);
+        for (auto& entry : stateCallbacks) {
+            if (entry.callback != nullptr && entry.pending) {
+                pending.push_back(entry);
+                entry.pending = false;
+            }
+        }
+    }
+    for (const auto& entry : pending) entry.callback(USER_SERVICE_INITIAL_USER_ID, NP_STATE_SIGNED_OUT, entry.userdata);
+    return 0;
+}
+
+int APS5_VABI sceNpRegisterStateCallbackA(NpStateCallbackA callback, void* userdata) {
+    if (callback == nullptr) return NP_ERROR_INVALID_ARGUMENT;
+    std::lock_guard lock(stateMutex);
+    for (const auto& entry : stateCallbacks)
+        if (entry.callback == callback) return NP_ERROR_CALLBACK_ALREADY_REGISTERED;
+    stateCallbacks.push_back({callback, userdata, true});
+    return static_cast<int>(stateCallbacks.size());
+}
+
+int APS5_VABI sceNpUnregisterStateCallbackA(int callback_id) {
+    std::lock_guard lock(stateMutex);
+    if (callback_id <= 0 || static_cast<std::size_t>(callback_id) > stateCallbacks.size() || stateCallbacks[callback_id - 1].callback == nullptr)
+        return NP_ERROR_INVALID_ARGUMENT;
+    stateCallbacks[callback_id - 1].callback = nullptr;
+    return 0;
 }
 
 int APS5_VABI sceNpCheckNpAvailability(int req_id, const char* user, void* result) {
@@ -67,42 +120,38 @@ int APS5_VABI sceNpGetAccountAge(int req_id, int user_id, uint8_t* age) {
 int APS5_VABI sceNpGetAccountCountryA(int user_id, void* country_code) {
  (void)user_id;
  (void)country_code;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return NP_ERROR_SIGNED_OUT;
 }
 
 int APS5_VABI sceNpGetAccountIdA(int user_id, uint64_t* account_id) {
  (void)user_id;
- (void)account_id;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!account_id) return NP_ERROR_INVALID_ARGUMENT;
+ *account_id = 0;
+ return NP_ERROR_SIGNED_OUT;
 }
 
+// Offline, users have no PSN identity (shadPS4 sceNpGetOnlineId without shadnet).
 int APS5_VABI sceNpGetNpId(int user_id, NpId* np_id) {
- (void)user_id;
- (void)np_id;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id == USER_SERVICE_USER_ID_INVALID || !np_id) return NP_ERROR_INVALID_ARGUMENT;
+ return NP_ERROR_SIGNED_OUT;
 }
 
 int APS5_VABI sceNpGetNpReachabilityState(int user_id, uint32_t* state) {
  (void)user_id;
- (void)state;
- NotImplemented_nid_no_patch(__func__);
+ if (!state) return NP_ERROR_INVALID_ARGUMENT;
+ *state = NP_REACHABILITY_STATE_UNAVAILABLE;
  return 0;
 }
 
 int APS5_VABI sceNpGetOnlineId(int user_id, NpOnlineId* online_id) {
- (void)user_id;
- (void)online_id;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id == USER_SERVICE_USER_ID_INVALID || !online_id) return NP_ERROR_INVALID_ARGUMENT;
+ return NP_ERROR_SIGNED_OUT;
 }
 
 int APS5_VABI sceNpGetState(int user_id, uint32_t* state) {
  (void)user_id;
- (void)state;
- NotImplemented_nid_no_patch(__func__);
+ if (!state) return NP_ERROR_INVALID_ARGUMENT;
+ *state = NP_STATE_SIGNED_OUT;
  return 0;
 }
 

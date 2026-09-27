@@ -4,6 +4,8 @@
 #include <cstdint>
 
 static constexpr int SCE_NP_TROPHY2_OK = 0;
+// Trophy2 shares the NP trophy error range (shadPS4 trophy_error.h); bad arguments are reported, not fatal.
+static constexpr int SCE_NP_TROPHY2_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80551604);
 static constexpr int SCE_NP_TROPHY2_ERROR_ICON_FILE_NOT_FOUND = -2141898479;
 
 static constexpr int NP_TROPHY2_CONTEXT_DEFAULT = 1;

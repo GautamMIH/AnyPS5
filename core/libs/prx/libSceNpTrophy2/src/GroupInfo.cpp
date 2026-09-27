@@ -11,7 +11,7 @@ extern "C" {
 
 int APS5_VABI sceNpTrophy2GetGroupInfo(int context, int handle, int group_id, NpTrophy2GroupDetails* details, NpTrophy2GroupData* data) {
     if (details == nullptr || data == nullptr) {
-        APS5_INVALID_ARG_EX;
+        return SCE_NP_TROPHY2_ERROR_INVALID_ARGUMENT;
     }
     (void)context;
     (void)handle;
@@ -41,7 +41,7 @@ int APS5_VABI sceNpTrophy2GetGroupInfo(int context, int handle, int group_id, Np
 
 int APS5_VABI sceNpTrophy2GetGroupInfoArray(int context, int handle, uint32_t offset, uint32_t limit, NpTrophy2GroupDetails* details_array, NpTrophy2GroupData* data_array, uint32_t* count) {
     if (count == nullptr) {
-        APS5_INVALID_ARG_EX;
+        return SCE_NP_TROPHY2_ERROR_INVALID_ARGUMENT;
     }
     (void)context;
     (void)handle;

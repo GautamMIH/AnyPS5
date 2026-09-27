@@ -27,7 +27,8 @@ public:
         std::uint64_t originalPltGotVaddr,
         const std::string& runPath,
         bool lazyBinding,
-        bool dependencyDiagnostics
+        bool dependencyDiagnostics,
+        const Domain::ModuleLinkInfo& linkInfo
     ) override;
 
 private:

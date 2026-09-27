@@ -26,6 +26,9 @@ static constexpr std::uint32_t R_X86_64_32 = 10;
 static constexpr std::uint32_t R_X86_64_32S = 11;
 static constexpr std::uint32_t R_X86_64_GOTPCRELX = 41;
 static constexpr std::uint32_t R_X86_64_REX_GOTPCRELX = 42;
+static constexpr std::uint32_t R_X86_64_DTPMOD64 = 16;
+static constexpr std::uint32_t R_X86_64_DTPOFF64 = 17;
+static constexpr std::uint32_t R_X86_64_TPOFF64 = 18;
 
 void ValidationPolicy::_initializeSupportedRelocationTypes() {
     _supportedRelocationTypes = {
@@ -43,6 +46,9 @@ void ValidationPolicy::_initializeSupportedRelocationTypes() {
         R_X86_64_32S,
         R_X86_64_GOTPCRELX,
         R_X86_64_REX_GOTPCRELX,
+        R_X86_64_DTPMOD64,
+        R_X86_64_DTPOFF64,
+        R_X86_64_TPOFF64,
     };
 }
 

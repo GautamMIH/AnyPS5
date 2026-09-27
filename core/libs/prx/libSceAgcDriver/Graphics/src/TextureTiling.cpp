@@ -46,6 +46,7 @@ BlockLayout GetBlockLayout(TextureTileMode tileMode, std::uint32_t bytesPerEleme
         case TextureTileMode::kStandard256B: return {256u, 1u << kLog2BlockThin256B[index].width, 1u << kLog2BlockThin256B[index].height};
         case TextureTileMode::kStandard4KB: return {4096u, 1u << kLog2BlockThin4KB[index].width, 1u << kLog2BlockThin4KB[index].height};
         case TextureTileMode::RenderTarget64KB:
+        case TextureTileMode::Depth64KB:
         case TextureTileMode::kStandard64KB: return {65536u, 1u << kLog2BlockThin64KB[index].width, 1u << kLog2BlockThin64KB[index].height};
     }
     throw std::runtime_error("AGC graphics: GetBlockLayout encountered an unknown tile mode");
@@ -88,7 +89,9 @@ bool GetMipTailLayout(TextureTileMode tileMode, const BlockLayout& block, std::u
     const auto index = static_cast<std::size_t>(std::countr_zero(bytesPerElement));
     switch (tileMode) {
         case TextureTileMode::kLinear:
-        case TextureTileMode::kStandard256B: return false;
+        case TextureTileMode::kStandard256B:
+        // Depth surfaces are padded to whole blocks with no mip tail (single level, as the DB writes them).
+        case TextureTileMode::Depth64KB: return false;
         case TextureTileMode::kStandard4KB:
             out = MakeMipTailLayout(kMipTailThin4KB[index], block.blockWidth >> 1u, block.blockHeight);
             return true;
@@ -229,8 +232,19 @@ std::vector<TileMipLayout> ComputeMipLayout(TextureTileMode tileMode, std::uint3
         Require(!IsBlockCompressed(format), "render target tiling does not support block compressed formats");
         Require(format != 128 && format != 129 && format != 132, "texture format does not support render target tiling");
     }
+    if (tileMode == TextureTileMode::Depth64KB) {
+        Require(bytesPerElement == 1 || bytesPerElement == 2 || bytesPerElement == 4, "depth tiling requires 8-, 16- or 32-bit elements");
+        Require(!IsBlockCompressed(format) && mipCount == 1, "depth tiling supports single-level uncompressed textures only");
+    }
     if (tileMode == TextureTileMode::kLinear) return ComputeLinearMipLayout(bytesPerElement, texelWidth, texelHeight, width, height, mipCount);
     return ComputeTiledMipLayout(tileMode, bytesPerElement, texelWidth, texelHeight, width, height, mipCount);
+}
+
+std::vector<TileMipLayout> ComputeElementMipLayout(TextureTileMode tileMode, std::uint32_t elementBytes, std::uint32_t width, std::uint32_t height, std::uint32_t mipCount) {
+    Require(width != 0 && height != 0, "cannot compute mip layout for a zero-sized surface");
+    Require(mipCount != 0 && mipCount <= 16u, "surface mip count is out of range");
+    Require(tileMode != TextureTileMode::kLinear, "element mip layouts are for tiled surfaces");
+    return ComputeTiledMipLayout(tileMode, elementBytes, 1u, 1u, width, height, mipCount);
 }
 
 std::uint64_t ComputeSurfaceSize(const std::vector<TileMipLayout>& mips, std::uint32_t arrayLayers) {

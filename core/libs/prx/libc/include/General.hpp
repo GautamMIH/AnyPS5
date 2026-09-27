@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBC_INCLUDE_GENERAL_HPP
 #define CORE_LIBS_PRX_LIBC_INCLUDE_GENERAL_HPP
 
+#include <cstdint>
 #include <stdexcept>
 #include <filesystem>
 
@@ -10,7 +11,12 @@
 
 extern "C" void NotImplemented_nid_no_patch(const char* funcName);
 
+extern "C" std::uint64_t APS5_VABI UnresolvedImport_nid_no_patch(const char* nid, const char* library);
+
 extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path);
+// Serves a top-level guest directory ("/savedata0") from a host directory until unmounted.
+extern "C" void MountGuestPath_nid_no_patch(const char* mountPoint, const std::filesystem::path& host);
+extern "C" void UnmountGuestPath_nid_no_patch(const char* mountPoint);
 
 #define APS5_INVALID_ARG_EX throw std::invalid_argument(std::string(__func__) + ": invalid argument")
 

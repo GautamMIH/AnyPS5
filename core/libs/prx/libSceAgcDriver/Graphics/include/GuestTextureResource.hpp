@@ -3,6 +3,7 @@
 
 #include "Recompiler.hpp"
 #include <cstdint>
+#include <optional>
 #include <span>
 
 namespace AgcDriver::Graphics {
@@ -12,14 +13,18 @@ enum class TextureTileMode {
     kStandard256B,
     kStandard4KB,
     kStandard64KB,
-    RenderTarget64KB
+    RenderTarget64KB,
+    // SW_64KB_Z_X: depth and stencil planes written by the depth block (see DepthTargetLayout).
+    Depth64KB
 };
 
 enum class TextureDimension {
     k1D,
     k2D,
     k2DArray,
-    kCube
+    kCube,
+    // Volume; its slices are addressed like array layers (thin tilings only).
+    k3D
 };
 
 struct GuestTextureResource {
@@ -30,8 +35,13 @@ struct GuestTextureResource {
     std::uint32_t baseArray;
     std::uint32_t mipCount;
     std::uint32_t baseLevel;
+    // Last mip the view exposes; the surface layout still spans all mipCount levels.
+    std::uint32_t lastLevel;
     TextureTileMode tileMode;
     TextureDimension dimension;
+    // How shaders see the texture: the instruction's shape picks the view (shadPS4 ImageViewInfo),
+    // while dimension keeps describing the surface in memory.
+    TextureDimension viewDimension;
     std::uint32_t format;
     std::uint8_t dstSelX;
     std::uint8_t dstSelY;
@@ -41,6 +51,9 @@ struct GuestTextureResource {
 
 GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words);
 bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension);
+// The view a sampled image of this dimension presents to a shader of this shape: a 2D shape views
+// one layer of an array or cube, an array shape views a 2D texture or cube as layers.
+std::optional<TextureDimension> SampledViewDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension);
 
 }
 

@@ -3,6 +3,8 @@
 layout(constant_id = 0) const uint ELEMENT_BYTES = 4u;
 layout(constant_id = 1) const uint BLOCK_BYTES = 256u;
 layout(constant_id = 2) const uint TILE_FAMILY = 0u;
+// 0 detiles (tiled input, linear output); 1 tiles (linear input, tiled output).
+layout(constant_id = 3) const uint TILE_DIRECTION = 0u;
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -134,9 +136,33 @@ uint renderTargetOffset(uint x, uint y) {
     return offset ^ ((z & 8u) << 5u) ^ ((z & 4u) << 7u) ^ ((z & 2u) << 9u) ^ ((z & 1u) << 11u);
 }
 
+// SW_64KB_Z_X in-block offsets (KytyPS5 Depth64KB); matches DepthTargetLayout.cpp.
+uint depthOffset(uint x, uint y) {
+    switch (ELEMENT_BYTES) {
+        case 1u:
+            return (x & 1u) ^ ((x << 1u) & 0x4u) ^ ((x << 2u) & 0x10u) ^ ((x << 3u) & 0x40u) ^ ((x << 5u) & 0x300u) ^
+                   ((x << 4u) & 0x400u) ^ ((x << 6u) & 0x800u) ^ ((x << 7u) & 0x2000u) ^ ((x << 8u) & 0x8000u) ^
+                   ((y << 1u) & 0x2u) ^ ((y << 2u) & 0x8u) ^ ((y << 3u) & 0xa0u) ^ ((y << 5u) & 0xf00u) ^
+                   ((y << 6u) & 0x1000u) ^ ((y << 7u) & 0x4000u);
+        case 2u:
+            return ((x << 1u) & 0x2u) ^ ((x << 2u) & 0x8u) ^ ((x << 3u) & 0x20u) ^ ((x << 4u) & 0x480u) ^
+                   ((x << 5u) & 0x300u) ^ ((x << 6u) & 0x800u) ^ ((x << 7u) & 0x2000u) ^ ((x << 8u) & 0x8000u) ^
+                   ((y << 2u) & 0x4u) ^ ((y << 3u) & 0x10u) ^ ((y << 4u) & 0x40u) ^ ((y << 5u) & 0xf00u) ^
+                   ((y << 8u) & 0x5000u);
+        default:
+            return ((x << 2u) & 0x4u) ^ ((x << 3u) & 0x10u) ^ ((x << 4u) & 0x440u) ^ ((x << 5u) & 0x300u) ^
+                   ((x << 6u) & 0x800u) ^ ((x << 9u) & 0xa000u) ^
+                   ((y << 3u) & 0x8u) ^ ((y << 4u) & 0x20u) ^ ((y << 5u) & 0xf80u) ^ ((y << 9u) & 0x1000u) ^
+                   ((y << 8u) & 0x4000u);
+    }
+}
+
 uint blockOffset(uvec2 p) {
     if (TILE_FAMILY == 2u) {
         return renderTargetOffset(p.x, p.y);
+    }
+    if (TILE_FAMILY == 3u) {
+        return depthOffset(p.x, p.y) & 0xffffu;
     }
     uint offset = standardOffset(p.x, p.y);
     if (BLOCK_BYTES > 4096u) {
@@ -197,6 +223,10 @@ void main() {
     uint blockIndex = block.y * params.blocksPerRow + block.x;
     uint tiledOffset = blockIndex * BLOCK_BYTES + blockOffset(swizzle);
 
-    copyElement(params.srcBase + tiledOffset, params.dstBase + linearOffset);
+    if (TILE_DIRECTION == 0u) {
+        copyElement(params.srcBase + tiledOffset, params.dstBase + linearOffset);
+    } else {
+        copyElement(params.srcBase + linearOffset, params.dstBase + tiledOffset);
+    }
 }
 

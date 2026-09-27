@@ -1,4 +1,10 @@
 #include "../include/Pthread.hpp"
+#include "../include/PthreadSync.hpp"
+#include "../include/PthreadStacks.hpp"
+#include "../include/ThreadLifecycle.hpp"
+#include <atomic>
+#include <algorithm>
+#include <cstring>
 #include "prx/libc/include/General.hpp"
 #include <cstdlib>
 #include <future>
@@ -9,6 +15,8 @@
 
 #ifndef _WIN32
 #include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #endif
 
 static constexpr int SCE_OK = 0;
@@ -16,6 +24,9 @@ static constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
 
 static constexpr std::size_t DEFAULT_STACK_SIZE = 1u << 20;
 static constexpr int DETACH_DETACHED = 1;
+static constexpr std::size_t kThreadNameCapacity = 32;
+static thread_local int cancelState = 0;
+static thread_local int cancelType = 0;
 
 #ifdef _WIN32
 #include <windows.h>
@@ -29,7 +40,31 @@ struct ThreadArgs {
     PthreadPrivate* self;
 };
 
+// The guest libc registers these through sceKernelSetThreadDtors and friends (Rtld.cpp); the
+// destructor callback runs its thread-local destructors as each guest thread finishes. A later
+// registration replaces an earlier one, as a kernel setter would.
+static std::atomic<thread_dtors_func_t> threadDtors{nullptr};
+static std::atomic<get_thread_atexit_count_func_t> threadAtexitCount{nullptr};
+static std::atomic<thread_atexit_report_func_t> threadAtexitReport{nullptr};
+static thread_local bool threadFinishing = false;
+
+void ThreadLifecycle::SetThreadDtors(thread_dtors_func_t callback) {
+    threadDtors.store(callback);
+}
+
+void ThreadLifecycle::SetThreadAtexitCount(get_thread_atexit_count_func_t callback) {
+    threadAtexitCount.store(callback);
+}
+
+void ThreadLifecycle::SetThreadAtexitReport(thread_atexit_report_func_t callback) {
+    threadAtexitReport.store(callback);
+}
+
 static void FinishThread(PthreadPrivate* self, void* retval) {
+    if (!threadFinishing) {
+        threadFinishing = true;
+        if (const auto callback = threadDtors.load()) callback();
+    }
     {
         std::unique_lock<std::mutex> lk(self->_join_mtx);
         self->_retval = retval;
@@ -38,13 +73,32 @@ static void FinishThread(PthreadPrivate* self, void* retval) {
     self->_join_cv.notify_all();
 }
 
+#ifndef _WIN32
+static thread_local PthreadPrivate* currentLinuxThread = nullptr;
+#endif
+
 static void RunThread(std::unique_ptr<ThreadArgs> args) {
     APS5_LOG_OUT("RunThread entry=0x%llx arg=%p self=%p", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(args->entry)), args->arg, static_cast<void*>(args->self));
     const auto entry = args->entry;
     void* arg = args->arg;
     PthreadPrivate* self = args->self;
     args.reset();
-    FinishThread(self, entry(arg));
+#ifndef _WIN32
+    currentLinuxThread = self;
+    self->hostThread = pthread_self();
+    self->hostRunning = true;
+    // Garbage collectors scan [stackaddr, stackaddr + stacksize) from scePthreadAttrGet.
+    PthreadStacks::CurrentBounds(&self->stackAddress, &self->stackSize);
+    PthreadStacks::RegisterCurrent();
+#endif
+    void* result = entry(arg);
+#ifndef _WIN32
+    self->hostRunning = false;
+#endif
+    FinishThread(self, result);
+#ifndef _WIN32
+    PthreadStacks::UnregisterCurrent();
+#endif
 }
 
 #ifdef _WIN32
@@ -100,10 +154,16 @@ static unsigned __stdcall StartNativeThread(void* opaque) {
 
 extern "C" {
 
-int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char*) {
+int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name) {
     if (!thread || !entry) throw std::runtime_error("scePthreadCreate: null arg");
     if (attr && !*attr) throw std::runtime_error("scePthreadCreate: null attributes");
     auto p = std::make_unique<PthreadPrivate>();
+    if (name) p->name = name;
+    if (attr && *attr) {
+        p->affinity = (*attr)->affinity;
+        p->priority = (*attr)->_schedpriority;
+        p->policy = (*attr)->_schedpolicy;
+    }
     bool detached = false;
     if (attr && *attr) detached = ((*attr)->_detachstate == DETACH_DETACHED);
     p->_detached = detached;
@@ -192,6 +252,10 @@ void APS5_VABI scePthreadExit(void* retval) {
     ReleaseThread(self);
     _endthreadex(0);
 #else
+    if (currentLinuxThread) {
+        currentLinuxThread->hostRunning = false;
+        FinishThread(currentLinuxThread, retval);
+    }
     pthread_exit(retval);
 #endif
     __builtin_unreachable();
@@ -201,7 +265,15 @@ Pthread APS5_VABI scePthreadSelf() {
 #ifdef _WIN32
     return currentThread;
 #else
-    return nullptr;
+    if (!currentLinuxThread) {
+        auto* initial = new PthreadPrivate();
+        initial->_detached = true;
+        initial->hostThread = pthread_self();
+        initial->hostRunning = true;
+        PthreadStacks::CurrentBounds(&initial->stackAddress, &initial->stackSize);
+        currentLinuxThread = initial;
+    }
+    return currentLinuxThread;
 #endif
 }
 
@@ -216,71 +288,67 @@ int APS5_VABI scePthreadCancel(Pthread thread) {
 }
 
 int APS5_VABI scePthreadEqual(Pthread thread1, Pthread thread2) {
- (void)thread1;
- (void)thread2;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return thread1 == thread2 ? 1 : 0;
 }
 
 int APS5_VABI scePthreadGetaffinity(Pthread thread, KernelCpumask* mask) {
- (void)thread;
- (void)mask;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!thread || !mask) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ *mask = thread->affinity;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadGetname(Pthread thread, char* name) {
- (void)thread;
- (void)name;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!thread || !name) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ const std::size_t count = std::min<std::size_t>(thread->name.size(), kThreadNameCapacity - 1);
+ std::memcpy(name, thread->name.data(), count);
+ name[count] = '\0';
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadGetprio(Pthread thread, int* prio) {
- (void)thread;
- (void)prio;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!thread || !prio) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ *prio = thread->priority;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadGetthreadid(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+#ifdef _WIN32
+ return static_cast<int>(GetCurrentThreadId());
+#else
+ return static_cast<int>(syscall(SYS_gettid));
+#endif
 }
 
 int APS5_VABI scePthreadRename(Pthread thread, const char* name) {
- (void)thread;
- (void)name;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!thread || !name) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ thread->name = name;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadSetaffinity(Pthread thread, KernelCpumask mask) {
- (void)thread;
- (void)mask;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!thread || mask == 0) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ thread->affinity = mask;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadSetcancelstate(int state, int* old_state) {
- (void)state;
- (void)old_state;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (state != 0 && state != 1) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ if (old_state) *old_state = cancelState;
+ cancelState = state;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadSetcanceltype(int type, int* old_type) {
- (void)type;
- (void)old_type;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (type != 0 && type != 2) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ if (old_type) *old_type = cancelType;
+ cancelType = type;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadSetprio(Pthread thread, int prio) {
- (void)thread;
- (void)prio;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!thread) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ thread->priority = prio;
+ return SCE_OK;
 }
 
 }

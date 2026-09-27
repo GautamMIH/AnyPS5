@@ -1,4 +1,9 @@
+#include <algorithm>
+#include <atomic>
 #include <cstddef>
+#include <cstdlib>
+#include <cstring>
+#include <string>
 #include <cstdint>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
@@ -7,58 +12,58 @@
 extern "C" {
 
 int APS5_VABI sceUserServiceGetAccessibilityChatTranscription(int user_id, int32_t* chat_transcription) {
- (void)user_id;
- (void)chat_transcription;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !chat_transcription) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ *chat_transcription = 0;
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetAccessibilityPressAndHoldDelay(int user_id, int32_t* press_and_hold_delay) {
- (void)user_id;
- (void)press_and_hold_delay;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !press_and_hold_delay) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ *press_and_hold_delay = 0;
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetAccessibilityTriggerEffect(int user_id, int32_t* trigger_effect) {
- (void)user_id;
- (void)trigger_effect;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !trigger_effect) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ *trigger_effect = 0;
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetAccessibilityVibration(int user_id, int32_t* vibration) {
- (void)user_id;
- (void)vibration;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !vibration) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ *vibration = 1;
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetAccessibilityZoomEnabled(int user_id, int32_t* zoom_enabled) {
- (void)user_id;
- (void)zoom_enabled;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !zoom_enabled) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ *zoom_enabled = 0;
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetAgeLevel(int user_id, uint32_t* age_level) {
- (void)user_id;
- (void)age_level;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !age_level) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ *age_level = USER_SERVICE_ADULT_AGE_LEVEL;
+ return USER_SERVICE_OK;
 }
 
+// The initial user is logged in at boot, which queues one login event; games that track players
+// through events rather than the login list depend on it (shadPS4 UserManager::LoginUser).
 int APS5_VABI sceUserServiceGetEvent(SceUserServiceEvent* event) {
- (void)event;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!event) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ static std::atomic<bool> loginDelivered{false};
+ if (loginDelivered.exchange(true)) return USER_SERVICE_ERROR_NO_EVENT;
+ event->event_type = USER_SERVICE_EVENT_LOGIN;
+ event->user_id = USER_SERVICE_INITIAL_USER_ID;
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetGamePresets(int user_id, UserServiceGamePresets* presets) {
- (void)user_id;
- (void)presets;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !presets || presets->this_size < sizeof(UserServiceGamePresets)) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ const std::size_t size = presets->this_size;
+ *presets = UserServiceGamePresets{};
+ presets->this_size = size;
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetInitialUser(int* user_id) {
@@ -81,18 +86,19 @@ int APS5_VABI sceUserServiceGetLoginUserIdList(UserServiceLoginUserIdList* user_
 }
 
 int APS5_VABI sceUserServiceGetUserName(int user_id, char* name, size_t size) {
- (void)user_id;
- (void)name;
- (void)size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !name || size == 0) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ const char* host = std::getenv(USER_SERVICE_NAME_VARIABLE);
+ const std::string userName = host != nullptr && host[0] != '\0' ? host : USER_SERVICE_DEFAULT_NAME;
+ const std::size_t count = std::min(size - 1, userName.size());
+ std::memcpy(name, userName.data(), count);
+ name[count] = '\0';
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetUserNumber(int user_id, int32_t* number) {
- (void)user_id;
- (void)number;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !number) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ *number = 1;
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceInitialize(const void* params) {
@@ -105,6 +111,13 @@ int APS5_VABI sceUserServiceInitialize2(void) {
 }
 
 int APS5_VABI sceUserServiceTerminate(void) {
+ return USER_SERVICE_OK;
+}
+
+
+int APS5_VABI sceUserServiceGetAccessibilityZoomFollowFocus(int user_id, int32_t* zoom_follow_focus) {
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !zoom_follow_focus) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ *zoom_follow_focus = 0;
  return USER_SERVICE_OK;
 }
 

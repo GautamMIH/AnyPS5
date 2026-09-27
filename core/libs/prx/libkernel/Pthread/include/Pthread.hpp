@@ -8,8 +8,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <thread>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 enum class MutexType : std::uint32_t {
     ErrorCheck = 1,
@@ -19,6 +23,7 @@ enum class MutexType : std::uint32_t {
 
 struct PthreadMutexattrPrivate {
     MutexType type;
+    int protocol = 0;
 };
 
 struct PthreadMutexPrivate {
@@ -28,7 +33,7 @@ struct PthreadMutexPrivate {
     std::atomic<std::thread::id> _owner;
     int _count;
 
-    PthreadMutexPrivate() : _type(MutexType::Normal), _count(0) {}
+    PthreadMutexPrivate() : _type(MutexType::Normal), _owner(std::thread::id{}), _count(0) {}
 };
 
 struct PthreadCondattrPrivate {
@@ -37,7 +42,20 @@ struct PthreadCondattrPrivate {
 
 struct PthreadCondPrivate {
     std::condition_variable_any _cv;
+    int _clockid = 0;
 };
+
+struct PthreadRwlockattrPrivate {
+    int type = 0;
+};
+
+struct PthreadRwlockPrivate {
+    std::shared_timed_mutex lock;
+    std::atomic<std::thread::id> writer;
+};
+
+inline constexpr KernelCpumask kDefaultThreadAffinity = 0x3fff;
+inline constexpr int kDefaultThreadPriority = 700;
 
 struct PthreadAttrPrivate {
     void* stackAddress = nullptr;
@@ -46,6 +64,9 @@ struct PthreadAttrPrivate {
     int _schedpriority;
     int _schedpolicy;
     int _inheritsched;
+    KernelCpumask affinity = kDefaultThreadAffinity;
+    std::size_t guardSize = 0x1000;
+    int solosched = 0;
 };
 
 struct PthreadPrivate {
@@ -55,9 +76,16 @@ struct PthreadPrivate {
     std::atomic<unsigned> references{2};
 #else
     std::thread _thr;
+    // Host thread running this guest thread, valid while hostRunning is set (signal delivery).
+    pthread_t hostThread{};
+    std::atomic<bool> hostRunning{false};
 #endif
     void* stackAddress = nullptr;
     std::size_t stackSize = 0;
+    KernelCpumask affinity = kDefaultThreadAffinity;
+    int priority = kDefaultThreadPriority;
+    int policy = 1;
+    std::string name;
     std::atomic<bool> _finished;
     void* _retval;
     bool _detached;

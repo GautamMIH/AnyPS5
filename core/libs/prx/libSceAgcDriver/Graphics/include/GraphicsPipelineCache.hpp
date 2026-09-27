@@ -12,12 +12,14 @@ namespace AgcDriver::Graphics {
 class GraphicsPipelineCache {
 public:
     explicit GraphicsPipelineCache(const Context& context) : context(context) {}
-    std::shared_ptr<Pipeline> Get(const State& state, const std::shared_ptr<ResidentColor>& target, const ShaderResources& resources, std::span<const CompiledShader> shaders);
+    // targets holds one entry per colour slot; unwritten slots are null.
+    std::shared_ptr<Pipeline> Get(const State& state, const std::array<std::shared_ptr<ResidentColor>, MaxColorTargets>& targets, const std::shared_ptr<ResidentDepth>& depth, const ShaderResources& resources, std::span<const CompiledShader> shaders);
 
 private:
     struct Entry {
         std::string key;
-        std::shared_ptr<ResidentColor> target;
+        std::array<std::shared_ptr<ResidentColor>, MaxColorTargets> targets;
+        std::shared_ptr<ResidentDepth> depth;
         std::shared_ptr<Pipeline> pipeline;
     };
     Context context;

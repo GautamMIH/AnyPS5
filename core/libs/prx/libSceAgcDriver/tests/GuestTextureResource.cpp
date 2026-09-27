@@ -219,31 +219,22 @@ void RunGuestTextureResourceTests() {
     badMsaa.msaaDepth = true;
     rejectFields(badMsaa, "MSAA");
 
-    Fields badBlockSize = base;
-    badBlockSize.maxUncompBlkSize = 1;
-    rejectFields(badBlockSize, "DCC block size overrides");
-    badBlockSize = base;
-    badBlockSize.maxCompBlkSize = 1;
-    rejectFields(badBlockSize, "DCC block size overrides");
+    // DCC block sizes without compression do not change sampling.
+    Fields blockSize = base;
+    blockSize.maxUncompBlkSize = 1;
+    blockSize.maxCompBlkSize = 2;
+    static_cast<void>(DecodeTextureResource(pack(blockSize)));
 
-    Fields badMeta = base;
-    badMeta.metaPipeAligned = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.writeCompress = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.metaCompress = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.dccAlphaPos = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.dccColorTransf = true;
-    rejectFields(badMeta, "metadata compression");
-    badMeta = base;
-    badMeta.metaAddr = 1;
-    rejectFields(badMeta, "metadata compression");
+    // Surfaces are stored uncompressed, so DCC state leaves the decoded texture unchanged.
+    Fields meta = base;
+    meta.metaPipeAligned = true;
+    meta.writeCompress = true;
+    meta.metaCompress = true;
+    meta.dccAlphaPos = true;
+    meta.dccColorTransf = true;
+    meta.metaAddr = 1;
+    const auto compressed = DecodeTextureResource(pack(meta));
+    Require(compressed.baseAddress == result.baseAddress && compressed.width == result.width && compressed.format == result.format, "DCC state changed the decoded texture");
 
     Fields badSwizzle = base;
     badSwizzle.bcSwizzle = 1;

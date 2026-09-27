@@ -1,4 +1,5 @@
 #include "../include/Pthread.hpp"
+#include "../include/PthreadSync.hpp"
 #include "prx/libc/include/General.hpp"
 #include <stdexcept>
 
@@ -74,114 +75,99 @@ int APS5_VABI scePthreadAttrGetstack(const PthreadAttr* attr, void** stackaddr, 
 }
 
 int APS5_VABI scePthreadAttrGet(Pthread thread, PthreadAttr* attr) {
-    if (!thread || !attr || !*attr)
-        throw std::runtime_error("scePthreadAttrGet: null arg");
+    if (!thread || !attr || !*attr) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
     (*attr)->_stacksize = thread->stackSize;
     (*attr)->stackAddress = thread->stackAddress;
     (*attr)->_detachstate = thread->_detached ? DETACH_DETACHED : DETACH_JOINABLE;
-    (*attr)->_schedpriority = 700;
-    (*attr)->_schedpolicy = SCHED_FIFO_PS5;
-    (*attr)->_inheritsched = 4;
+    (*attr)->_schedpriority = thread->priority;
+    (*attr)->_schedpolicy = thread->policy;
+    (*attr)->affinity = thread->affinity;
     return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetaffinity(const PthreadAttr* attr, KernelCpumask* mask) {
- (void)attr;
- (void)mask;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || !mask) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ *mask = (*attr)->affinity;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetdetachstate(const PthreadAttr* attr, int* state) {
- (void)attr;
- (void)state;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || !state) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ *state = (*attr)->_detachstate;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetguardsize(const PthreadAttr* attr, size_t* guard_size) {
- (void)attr;
- (void)guard_size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || !guard_size) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ *guard_size = (*attr)->guardSize;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetschedparam(const PthreadAttr* attr, KernelSchedParam* param) {
- (void)attr;
- (void)param;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || !param) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ param->sched_priority = (*attr)->_schedpriority;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetsolosched(const PthreadAttr* attr, int* solosched) {
- (void)attr;
- (void)solosched;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || !solosched) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ *solosched = (*attr)->solosched;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetstackaddr(const PthreadAttr* attr, void** stack_addr) {
- (void)attr;
- (void)stack_addr;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || !stack_addr) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ *stack_addr = (*attr)->stackAddress;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrGetstacksize(const PthreadAttr* attr, size_t* stack_size) {
- (void)attr;
- (void)stack_size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || !stack_size) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ *stack_size = (*attr)->_stacksize;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetaffinity(PthreadAttr* attr, KernelCpumask mask) {
- (void)attr;
- (void)mask;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || mask == 0) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ (*attr)->affinity = mask;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetguardsize(PthreadAttr* attr, size_t guard_size) {
- (void)attr;
- (void)guard_size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ (*attr)->guardSize = guard_size;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetinheritsched(PthreadAttr* attr, int inherit_sched) {
- (void)attr;
- (void)inherit_sched;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || (inherit_sched != 0 && inherit_sched != 4)) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ (*attr)->_inheritsched = inherit_sched;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetschedpolicy(PthreadAttr* attr, int policy) {
- (void)attr;
- (void)policy;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || policy < 1 || policy > 3) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ (*attr)->_schedpolicy = policy;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetsolosched(PthreadAttr* attr, int solosched) {
- (void)attr;
- (void)solosched;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ (*attr)->solosched = solosched;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetstack(PthreadAttr* attr, void* addr, size_t size) {
- (void)attr;
- (void)addr;
- (void)size;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || !addr || size < 16384) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ (*attr)->stackAddress = addr;
+ (*attr)->_stacksize = size;
+ return SCE_OK;
 }
 
 int APS5_VABI scePthreadAttrSetstackaddr(PthreadAttr* attr, void* addr) {
- (void)attr;
- (void)addr;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (!attr || !*attr || !addr) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
+ (*attr)->stackAddress = addr;
+ return SCE_OK;
 }
 
 }

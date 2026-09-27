@@ -9,7 +9,7 @@ extern "C" {
 
 int APS5_VABI sceNpTrophy2CreateContext(int* context, int user_id, uint32_t service_label, uint64_t options) {
     if (context == nullptr) {
-        APS5_INVALID_ARG_EX;
+        return SCE_NP_TROPHY2_ERROR_INVALID_ARGUMENT;
     }
     (void)user_id;
     (void)service_label;

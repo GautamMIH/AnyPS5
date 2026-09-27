@@ -7,12 +7,15 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <domain/GuestRuntime.hpp>
 
 namespace Domain {
 
 using FileByteOffset = std::uint64_t;
 using VirtualAddress = std::uint64_t;
 using ByteCount = std::uint64_t;
+
+inline constexpr std::uint8_t kGlobalFunctionSymbolInfo = 0x12;
 
 struct ElfHeader {
     std::uint16_t Machine;
@@ -59,6 +62,33 @@ struct NidReference {
     FileByteOffset RelocationTableOffset;
     VirtualAddress RelocationAddress;
     std::int64_t Addend;
+    std::uint8_t SymbolInfo = kGlobalFunctionSymbolInfo;
+    std::string LibraryFile;
+};
+
+struct ExportedSymbol {
+    std::string Name;
+    std::uint8_t Info;
+    std::uint64_t Value;
+    std::uint64_t Size;
+    std::string Version;
+};
+
+struct SymbolVersion {
+    std::string Name;
+    std::string File;
+};
+
+enum class ModuleKind {
+    Executable,
+    Library
+};
+
+struct ModuleLinkInfo {
+    ModuleKind Kind = ModuleKind::Executable;
+    VirtualAddress InitAddress = 0;
+    VirtualAddress FiniAddress = 0;
+    std::string SoName;
 };
 
 struct CallSiteInfo {
@@ -92,6 +122,14 @@ struct SysVDynamicSection {
     std::vector<std::uint8_t> DynStrData;
     std::vector<std::uint8_t> RelaData;
     std::vector<std::uint8_t> RelaPltData;
+    std::vector<std::uint8_t> HashData;
+    std::vector<SymbolVersion> SymbolVersions;
+    std::vector<std::uint8_t> VersymData;
+    std::vector<std::uint8_t> VerdefData;
+    std::vector<std::uint8_t> VerneedData;
+    std::uint64_t VerdefCount = 0;
+    std::uint64_t VerneedCount = 0;
+    std::vector<GuestRuntime> GuestModules;
 };
 
 struct CallRegistryEntry {

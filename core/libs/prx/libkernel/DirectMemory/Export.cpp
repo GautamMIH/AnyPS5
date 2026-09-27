@@ -1,9 +1,54 @@
 #include <cstdint>
 #include <cstddef>
+#include <algorithm>
 #include <cstring>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "DirectMemory.hpp"
+#include "prx/libkernel/Pthread/include/PthreadStacks.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
+#include <map>
+#include <mutex>
+#include <string>
+
+namespace VirtualRangeNames {
+
+struct Range {
+    std::uint64_t Length;
+    std::string Name;
+};
+
+std::mutex& Mutex() {
+    static std::mutex instance;
+    return instance;
+}
+
+std::map<std::uintptr_t, Range>& Ranges() {
+    static std::map<std::uintptr_t, Range> instance;
+    return instance;
+}
+
+void Set(std::uintptr_t start, std::uint64_t length, const char* name) {
+    const std::lock_guard lock(Mutex());
+    Ranges()[start] = {length, name};
+}
+
+void Get(std::uintptr_t address, char* output, std::size_t outputSize) {
+    const std::lock_guard lock(Mutex());
+    auto& ranges = Ranges();
+    auto it = ranges.upper_bound(address);
+    if (it == ranges.begin())
+        return;
+    --it;
+    if (address - it->first >= it->second.Length || outputSize == 0)
+        return;
+    const std::size_t count = std::min(outputSize - 1, it->second.Name.size());
+    std::memcpy(output, it->second.Name.data(), count);
+    output[count] = '\0';
+}
+
+}
 
 extern "C" {
 
@@ -80,25 +125,54 @@ int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
 }
 
 int APS5_VABI sceKernelReleaseDirectMemory(int64_t start, size_t len) {
- if (start < 0 || len == 0) return SCE_KERNEL_ERROR_EINVAL;
- DirectMemoryFree(start, len);
- return 0;
+ return DoReleaseDirect(start, len);
 }
 
 int APS5_VABI sceKernelReserveVirtualRange(void** addr, size_t len, int flags, size_t alignment) {
- (void)flags;
- return DoReserveVirtual(addr, len, alignment);
+ return DoReserveVirtual(addr, len, flags, alignment);
 }
 
 int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
- (void)flags;
+ constexpr int kFindNext = 1;
+ constexpr int kProtectionCpuRead = 0x1;
+ constexpr int kProtectionCpuWrite = 0x2;
+ constexpr int kProtectionGpuRead = 0x10;
+ constexpr int kProtectionGpuWrite = 0x20;
+ constexpr int kDefaultMemoryType = 3;
  if (!info || info_size < sizeof(VirtualQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
+ const bool findNext = (flags & kFindNext) != 0;
+ const auto address = reinterpret_cast<std::uint64_t>(addr);
+ GuestMemoryBacking::Area area{};
+ const bool guest = GuestMemoryBacking::GuestVirtualQuery_nid_postfix(addr, findNext, &area);
+ // Loaded images are not guest areas; the registry describes them.
+ GuestAllocations::Range image{};
+ bool imageFound = false;
+ {
+  GuestAllocations::Mutation mutation;
+  imageFound = mutation.Query(addr, findNext, &image) && !image.releasable;
+ }
+ const auto contains = [&](std::uint64_t first, std::uint64_t bytes) { return first <= address && address - first < bytes; };
+ const bool useImage = imageFound && (!guest || (!contains(area.address, area.bytes) && (contains(image.address, image.bytes) || image.address < area.address)));
+ if (!guest && !useImage) return SCE_KERNEL_ERROR_EACCES;
  memset(info, 0, sizeof(VirtualQueryInfo));
- uintptr_t ptr = reinterpret_cast<uintptr_t>(addr);
- info->start = ptr & ~static_cast<uintptr_t>(PS5_PAGE_SIZE - 1);
- info->end = info->start + PS5_PAGE_SIZE;
- info->is_direct = 1;
- info->protection = 3;
+ if (useImage) {
+  info->start = image.address;
+  info->end = image.address + image.bytes;
+  info->protection = (image.readable ? kProtectionCpuRead | kProtectionGpuRead : 0) | (image.writable ? kProtectionCpuWrite | kProtectionGpuWrite : 0);
+  info->is_committed = 1;
+ } else {
+  info->start = area.address;
+  info->end = area.address + area.bytes;
+  info->protection = area.protection;
+  info->is_committed = area.kind != GuestMemoryBacking::Kind::Reserved;
+  info->is_direct = area.kind == GuestMemoryBacking::Kind::Direct;
+  info->is_flexible = area.kind == GuestMemoryBacking::Kind::Flexible || area.kind == GuestMemoryBacking::Kind::Heap;
+  if (info->is_direct) {
+   info->offset = static_cast<std::uint64_t>(area.physical);
+   info->memory_type = kDefaultMemoryType;
+  }
+ }
+ VirtualRangeNames::Get(info->start, info->name, sizeof(info->name));
  return 0;
 }
 
@@ -107,19 +181,13 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
 // ---------------------------------------------------------------------------
 
 int APS5_VABI sceKernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
- (void)start;
- (void)len;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return DoReleaseDirect(start, len);
 }
 
 int APS5_VABI sceKernelMtypeprotect(const void* addr, size_t len, int type, int prot) {
- (void)addr;
- (void)len;
+ // Memory types only select cache policy, which the host does not model.
  (void)type;
- (void)prot;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return DoMprotect(addr, len, prot);
 }
 
 int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot) {
@@ -132,10 +200,10 @@ int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** en
 }
 
 int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
- (void)addr;
- (void)start;
- (void)end;
- NotImplemented_nid_no_patch(__func__);
+ if (!PthreadStacks::Find(reinterpret_cast<std::uintptr_t>(addr), start, end)) {
+  if (start) *start = nullptr;
+  if (end) *end = nullptr;
+ }
  return 0;
 }
 
@@ -152,10 +220,8 @@ int APS5_VABI sceKernelConfiguredFlexibleMemorySize(size_t* size) {
 }
 
 int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name) {
- (void)addr;
- (void)len;
- (void)name;
- NotImplemented_nid_no_patch(__func__);
+ if (!addr || len == 0 || !name) return SCE_KERNEL_ERROR_EINVAL;
+ VirtualRangeNames::Set(reinterpret_cast<std::uintptr_t>(addr), len, name);
  return 0;
 }
 
@@ -184,21 +250,57 @@ int APS5_VABI sceKernelSetPrtAperture(int index, void* addr, size_t len) {
  return 0;
 }
 
-int APS5_VABI sceKernelBatchMap(KernelBatchMapEntry* entries, int num_entries, int* num_entries_out) {
- (void)entries;
- (void)num_entries;
- (void)num_entries_out;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, int* num_entries_out, int flags) {
+ constexpr int kOperationMapDirect = 0;
+ constexpr int kOperationUnmap = 1;
+ constexpr int kOperationProtect = 2;
+ constexpr int kOperationMapFlexible = 3;
+ constexpr int kOperationTypeProtect = 4;
+ if (num_entries < 0 || (num_entries > 0 && !entries)) return SCE_KERNEL_ERROR_EINVAL;
+ int processed = 0;
+ int result = 0;
+ for (; processed < num_entries; ++processed) {
+  const auto& entry = entries[processed];
+  const int protection = static_cast<unsigned char>(entry.protection);
+  void* address = entry.start;
+  switch (entry.operation) {
+  case kOperationMapDirect:
+   result = DoMapDirect(&address, entry.length, protection, flags, static_cast<int64_t>(entry.offset), 0);
+   break;
+  case kOperationUnmap:
+   result = DoMunmap(address, entry.length);
+   break;
+  case kOperationProtect:
+  case kOperationTypeProtect:
+   result = DoMprotect(address, entry.length, protection);
+   break;
+  case kOperationMapFlexible:
+   result = DoMapAnon(&address, entry.length, protection, flags);
+   break;
+  default:
+   result = SCE_KERNEL_ERROR_EINVAL;
+   break;
+  }
+  if (result != 0) break;
+ }
+ if (num_entries_out) *num_entries_out = processed;
+ return result;
 }
 
-int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, int* num_entries_out, int flags) {
- (void)entries;
- (void)num_entries;
- (void)num_entries_out;
- (void)flags;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceKernelBatchMap(KernelBatchMapEntry* entries, int num_entries, int* num_entries_out) {
+ constexpr int kMapFixed = 0x10;
+ return sceKernelBatchMap2(entries, num_entries, num_entries_out, kMapFixed);
+}
+
+}
+
+extern "C" {
+
+int APS5_VABI sceKernelMlock_nid_postfix(void* address, std::uint64_t length) {
+    (void)address;
+    (void)length;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
 }

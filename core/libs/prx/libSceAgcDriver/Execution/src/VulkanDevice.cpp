@@ -1,5 +1,7 @@
+#include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
@@ -21,6 +23,9 @@
 #include <spirv/unified1/spirv.hpp>
 #include <array>
 #include <algorithm>
+#include <map>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -81,6 +86,15 @@ struct VulkanDevice::State {
     bool fragmentShaderBarycentric = false;
     bool depthClipControl = false;
     bool depthRangeUnrestricted = false;
+    bool externalMemoryHost = false;
+    std::unique_ptr<Graphics::GuestGpuMemory> guestGpuMemory;
+    bool depthBounds = false;
+    bool depthBiasClamp = false;
+    bool independentBlend = false;
+    bool geometryShader = false;
+    bool imageGatherExtended = false;
+    bool storageImageReadWithoutFormat = false;
+    bool storageImageWriteWithoutFormat = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
     std::unique_ptr<Graphics::TextureDetiler> detiler;
@@ -96,6 +110,7 @@ struct VulkanDevice::State {
     VkPhysicalDeviceMeshShaderPropertiesEXT meshLimits{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_PROPERTIES_EXT};
     std::unique_ptr<PresentationScaler> scaler;
     std::unique_ptr<PresentationScaler> rgbaScaler;
+    std::map<VkFormat, std::unique_ptr<PresentationScaler>> packedScalers;
 
     template<typename TFunction>
     TFunction InstanceFunction(const char* name) const {
@@ -172,6 +187,7 @@ struct VulkanDevice::State {
             const auto idle = reinterpret_cast<PFN_vkDeviceWaitIdle>(deviceProc(device, "vkDeviceWaitIdle"))(device);
             if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
             drawQueue.reset();
+            guestGpuMemory.reset();
             graphicsPipelines.reset();
             renderCache.reset();
             textureCache.reset();
@@ -179,6 +195,7 @@ struct VulkanDevice::State {
             colorTransfer.reset();
             scaler.reset();
             rgbaScaler.reset();
+            packedScalers.clear();
             pipelineCache.reset();
             bufferPool.reset();
             descriptorCache.reset();
@@ -261,6 +278,43 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     std::vector<VkPhysicalDevice> devices(count);
     check(enumerate(state->instance, &count, devices.data()), "vkEnumeratePhysicalDevices");
     devices.resize(count);
+    // Device preference follows shadPS4 (vk_instance.cpp): Vulkan 1.1 support, then discrete GPUs,
+    // then anything but a CPU implementation, then the largest device-local heap. The first
+    // suitable device in that order is used. ANYPS5_GPU=<index> picks a device by enumeration
+    // index instead.
+    const auto getProperties = state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
+    const auto getMemory = state->InstanceFunction<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties");
+    if (const char* chosen = std::getenv("ANYPS5_GPU")) {
+        const auto index = std::strtoul(chosen, nullptr, 10);
+        require(index < devices.size(), "ANYPS5_GPU names a device index past the enumerated devices");
+        devices = {devices[index]};
+    } else {
+        const auto deviceLocalBytes = [&](VkPhysicalDevice physical) {
+            VkPhysicalDeviceMemoryProperties memory{};
+            getMemory(physical, &memory);
+            VkDeviceSize largest = 0;
+            for (std::uint32_t i = 0; i < memory.memoryHeapCount; ++i) {
+                if ((memory.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) largest = std::max(largest, memory.memoryHeaps[i].size);
+            }
+            return largest;
+        };
+        std::stable_sort(devices.begin(), devices.end(), [&](VkPhysicalDevice left, VkPhysicalDevice right) {
+            VkPhysicalDeviceProperties l{};
+            VkPhysicalDeviceProperties r{};
+            getProperties(left, &l);
+            getProperties(right, &r);
+            const bool lApi = l.apiVersion >= VK_API_VERSION_1_1;
+            const bool rApi = r.apiVersion >= VK_API_VERSION_1_1;
+            if (lApi != rApi) return lApi;
+            const bool lDiscrete = l.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+            const bool rDiscrete = r.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+            if (lDiscrete != rDiscrete) return lDiscrete;
+            const bool lCpu = l.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+            const bool rCpu = r.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU;
+            if (lCpu != rCpu) return rCpu;
+            return deviceLocalBytes(left) > deviceLocalBytes(right);
+        });
+    }
     VkPhysicalDevice selected = VK_NULL_HANDLE;
     std::uint32_t family = 0;
     const std::array<const char*, 1> presentationExtensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
@@ -310,6 +364,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(selected, &properties);
     state->properties = properties.properties;
     state->physical = selected;
+    std::fprintf(stderr, "[AnyPS5] Vulkan device: %s\n", state->properties.deviceName);
     if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0) {
         state->capabilities.push_back(spv::CapabilityGroupNonUniform);
         if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) != 0) state->capabilities.push_back(spv::CapabilityGroupNonUniformBallot);
@@ -364,6 +419,12 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->capabilities.push_back(11);
     state->capabilities.push_back(5347);
     state->spirvExtensions.push_back("SPV_KHR_physical_storage_buffer");
+    // Guest memory is shared with the GPU by importing its host pages (GuestGpuMemory).
+    state->externalMemoryHost = hasExtension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) && hasExtension(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+    if (state->externalMemoryHost) {
+        deviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+    }
     state->depthRangeUnrestricted = hasExtension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     if (state->depthRangeUnrestricted) deviceExtensions.push_back(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     VkPhysicalDeviceDepthClipControlFeaturesEXT depthClipFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT};
@@ -396,9 +457,25 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.tessellationShader = available.tessellationShader;
     state->tessellationShader = enabled.tessellationShader == VK_TRUE;
     if (state->tessellationShader) state->capabilities.push_back(3);
+    // The Geometry capability also covers pixel shaders reading their render-target layer.
+    enabled.geometryShader = available.geometryShader;
+    state->geometryShader = enabled.geometryShader == VK_TRUE;
+    if (state->geometryShader) state->capabilities.push_back(spv::CapabilityGeometry);
     require(available.samplerAnisotropy && available.textureCompressionBC, "device lacks sampler anisotropy or BC texture compression support required for texture sampling");
     enabled.samplerAnisotropy = VK_TRUE;
     enabled.textureCompressionBC = VK_TRUE;
+    enabled.depthBounds = available.depthBounds;
+    state->depthBounds = enabled.depthBounds == VK_TRUE;
+    enabled.depthBiasClamp = available.depthBiasClamp;
+    state->depthBiasClamp = enabled.depthBiasClamp == VK_TRUE;
+    enabled.independentBlend = available.independentBlend;
+    state->independentBlend = enabled.independentBlend == VK_TRUE;
+    enabled.shaderImageGatherExtended = available.shaderImageGatherExtended;
+    state->imageGatherExtended = enabled.shaderImageGatherExtended == VK_TRUE;
+    enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
+    enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
+    state->storageImageReadWithoutFormat = enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
+    state->storageImageWriteWithoutFormat = enabled.shaderStorageImageWriteWithoutFormat == VK_TRUE;
     state->samplerAnisotropy = true;
     state->textureCompressionBC = true;
     deviceInfo.pEnabledFeatures = &enabled;
@@ -435,6 +512,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->graphicsPipelines = std::make_unique<Graphics::GraphicsPipelineCache>(graphicsContext());
     state->textureCache = std::make_unique<Graphics::TextureCache>(graphicsContext());
     state->colorTransfer = std::make_unique<Graphics::GpuColorTransfer>(graphicsContext());
+    state->guestGpuMemory = Graphics::GuestGpuMemory::Create(graphicsContext());
     if (window != nullptr) {
         require(window->getDrawableSize != nullptr, "missing window drawable size query");
         std::uint32_t drawableWidth = 0;
@@ -499,6 +577,8 @@ void VulkanDevice::WaitIdle() {
     timing.Mark("draw_wait");
     check(state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(state->device), "vkDeviceWaitIdle");
     timing.Mark("device_wait");
+    // With the GPU idle, imports of freed guest memory can go.
+    if (state->guestGpuMemory) state->guestGpuMemory->Collect();
 }
 
 void VulkanDevice::WaitDraws() {
@@ -575,7 +655,47 @@ void VulkanDevice::PresentPixels(std::uint32_t width, std::uint32_t height, std:
     present(width, height, true, pixels);
 }
 
+namespace {
+
+// ANYPS5_DUMP_FRAMES=N writes every Nth presented display buffer to anyps5-frame-<n>.ppm in the
+// working directory, for checking what a title renders.
+std::uint32_t frameDumpInterval() {
+    static const std::uint32_t interval = [] {
+        const char* value = std::getenv("ANYPS5_DUMP_FRAMES");
+        return value ? static_cast<std::uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+    }();
+    return interval;
+}
+
+void writeFrame(const DisplayBuffer& buffer, std::span<const std::byte> bgra, std::uint64_t index) {
+    char name[64];
+    std::snprintf(name, sizeof(name), "anyps5-frame-%06llu.ppm", static_cast<unsigned long long>(index));
+    std::FILE* file = std::fopen(name, "wb");
+    if (file == nullptr) return;
+    std::fprintf(file, "P6\n%u %u\n255\n", buffer.width, buffer.height);
+    std::vector<unsigned char> row(static_cast<std::size_t>(buffer.width) * 3u);
+    for (std::uint32_t y = 0; y < buffer.height; ++y) {
+        for (std::uint32_t x = 0; x < buffer.width; ++x) {
+            const auto* pixel = bgra.data() + (static_cast<std::size_t>(y) * buffer.width + x) * 4u;
+            row[x * 3u] = static_cast<unsigned char>(pixel[2]);
+            row[x * 3u + 1u] = static_cast<unsigned char>(pixel[1]);
+            row[x * 3u + 2u] = static_cast<unsigned char>(pixel[0]);
+        }
+        std::fwrite(row.data(), 1, row.size(), file);
+    }
+    std::fclose(file);
+}
+
+}
+
 void VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
+    if (const auto interval = frameDumpInterval(); interval != 0) {
+        static std::uint64_t presented = 0;
+        if (presented++ % interval == 0) {
+            ResolveMemory(buffer.address, DisplayBufferSize(buffer), false);
+            writeFrame(buffer, ReadDisplayBuffer(buffer), presented - 1);
+        }
+    }
     present(buffer.width, buffer.height, true, {}, &buffer);
 }
 
@@ -599,7 +719,16 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             state->colorTransfer->Upload(display->address, width, height, Graphics::ColorTileMode::RenderTarget);
         }
     }
-    auto* scaler = resident && display->pixelFormat == 0x8000000022000000ull ? state->rgbaScaler.get() : state->scaler.get();
+    const auto layout = display != nullptr ? DecodeDisplayPixelFormat(display->pixelFormat) : DisplayPixelLayout::Bgra8;
+    auto* scaler = resident && layout == DisplayPixelLayout::Rgba8 ? state->rgbaScaler.get() : state->scaler.get();
+    if (layout == DisplayPixelLayout::Rgb10A2 || layout == DisplayPixelLayout::Bgr10A2) {
+        // The display engine reinterprets the surface bits, so the source image takes the guest
+        // format and the blit converts to the swapchain.
+        const auto format = layout == DisplayPixelLayout::Rgb10A2 ? VK_FORMAT_A2B10G10R10_UNORM_PACK32 : VK_FORMAT_A2R10G10B10_UNORM_PACK32;
+        auto& packed = state->packedScalers[format];
+        if (!packed) packed = std::make_unique<PresentationScaler>(graphicsContext(), format, VK_FORMAT_B8G8R8A8_UNORM);
+        scaler = packed.get();
+    }
     if (!pixels.empty()) state->Upload(pixels);
     timing.Mark("pixel_upload");
     auto wait = state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences");
@@ -647,7 +776,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
             resident->Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
             scaler->RecordImage(commands, resident->Target().Image());
         } else {
-            if (display != nullptr) state->colorTransfer->Detile(commands, display->pixelFormat == 0x8000000022000000ull);
+            if (display != nullptr) state->colorTransfer->Detile(commands, layout == DisplayPixelLayout::Rgba8);
             scaler->RecordUpload(commands, display != nullptr ? state->colorTransfer->LinearBuffer() : state->uploadBuffer);
         }
         VkClearColorValue letterbox{};
@@ -694,6 +823,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
 ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
     const auto& limits = state->properties.limits;
     ShaderRecompiler::SpirvTarget target{VK_API_VERSION_1_1, state->meshShader ? 0x00010400u : 0x00010300u, state->subgroup.subgroupSize, ShaderRecompiler::BdaAbi::Version, state->capabilities, state->spirvExtensions, false, {limits.maxComputeWorkGroupSize[0], limits.maxComputeWorkGroupSize[1], limits.maxComputeWorkGroupSize[2]}, limits.maxComputeWorkGroupInvocations, limits.maxComputeSharedMemorySize, {}, {}};
+    target.storageBufferOffsetAlignment = static_cast<std::uint32_t>(limits.minStorageBufferOffsetAlignment);
     if (state->meshShader) {
         const auto& mesh = state->meshLimits;
         target.mesh = ShaderRecompiler::MeshTargetLimits{{mesh.maxMeshWorkGroupSize[0], mesh.maxMeshWorkGroupSize[1], mesh.maxMeshWorkGroupSize[2]}, mesh.maxMeshWorkGroupInvocations, std::min(mesh.maxMeshSharedMemorySize, mesh.maxMeshPayloadAndSharedMemorySize), mesh.maxMeshOutputVertices, mesh.maxMeshOutputPrimitives, mesh.maxMeshOutputComponents, std::min(mesh.maxMeshOutputMemorySize, mesh.maxMeshPayloadAndOutputMemorySize), mesh.meshOutputPerVertexGranularity, mesh.meshOutputPerPrimitiveGranularity};
@@ -703,7 +833,7 @@ ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
 }
 
 Graphics::Context VulkanDevice::graphicsContext() const {
-    return Graphics::Context{
+    auto context = Graphics::Context{
         state->device,
         state->physical,
         state->queue,
@@ -734,12 +864,30 @@ Graphics::Context VulkanDevice::graphicsContext() const {
         state->descriptorCache,
         state->samplerCache
     };
+    context.depthBounds = state->depthBounds;
+    context.depthBiasClamp = state->depthBiasClamp;
+    context.independentBlend = state->independentBlend;
+    context.geometryShader = state->geometryShader;
+    context.imageGatherExtended = state->imageGatherExtended;
+    context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
+    context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
+    context.externalMemoryHost = state->externalMemoryHost;
+    context.guestGpuMemory = state->guestGpuMemory.get();
+    return context;
 }
 
 void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable) {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     state->drawQueue->Resolve(address, bytes);
     state->renderCache->Resolve(address, bytes, writable);
+}
+
+void VulkanDevice::ResolveFastClears(const Graphics::State& graphics) {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+        static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+    });
+    Graphics::ApplyFastClears(graphics);
 }
 
 void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
@@ -833,12 +981,14 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
         upload.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
         state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &upload, 0, nullptr, 0, nullptr);
+        resources.RecordUploads(commands);
         state->DeviceFunction<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
         resources.Bind(commands, VK_PIPELINE_BIND_POINT_COMPUTE, layout);
         if (pushStages != 0) {
             state->DeviceFunction<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes, pushBytes.data());
         }
         state->DeviceFunction<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, x, y, z);
+        resources.RecordDownloads(commands);
         VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         download.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
         download.dstAccessMask = VK_ACCESS_HOST_READ_BIT;

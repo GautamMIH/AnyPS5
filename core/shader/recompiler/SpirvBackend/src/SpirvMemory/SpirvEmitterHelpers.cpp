@@ -190,7 +190,25 @@ void DefineInputs(SpirvEmitterState& state) {
             addBuiltin(StageInputKind::WorkgroupId, 3u, "gl_WorkGroupID");
         }
     }
-    for (auto& input : state.inputs) {
+    for (std::size_t index = 0; index < state.inputs.size(); ++index) {
+        auto& input = state.inputs[index];
+        if (input.kind == StageInputKind::Parameter && state.program.Resources().stage == IrShaderStage::Pixel) {
+            // Several pixel inputs may read the same exported parameter (SPI_PS_INPUT_CNTL.OFFSET);
+            // Vulkan allows one variable per location, so they share it.
+            const auto location = PixelParameterLocation(state, input.location);
+            const SpirvInputBinding* shared = nullptr;
+            for (std::size_t other = 0; other < index && shared == nullptr; ++other) {
+                const auto& candidate = state.inputs[other];
+                if (candidate.kind == StageInputKind::Parameter && PixelParameterLocation(state, candidate.location) == location) shared = &candidate;
+            }
+            if (shared != nullptr) {
+                if (shared->perVertex != input.perVertex || PixelParameterIsFlat(state, shared->location) != PixelParameterIsFlat(state, input.location)) {
+                    FailEmit("pixel inputs reading the same parameter use different interpolation");
+                }
+                input.variableId = shared->variableId;
+                continue;
+            }
+        }
         std::uint32_t type = TypeU32(state);
         switch (input.kind) {
         case StageInputKind::VertexIndex:

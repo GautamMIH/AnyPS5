@@ -17,6 +17,7 @@ TextureTileMode resolveTileMode(std::uint32_t raw) {
         case 0x01: return TextureTileMode::kStandard256B;
         case 0x05: return TextureTileMode::kStandard4KB;
         case 0x09: return TextureTileMode::kStandard64KB;
+        case 0x18: return TextureTileMode::Depth64KB;
         case 0x1b: return TextureTileMode::RenderTarget64KB;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported tile mode " + std::to_string(raw));
     }
@@ -26,6 +27,7 @@ TextureDimension resolveDimension(std::uint32_t raw) {
     switch (raw) {
         case 8: return TextureDimension::k1D;
         case 9: return TextureDimension::k2D;
+        case 10: return TextureDimension::k3D;
         case 11: return TextureDimension::kCube;
         case 13: return TextureDimension::k2DArray;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported image type " + std::to_string(raw));
@@ -89,12 +91,22 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     Require(!prtDefColor, "guest texture descriptor uses a partially resident default color which is not implemented");
     Require(arrayPitch == 0, "guest texture descriptor uses a nonzero array pitch which is not implemented");
     Require(!msaaDepth, "guest texture descriptor uses MSAA which is not implemented");
-    Require(maxUncompBlkSize == 0 && maxCompBlkSize == 0, "guest texture descriptor uses DCC block size overrides which are not implemented");
-    Require(!metaPipeAligned && !writeCompress && !metaCompress && !dccAlphaPos && !dccColorTransf && metaAddr == 0, "guest texture descriptor uses metadata compression which is not implemented");
+    // DCC fields (block sizes, compression, metadata address) describe how a surface may be
+    // stored compressed. Emulated GPU writes are always plain texels (colour targets ignore
+    // DCC_ENABLE too), so the surface is read uncompressed and the metadata is never consulted,
+    // as in shadPS4.
+    static_cast<void>(maxUncompBlkSize);
+    static_cast<void>(maxCompBlkSize);
+    static_cast<void>(metaPipeAligned);
+    static_cast<void>(writeCompress);
+    static_cast<void>(metaCompress);
+    static_cast<void>(dccAlphaPos);
+    static_cast<void>(dccColorTransf);
+    static_cast<void>(metaAddr);
     Require(bcSwizzle == 0, "guest texture descriptor uses a BC swizzle which is not implemented");
 
     Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
-    Require(lastLevel == maxMip, "guest texture descriptor must expose every mip level down to the last one");
+    Require(lastLevel <= maxMip, "guest texture descriptor exposes mip levels past the surface");
 
     const auto tileMode = resolveTileMode(tileModeRaw);
     const auto dimension = resolveDimension(typeRaw);
@@ -108,6 +120,13 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
             break;
         case TextureDimension::k2DArray:
             Require(baseArray <= depth, "guest 2D array texture descriptor has a base array past its last array slice");
+            break;
+        case TextureDimension::k3D:
+            // Thin tilings store a volume's slices like array layers and standard tilings use
+            // thick blocks (KytyPS5); mip chains, whose depth shrinks per level, are not modelled.
+            Require(baseArray == 0, "guest 3D texture descriptor has a nonzero base slice");
+            Require(tileMode != TextureTileMode::kStandard256B && tileMode != TextureTileMode::Depth64KB, "3D textures in 256-byte or depth tiling are invalid");
+            Require(maxMip == 0, "mipmapped 3D textures are not implemented");
             break;
         case TextureDimension::kCube:
             Require(width == height, "guest cube texture descriptor is not square");
@@ -124,8 +143,10 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.baseArray = baseArray;
     result.mipCount = maxMip + 1u;
     result.baseLevel = baseLevel;
+    result.lastLevel = lastLevel;
     result.tileMode = tileMode;
     result.dimension = dimension;
+    result.viewDimension = dimension;
     result.format = format;
     result.dstSelX = static_cast<std::uint8_t>(dstSelX);
     result.dstSelY = static_cast<std::uint8_t>(dstSelY);
@@ -138,11 +159,25 @@ bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, Texture
     switch (shape) {
         case ShaderRecompiler::DescriptorImageShape::Image1D: return dimension == TextureDimension::k1D;
         case ShaderRecompiler::DescriptorImageShape::Image2D: return dimension == TextureDimension::k2D;
-        case ShaderRecompiler::DescriptorImageShape::Image2DArray: return dimension == TextureDimension::k2DArray;
+        // A cube's faces are addressable as 2D array layers.
+        case ShaderRecompiler::DescriptorImageShape::Image2DArray: return dimension == TextureDimension::k2DArray || dimension == TextureDimension::kCube;
         case ShaderRecompiler::DescriptorImageShape::ImageCube: return dimension == TextureDimension::kCube;
-        case ShaderRecompiler::DescriptorImageShape::Image3D: return false;
+        case ShaderRecompiler::DescriptorImageShape::Image3D: return dimension == TextureDimension::k3D;
     }
     throw std::runtime_error("AGC graphics: MatchesGuestDimension encountered an unknown descriptor image shape");
+}
+
+std::optional<TextureDimension> SampledViewDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension) {
+    using Shape = ShaderRecompiler::DescriptorImageShape;
+    const bool layered = dimension == TextureDimension::k2D || dimension == TextureDimension::k2DArray || dimension == TextureDimension::kCube;
+    switch (shape) {
+        case Shape::Image1D: return dimension == TextureDimension::k1D ? std::optional(TextureDimension::k1D) : std::nullopt;
+        case Shape::Image2D: return layered ? std::optional(TextureDimension::k2D) : std::nullopt;
+        case Shape::Image2DArray: return layered ? std::optional(TextureDimension::k2DArray) : std::nullopt;
+        case Shape::ImageCube: return dimension == TextureDimension::kCube ? std::optional(TextureDimension::kCube) : std::nullopt;
+        case Shape::Image3D: return dimension == TextureDimension::k3D ? std::optional(TextureDimension::k3D) : std::nullopt;
+    }
+    throw std::runtime_error("AGC graphics: SampledViewDimension encountered an unknown descriptor image shape");
 }
 
 }

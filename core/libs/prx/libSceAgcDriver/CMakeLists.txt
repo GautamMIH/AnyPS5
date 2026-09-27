@@ -46,6 +46,19 @@ add_custom_command(
         VERBATIM
 )
 
+set(agcTextureMergeShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/TextureMerge.comp)
+set(agcTextureMergeShaderSpv ${agcTextureDetileGeneratedDir}/TextureMerge.spv)
+set(agcTextureMergeShaderHeader ${agcTextureDetileGeneratedDir}/TextureMerge_spv.h)
+add_custom_command(
+        OUTPUT "${agcTextureMergeShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcTextureMergeShaderSpv}" "${agcTextureMergeShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcTextureMergeShaderSpv} -DOUTPUT=${agcTextureMergeShaderHeader}
+        -DSYMBOL=TEXTURE_MERGE_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcTextureMergeShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver.cpp
@@ -58,15 +71,21 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/PresentationScaler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Draw.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/FastClear.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/LayeredColorTransfer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/DepthTargetLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetTransfer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Pipeline.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Resources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderInputState.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderResources.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/StorageImage.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureAddressing.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderAddressResources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestBufferMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/BdaResources.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestGpuMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/BufferAddress.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderValidation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/State.cpp
@@ -78,6 +97,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Texture.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
+        ${agcTextureMergeShaderHeader}
         ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Event.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Query.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Resource/src/Lifecycle.cpp
@@ -102,6 +122,7 @@ target_link_libraries(libSceAgcDriver PRIVATE
         shader_recompiler_agc_driver
         SDL2-static
         libc
+        libkernel
 )
 
 set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
@@ -195,14 +216,21 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         tests/GuestTextureResource.cpp
         tests/GuestSamplerResource.cpp
         tests/TextureDetiler.cpp
+        Graphics/src/Draw.cpp
+        Graphics/src/Pipeline.cpp
+        Graphics/src/GraphicsPipelineCache.cpp
         Graphics/src/State.cpp
         Graphics/src/ColorTargetLayout.cpp
+        Graphics/src/DepthTargetLayout.cpp
         Graphics/src/ColorTargetTransfer.cpp
         Graphics/src/Resources.cpp
         Graphics/src/ShaderResources.cpp
+        Graphics/src/StorageImage.cpp
+        Graphics/src/TextureAddressing.cpp
         Graphics/src/ShaderAddressResources.cpp
         Graphics/src/GuestBufferMemory.cpp
         Graphics/src/BdaResources.cpp
+        Graphics/src/GuestGpuMemory.cpp
         Graphics/src/BufferAddress.cpp
         Graphics/src/ShaderValidation.cpp
         Graphics/src/GuestTextureResource.cpp
@@ -213,6 +241,7 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/Texture.cpp
         Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
+        ${agcTextureMergeShaderHeader}
         Execution/src/GuestMemory.cpp
 )
 
@@ -228,6 +257,7 @@ target_include_directories(agc_driver_graphics_tests PRIVATE
 )
 
 target_link_libraries(agc_driver_graphics_tests PRIVATE
+        shader_recompiler_agc_driver
         libc
 )
 
@@ -252,6 +282,18 @@ target_include_directories(agc_driver_bda_device_tests PRIVATE
 target_link_libraries(agc_driver_bda_device_tests PRIVATE SDL2-static libc shader_recompiler_agc_driver)
 set_target_properties(agc_driver_bda_device_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_bda_device_tests)
+
+if(BUILD_TESTING)
+    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_driver_flip_tests agc_driver_pm4_tests)
+        string(REGEX REPLACE "_tests$" "" agcTestName "${agcTest}")
+        set_target_properties(${agcTest} PROPERTIES EXCLUDE_FROM_ALL OFF)
+        add_test(NAME ${agcTestName} COMMAND ${agcTest})
+        if(WIN32)
+            set_tests_properties(${agcTestName} PROPERTIES ENVIRONMENT_MODIFICATION
+                "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
+endif()
 
 option(AGC_BUILD_VISUAL_TEST "Enable the standalone AGC SPIR-V visual test" OFF)
 
@@ -288,14 +330,21 @@ if(AGC_BUILD_VISUAL_TEST)
             Execution/src/GuestMemory.cpp
             Execution/src/BdaFeatures.cpp
             Graphics/src/Draw.cpp
+            Graphics/src/FastClear.cpp
+            Graphics/src/LayeredColorTransfer.cpp
             Graphics/src/ColorTargetLayout.cpp
+            Graphics/src/DepthTargetLayout.cpp
             Graphics/src/ColorTargetTransfer.cpp
             Graphics/src/Pipeline.cpp
             Graphics/src/Resources.cpp
             Graphics/src/ShaderResources.cpp
+            Graphics/src/StorageImage.cpp
+            Graphics/src/TextureAddressing.cpp
             Graphics/src/ShaderAddressResources.cpp
             Graphics/src/GuestBufferMemory.cpp
             Graphics/src/BdaResources.cpp
+            Graphics/src/GuestGpuMemory.cpp
+        Graphics/src/GuestGpuMemory.cpp
             Graphics/src/BufferAddress.cpp
             Graphics/src/ShaderValidation.cpp
             Graphics/src/GuestTextureResource.cpp
@@ -306,6 +355,8 @@ if(AGC_BUILD_VISUAL_TEST)
             Graphics/src/Texture.cpp
             Graphics/src/Sampler.cpp
             ${agcTextureDetileShaderHeader}
+            ${agcTextureMergeShaderHeader}
+        ${agcTextureMergeShaderHeader}
             ${visualShaders}
     )
 

@@ -18,7 +18,7 @@ GpuColorTransfer::GpuColorTransfer(const Context& context) : context(context) {
         descriptorInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
         descriptorInfo.pBindings = bindings.data();
         Check(context.Function<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(context.device, &descriptorInfo, nullptr, &descriptorLayout), "vkCreateDescriptorSetLayout color transfer");
-        const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, 16};
+        const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, 28};
         VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         layoutInfo.setLayoutCount = 1;
         layoutInfo.pSetLayouts = &descriptorLayout;
@@ -67,11 +67,11 @@ void GpuColorTransfer::release() noexcept {
     if (descriptorLayout) context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")(context.device, descriptorLayout, nullptr);
 }
 
-void GpuColorTransfer::prepare(std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode) {
-    const ColorTargetLayout layout(newWidth, newHeight, newMode);
+void GpuColorTransfer::prepare(std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode, std::uint32_t newElementBytes, ColorTail newTail) {
+    const ColorTargetLayout layout(newWidth, newHeight, newMode, newElementBytes, newTail);
     Require(layout.Bytes() <= context.limits.maxStorageBufferRange && layout.LinearBytes() <= context.limits.maxStorageBufferRange, "color transfer exceeds storage buffer limits");
     Require((newWidth + 7u) / 8u <= context.limits.maxComputeWorkGroupCount[0] && (newHeight + 7u) / 8u <= context.limits.maxComputeWorkGroupCount[1], "color transfer exceeds workgroup limits");
-    if (tiled && width == newWidth && height == newHeight && mode == newMode) return;
+    if (tiled && width == newWidth && height == newHeight && mode == newMode && elementBytes == newElementBytes && tail == newTail) return;
     auto newTiled = std::make_unique<Buffer>(context, layout.Bytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     auto newLinear = std::make_unique<Buffer>(context, layout.LinearBytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     auto newReadback = std::make_unique<Buffer>(context, layout.Bytes(), VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
@@ -94,13 +94,15 @@ void GpuColorTransfer::prepare(std::uint32_t newWidth, std::uint32_t newHeight, 
     width = newWidth;
     height = newHeight;
     mode = newMode;
+    elementBytes = newElementBytes;
+    tail = newTail;
 }
 
-void GpuColorTransfer::Upload(std::uint64_t address, std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode) {
+void GpuColorTransfer::Upload(std::uint64_t address, std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode, std::uint32_t newElementBytes, ColorTail newTail) {
     PerformanceTimer timing("ColorTransfer.Upload");
-    prepare(newWidth, newHeight, newMode);
+    prepare(newWidth, newHeight, newMode, newElementBytes, newTail);
     timing.Mark("prepare");
-    const ColorTargetLayout layout(width, height, mode);
+    const ColorTargetLayout layout(width, height, mode, elementBytes, tail);
     GuestMemory::Read(address, upload->Bytes(), layout.Alignment());
     timing.Mark("guest_read", layout.Bytes());
 }
@@ -112,7 +114,9 @@ void GpuColorTransfer::convert(VkCommandBuffer commands, bool toTiled, bool swap
     before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
-    const std::array<std::uint32_t, 4> push{width, height, (width + 127u) / 128u, (toTiled ? 1u : 0u) | (swapRedBlue ? 2u : 0u) | (mode == ColorTileMode::RenderTarget ? 4u : 0u)};
+    Require(!swapRedBlue || elementBytes == 4, "red/blue swap requires 32-bit pixels");
+    const ColorTargetLayout layout(width, height, mode, elementBytes, tail);
+    const std::array<std::uint32_t, 7> push{width, height, mode == ColorTileMode::RenderTarget ? layout.BlocksPerRow() : 0u, (toTiled ? 1u : 0u) | (swapRedBlue ? 2u : 0u) | (mode == ColorTileMode::RenderTarget ? 4u : 0u) | (tail.present ? 8u : 0u), elementBytes, tail.x, tail.y};
     context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     context.Function<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
     context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push.data());

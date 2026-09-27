@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_GUESTBUFFERMEMORY_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include <memory>
@@ -14,11 +15,16 @@ struct GuestMemorySnapshot {
     std::span<const std::byte> bytes;
 };
 
+// The guest memory one draw or dispatch reaches. Regions the device's GuestGpuMemory covers are
+// used in place (GPU writes land in guest memory directly); others are copied into buffers before
+// the work and their writes copied back after it.
 class GuestBufferMemory {
 public:
     explicit GuestBufferMemory(const Context& context);
     void AcquireRegistered();
-    void AddWritable(std::uint64_t address, std::size_t bytes);
+    // leading: bytes before address the region also covers for a view's alignment; they are
+    // uploaded but never written back.
+    void AddWritable(std::uint64_t address, std::size_t bytes, std::size_t leading = 0);
     void AddSnapshot(const GuestMemorySnapshot& snapshot);
     void Upload(bool addressable);
     VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes) const;
@@ -33,6 +39,9 @@ private:
         bool writable;
         std::vector<std::byte> snapshot;
         std::unique_ptr<Buffer> buffer;
+        // Contents are read at upload rather than captured (registered memory, live mirrors).
+        bool live = false;
+        std::optional<GuestGpuMemory::View> view;
     };
 
     void validate(std::uint64_t address, std::size_t bytes) const;

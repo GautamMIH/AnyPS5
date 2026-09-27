@@ -80,9 +80,9 @@ void stateTests() {
     Require(initial.userConfig.at(0x24b) == 0, "queue reset must disable primitive restart");
     auto queue = makeState();
     auto state = AgcDriver::Graphics::DecodeState(queue);
-    Require(state.color.address == reinterpret_cast<std::uintptr_t>(colorMemory.data()) && state.color.bytes == colorMemory.size(), "render-target address or size changed");
+    Require(state.colors[0].address == reinterpret_cast<std::uintptr_t>(colorMemory.data()) && state.colors[0].bytes == colorMemory.size(), "render-target address or size changed");
     Require(state.viewport.y == 4 && state.viewport.height == -4, "negative viewport height was lost");
-    Require(state.color.format == VK_FORMAT_R8G8B8A8_UNORM, "RGBA format changed");
+    Require(state.colors[0].format == VK_FORMAT_R8G8B8A8_UNORM, "RGBA format changed");
     queue.userConfig[0x24b] = 1;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "GE_MULTI_PRIM_IB_RESET_EN");
     queue = makeState();
@@ -110,7 +110,13 @@ void stateTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "target zero");
     queue = makeState();
     queue.context[0x200] = 2;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "depth");
+    Require(!AgcDriver::Graphics::DecodeState(queue).hasDepthTarget, "depth state without an attachment must be ignored");
+    queue.context[0x10] = 3;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "depth base");
+    queue = makeState();
+    queue.context[0x200] = 0x1002u;
+    queue.context[0x10] = 3;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "reserved DB_DEPTH_CONTROL");
     queue = makeState();
     queue.context[0x10f] = 0x7fc00000;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "non-finite");
@@ -199,14 +205,14 @@ void DisabledColorTests() {
     queue.context[0x8e] = 0;
     for (const auto offset : {0x31cu, 0x31bu, 0x31du, 0x3b0u, 0x3b8u, 0x390u, 0x318u, 0x1e0u}) queue.context.erase(offset);
     const auto state = AgcDriver::Graphics::DecodeState(queue);
-    Require(!state.hasColorTarget && state.color.address == 0 && state.color.bytes == 0, "disabled color writes accessed a color surface");
+    Require(!state.HasColorTarget() && state.colors[0].address == 0 && state.colors[0].bytes == 0, "disabled color writes accessed a color surface");
     Require(state.renderExtent.width == 64 && state.renderExtent.height == 4, "attachment-free framebuffer lost screen scissor extent");
     queue.context[0xd] = 0;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "empty framebuffer extent");
     queue = makeState();
     queue.context[0x8e] = 3;
     const auto partial = AgcDriver::Graphics::DecodeState(queue);
-    Require(partial.hasColorTarget && partial.blend.colorWriteMask == 3, "partial color write mask changed");
+    Require(partial.HasColorTarget() && partial.blends[0].colorWriteMask == 3, "partial color write mask changed");
     queue.context.erase(0x31c);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
 }
@@ -254,7 +260,7 @@ void InitialContextTests() {
     queue.userConfig[0x242] = 4;
     for (const auto offset : {0x2d5u, 0x204u, 0x8eu, 0x8fu, 0x1c3u, 0x1c5u, 0x31cu, 0x3b0u, 0x3b8u, 0x318u, 0x390u, 0x10fu, 0x110u, 0x111u, 0x112u, 0x113u, 0x114u, 0xb4u, 0xb5u}) queue.context.at(offset) = configured.context.at(offset);
     const auto state = AgcDriver::Graphics::DecodeState(queue);
-    Require(state.color.address == reinterpret_cast<std::uintptr_t>(colorMemory.data()) && state.color.bytes == colorMemory.size(), "sparse guest setup lost its render target");
+    Require(state.colors[0].address == reinterpret_cast<std::uintptr_t>(colorMemory.data()) && state.colors[0].bytes == colorMemory.size(), "sparse guest setup lost its render target");
     Require(queue.context.at(0x206) == 0x43f, "initial homogeneous viewport mode changed");
     for (const auto control : {0x3fu, 0x43eu, 0x53fu, 0x63fu, 0x8000043fu}) {
         queue.context[0x206] = control;
@@ -556,8 +562,8 @@ const std::vector<std::byte>& bufferBytes(VkBuffer buffer) {
 void expectResourceFailure(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, std::string_view reason) {
     mock = MockVulkan{};
     const auto context = mockContext();
-    const auto color = AgcDriver::Graphics::DecodeState(makeState()).color;
-    expectFailure([&] { AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, color, 0, 0); }, reason);
+    const auto color = AgcDriver::Graphics::DecodeState(makeState()).colors[0];
+    expectFailure([&] { AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, std::span(&color, 1), 0, 0); }, reason);
     Require(mock.live == 0, "failed shader resources leaked Vulkan objects");
 }
 
@@ -606,7 +612,7 @@ void resourceTests() {
         vertex.bindings.push_back(makeBinding(Role::ShaderData, 5, 1, {7, 8, 9}));
         fragment.bindings.push_back(makeBinding(Role::FlattenedSrt, 43, 1, {1, 2}));
         fragment.bindings.push_back(makeBinding(Role::GuestBuffers, 44, 1, vsharp(guestThird.data(), 8)));
-        AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, state.color, 0, 0);
+        AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, std::span(&state.colors[0], 1), 0, 0);
         Require(resources.Layout() != VK_NULL_HANDLE, "descriptor set layout was not created");
         Require(mock.layoutBindings.size() == 4 && mock.writes.size() == 4, "one layout binding and one write per shader binding are expected");
         Require(findLayoutBinding(0).descriptorCount == 2 && findLayoutBinding(0).stageFlags == VK_SHADER_STAGE_VERTEX_BIT && findLayoutBinding(0).descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, "guest buffer array layout binding is incorrect");
@@ -638,7 +644,7 @@ void resourceTests() {
     {
         ShaderRecompiler::RecompileResult vertex;
         ShaderRecompiler::RecompileResult fragment;
-        AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, state.color, 0, 0);
+        AgcDriver::Graphics::ShaderResources resources(context, vertex, fragment, std::span(&state.colors[0], 1), 0, 0);
         Require(resources.Layout() != VK_NULL_HANDLE && mock.layoutBindings.empty() && mock.poolSizes.empty() && mock.writes.empty(), "a shader without bindings must produce only an empty set layout");
         resources.Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, VK_NULL_HANDLE);
         Require(mock.boundSets == 0, "an empty descriptor set was bound");
@@ -716,9 +722,9 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[1] |= 0x3fffu << 16u; binding.guestDescriptor[2] = 0xffffffffu; }), "descriptor range limit");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor[2] = 8192; }), "descriptor range limit");
     expectSingleFailure(changed([](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(0x1000), 8); }), "not readable");
-    expectSingleFailure(changed([&](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(state.color.address), 64); }), "aliases the render target");
+    expectSingleFailure(changed([&](auto& binding) { binding.guestDescriptor = vsharp(reinterpret_cast<const void*>(state.colors[0].address), 64); }), "aliases the render target");
     expectSingleFailure(changed([](auto& binding) { binding.count = 3; binding.guestDescriptor = join(join(vsharp(guestFirst.data(), 16), vsharp(guestSecond.data(), 32)), vsharp(reinterpret_cast<const void*>(0x1000), 8)); }), "not readable");
-    expectSingleFailure(changed([&](auto& binding) { binding.count = 2; binding.guestDescriptor = join(vsharp(guestFirst.data(), 16), vsharp(reinterpret_cast<const void*>(state.color.address), 64)); }), "aliases the render target");
+    expectSingleFailure(changed([&](auto& binding) { binding.count = 2; binding.guestDescriptor = join(vsharp(guestFirst.data(), 16), vsharp(reinterpret_cast<const void*>(state.colors[0].address), 64)); }), "aliases the render target");
     expectSingleFailure(changed([](auto& binding) { binding.count = 17; binding.guestDescriptor.assign(68, 0); }), "per-stage limits");
     {
         ShaderRecompiler::RecompileResult vertex;

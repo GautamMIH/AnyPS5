@@ -1,5 +1,6 @@
 #include "prx/libkernel/File/include/NativeStat.hpp"
 
+#include <cerrno>
 #include <stdexcept>
 #include <string>
 
@@ -20,11 +21,36 @@ static int DoStat(const std::filesystem::path& p, NativeStat* st) {
 
 namespace File {
 
-void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
+namespace {
+
+void fill(const NativeStat& st, FileStat* sb);
+
+}
+
+int FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
     NativeStat st{};
-    if (DoStat(nativePath, &st) != 0) {
-        throw std::runtime_error(std::string("FillFileStat: stat failed for ") + nativePath.string());
-    }
+    if (DoStat(nativePath, &st) != 0)
+        return errno;
+    fill(st, sb);
+    return 0;
+}
+
+int FillFileStatFromDescriptor(int descriptor, FileStat* sb) {
+    NativeStat st{};
+#ifdef _WIN32
+    if (_fstat64(descriptor, &st) != 0)
+        return errno;
+#else
+    if (::fstat(descriptor, &st) != 0)
+        return errno;
+#endif
+    fill(st, sb);
+    return 0;
+}
+
+namespace {
+
+void fill(const NativeStat& st, FileStat* sb) {
     *sb = FileStat{};
     sb->st_mode = static_cast<std::uint16_t>(st.st_mode);
     sb->st_size = static_cast<std::int64_t>(st.st_size);
@@ -70,6 +96,8 @@ void FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
     sb->st_birthtim.tv_nsec = static_cast<std::int64_t>(st.st_birthtim.tv_nsec);
 #endif
 #endif
+}
+
 }
 
 }

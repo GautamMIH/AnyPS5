@@ -7,6 +7,9 @@ namespace Agc::Command {
 
 std::uint32_t DrawInitiator(std::uint64_t modifier, bool indexed, const char* function);
 std::uint64_t DrawPatchOffsets(std::uint64_t modifier, const char* function);
+// Indexed indirect draws may also patch the start index: its SGPR goes in bits 16-31, enabled by
+// bit 59 (KytyPS5 decode_indirect_modifier_patch_offsets).
+std::uint64_t DrawIndexedPatchOffsets(std::uint64_t modifier, const char* function);
 std::uint32_t DrawIndexLocation(std::uint64_t modifier);
 
 }

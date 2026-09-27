@@ -61,14 +61,14 @@ void Run(SDL_Window* window, const std::filesystem::path& directory, bool verify
     }
     AgcDriver::Graphics::State state{};
     state.stages.path = AgcDriver::Graphics::ShaderPath::Vertex;
-    state.color = {reinterpret_cast<std::uintptr_t>(Pixels.data()), {Width, Height}, VK_FORMAT_R8G8B8A8_UNORM, Pixels.size()};
-    state.hasColorTarget = true;
+    state.colors[0] = {reinterpret_cast<std::uintptr_t>(Pixels.data()), {Width, Height}, VK_FORMAT_R8G8B8A8_UNORM, Pixels.size()};
+    state.colorTargetMask = 1;
     state.renderExtent = {Width, Height};
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     state.viewport = {0, static_cast<float>(Height), static_cast<float>(Width), -static_cast<float>(Height), 0, 1};
     state.scissor = {{0, 0}, {Width, Height}};
     state.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    state.blend.colorWriteMask = 15;
+    state.blends[0].colorWriteMask = 15;
     const std::array<std::uint16_t, 3> indices{0, 1, 2};
     const AgcDriver::Pm4::DrawParameters draw{reinterpret_cast<std::uintptr_t>(indices.data()), 3, 2, 1, 0};
     device.Draw(state, draw, shaders);

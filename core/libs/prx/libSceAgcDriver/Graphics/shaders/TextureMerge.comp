@@ -1,0 +1,31 @@
+#version 450
+
+// Merges tiled texels into guest memory: each invocation owns one dword and replaces only the
+// bytes the mask marks, so images sharing blocks (mips in one tail) keep each other's texels and no
+// sub-dword atomics touch host memory.
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Source { uint data[]; } sourceBuffer;
+layout(set = 0, binding = 1, std430) readonly buffer Mask { uint data[]; } maskBuffer;
+layout(set = 0, binding = 2, std430) buffer Guest { uint data[]; } guestBuffer;
+
+layout(push_constant) uniform Push {
+    uint sourceBase;
+    uint maskBase;
+    uint guestBase;
+    uint dwords;
+} params;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= params.dwords) {
+        return;
+    }
+    uint mask = maskBuffer.data[params.maskBase + index];
+    if (mask == 0u) {
+        return;
+    }
+    uint guest = guestBuffer.data[params.guestBase + index];
+    guestBuffer.data[params.guestBase + index] = (guest & ~mask) | (sourceBuffer.data[params.sourceBase + index] & mask);
+}

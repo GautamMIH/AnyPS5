@@ -97,25 +97,17 @@ double APS5_VABI strtod_nid_postfix(const char* str, char** endptr) {
     return std::strtod(str, endptr);
 }
 
+double APS5_VABI atof_nid_postfix(const char* str) { return std::atof(str); }
+float APS5_VABI strtof_nid_postfix(const char* str, char** endptr) { return std::strtof(str, endptr); }
+long double APS5_VABI strtold_nid_postfix(const char* str, char** endptr) {
+    static_assert(sizeof(long double) == 16, "Guest long double requires x87 extended precision storage");
+    return std::strtold(str, endptr);
+}
+
 int APS5_VABI atoi_nid_postfix(const char* str) {
     return std::atoi(str);
 }
 
-const wchar_t* APS5_VABI wmemchr_nid_postfix(const wchar_t* s, wchar_t c, size_t n) {
-    return std::wmemchr(s, c, n);
-}
-
-int APS5_VABI wmemcmp_nid_postfix(const wchar_t* s1, const wchar_t* s2, size_t n) {
-    return std::wmemcmp(s1, s2, n);
-}
-
-wchar_t* APS5_VABI wmemcpy_nid_postfix(wchar_t* dest, const wchar_t* src, size_t n) {
-    return std::wmemcpy(dest, src, n);
-}
-
-wchar_t* APS5_VABI wmemmove_nid_postfix(wchar_t* dest, const wchar_t* src, size_t n) {
-    return std::wmemmove(dest, src, n);
-}
 
 }
 

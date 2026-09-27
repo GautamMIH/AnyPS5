@@ -8,7 +8,7 @@ extern "C" {
 
 int APS5_VABI sceNpTrophy2CreateHandle(int* handle) {
     if (handle == nullptr) {
-        APS5_INVALID_ARG_EX;
+        return SCE_NP_TROPHY2_ERROR_INVALID_ARGUMENT;
     }
     *handle = NP_TROPHY2_HANDLE_DEFAULT;
     return SCE_NP_TROPHY2_OK;

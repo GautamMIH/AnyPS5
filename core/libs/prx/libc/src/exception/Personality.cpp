@@ -1,5 +1,11 @@
 #include "prx/libc/include/exceptions/Runtime.hpp"
 
+#ifndef _WIN32
+#include <cstdlib>
+#include <dlfcn.h>
+#endif
+
+
 extern "C" _Unwind_Reason_Code APS5_VABI __gxx_personality_v0_nid_postfix(
     int version, _Unwind_Action actions, std::uint64_t exceptionClass,
     _Unwind_Exception* exception, _Unwind_Context* context
@@ -71,9 +77,25 @@ extern "C" _Unwind_Reason_Code APS5_VABI __gxx_personality_v0_nid_postfix(
     return _URC_CONTINUE_UNWIND;
 }
 
+#ifdef _WIN32
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(
     int version, _Unwind_Action actions, std::uint64_t exceptionClass,
     _Unwind_Exception* exception, _Unwind_Context* context
 ) {
     return __gxx_personality_v0_nid_postfix(version, actions, exceptionClass, exception, context);
 }
+#else
+// Every frame in this library shares one personality reference. The guest unwinder recognises this
+// function as its own and calls __gxx_personality_v0_nid_postfix itself, so the only caller that
+// reaches this body is the host unwinder, which passes its own context layout: forward to the host
+// C++ runtime's personality. Hidden visibility keeps it from interposing on other libraries.
+extern "C" __attribute__((visibility("hidden"))) _Unwind_Reason_Code __gxx_personality_v0(
+    int version, _Unwind_Action actions, std::uint64_t exceptionClass,
+    _Unwind_Exception* exception, _Unwind_Context* context
+) {
+    using Personality = _Unwind_Reason_Code (*)(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
+    static const auto host = reinterpret_cast<Personality>(dlsym(RTLD_DEFAULT, "__gxx_personality_v0"));
+    if (host == nullptr || host == &__gxx_personality_v0) std::abort();
+    return host(version, actions, exceptionClass, exception, context);
+}
+#endif

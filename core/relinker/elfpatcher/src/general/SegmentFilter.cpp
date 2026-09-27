@@ -12,6 +12,9 @@ bool SegmentFilter::_isSceSpecificSegment(const std::uint32_t type) const {
 
 bool SegmentFilter::ShouldSkip(const Domain::ProgramHeader& ph) const {
     if (ph.Type == PT_OS_PROCPARAM) return false;
+    // The unwind table index lies inside the OS-specific type range but is the standard GNU one;
+    // without it no C++ exception can be caught in the relinked module.
+    if (ph.Type == PT_GNU_EH_FRAME) return false;
     if (_isSceSpecificSegment(ph.Type)) return true;
     if (ph.Type == PT_DYNAMIC) return true;
     if (ph.Type == PT_NOTE && ph.MappedAddress == 0 && ph.FileSize > 0) return true;
