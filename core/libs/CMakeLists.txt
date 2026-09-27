@@ -346,6 +346,14 @@ if(BUILD_TESTING)
         set_tests_properties(guest_strings PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    # Catches guest-runtime throws in host frames, which needs libc.prx to replace the host C++
+    # runtime process-wide. On Linux libc.prx deliberately leaves the host runtime to host code (the
+    # driver, Vulkan, SDL, FFmpeg) and serves guest code through NID exports, so the executable is
+    # built but not registered as a test.
+    add_executable(exception_runtime_tests tests/ExceptionRuntime.cpp)
+    target_include_directories(exception_runtime_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(exception_runtime_tests PRIVATE libc)
+    configure_windows_unwind(exception_runtime_tests)
 endif()
 
 add_executable(application_heap_tests EXCLUDE_FROM_ALL tests/ApplicationHeap.cpp prx/libc/src/ApplicationHeap.cpp prx/libc/src/ApplicationProcessParameters.cpp)

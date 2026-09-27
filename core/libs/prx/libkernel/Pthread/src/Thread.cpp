@@ -1,6 +1,8 @@
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
 #include "../include/PthreadStacks.hpp"
+#include "../include/ThreadLifecycle.hpp"
+#include <atomic>
 #include <algorithm>
 #include <cstring>
 #include "prx/libc/include/General.hpp"
@@ -38,7 +40,31 @@ struct ThreadArgs {
     PthreadPrivate* self;
 };
 
+// The guest libc registers these through sceKernelSetThreadDtors and friends (Rtld.cpp); the
+// destructor callback runs its thread-local destructors as each guest thread finishes. A later
+// registration replaces an earlier one, as a kernel setter would.
+static std::atomic<thread_dtors_func_t> threadDtors{nullptr};
+static std::atomic<get_thread_atexit_count_func_t> threadAtexitCount{nullptr};
+static std::atomic<thread_atexit_report_func_t> threadAtexitReport{nullptr};
+static thread_local bool threadFinishing = false;
+
+void ThreadLifecycle::SetThreadDtors(thread_dtors_func_t callback) {
+    threadDtors.store(callback);
+}
+
+void ThreadLifecycle::SetThreadAtexitCount(get_thread_atexit_count_func_t callback) {
+    threadAtexitCount.store(callback);
+}
+
+void ThreadLifecycle::SetThreadAtexitReport(thread_atexit_report_func_t callback) {
+    threadAtexitReport.store(callback);
+}
+
 static void FinishThread(PthreadPrivate* self, void* retval) {
+    if (!threadFinishing) {
+        threadFinishing = true;
+        if (const auto callback = threadDtors.load()) callback();
+    }
     {
         std::unique_lock<std::mutex> lk(self->_join_mtx);
         self->_retval = retval;

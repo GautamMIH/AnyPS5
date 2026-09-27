@@ -55,7 +55,7 @@ public:
     }
 
     std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo& info) override {
-        require(info.mode == VIDEO_OUT_FLIP_MODE_VSYNC, "unsupported flip mode");
+        require(info.mode == VIDEO_OUT_FLIP_MODE_VSYNC, ("unsupported flip mode " + std::to_string(info.mode) + " (index " + std::to_string(info.index) + ", argument " + std::to_string(info.argument) + ")").c_str());
         require(info.index >= VIDEO_OUT_BUFFER_INDEX_BLACK && info.index < VIDEO_OUT_BUFFER_NUM_MAX, "invalid flip index");
         auto request = std::make_shared<FlipRequest>();
         request->cfg = cfg;

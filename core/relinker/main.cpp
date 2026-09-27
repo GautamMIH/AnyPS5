@@ -4,10 +4,13 @@
 #include <io/FileWriter.hpp>
 #include <relinker/parsing/ElfReader.hpp>
 #include <relinker/parsing/SelfUnwrapper.hpp>
+#include <relinker/analysis/SyscallScanner.hpp>
+#include <relinker/guest/GuestImage.hpp>
 #include <codegen/IAmd64OnlyConverter.hpp>
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <vector>
 
 int main(const int argc, char* argv[]) {
     Cli::Args args;
@@ -43,7 +46,21 @@ int main(const int argc, char* argv[]) {
             inputBytes = std::move(result.Bytes);
         }
 
-        Cli::RelinkModule(inputBytes, absPath, args);
+        // A single executable: modules shipped beside it (sce_module/) are relinked as guest
+        // modules it loads first. --game mode relinks a whole dump, modules included.
+        auto module = Cli::PrepareModule(inputBytes, args);
+        std::cout << "sce_module/sce_modules processing: " << (args.skipSceModule ? "disabled (--skip-sce-module)" : "enabled") << '\n';
+        std::vector<Relinker::GuestArtifact> guestArtifacts;
+        if (!args.skipSceModule) {
+            const auto syscallScanner = args.skipSyscallCheck ? Relinker::MakeNullSyscallScanner() : Relinker::MakeSyscallScanner();
+            guestArtifacts = Relinker::GuestModuleBuilder().Build(args.inputPath, absPath, module.Result.DynamicSection, args.toWindows, args.toIntel, *syscallScanner, args.lazyBinding, args.runPath);
+        }
+        Cli::EmitModule(module, absPath, args);
+        for (const auto& artifact : guestArtifacts) {
+            std::filesystem::create_directories(artifact.Path.parent_path());
+            fileWriter.Write(artifact.Path.string(), artifact.Bytes);
+            std::cout << "Guest module: " << artifact.Path.string() << '\n';
+        }
 
         if (args.autorun) return Cli::Autorun(absPath, args.toWindows);
 

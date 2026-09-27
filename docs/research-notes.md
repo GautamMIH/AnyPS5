@@ -61,3 +61,15 @@ Issues that needed research, with a short answer. Check here before researching;
 ## Fast clears / compression
 
 - **CMASK fast clear.** Register CMASK (only with FAST_CLEAR) as cleared on first use; DMA fill or XOR-free compute write to it re-clears; draw into a cleared target fills with CLEAR_WORD; eliminate pass = that fill for target 0. DCC ignored: surfaces stay uncompressed. (shadPS4 vk_rasterizer.cpp, texture_cache.h)
+
+## Upstream merges
+
+- **C++ exception runtime on Linux.** Upstream (a4c519b) interposes libstdc++ process-wide with libc.prx's runtime; ours (60e4393) keeps host code on libstdc++ and serves guest code through NID exports (interposing broke try/catch in host libraries: driver, Vulkan, SDL). Kept ours on Linux, upstream's exports on Windows. tests/ExceptionRuntime.cpp assumes the process-wide model, so it is built but not registered on Linux.
+- **Guest locale.** Upstream's std::locale rewrite (e526f1f) breaks titles whose inlined Dinkumware code reads locale internals (Zorro then parsed its settings wrong and asked for flip mode 2) and dropped the facet id exports (ctype<char>::id, num_put id/vtable, locale::id::_Id_cnt). Kept our layout-compatible GuestLocale; _Getptolower/_Getptoupper return short tables.
+- **Game modules.** Upstream's single-file mode relinks sce_module/ ELF modules as eagerly linked guest modules (GuestModuleBuilder, --skip-sce-module); our --game mode relinks a whole dump (SELF unwrapping, runtime loading). Both kept: builder runs between PrepareModule and EmitModule in single-file mode only.
+- **Bisecting a merge regression.** Build the pre-merge branch in a temp worktree (symlink its empty 3rdparty/ submodule dirs to a populated checkout), then swap .prx files into the run folder; libc.prx and libSceLibcInternal.prx must be swapped together.
+
+## Other projects
+
+- **OverkillLabs/DeadCells-PS5-Native** (checked 2026-09-27). Not a separate engine: a copy of upstream AnyPS5 at 1a0ebbc plus one squashed commit (1e9b001), Windows PE output, Dead Cells (PPSA15552) relinked like any title. Worth porting selectively: DISPATCH_DIRECT initiator bits (FORCE_START_AT_000, thread-count mode, COMPUTE_START_X/Y/Z), a software NGS2 mixer (libSceNgs2.native), event-flag AND/OR/CLEAR modes, FreeBSD getdents/fcntl on directory fds, SDL game controllers. Avoid: swallow-errors-and-continue policy, ISA-matched kernel replacement, RELEASE_MEM layout probing, blanket return-0 stubs, hardcoded title checks. GPL-2.0; NGS2 layouts are said to follow the Prospero SDK.
+

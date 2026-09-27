@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <stdexcept>
+#include <domain/GuestRuntime.hpp>
 
 namespace Domain {
 
@@ -128,6 +129,7 @@ struct SysVDynamicSection {
     std::vector<std::uint8_t> VerneedData;
     std::uint64_t VerdefCount = 0;
     std::uint64_t VerneedCount = 0;
+    std::vector<GuestRuntime> GuestModules;
 };
 
 struct CallRegistryEntry {

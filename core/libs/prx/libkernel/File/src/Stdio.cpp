@@ -6,6 +6,9 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/File/include/FileErrors.hpp"
+#include "prx/libkernel/File/include/File.hpp"
+#include "prx/libkernel/File/include/FileFlags.hpp"
+#include <cstdarg>
 
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -89,6 +92,64 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     }
 #endif
     return readDirectory(fd, buf, nbytes);
+}
+
+}
+
+// Underscore-prefixed POSIX aliases and file calls some titles import (from upstream).
+extern "C" int APS5_VABI close_nid_postfix(int descriptor);
+
+extern "C" {
+
+int APS5_VABI _close_nid_postfix(int descriptor) {
+    return close_nid_postfix(descriptor);
+}
+
+int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
+    std::uint16_t mode = 0;
+    if (flags & SCE_KERNEL_O_CREAT) {
+#ifdef _WIN32
+        __builtin_sysv_va_list arguments;
+        __builtin_sysv_va_start(arguments, flags);
+        mode = static_cast<std::uint16_t>(__builtin_va_arg(arguments, int));
+        __builtin_sysv_va_end(arguments);
+#else
+        std::va_list arguments;
+        va_start(arguments, flags);
+        mode = static_cast<std::uint16_t>(va_arg(arguments, int));
+        va_end(arguments);
+#endif
+    }
+    return sceKernelOpen(path, flags, mode);
+}
+
+std::int64_t APS5_VABI _read_nid_postfix(int descriptor, void* buffer, std::size_t count) {
+    return sceKernelRead(descriptor, buffer, count);
+}
+
+std::int64_t APS5_VABI _write_nid_postfix(int descriptor, const void* buffer, std::size_t count) {
+    return sceKernelWrite(descriptor, buffer, count);
+}
+
+int APS5_VABI sceKernelChmod_nid_postfix(const char* path, std::uint16_t mode) {
+    (void)path;
+    (void)mode;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t length) {
+    (void)path;
+    (void)length;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval* times) {
+    (void)path;
+    (void)times;
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
 }
