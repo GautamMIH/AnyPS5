@@ -233,6 +233,25 @@ void testIndirectDraw() {
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2c, {0, 0x280, 0x280, 0x40000000u, 1, 0, 0, 16, 2}), 0); }, "count address");
 }
 
+void testConditionalBranch() {
+    alignas(8) std::uint64_t value = 0x1234;
+    alignas(4) std::array<std::uint32_t, 2> then{}, otherwise{};
+    const auto branch = [&](std::uint32_t mode, std::uint32_t function, std::uint64_t reference, std::uint32_t elseDwords) {
+        return makePacket(0x3f, {mode | (function << 8u), low(&value), high(&value), 0xffff, 0, static_cast<std::uint32_t>(reference), 0, low(then.data()), high(then.data()), 2u | (2u << 28u), low(otherwise.data()), high(otherwise.data()), elseDwords});
+    };
+    const auto taken = AgcDriver::Pm4::ResolveBranch(branch(1, 3, 0x1234, 0));
+    check(taken && taken->address == reinterpret_cast<std::uintptr_t>(then.data()) && taken->dwords == 2, "equal branch not taken");
+    check(!AgcDriver::Pm4::ResolveBranch(branch(1, 3, 0x1235, 0)), "mode 1 branch did not fall through");
+    const auto other = AgcDriver::Pm4::ResolveBranch(branch(2, 4, 0x1234, 1));
+    check(other && other->address == reinterpret_cast<std::uintptr_t>(otherwise.data()) && other->dwords == 1, "mode 2 branch did not take its else buffer");
+    check(AgcDriver::Pm4::ResolveBranch(branch(2, 5, 0x1000, 1))->address == reinterpret_cast<std::uintptr_t>(then.data()), ">= branch not taken");
+    expectFailure([&] { AgcDriver::Pm4::Validate(branch(0, 3, 0, 0), 0); }, "branch mode");
+    expectFailure([&] { AgcDriver::Pm4::Validate(branch(1, 7, 0, 0), 0); }, "branch mode");
+    auto misaligned = branch(1, 3, 0, 0);
+    misaligned[2] |= 4;
+    expectFailure([&] { AgcDriver::Pm4::Validate(misaligned, 0); }, "compare address");
+}
+
 void testMemory() {
     AgcDriver::QueueState state;
     std::array<std::uint32_t, 4> data{0, 0, 0, 0};
@@ -510,6 +529,7 @@ int main(int argc, char** argv) {
         testContextAndBases();
         testIndexedDraw();
     testIndirectDraw();
+    testConditionalBranch();
         testAutoDraw();
         testMemory();
         testReleaseMem();

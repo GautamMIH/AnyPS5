@@ -132,25 +132,7 @@ public:
             rethrowFailure();
             require(!stopping, "submission during shutdown");
             require(accepted != std::numeric_limits<std::uint64_t>::max(), "submission serial overflow");
-            for (std::size_t cursor = 0; cursor < submission.commands.size();) {
-                const auto* words = submission.commands.data() + cursor;
-                if (words[0] == RenderingWaitPacketHeader) {
-                    const auto output = outputs.find(words[1]);
-                    require(output != outputs.end(), "rendering wait references an unregistered video output");
-                    auto wait = output->second->CaptureRenderingWait(words[2]);
-                    require(wait != nullptr, "video output returned a null rendering wait");
-                    submission.renderingWaits.emplace(cursor, std::move(wait));
-                }
-                if (words[0] == FlipPacketHeader) {
-                    const auto output = outputs.find(words[1]);
-                    require(output != outputs.end(), "flip references an unregistered video output");
-                    const FlipInfo info{words[1], std::bit_cast<std::int32_t>(words[2]), words[3], std::bit_cast<std::int64_t>(static_cast<std::uint64_t>(words[4]) | (static_cast<std::uint64_t>(words[5]) << 32u))};
-                    auto request = output->second->Reserve(info);
-                    require(request != nullptr, "video output returned a null flip reservation");
-                    submission.flips.emplace(cursor, std::move(request));
-                }
-                cursor += static_cast<std::size_t>((words[0] >> 16u) & 0x3fffu) + 2;
-            }
+            registerDisplayPackets(submission, 0, submission.commands.size());
             submission.shaders = shaders;
             submission.serial = accepted + 1;
             submission.enqueued = FrameTiming::Clock::now();
@@ -337,13 +319,40 @@ private:
 
     // INDIRECT_BUFFER: the nested command buffer is read when execution reaches it and replaces the
     // packet (call) or the rest of the submission (chain, bit 20).
-    static void spliceIndirectBuffer(Submission& submission, std::size_t cursor) {
-        constexpr std::size_t packetDwords = 4;
-        constexpr std::size_t maximumDwords = 64u * 1024u * 1024u;
+    // Reserves the flips and captures the rendering waits in commands [first, last); the caller
+    // holds mutex. Flips reach the video output's queue in the order they are reserved.
+    void registerDisplayPackets(Submission& submission, std::size_t first, std::size_t last) {
+        for (std::size_t cursor = first; cursor < last;) {
+            const auto* words = submission.commands.data() + cursor;
+            if (words[0] == RenderingWaitPacketHeader) {
+                const auto output = outputs.find(words[1]);
+                require(output != outputs.end(), "rendering wait references an unregistered video output");
+                auto wait = output->second->CaptureRenderingWait(words[2]);
+                require(wait != nullptr, "video output returned a null rendering wait");
+                submission.renderingWaits.emplace(cursor, std::move(wait));
+            }
+            if (words[0] == FlipPacketHeader) {
+                const auto output = outputs.find(words[1]);
+                require(output != outputs.end(), "flip references an unregistered video output");
+                const FlipInfo info{words[1], std::bit_cast<std::int32_t>(words[2]), words[3], std::bit_cast<std::int64_t>(static_cast<std::uint64_t>(words[4]) | (static_cast<std::uint64_t>(words[5]) << 32u))};
+                auto request = output->second->Reserve(info);
+                require(request != nullptr, "video output returned a null flip reservation");
+                submission.flips.emplace(cursor, std::move(request));
+            }
+            cursor += static_cast<std::size_t>((words[0] >> 16u) & 0x3fffu) + 2;
+        }
+    }
+
+    void spliceIndirectBuffer(Submission& submission, std::size_t cursor) {
         const auto* packet = submission.commands.data() + cursor;
         const auto address = (static_cast<std::uint64_t>(packet[2]) << 32u) | (packet[1] & ~3u);
-        const auto dwords = static_cast<std::size_t>(packet[3] & 0xfffffu);
-        const bool chain = (packet[3] & (1u << 20u)) != 0;
+        spliceCommands(submission, cursor, 4, address, packet[3] & 0xfffffu, (packet[3] & (1u << 20u)) != 0);
+    }
+
+    // Replaces the packet at cursor with the command buffer it calls (or, chained, with that buffer
+    // and nothing after it).
+    void spliceCommands(Submission& submission, std::size_t cursor, std::size_t packetDwords, std::uint64_t address, std::size_t dwords, bool chain) {
+        constexpr std::size_t maximumDwords = 64u * 1024u * 1024u;
         std::vector<std::uint32_t> nested;
         if (dwords != 0) {
             require(address != 0, "nested command buffer has a null address");
@@ -351,9 +360,6 @@ private:
             GuestMemory::CheckRange(source, dwords * sizeof(std::uint32_t), alignof(std::uint32_t));
             nested.assign(source, source + dwords);
             validate(nested, submission.queue);
-            for (std::size_t offset = 0; offset < nested.size(); offset += ((nested[offset] >> 16u) & 0x3fffu) + 2u) {
-                require(nested[offset] != FlipPacketHeader && nested[offset] != RenderingWaitPacketHeader, "flips and rendering waits inside nested command buffers are not implemented");
-            }
         }
         require(submission.commands.size() - packetDwords + nested.size() <= maximumDwords, "nested command buffers exceed the submission limit");
         const auto after = cursor + packetDwords;
@@ -374,6 +380,9 @@ private:
         const auto tail = chain ? commands.end() : commands.begin() + static_cast<std::ptrdiff_t>(after);
         commands.erase(commands.begin() + static_cast<std::ptrdiff_t>(cursor), tail);
         commands.insert(commands.begin() + static_cast<std::ptrdiff_t>(cursor), nested.begin(), nested.end());
+        // Flips in nested buffers are known only now, so they are reserved when reached.
+        std::lock_guard lock(mutex);
+        registerDisplayPackets(submission, cursor, cursor + nested.size());
     }
 
     static void validate(std::span<const std::uint32_t> commands, std::uint32_t queue) {
@@ -710,6 +719,21 @@ private:
                 if (opcode == 0x15 && queue.shader.contains(0x20c) && queue.shader.contains(0x20d)) std::fprintf(stderr, "[pm4] q%u op=0x15 dispatch %ux%ux%u program=0x%llx\n", static_cast<unsigned>(submission.queue), packet[1], packet[2], packet[3], static_cast<unsigned long long>((static_cast<std::uint64_t>(queue.shader.at(0x20c)) << 8u) | (static_cast<std::uint64_t>(queue.shader.at(0x20d) & 0xffu) << 40u)));
                 else if (opcode == 0x50 && count >= 7) std::fprintf(stderr, "[pm4] q%u op=0x%02x dst=0x%llx bytes=0x%x control=0x%08x src=0x%08x%08x\n", static_cast<unsigned>(submission.queue), static_cast<unsigned>(opcode), static_cast<unsigned long long>(packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u)), packet[6] & 0x3ffffffu, packet[1], packet[3], packet[2]);
                 else std::fprintf(stderr, "[pm4] q%u op=0x%02x dwords=%zu\n", static_cast<unsigned>(submission.queue), static_cast<unsigned>(opcode), count);
+            }
+            if (opcode == 0x3f && count == 14) {
+                // The compare value may be written by earlier GPU work.
+                std::optional<Pm4::BranchTarget> target;
+                {
+                    std::lock_guard gpuLock(gpuMutex);
+                    if (device != nullptr) device->WaitIdle();
+                    const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+                        if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+                    });
+                    target = Pm4::ResolveBranch(packet);
+                }
+                if (target) spliceCommands(submission, cursor, count, target->address, target->dwords, true);
+                else spliceCommands(submission, cursor, count, 0, 0, false);
+                continue;
             }
             if (opcode == 0x3f) {
                 spliceIndirectBuffer(submission, cursor);

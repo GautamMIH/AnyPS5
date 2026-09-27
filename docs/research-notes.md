@@ -34,13 +34,18 @@ Issues that needed research, with a short answer. Check here before researching;
 - **Save data mount points.** Mount points are short guest paths `/savedataN` (16-byte field) served from the save directory, not host paths. (shadPS4 savedata)
 - **Offline NP.** Online/NP ids return SIGNED_OUT 0x80550006; bad args 0x80550003. Trophy bad args return 0x80551604 instead of failing. (shadPS4 np_manager.cpp, np_trophy.cpp)
 
+## Command buffers
+
+- **Conditional branch (CbBranch).** INDIRECT_BUFFER with 14 dwords: mode (1 then-only, 2 then/else), compare function (WAIT_REG_MEM codes) on 64-bit (*addr & mask) vs reference; target runs as a chain (no return). Writer drops low address bits (compare 31:3, buffers 31:2) instead of rejecting. Flips in branch targets are reserved when reached. (Kyty CpOpBranch, AgcCbBranch)
+
 ## Textures
 
 - **Shader shape vs descriptor type.** The instruction's dimension picks the view (shadPS4 ImageViewInfo uses the shader's is_array): a 2D sample of an array/cube views the base layer; an array sample of a 2D texture views it as one layer. The descriptor type still defines the memory layout.
 
 ## Audio / video decode
 
-- **libSceAudiodec codec ids.** AT9 = 1, MP3 = 2, M4AAC = 3. Ctrl = {param, bsiInfo, auInfo {size 0x18, addr, bytes}, pcmItem {size 0x18, addr, bytes}}. Unfilled bsi/param info (channels 0) makes games divide by zero. shadPS4 decodes AAC/MP3 (Ajm) and video (Videodec2) with FFmpeg; AT9 with LibAtrac9 (vendored here).
+- **libSceAudiodec codec ids / errors.** AT9 = 1, MP3 = 2, M4AAC = 3; errors 0x807F00xx (fpPS4 ps4_libsceaudiodec.pas). Ctrl = {param, bsiInfo, auInfo {size 0x18, addr, bytes}, pcmItem {size 0x18, addr, bytes}}; decode writes consumed AU bytes and PCM bytes back. Unfilled bsi (channels 0) makes games divide by zero.
+- **M4AAC layouts (verified on Smurfs: 48 kHz stereo decodes).** Param 0x20: {size, wordSize (2 = float, per game's channels*4 sizing), config (1 ADTS, 2 raw — shadPS4 AJM), samplingFreqIndex, maxChannels, enableHeaac, enableNondelayOutput, interleaveOrder}. Bsi 0x14: {size, samplingFreq, channels (game indexes channel maps by channels-1), bitrate, heaac}. Raw streams carry no channel config: first element (SCE/CPE) narrows it. Decoded with system FFmpeg; shadPS4 uses fdk-aac.
 
 ## Fast clears / compression
 

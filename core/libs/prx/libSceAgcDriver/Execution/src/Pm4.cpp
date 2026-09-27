@@ -222,6 +222,13 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             break;
         }
         case 0x3f:
+            if (packet.size() == 14) {
+                require((packet[1] & ~0x703u) == 0 && (packet[1] & 3u) != 0 && (packet[1] & 3u) != 3 && ((packet[1] >> 8u) & 7u) <= 6, "unsupported conditional branch mode or compare function");
+                require((packet[2] & 7u) == 0 && address(packet[2], packet[3]) != 0, "null or misaligned conditional branch compare address");
+                require((packet[8] & 3u) == 0 && (packet[11] & 3u) == 0, "misaligned conditional branch buffer");
+                require((packet[10] & ~0x300fffffu) == 0 && (packet[13] & ~0x300fffffu) == 0, "unsupported conditional branch buffer fields");
+                break;
+            }
             size(4);
             require((packet[1] & 3u) == 0, "misaligned nested command buffer");
             require((packet[3] & 0x0fe00000u) == 0x0f200000u, "unsupported INDIRECT_BUFFER control fields");
@@ -375,6 +382,28 @@ bool WaitSatisfied(std::span<const std::uint32_t> packet) {
         case 5: return masked >= reference;
         default: return masked > reference;
     }
+}
+
+std::optional<BranchTarget> ResolveBranch(std::span<const std::uint32_t> packet) {
+    Validate(packet, 0x20);
+    require(packet.size() == 14, "expected a conditional INDIRECT_BUFFER");
+    std::uint64_t value = 0;
+    GuestMemory::Read(address(packet[2], packet[3]), std::as_writable_bytes(std::span(&value, 1)), 8);
+    const auto masked = value & address(packet[4], packet[5]);
+    const auto reference = address(packet[6], packet[7]);
+    bool taken = true;
+    switch ((packet[1] >> 8u) & 7u) {
+        case 0: taken = true; break;
+        case 1: taken = masked < reference; break;
+        case 2: taken = masked <= reference; break;
+        case 3: taken = masked == reference; break;
+        case 4: taken = masked != reference; break;
+        case 5: taken = masked >= reference; break;
+        default: taken = masked > reference; break;
+    }
+    if (taken) return BranchTarget{address(packet[8], packet[9]), packet[10] & 0xfffffu};
+    if ((packet[1] & 3u) == 2 && (packet[13] & 0xfffffu) != 0) return BranchTarget{address(packet[11], packet[12]), packet[13] & 0xfffffu};
+    return std::nullopt;
 }
 
 std::string DescribeWait(std::span<const std::uint32_t> packet) {

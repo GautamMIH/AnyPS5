@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Pm4Opcodes.hpp"
 #include <array>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -36,6 +37,14 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue);
 bool AccessesMemory(std::uint32_t header);
 // Evaluates a memory WAIT_REG_MEM (32- or 64-bit) against current guest memory.
 bool WaitSatisfied(std::span<const std::uint32_t> packet);
+// A conditional INDIRECT_BUFFER (14 dwords, libSceAgc CbBranch) jumps to its then buffer when
+// (*compare & mask) <function> reference holds, else (mode 2) to its else buffer; mode 1 falls
+// through. The jump does not return (KytyPS5 CpOpBranch).
+struct BranchTarget {
+    std::uint64_t address;
+    std::uint32_t dwords;
+};
+std::optional<BranchTarget> ResolveBranch(std::span<const std::uint32_t> packet);
 std::string DescribeWait(std::span<const std::uint32_t> packet);
 // GPU reference clock used for timestamp writes, in 100 MHz ticks.
 std::uint64_t GpuClock();
