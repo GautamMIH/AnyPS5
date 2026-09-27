@@ -46,6 +46,19 @@ add_custom_command(
         VERBATIM
 )
 
+set(agcTextureMergeShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/TextureMerge.comp)
+set(agcTextureMergeShaderSpv ${agcTextureDetileGeneratedDir}/TextureMerge.spv)
+set(agcTextureMergeShaderHeader ${agcTextureDetileGeneratedDir}/TextureMerge_spv.h)
+add_custom_command(
+        OUTPUT "${agcTextureMergeShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -o "${agcTextureMergeShaderSpv}" "${agcTextureMergeShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcTextureMergeShaderSpv} -DOUTPUT=${agcTextureMergeShaderHeader}
+        -DSYMBOL=TEXTURE_MERGE_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcTextureMergeShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver.cpp
@@ -84,6 +97,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Texture.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
+        ${agcTextureMergeShaderHeader}
         ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Event.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Query.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Resource/src/Lifecycle.cpp
@@ -224,6 +238,7 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/Texture.cpp
         Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
+        ${agcTextureMergeShaderHeader}
         Execution/src/GuestMemory.cpp
 )
 
@@ -324,6 +339,8 @@ if(AGC_BUILD_VISUAL_TEST)
             Graphics/src/Texture.cpp
             Graphics/src/Sampler.cpp
             ${agcTextureDetileShaderHeader}
+            ${agcTextureMergeShaderHeader}
+        ${agcTextureMergeShaderHeader}
             ${visualShaders}
     )
 

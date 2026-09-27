@@ -3,6 +3,8 @@
 layout(constant_id = 0) const uint ELEMENT_BYTES = 4u;
 layout(constant_id = 1) const uint BLOCK_BYTES = 256u;
 layout(constant_id = 2) const uint TILE_FAMILY = 0u;
+// 0 detiles (tiled input, linear output); 1 tiles (linear input, tiled output).
+layout(constant_id = 3) const uint TILE_DIRECTION = 0u;
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -221,6 +223,10 @@ void main() {
     uint blockIndex = block.y * params.blocksPerRow + block.x;
     uint tiledOffset = blockIndex * BLOCK_BYTES + blockOffset(swizzle);
 
-    copyElement(params.srcBase + tiledOffset, params.dstBase + linearOffset);
+    if (TILE_DIRECTION == 0u) {
+        copyElement(params.srcBase + tiledOffset, params.dstBase + linearOffset);
+    } else {
+        copyElement(params.srcBase + linearOffset, params.dstBase + tiledOffset);
+    }
 }
 

@@ -4,13 +4,17 @@
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
+#include <optional>
 #include <memory>
 #include <vector>
 
 namespace AgcDriver::Graphics {
 
 // One mip of a guest texture that shaders write (image_store). The guest texels are detiled into a
-// host image before the draw or dispatch and tiled back into guest memory once it completes.
+// host image before the draw or dispatch and tiled back into guest memory once it completes. When
+// the guest memory is shared with the GPU (GuestGpuMemory) both happen on the GPU in the same
+// command buffer; otherwise on the CPU around it.
 class StorageImage {
 public:
     StorageImage(const Context& context, const GuestTextureResource& resource);
@@ -25,6 +29,9 @@ public:
 
 private:
     void release() noexcept;
+    void recordGpuUpload(VkCommandBuffer commands);
+    void recordGpuDownload(VkCommandBuffer commands);
+    std::vector<VkBufferImageCopy> imageCopies() const;
     Context context;
     GuestTextureResource resource;
     TileMipLayout mip{};
@@ -36,6 +43,15 @@ private:
     std::uint64_t guestBase = 0;
     std::vector<std::byte> tiled;
     std::unique_ptr<Buffer> staging;
+    // GPU tiling: guest memory, the texels tiled on the device with a mask of the bytes they
+    // cover (write-back replaces only those, so images sharing a mip tail keep each other's
+    // texels), an all-ones linear image for tiling the mask, and the passes' descriptor sets.
+    std::optional<GuestGpuMemory::View> guest;
+    std::uint64_t guestBytes = 0;
+    std::unique_ptr<Buffer> tiledStaging;
+    std::unique_ptr<Buffer> tiledMask;
+    std::unique_ptr<Buffer> ones;
+    VkDescriptorPool tilingPool = VK_NULL_HANDLE;
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;

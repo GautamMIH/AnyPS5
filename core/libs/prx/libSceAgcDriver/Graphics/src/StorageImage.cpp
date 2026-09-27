@@ -2,13 +2,25 @@
 #include "prx/libSceAgcDriver/Graphics/include/StorageImage.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
 namespace AgcDriver::Graphics {
+namespace {
+
+// Debug aid: ANYPS5_CHECK_STORAGE_TILING=1 re-tiles each GPU-tiled storage image on the CPU after
+// its dispatch and compares the result with what the GPU wrote to guest memory.
+bool checkTiling() {
+    static const bool enabled = std::getenv("ANYPS5_CHECK_STORAGE_TILING") != nullptr;
+    return enabled;
+}
+
+}
 
 StorageImage::StorageImage(const Context& context, const GuestTextureResource& resource) : context(context), resource(resource) {
     PerformanceTimer timing("Graphics.StorageImage.Upload");
@@ -32,12 +44,32 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
     Require(sliceBytes <= std::numeric_limits<std::uint64_t>::max() / (resource.baseArray + layers), "storage image surface size overflow");
     guestBase = resource.baseAddress + sliceBytes * resource.baseArray;
     // Thick volumes interleave slices inside blocks, so the whole surface is one unit.
-    const auto guestBytes = thick ? GuestTextureBytes(resource) : sliceBytes * layers;
+    guestBytes = thick ? GuestTextureBytes(resource) : sliceBytes * layers;
     if (thick) sliceBytes = guestBytes;
     Require(guestBytes <= std::numeric_limits<std::size_t>::max(), "storage image exceeds the host address space");
     // Resolving as writable hands the range to this image: resident render targets are written
     // back and invalidated first.
     GuestMemory::CheckRange(reinterpret_cast<const void*>(guestBase), static_cast<std::size_t>(guestBytes), 1, true);
+    // Thick volumes interleave slices within blocks, which the GPU tiler does not model.
+    if (context.guestGpuMemory != nullptr && context.detiler != nullptr && !thick) {
+        guest = context.guestGpuMemory->Resolve(guestBase, guestBytes);
+        if (guest && guest->bytes != guestBytes) guest.reset();
+    }
+    if (guest) {
+        const auto deviceUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        tiledStaging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        tiledMask = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        ones = std::make_unique<Buffer>(context, static_cast<std::size_t>(mip.linearSize * layers), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        const VkMemoryPropertyFlags linearMemory = checkTiling() ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+        staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(mip.linearSize * layers), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, linearMemory);
+        if (checkTiling()) {
+            tiled.resize(static_cast<std::size_t>(guestBytes));
+            GuestMemory::Read(guestBase, tiled, 1);
+        }
+        // Per layer: a detile on upload; texel and mask tiles and a merge on download.
+        tilingPool = context.detiler->CreatePool(layers * 4);
+        timing.Mark("gpu_setup");
+    } else {
     tiled.resize(static_cast<std::size_t>(guestBytes));
     GuestMemory::Read(guestBase, tiled, 1);
     timing.Mark("guest_read", guestBytes);
@@ -54,6 +86,7 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
         }
     }
     timing.Mark("detile");
+    }
 
     try {
         VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -92,6 +125,8 @@ StorageImage::~StorageImage() {
 }
 
 void StorageImage::release() noexcept {
+    if (tilingPool != VK_NULL_HANDLE && context.detiler != nullptr) context.detiler->DestroyPool(tilingPool);
+    tilingPool = VK_NULL_HANDLE;
     if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
     if (image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
     if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
@@ -100,7 +135,101 @@ void StorageImage::release() noexcept {
     memory = VK_NULL_HANDLE;
 }
 
+std::vector<VkBufferImageCopy> StorageImage::imageCopies() const {
+    std::vector<VkBufferImageCopy> copies;
+    for (std::uint32_t layer = 0; layer < layers; ++layer) {
+        VkBufferImageCopy copy{};
+        copy.bufferOffset = layer * mip.linearSize;
+        copy.bufferRowLength = mip.pitchBytes / elementBytes;
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, volume ? 0u : layer, 1};
+        copy.imageOffset.z = volume ? static_cast<std::int32_t>(layer) : 0;
+        copy.imageExtent = {mip.width, mip.height, 1};
+        copies.push_back(copy);
+    }
+    return copies;
+}
+
+// Guest tiled bytes -> detile per layer -> image.
+void StorageImage::recordGpuUpload(VkCommandBuffer commands) {
+    const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    VkMemoryBarrier earlier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    earlier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    earlier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &earlier, 0, nullptr, 0, nullptr);
+    for (std::uint32_t layer = 0; layer < layers; ++layer) {
+        context.detiler->Dispatch(commands, resource.tileMode, elementBytes, guest->buffer, guest->offset + layer * sliceBytes + mip.tiledOffset, staging->Handle(), layer * mip.linearSize, mip, layer + resource.baseArray, false, tilingPool);
+    }
+    VkMemoryBarrier detiled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    detiled.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    detiled.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toTransfer.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.image = image;
+    toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, volume ? 1u : layers};
+    barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &detiled, 0, nullptr, 1, &toTransfer);
+    const auto copies = imageCopies();
+    context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, staging->Handle(), image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, static_cast<std::uint32_t>(copies.size()), copies.data());
+    VkImageMemoryBarrier toGeneral = toTransfer;
+    toGeneral.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toGeneral.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    toGeneral.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+}
+
+// Image -> linear -> tile texels and their byte mask per layer -> merge the masked bytes into guest.
+void StorageImage::recordGpuDownload(VkCommandBuffer commands) {
+    const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    const auto fill = context.Function<PFN_vkCmdFillBuffer>("vkCmdFillBuffer");
+    VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    toTransfer.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toTransfer.image = image;
+    toTransfer.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, volume ? 1u : layers};
+    VkMemoryBarrier reuse{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    reuse.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    reuse.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &reuse, 0, nullptr, 1, &toTransfer);
+    const auto copies = imageCopies();
+    context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging->Handle(), static_cast<std::uint32_t>(copies.size()), copies.data());
+    fill(commands, ones->Handle(), 0, VK_WHOLE_SIZE, 0xffffffffu);
+    for (std::uint32_t layer = 0; layer < layers; ++layer) fill(commands, tiledMask->Handle(), layer * sliceBytes + mip.tiledOffset, mip.tiledSize, 0u);
+    VkMemoryBarrier linear{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    linear.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    linear.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &linear, 0, nullptr, 0, nullptr);
+    for (std::uint32_t layer = 0; layer < layers; ++layer) {
+        const auto tiledOffset = layer * sliceBytes + mip.tiledOffset;
+        context.detiler->Dispatch(commands, resource.tileMode, elementBytes, staging->Handle(), layer * mip.linearSize, tiledStaging->Handle(), tiledOffset, mip, layer + resource.baseArray, true, tilingPool);
+        context.detiler->Dispatch(commands, resource.tileMode, elementBytes, ones->Handle(), layer * mip.linearSize, tiledMask->Handle(), tiledOffset, mip, layer + resource.baseArray, true, tilingPool);
+    }
+    VkMemoryBarrier tiledBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    tiledBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    tiledBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &tiledBarrier, 0, nullptr, 0, nullptr);
+    for (std::uint32_t layer = 0; layer < layers; ++layer) {
+        const auto tiledOffset = layer * sliceBytes + mip.tiledOffset;
+        context.detiler->Merge(commands, tiledStaging->Handle(), tiledOffset, tiledMask->Handle(), tiledOffset, guest->buffer, guest->offset + tiledOffset, mip.tiledSize, tilingPool);
+    }
+    VkMemoryBarrier merged{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    merged.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    merged.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &merged, 0, nullptr, 0, nullptr);
+}
+
 void StorageImage::RecordUpload(VkCommandBuffer commands) {
+    if (guest) {
+        recordGpuUpload(commands);
+        return;
+    }
     const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     host.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
@@ -127,6 +256,10 @@ void StorageImage::RecordUpload(VkCommandBuffer commands) {
 }
 
 void StorageImage::RecordDownload(VkCommandBuffer commands) {
+    if (guest) {
+        recordGpuDownload(commands);
+        return;
+    }
     const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -149,6 +282,26 @@ void StorageImage::RecordDownload(VkCommandBuffer commands) {
 }
 
 void StorageImage::WriteBack() {
+    // The download already wrote the GPU tiling into guest memory.
+    if (guest) {
+        if (!checkTiling()) return;
+        staging->Invalidate();
+        const auto linear = staging->Bytes();
+        std::size_t mismatches = 0;
+        for (std::uint32_t layer = 0; layer < layers; ++layer) {
+            for (std::uint32_t y = 0; y < mip.height; ++y) {
+                for (std::uint32_t x = 0; x < mip.width; ++x) {
+                    // Only this mip's texels: bytes around them (a shared mip tail) may have been
+                    // written by earlier work after the reference copy was taken.
+                    const auto destination = layer * sliceBytes + TexelOffset(resource.tileMode, elementBytes, mip, x, y, layer + resource.baseArray);
+                    const auto* written = reinterpret_cast<const std::byte*>(guestBase + destination);
+                    mismatches += std::memcmp(written, linear.data() + layer * mip.linearSize + static_cast<std::size_t>(y) * mip.pitchBytes + static_cast<std::size_t>(x) * elementBytes, elementBytes) != 0;
+                }
+            }
+        }
+        std::fprintf(stderr, "[storage-tiling] %ux%ux%u mode %d bpe %u: %zu mismatching texels\n", mip.width, mip.height, layers, static_cast<int>(resource.tileMode), elementBytes, mismatches);
+        return;
+    }
     PerformanceTimer timing("Graphics.StorageImage.WriteBack");
     staging->Invalidate();
     const auto linear = staging->Bytes();
