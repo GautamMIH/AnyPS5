@@ -47,6 +47,12 @@ Issues that needed research, with a short answer. Check here before researching;
 - **libSceAudiodec codec ids / errors.** AT9 = 1, MP3 = 2, M4AAC = 3; errors 0x807F00xx (fpPS4 ps4_libsceaudiodec.pas). Ctrl = {param, bsiInfo, auInfo {size 0x18, addr, bytes}, pcmItem {size 0x18, addr, bytes}}; decode writes consumed AU bytes and PCM bytes back. Unfilled bsi (channels 0) makes games divide by zero.
 - **M4AAC layouts (verified on Smurfs: 48 kHz stereo decodes).** Param 0x20: {size, wordSize (2 = float, per game's channels*4 sizing), config (1 ADTS, 2 raw — shadPS4 AJM), samplingFreqIndex, maxChannels, enableHeaac, enableNondelayOutput, interleaveOrder}. Bsi 0x14: {size, samplingFreq, channels (game indexes channel maps by channels-1), bitrate, heaac}. Raw streams carry no channel config: first element (SCE/CPE) narrows it. Decoded with system FFmpeg; shadPS4 uses fdk-aac.
 
+- **libSceVideodec2.** Structs, errors 0x811D01xx/02xx and flow as shadPS4 videodec2 (FFmpeg H.264 codec 1 / HEVC 974921, handle = pointer, compute queue = pointer into title memory). Output NV12: luma then interleaved chroma, height aligned 16, picture info (Avc 0x78 / Hevc 0xB8) right after the frame for GetPictureInfo. Pitch must be 256-byte aligned (linear GPU row alignment, 2048 for 1920) or the title's linear texture over the frame over-reads; shadPS4 uses 64.
+
+## Unreal Engine symptoms
+
+- **Null store in UE shipping code** can be a deliberate fatal: e.g. `gc.EnableTimeoutOnPendingDestroyedObjectInShipping` crashes when GC waits too long for FinishDestroy — caused by very slow frames, not a missing API. Find cvar names by decoding UTF-16 strings next to the registration call.
+
 ## Fast clears / compression
 
 - **CMASK fast clear.** Register CMASK (only with FAST_CLEAR) as cleared on first use; DMA fill or XOR-free compute write to it re-clears; draw into a cleared target fills with CLEAR_WORD; eliminate pass = that fill for target 0. DCC ignored: surfaces stay uncompressed. (shadPS4 vk_rasterizer.cpp, texture_cache.h)
