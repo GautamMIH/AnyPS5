@@ -42,6 +42,7 @@ Issues that needed research, with a short answer. Check here before researching;
 
 ## Textures
 
+- **Texture cache cost (measured on Smurfs).** Full-content validation (memcmp against the snapshot) is cheap: ~19 ms/frame for 341 MB. The real cost was eviction thrash: a 256 MB budget counting snapshot + GPU copy holds ~15 large textures, so a ~25-texture working set missed every frame (218 MB re-read and re-detiled). Budget 1 GiB / 1024 entries: misses ~1/frame. Write-tracked validation would need page-level watches that coexist with render-target watches on shared pages; not worth it for ~20 ms.
 - **Shader shape vs descriptor type.** The instruction's dimension picks the view (shadPS4 ImageViewInfo uses the shader's is_array): a 2D sample of an array/cube views the base layer; an array sample of a 2D texture views it as one layer. The descriptor type still defines the memory layout.
 
 ## Audio / video decode

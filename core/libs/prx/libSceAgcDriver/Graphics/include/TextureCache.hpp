@@ -27,7 +27,7 @@ private:
     Context context;
     std::list<Entry> entries;
     std::uint64_t retainedBytes = 0;
-    static constexpr std::uint64_t budget = 256ull * 1024 * 1024;
+    static constexpr std::uint64_t budget = 1024ull * 1024 * 1024;
 };
 
 }
