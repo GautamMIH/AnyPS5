@@ -1,12 +1,14 @@
 #include "prx/libc/include/MemoryBackingPlatform.hpp"
 #include <cerrno>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <stdexcept>
 #include <system_error>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 namespace GuestMemoryBacking::Platform {
@@ -14,64 +16,80 @@ namespace {
 
 constexpr std::uintptr_t kArenaBase = 0x1000000000;
 constexpr std::size_t kArenaSize = 0x3f000000000;
-constexpr int kArenaFlags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+constexpr int kReservedFlags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
 
 void check(bool success, const char* operation) {
     if (!success) throw std::system_error(errno, std::generic_category(), operation);
 }
 
-void checkMapping(void* result, const char* operation, const void* address, std::size_t bytes) {
+void checkMapping(void* result, const char* operation, std::uint64_t address, std::size_t bytes) {
     if (result != MAP_FAILED) return;
     char message[128];
-    std::snprintf(message, sizeof(message), "%s at %p (0x%zx bytes)", operation, address, bytes);
+    std::snprintf(message, sizeof(message), "%s at 0x%llx (0x%zx bytes)", operation, static_cast<unsigned long long>(address), bytes);
     check(false, message);
 }
 
-class AddressArena {
-public:
-    bool Contains(std::uintptr_t address, std::size_t bytes) {
-        std::lock_guard lock(_mutex);
-        _ensure();
-        return address >= _base && address < _end && bytes <= _end - address;
-    }
+// Returns a range to the reserved, inaccessible state.
+void reserve(std::uint64_t address, std::size_t bytes) {
+    checkMapping(mmap(reinterpret_cast<void*>(address), bytes, PROT_NONE, kReservedFlags | MAP_FIXED, -1, 0), "mmap guest reservation", address, bytes);
+}
 
-    std::uintptr_t Allocate(std::size_t bytes, std::size_t alignment) {
+// The guest address space: a reserved host region with a free list, plus fixed claims outside it.
+class AddressSpace {
+public:
+    std::uint64_t Claim(std::uint64_t address, std::size_t bytes, std::size_t alignment, bool fixed) {
         std::lock_guard lock(_mutex);
         _ensure();
-        for (auto it = _free.begin(); it != _free.end(); ++it) {
-            const auto start = it->first;
-            const auto finish = it->second;
-            const auto aligned = (start + alignment - 1) & ~(static_cast<std::uintptr_t>(alignment) - 1);
-            if (aligned < start || aligned >= finish || finish - aligned < bytes) continue;
-            _free.erase(it);
-            if (aligned > start) _free.emplace(start, aligned);
-            if (aligned + bytes < finish) _free.emplace(aligned + bytes, finish);
+        if (fixed) {
+            if (address >= _base && address < _end) {
+                if (bytes > _end - address || !_takeFree(address, bytes)) return 0;
+                return address;
+            }
+            // Outside the arena: claim host address space that nothing else uses.
+            void* reservation = mmap(reinterpret_cast<void*>(address), bytes, PROT_NONE, kReservedFlags | MAP_FIXED_NOREPLACE, -1, 0);
+            if (reservation == MAP_FAILED) return 0;
+            if (reinterpret_cast<std::uint64_t>(reservation) != address) {
+                munmap(reservation, bytes);
+                return 0;
+            }
+            _outside.emplace(address, address + bytes);
+            return address;
+        }
+        const auto start = address < _base ? _base : address;
+        for (auto it = _free.upper_bound(start) == _free.begin() ? _free.begin() : std::prev(_free.upper_bound(start)); it != _free.end(); ++it) {
+            const auto first = it->first < start ? start : it->first;
+            const auto aligned = (first + alignment - 1) & ~(static_cast<std::uint64_t>(alignment) - 1);
+            if (aligned < first || aligned >= it->second || it->second - aligned < bytes) continue;
+            _takeFree(aligned, bytes);
             return aligned;
         }
-        char message[128];
-        std::snprintf(message, sizeof(message), "guest address space exhausted (0x%zx bytes, alignment 0x%zx)", bytes, alignment);
-        throw std::runtime_error(message);
+        return 0;
     }
 
-    void Claim(std::uintptr_t address, std::size_t bytes) {
+    bool Free(std::uint64_t address, std::size_t bytes) {
         std::lock_guard lock(_mutex);
         _ensure();
-        auto it = _free.upper_bound(address);
-        if (it == _free.begin()) throw std::runtime_error("fixed guest mapping overlaps active guest memory");
-        --it;
-        const auto start = it->first;
-        const auto finish = it->second;
-        if (address + bytes > finish) throw std::runtime_error("fixed guest mapping overlaps active guest memory");
-        _free.erase(it);
-        if (start < address) _free.emplace(start, address);
-        if (address + bytes < finish) _free.emplace(address + bytes, finish);
+        if (address >= _base && address < _end) {
+            auto it = _free.upper_bound(address);
+            if (it == _free.begin()) return false;
+            --it;
+            return address + bytes <= it->second;
+        }
+        return false;
     }
 
-    void Return(std::uintptr_t address, std::size_t bytes) {
+    void Release(std::uint64_t address, std::size_t bytes) {
         std::lock_guard lock(_mutex);
-        checkMapping(mmap(reinterpret_cast<void*>(address), bytes, PROT_NONE, kArenaFlags | MAP_FIXED, -1, 0), "mmap guest address reservation", reinterpret_cast<void*>(address), bytes);
-        std::uintptr_t start = address;
-        std::uintptr_t finish = address + bytes;
+        _ensure();
+        if (address < _base || address >= _end) {
+            // Outside claims are released whole or split like any mapping.
+            check(munmap(reinterpret_cast<void*>(address), bytes) == 0, "munmap outside guest range");
+            _removeOutside(address, address + bytes);
+            return;
+        }
+        reserve(address, bytes);
+        std::uint64_t start = address;
+        std::uint64_t finish = address + bytes;
         auto next = _free.lower_bound(start);
         if (next != _free.end() && next->first == finish) {
             finish = next->second;
@@ -90,97 +108,110 @@ public:
 private:
     std::mutex _mutex;
     bool _initialized = false;
-    std::uintptr_t _base = 0;
-    std::uintptr_t _end = 0;
-    std::map<std::uintptr_t, std::uintptr_t> _free;
+    std::uint64_t _base = 0;
+    std::uint64_t _end = 0;
+    std::map<std::uint64_t, std::uint64_t> _free;
+    std::map<std::uint64_t, std::uint64_t> _outside;
+
+    bool _takeFree(std::uint64_t address, std::size_t bytes) {
+        auto it = _free.upper_bound(address);
+        if (it == _free.begin()) return false;
+        --it;
+        const auto start = it->first;
+        const auto finish = it->second;
+        if (address + bytes > finish) return false;
+        _free.erase(it);
+        if (start < address) _free.emplace(start, address);
+        if (address + bytes < finish) _free.emplace(address + bytes, finish);
+        return true;
+    }
+
+    void _removeOutside(std::uint64_t first, std::uint64_t last) {
+        std::map<std::uint64_t, std::uint64_t> kept;
+        for (const auto& [begin, end] : _outside) {
+            if (end <= first || begin >= last) {
+                kept.emplace(begin, end);
+                continue;
+            }
+            if (begin < first) kept.emplace(begin, first);
+            if (end > last) kept.emplace(last, end);
+        }
+        _outside.swap(kept);
+    }
 
     void _ensure() {
         if (_initialized) return;
-        void* reservation = mmap(reinterpret_cast<void*>(kArenaBase), kArenaSize, PROT_NONE, kArenaFlags | MAP_FIXED_NOREPLACE, -1, 0);
-        if (reservation == MAP_FAILED) reservation = mmap(nullptr, kArenaSize, PROT_NONE, kArenaFlags, -1, 0);
-        checkMapping(reservation, "mmap guest address space", reinterpret_cast<void*>(kArenaBase), kArenaSize);
-        _base = reinterpret_cast<std::uintptr_t>(reservation);
+        void* reservation = mmap(reinterpret_cast<void*>(kArenaBase), kArenaSize, PROT_NONE, kReservedFlags | MAP_FIXED_NOREPLACE, -1, 0);
+        if (reservation == MAP_FAILED) reservation = mmap(nullptr, kArenaSize, PROT_NONE, kReservedFlags, -1, 0);
+        checkMapping(reservation, "mmap guest address space", kArenaBase, kArenaSize);
+        _base = reinterpret_cast<std::uint64_t>(reservation);
         _end = _base + kArenaSize;
         _free.emplace(_base, _end);
+        // Segments keep their descriptors open for later views.
+        rlimit files{};
+        if (getrlimit(RLIMIT_NOFILE, &files) == 0 && files.rlim_cur < files.rlim_max) {
+            files.rlim_cur = files.rlim_max;
+            setrlimit(RLIMIT_NOFILE, &files);
+        }
         _initialized = true;
     }
 };
 
-AddressArena& arena() {
-    static AddressArena instance;
-    return instance;
+AddressSpace& space() {
+    static auto* instance = new AddressSpace;
+    return *instance;
 }
 
-void releaseView(std::uint64_t address, std::size_t bytes) {
-    if (arena().Contains(address, bytes)) {
-        arena().Return(address, bytes);
-        return;
+}
+
+Segment CreateSegment(std::size_t bytes) {
+    if (bytes == 0 || bytes > static_cast<std::size_t>(std::numeric_limits<off_t>::max())) throw std::overflow_error("guest segment size");
+    const int descriptor = memfd_create("AnyPS5 guest memory", MFD_CLOEXEC);
+    check(descriptor >= 0, "memfd_create guest segment");
+    if (ftruncate(descriptor, static_cast<off_t>(bytes)) != 0) {
+        const auto error = errno;
+        close(descriptor);
+        errno = error;
+        check(false, "ftruncate guest segment");
     }
-    check(munmap(reinterpret_cast<void*>(address), bytes) == 0, "munmap guest view");
-}
-
-}
-
-Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protection) {
-    if (bytes > static_cast<std::size_t>(std::numeric_limits<off_t>::max()) || bytes > std::numeric_limits<std::size_t>::max() - alignment) throw std::overflow_error("guest backing size overflow");
-    int descriptor = memfd_create("AnyPS5 guest memory", MFD_CLOEXEC);
-    check(descriptor >= 0, "memfd_create guest backing");
-    void* alias = MAP_FAILED;
-    std::uintptr_t target = 0;
-    bool inArena = false;
-    bool outsideReserved = false;
-    try {
-        check(ftruncate(descriptor, static_cast<off_t>(bytes)) == 0, "ftruncate guest backing");
-        alias = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor, 0);
-        check(alias != MAP_FAILED, "mmap guest backing alias");
-        const auto requested = reinterpret_cast<std::uintptr_t>(address);
-        if (address == nullptr) {
-            target = arena().Allocate(bytes, alignment);
-            inArena = true;
-        } else if (arena().Contains(requested, bytes)) {
-            arena().Claim(requested, bytes);
-            target = requested;
-            inArena = true;
-        } else {
-            void* reservation = mmap(address, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-            checkMapping(reservation, "mmap guest backing reservation", address, bytes);
-            if (reservation != address) {
-                check(munmap(reservation, bytes) == 0, "munmap mismatched guest reservation");
-                throw std::runtime_error("fixed guest backing reservation address mismatch");
-            }
-            target = requested;
-            outsideReserved = true;
-        }
-        void* guest = mmap(reinterpret_cast<void*>(target), bytes, protection, MAP_SHARED | MAP_FIXED, descriptor, 0);
-        checkMapping(guest, "mmap guest backing view", reinterpret_cast<void*>(target), bytes);
-        const auto closeResult = close(descriptor);
-        descriptor = -1;
-        check(closeResult == 0, "close guest backing descriptor");
-        return {target, bytes, alias, 0};
-    } catch (...) {
-        if (inArena) arena().Return(target, bytes);
-        else if (outsideReserved) check(munmap(reinterpret_cast<void*>(target), bytes) == 0, "munmap failed guest reservation");
-        if (alias != MAP_FAILED) check(munmap(alias, bytes) == 0, "munmap failed guest alias");
-        if (descriptor >= 0) check(close(descriptor) == 0, "close failed guest backing");
-        throw;
+    void* alias = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_NORESERVE, descriptor, 0);
+    if (alias == MAP_FAILED) {
+        const auto error = errno;
+        close(descriptor);
+        errno = error;
+        check(false, "mmap guest segment alias");
     }
+    return {static_cast<std::uintptr_t>(descriptor), alias, bytes};
 }
 
-void Unmap(const Mapping& mapping) {
-    releaseView(mapping.address, mapping.bytes);
-    check(munmap(mapping.alias, mapping.bytes) == 0, "munmap guest alias");
+void DestroySegment(const Segment& segment) {
+    check(munmap(segment.alias, segment.bytes) == 0, "munmap guest segment alias");
+    check(close(static_cast<int>(segment.handle)) == 0, "close guest segment");
 }
 
-void Deactivate(std::uint64_t address, std::size_t bytes) {
-    check(mprotect(reinterpret_cast<void*>(address), bytes, PROT_NONE) == 0, "mprotect guest backing unmap");
+std::uint64_t ClaimRange(std::uint64_t address, std::size_t bytes, std::size_t alignment, bool fixed) {
+    return space().Claim(address, bytes, alignment, fixed);
 }
 
-void Release(std::uint64_t address, std::size_t bytes) {
-    releaseView(address, bytes);
+bool RangeFree(std::uint64_t address, std::size_t bytes) {
+    return space().Free(address, bytes);
 }
 
-void ReleaseAlias(const Mapping& mapping) {
-    check(munmap(mapping.alias, mapping.bytes) == 0, "munmap guest alias");
+void ReleaseRange(std::uint64_t address, std::size_t bytes) {
+    space().Release(address, bytes);
+}
+
+void MapView(std::uint64_t address, std::size_t bytes, const Segment& segment, std::uint64_t offset, int protection) {
+    if (offset > segment.bytes || bytes > segment.bytes - offset) throw std::out_of_range("guest view exceeds its segment");
+    checkMapping(mmap(reinterpret_cast<void*>(address), bytes, protection, MAP_SHARED | MAP_FIXED, static_cast<int>(segment.handle), static_cast<off_t>(offset)), "mmap guest view", address, bytes);
+}
+
+void UnmapView(std::uint64_t address, std::size_t bytes) {
+    reserve(address, bytes);
+}
+
+void Protect(std::uint64_t address, std::size_t bytes, int protection) {
+    check(mprotect(reinterpret_cast<void*>(address), bytes, protection) == 0, "mprotect guest range");
 }
 
 }

@@ -8,6 +8,8 @@
 #endif
 #include <windows.h>
 
+// Placeholder reservations (Windows 10 1803+) let views be mapped into reserved ranges. Untested:
+// this backend is written to the same contract as the Linux one but has not been run.
 namespace GuestMemoryBacking::Platform {
 namespace {
 
@@ -21,60 +23,73 @@ void check(bool success, const char* operation) {
     if (!success) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), operation);
 }
 
+void* reservePlaceholder(void* address, std::size_t bytes) {
+    return VirtualAlloc2(nullptr, address, bytes, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, nullptr, 0);
 }
 
-Mapping Map(void* address, std::size_t bytes, std::size_t alignment, int protection) {
-    SYSTEM_INFO info{};
-    GetSystemInfo(&info);
-    alignment = std::max(alignment, static_cast<std::size_t>(info.dwAllocationGranularity));
-    if (address != nullptr && reinterpret_cast<std::uintptr_t>(address) % info.dwAllocationGranularity != 0) throw std::invalid_argument("fixed guest view is not aligned to native allocation granularity");
+// Splits the placeholder so [address, address + bytes) is one placeholder of its own.
+void isolatePlaceholder(std::uint64_t address, std::size_t bytes) {
+    VirtualFree(reinterpret_cast<void*>(address), bytes, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+}
+
+}
+
+Segment CreateSegment(std::size_t bytes) {
     const auto size = static_cast<std::uint64_t>(bytes);
-    HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE, static_cast<DWORD>(size >> 32u), static_cast<DWORD>(size), nullptr);
-    check(section != nullptr, "CreateFileMapping guest backing");
-    void* alias = nullptr;
-    void* guest = nullptr;
-    try {
-        alias = MapViewOfFile(section, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, bytes);
-        check(alias != nullptr, "MapViewOfFile guest backing alias");
-        if (address == nullptr && alignment > info.dwAllocationGranularity) {
-            if (bytes > std::numeric_limits<std::size_t>::max() - alignment) throw std::overflow_error("aligned guest backing reservation overflow");
-            void* reservation = VirtualAlloc(nullptr, bytes + alignment, MEM_RESERVE, PAGE_NOACCESS);
-            check(reservation != nullptr, "VirtualAlloc guest backing reservation");
-            const auto first = reinterpret_cast<std::uintptr_t>(reservation);
-            address = reinterpret_cast<void*>((first + alignment - 1) & ~(static_cast<std::uintptr_t>(alignment) - 1));
-            check(VirtualFree(reservation, 0, MEM_RELEASE) != FALSE, "VirtualFree guest backing reservation");
-        }
-        guest = MapViewOfFileEx(section, FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE, 0, 0, bytes, address);
-        check(guest != nullptr, "MapViewOfFileEx guest memory");
-        if (reinterpret_cast<std::uintptr_t>(guest) % alignment != 0 || (address != nullptr && guest != address)) throw std::runtime_error("guest backing view address mismatch");
-        DWORD previous = 0;
-        check(VirtualProtect(guest, bytes, nativeProtection(protection), &previous) != FALSE, "VirtualProtect guest backing view");
-        return {reinterpret_cast<std::uintptr_t>(guest), bytes, alias, reinterpret_cast<std::uintptr_t>(section)};
-    } catch (...) {
-        if (guest != nullptr) check(UnmapViewOfFile(guest) != FALSE, "UnmapViewOfFile failed guest view");
-        if (alias != nullptr) check(UnmapViewOfFile(alias) != FALSE, "UnmapViewOfFile failed guest alias");
-        check(CloseHandle(section) != FALSE, "CloseHandle failed guest backing");
-        throw;
+    HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_RESERVE, static_cast<DWORD>(size >> 32u), static_cast<DWORD>(size), nullptr);
+    check(section != nullptr, "CreateFileMapping guest segment");
+    void* alias = MapViewOfFile(section, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, bytes);
+    if (alias == nullptr) {
+        CloseHandle(section);
+        check(false, "MapViewOfFile guest segment alias");
     }
+    return {reinterpret_cast<std::uintptr_t>(section), alias, bytes};
 }
 
-void Unmap(const Mapping& mapping) {
-    check(UnmapViewOfFile(reinterpret_cast<void*>(mapping.address)) != FALSE, "UnmapViewOfFile guest view");
-    check(UnmapViewOfFile(mapping.alias) != FALSE, "UnmapViewOfFile guest alias");
-    check(CloseHandle(reinterpret_cast<HANDLE>(mapping.handle)) != FALSE, "CloseHandle guest backing");
+void DestroySegment(const Segment& segment) {
+    check(UnmapViewOfFile(segment.alias) != FALSE, "UnmapViewOfFile guest segment alias");
+    check(CloseHandle(reinterpret_cast<HANDLE>(segment.handle)) != FALSE, "CloseHandle guest segment");
 }
 
-void Deactivate(std::uint64_t address, std::size_t bytes) {
+std::uint64_t ClaimRange(std::uint64_t address, std::size_t bytes, std::size_t alignment, bool fixed) {
+    if (fixed) return reservePlaceholder(reinterpret_cast<void*>(address), bytes) != nullptr ? address : 0;
+    MEM_ADDRESS_REQUIREMENTS requirements{};
+    requirements.LowestStartingAddress = reinterpret_cast<void*>(address);
+    requirements.Alignment = alignment;
+    MEM_EXTENDED_PARAMETER parameter{};
+    parameter.Type = MemExtendedParameterAddressRequirements;
+    parameter.Pointer = &requirements;
+    void* result = VirtualAlloc2(nullptr, nullptr, bytes, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, &parameter, 1);
+    return reinterpret_cast<std::uint64_t>(result);
+}
+
+bool RangeFree(std::uint64_t address, std::size_t bytes) {
+    MEMORY_BASIC_INFORMATION memory{};
+    if (VirtualQuery(reinterpret_cast<void*>(address), &memory, sizeof(memory)) != sizeof(memory)) return false;
+    return memory.State == MEM_FREE && reinterpret_cast<std::uint64_t>(memory.BaseAddress) + memory.RegionSize >= address + bytes;
+}
+
+void ReleaseRange(std::uint64_t address, std::size_t bytes) {
+    isolatePlaceholder(address, bytes);
+    check(VirtualFree(reinterpret_cast<void*>(address), 0, MEM_RELEASE) != FALSE, "VirtualFree guest range");
+}
+
+void MapView(std::uint64_t address, std::size_t bytes, const Segment& segment, std::uint64_t offset, int protection) {
+    isolatePlaceholder(address, bytes);
+    void* view = MapViewOfFile3(reinterpret_cast<HANDLE>(segment.handle), nullptr, reinterpret_cast<void*>(address), offset, bytes, MEM_REPLACE_PLACEHOLDER, PAGE_EXECUTE_READWRITE, nullptr, 0);
+    check(view != nullptr, "MapViewOfFile3 guest view");
+    VirtualAlloc(view, bytes, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    Protect(address, bytes, protection);
+}
+
+void UnmapView(std::uint64_t address, std::size_t bytes) {
+    static_cast<void>(bytes);
+    check(UnmapViewOfFile2(GetCurrentProcess(), reinterpret_cast<void*>(address), MEM_PRESERVE_PLACEHOLDER) != FALSE, "UnmapViewOfFile2 guest view");
+}
+
+void Protect(std::uint64_t address, std::size_t bytes, int protection) {
     DWORD previous = 0;
-    check(VirtualProtect(reinterpret_cast<void*>(address), bytes, PAGE_NOACCESS, &previous) != FALSE, "VirtualProtect guest backing unmap");
-}
-
-void Release(std::uint64_t, std::size_t) {
-    throw std::runtime_error("replacing part of a guest memory mapping is not implemented on Windows");
-}
-
-void ReleaseAlias(const Mapping& mapping) {
-    check(UnmapViewOfFile(mapping.alias) != FALSE, "UnmapViewOfFile guest alias");
+    check(VirtualProtect(reinterpret_cast<void*>(address), bytes, nativeProtection(protection), &previous) != FALSE, "VirtualProtect guest range");
 }
 
 }

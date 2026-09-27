@@ -7,6 +7,7 @@
 #include "DirectMemory.hpp"
 #include "prx/libkernel/Pthread/include/PthreadStacks.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <map>
 #include <mutex>
 #include <string>
@@ -124,14 +125,11 @@ int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
 }
 
 int APS5_VABI sceKernelReleaseDirectMemory(int64_t start, size_t len) {
- if (start < 0 || len == 0) return SCE_KERNEL_ERROR_EINVAL;
- DirectMemoryFree(start, len);
- return 0;
+ return DoReleaseDirect(start, len);
 }
 
 int APS5_VABI sceKernelReserveVirtualRange(void** addr, size_t len, int flags, size_t alignment) {
- (void)flags;
- return DoReserveVirtual(addr, len, alignment);
+ return DoReserveVirtual(addr, len, flags, alignment);
 }
 
 int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
@@ -140,19 +138,41 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
  constexpr int kProtectionCpuWrite = 0x2;
  constexpr int kProtectionGpuRead = 0x10;
  constexpr int kProtectionGpuWrite = 0x20;
+ constexpr int kDefaultMemoryType = 3;
  if (!info || info_size < sizeof(VirtualQueryInfo)) return SCE_KERNEL_ERROR_EINVAL;
- GuestAllocations::Range range{};
+ const bool findNext = (flags & kFindNext) != 0;
+ const auto address = reinterpret_cast<std::uint64_t>(addr);
+ GuestMemoryBacking::Area area{};
+ const bool guest = GuestMemoryBacking::GuestVirtualQuery_nid_postfix(addr, findNext, &area);
+ // Loaded images are not guest areas; the registry describes them.
+ GuestAllocations::Range image{};
+ bool imageFound = false;
  {
   GuestAllocations::Mutation mutation;
-  if (!mutation.Query(addr, (flags & kFindNext) != 0, &range)) return SCE_KERNEL_ERROR_EACCES;
+  imageFound = mutation.Query(addr, findNext, &image) && !image.releasable;
  }
+ const auto contains = [&](std::uint64_t first, std::uint64_t bytes) { return first <= address && address - first < bytes; };
+ const bool useImage = imageFound && (!guest || (!contains(area.address, area.bytes) && (contains(image.address, image.bytes) || image.address < area.address)));
+ if (!guest && !useImage) return SCE_KERNEL_ERROR_EACCES;
  memset(info, 0, sizeof(VirtualQueryInfo));
- info->start = range.address;
- info->end = range.address + range.bytes;
- info->protection = (range.readable ? kProtectionCpuRead | kProtectionGpuRead : 0) | (range.writable ? kProtectionCpuWrite | kProtectionGpuWrite : 0);
- info->is_committed = range.readable || range.writable;
- info->is_direct = info->is_committed;
- VirtualRangeNames::Get(range.address, info->name, sizeof(info->name));
+ if (useImage) {
+  info->start = image.address;
+  info->end = image.address + image.bytes;
+  info->protection = (image.readable ? kProtectionCpuRead | kProtectionGpuRead : 0) | (image.writable ? kProtectionCpuWrite | kProtectionGpuWrite : 0);
+  info->is_committed = 1;
+ } else {
+  info->start = area.address;
+  info->end = area.address + area.bytes;
+  info->protection = area.protection;
+  info->is_committed = area.kind != GuestMemoryBacking::Kind::Reserved;
+  info->is_direct = area.kind == GuestMemoryBacking::Kind::Direct;
+  info->is_flexible = area.kind == GuestMemoryBacking::Kind::Flexible || area.kind == GuestMemoryBacking::Kind::Heap;
+  if (info->is_direct) {
+   info->offset = static_cast<std::uint64_t>(area.physical);
+   info->memory_type = kDefaultMemoryType;
+  }
+ }
+ VirtualRangeNames::Get(info->start, info->name, sizeof(info->name));
  return 0;
 }
 
@@ -161,18 +181,13 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
 // ---------------------------------------------------------------------------
 
 int APS5_VABI sceKernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
- if (start < 0 || len == 0 || (static_cast<uint64_t>(start) & (PS5_PAGE_SIZE - 1)) != 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
- DirectMemoryFree(start, len);
- return 0;
+ return DoReleaseDirect(start, len);
 }
 
 int APS5_VABI sceKernelMtypeprotect(const void* addr, size_t len, int type, int prot) {
- (void)addr;
- (void)len;
+ // Memory types only select cache policy, which the host does not model.
  (void)type;
- (void)prot;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return DoMprotect(addr, len, prot);
 }
 
 int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot) {

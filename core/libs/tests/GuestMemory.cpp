@@ -1,5 +1,6 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "SceTypes.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -9,6 +10,14 @@ extern "C" {
 void* APS5_VABI mmap_nid_postfix(void*, std::size_t, int, int, int, std::int64_t) noexcept;
 int APS5_VABI munmap_nid_postfix(void*, std::size_t) noexcept;
 int* APS5_VABI __error_nid_postfix();
+int APS5_VABI sceKernelAllocateMainDirectMemory(std::size_t, std::size_t, int, std::int64_t*);
+int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
+int APS5_VABI sceKernelMapFlexibleMemory(void**, std::size_t, int, int);
+int APS5_VABI sceKernelReserveVirtualRange(void**, std::size_t, int, std::size_t);
+int APS5_VABI sceKernelReleaseDirectMemory(std::int64_t, std::size_t);
+int APS5_VABI sceKernelMunmap(std::uint64_t, std::size_t);
+int APS5_VABI sceKernelMprotect(const void*, std::size_t, int);
+int APS5_VABI sceKernelVirtualQuery(const void*, int, VirtualQueryInfo*, std::uint64_t);
 }
 
 static void Require(bool condition) {
@@ -55,8 +64,11 @@ int main() {
     Require(munmap_nid_postfix(memory, page) == 0);
     Require(memory[page * 2] == 73);
     Require(munmap_nid_postfix(memory + page * 2, page) == 0);
-    Require(munmap_nid_postfix(memory, page) == -1);
-    for (int protection : {0, 1, 3, 5}) {
+    // Unmapping free memory succeeds, as on the PS5 kernel.
+    Require(munmap_nid_postfix(memory, page) == 0);
+    // Flexible memory cannot be executable.
+    reject(page, 5, 0x1002, -1, 0, 13);
+    for (int protection : {0, 1, 3}) {
         void* mapped = mmap_nid_postfix(memory, 1, protection, 0x1002, -1, 0);
         Require(mapped != failed);
         {
@@ -67,4 +79,53 @@ int main() {
         }
         Require(munmap_nid_postfix(mapped, 1) == 0);
     }
+
+    // PS5 memory model (docs/research-notes.md).
+    constexpr int fixed = 0x10;
+    constexpr int noOverwrite = 0x80;
+    constexpr int enomem = static_cast<int>(0x8002000C);
+    constexpr int eacces = static_cast<int>(0x8002000D);
+    constexpr int cpuReadWrite = 0x3;
+    std::int64_t physical = -1;
+    Require(sceKernelAllocateMainDirectMemory(page * 2, page, 0, &physical) == 0);
+    // Two views of the same physical memory share contents.
+    void* first = nullptr;
+    void* second = nullptr;
+    Require(sceKernelMapDirectMemory(&first, page * 2, cpuReadWrite, 0, physical, page) == 0);
+    Require(sceKernelMapDirectMemory(&second, page, cpuReadWrite, 0, physical + page, page) == 0);
+    static_cast<unsigned char*>(first)[page + 5] = 99;
+    Require(static_cast<unsigned char*>(second)[5] == 99);
+    Require(sceKernelMapDirectMemory(&first, page, 0x7, 0, physical, page) == eacces);
+    // Contents survive unmapping one view.
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(second), page) == 0);
+    Require(sceKernelMapDirectMemory(&second, page, cpuReadWrite, 0, physical + page, page) == 0);
+    Require(static_cast<unsigned char*>(second)[5] == 99);
+    VirtualQueryInfo info{};
+    Require(sceKernelVirtualQuery(first, 0, &info, sizeof(info)) == 0);
+    Require(info.start == reinterpret_cast<std::uintptr_t>(first) && info.end == info.start + page * 2 && info.is_direct && info.is_committed && info.offset == static_cast<std::uint64_t>(physical) && info.protection == cpuReadWrite);
+    // Releasing physical memory unmaps every view.
+    Require(sceKernelReleaseDirectMemory(physical, page * 2) == 0);
+    Require(sceKernelVirtualQuery(second, 0, &info, sizeof(info)) != 0);
+
+    // A reservation is unbacked; fixed maps replace it, NO_OVERWRITE refuses.
+    void* reserved = nullptr;
+    Require(sceKernelReserveVirtualRange(&reserved, page * 4, 0, page) == 0);
+    Require(sceKernelVirtualQuery(reserved, 0, &info, sizeof(info)) == 0 && !info.is_committed && info.end - info.start == page * 4);
+    Require(sceKernelMprotect(reserved, page, cpuReadWrite) == 0);
+    void* inside = static_cast<unsigned char*>(reserved) + page;
+    Require(sceKernelMapFlexibleMemory(&inside, page, cpuReadWrite, fixed | noOverwrite) == enomem);
+    Require(sceKernelMapFlexibleMemory(&inside, page, cpuReadWrite, fixed) == 0 && inside == static_cast<unsigned char*>(reserved) + page);
+    static_cast<unsigned char*>(inside)[0] = 7;
+    Require(sceKernelVirtualQuery(inside, 0, &info, sizeof(info)) == 0 && info.is_flexible && info.is_committed && info.start == reinterpret_cast<std::uintptr_t>(inside) && info.end == info.start + page);
+    Require(sceKernelMprotect(inside, page, 0x1) == 0);
+    Require(sceKernelVirtualQuery(inside, 0, &info, sizeof(info)) == 0 && info.protection == 0x1);
+    Require(static_cast<unsigned char*>(inside)[0] == 7);
+    // Unmap skips holes and frees reserved parts.
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(reserved), page * 8) == 0);
+    Require(sceKernelVirtualQuery(reserved, 0, &info, sizeof(info)) != 0);
+    // The freed range can be claimed again at a fixed address.
+    void* again = reserved;
+    Require(sceKernelMapFlexibleMemory(&again, page, cpuReadWrite, fixed | noOverwrite) == 0 && again == reserved);
+    Require(static_cast<unsigned char*>(again)[0] == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(again), page) == 0);
 }

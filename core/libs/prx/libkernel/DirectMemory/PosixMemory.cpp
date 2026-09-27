@@ -25,6 +25,11 @@ bool RoundLength(std::size_t length, std::size_t& rounded) {
 void SetError(int error) {
     *__error_nid_postfix() = error;
 }
+
+// SCE kernel errors are 0x8002xxxx with the errno in the low bits.
+int GuestErrno(int result) {
+    return result & 0xffff;
+}
 }
 
 extern "C" {
@@ -47,7 +52,7 @@ void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protecti
     void* mapped = nullptr;
     try {
         const auto result = DoMapAnon(&mapped, rounded, protection, 0);
-        if (result != 0) return failed(GuestNoMemory);
+        if (result != 0) return failed(GuestErrno(result));
         return mapped;
     } catch (const std::bad_alloc&) {
         return failed(GuestNoMemory);
@@ -68,7 +73,7 @@ int APS5_VABI munmap_nid_postfix(void* address, std::size_t length) noexcept {
         rounded > std::numeric_limits<std::uintptr_t>::max() - start)
         return failed(GuestInvalid);
     try {
-        if (DoMunmap(address, rounded) != 0) return failed(GuestInvalid);
+        if (const auto result = DoMunmap(address, rounded); result != 0) return failed(GuestErrno(result));
         return 0;
     } catch (const std::bad_alloc&) {
         return failed(GuestNoMemory);

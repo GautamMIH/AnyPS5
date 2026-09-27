@@ -4,7 +4,6 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
-#include <string>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
@@ -13,230 +12,119 @@
 #include <sys/mman.h>
 #else
 #include <windows.h>
-
-static constexpr int PROT_NONE = 0;
-static constexpr int PROT_READ = 1;
-static constexpr int PROT_WRITE = 2;
-static constexpr int PROT_EXEC = 4;
-
-static DWORD WinProtFromPosix(int prot) {
-    if (prot == PROT_NONE) return PAGE_NOACCESS;
-    if ((prot & PROT_EXEC) && (prot & PROT_WRITE)) return PAGE_EXECUTE_READWRITE;
-    if ((prot & PROT_EXEC) && (prot & PROT_READ)) return PAGE_EXECUTE_READ;
-    if (prot & PROT_EXEC) return PAGE_EXECUTE;
-    if (prot & PROT_WRITE) return PAGE_READWRITE;
-    return PAGE_READONLY;
-}
-
-static int mprotect(void* addr, size_t len, int prot) {
-    DWORD old;
-    if (!VirtualProtect(addr, len, WinProtFromPosix(prot), &old))
-        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "VirtualProtect failed");
-    return 0;
-}
 #endif
 
+// Guest virtual memory lives in GuestMemoryBacking, which follows the PS5 model (see
+// docs/research-notes.md); these wrappers translate its status into SCE error codes.
 namespace {
 
-void ValidateLength(size_t len) {
-    if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) {
-        // return SCE_KERNEL_ERROR_EINVAL;
-        throw std::invalid_argument("Memory length must be a positive multiple of the guest page size");
+using GuestMemoryBacking::Kind;
+using GuestMemoryBacking::Status;
+
+// Debug aid: ANYPS5_TRACE_MEMORY=1 logs every guest mapping operation.
+void TraceMemory(const char* operation, const void* addr, size_t len, int prot, int flags, int result) {
+    static const bool enabled = std::getenv("ANYPS5_TRACE_MEMORY") != nullptr;
+    if (enabled) std::fprintf(stderr, "[memory] %s 0x%llx+0x%zx prot=0x%x flags=0x%x -> 0x%x\n", operation, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(addr)), len, prot, flags, static_cast<unsigned>(result));
+}
+
+int SceResult(Status status) {
+    switch (status) {
+    case Status::Ok: return 0;
+    case Status::NoMemory: return SCE_KERNEL_ERROR_ENOMEM;
+    case Status::Access: return SCE_KERNEL_ERROR_EACCES;
+    case Status::Invalid: break;
     }
+    return SCE_KERNEL_ERROR_EINVAL;
 }
 
-size_t ValidateAlignment(size_t alignment) {
-    if (alignment == 0) return PS5_PAGE_SIZE;
-    if (alignment < PS5_PAGE_SIZE || (alignment & (alignment - 1)) != 0) {
-        // return SCE_KERNEL_ERROR_EINVAL;
-        throw std::invalid_argument("Memory alignment must be a power of two no smaller than the guest page size");
-    }
-    return alignment;
-}
-
-void ValidateRange(const void* addr, size_t len, size_t alignment) {
-    ValidateLength(len);
-    const auto start = reinterpret_cast<std::uintptr_t>(addr);
-    if (!addr || (start & (alignment - 1)) != 0 || len > std::numeric_limits<std::uintptr_t>::max() - start) {
-        // return SCE_KERNEL_ERROR_EINVAL;
-        throw std::invalid_argument("Invalid memory address, alignment or range");
-    }
-}
-
-constexpr int kCpuRead = 0x1;
-constexpr int kCpuWrite = 0x2;
-constexpr int kGpuRead = 0x10 | 0x40;
-constexpr int kGpuWrite = 0x20 | 0x80;
-
-bool GuestWritable(int prot) {
-    return (prot & (kCpuWrite | kGpuWrite)) != 0;
-}
-
-bool GuestReadable(int prot) {
-    return (prot & (kCpuRead | kGpuRead)) != 0 || GuestWritable(prot);
-}
-
-// Bits 0x40-0x200 grant access to other on-chip agents; like KytyPS5 only the CPU and GPU bits
-// shape the host mapping.
-int LinuxProtFromSce(int prot) {
-    if ((prot & ~0x3f7) != 0) {
-        // return SCE_KERNEL_ERROR_EINVAL;
-        throw std::invalid_argument("Unsupported memory protection bits 0x" + [prot] {
-            char text[16];
-            std::snprintf(text, sizeof(text), "%x", static_cast<unsigned>(prot));
-            return std::string(text);
-        }());
-    }
-    int result = PROT_NONE;
-    if (GuestReadable(prot)) result |= PROT_READ;
-    if (GuestWritable(prot)) result |= PROT_WRITE;
-    if (prot & 4) result |= PROT_READ | PROT_EXEC;
+int Map(const char* operation, void** addr, size_t len, size_t alignment, Kind kind, int prot, int flags, int64_t physical) {
+    if (addr == nullptr) return SCE_KERNEL_ERROR_EINVAL;
+    const void* requested = *addr;
+    const auto result = SceResult(GuestMemoryBacking::GuestVirtualMap_nid_postfix(addr, len, alignment, kind, prot, flags, physical));
+    TraceMemory(operation, result == 0 ? *addr : requested, len, prot, flags, result);
     return result;
 }
 
-void Unmap(void* addr, size_t len) {
-    GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(addr, len);
-}
-
-void* MapAligned(void* addr, size_t len, int prot, int flags, size_t alignment) {
-    ValidateLength(len);
-    alignment = ValidateAlignment(alignment);
-    constexpr int guestMapFixed = 0x10;
-    constexpr int guestMapNoOverwrite = 0x80;
-    constexpr int guestMapNoCoalesce = 0x400000;
-    if ((flags & ~(guestMapFixed | guestMapNoOverwrite | guestMapNoCoalesce)) != 0) throw std::invalid_argument("Unsupported memory mapping flags");
-    if ((flags & guestMapFixed) != 0) ValidateRange(addr, len, alignment);
-    else if (addr != nullptr) throw std::invalid_argument("Non-fixed mapping address hints are not implemented");
-    return GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(addr, len, alignment, prot);
-}
-
-// Debug aid: ANYPS5_TRACE_MEMORY=1 logs every guest mapping operation.
-void TraceMemory(const char* operation, const void* addr, size_t len, int prot, int flags) {
-    static const bool enabled = std::getenv("ANYPS5_TRACE_MEMORY") != nullptr;
-    if (enabled) std::fprintf(stderr, "[memory] %s 0x%llx+0x%zx prot=0x%x flags=0x%x\n", operation, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(addr)), len, prot, flags);
-}
-
-void PrepareFixedMapping(GuestAllocations::Mutation& mutation, void* addr, size_t len, int flags) {
-    constexpr int guestMapNoOverwrite = 0x80;
-    if (addr == nullptr) return;
-    if ((flags & guestMapNoOverwrite) != 0) {
-        mutation.RequireAvailable(addr, len);
-        return;
-    }
-    TraceMemory("carve", addr, len, 0, flags);
-    mutation.Carve(addr, len, [&] {
-        GuestMemoryBacking::GuestMemoryBackingCarve_nid_postfix(addr, len);
-    });
-}
-
-void ValidateOutput(void** addr) {
-    if (!addr) {
-        // return SCE_KERNEL_ERROR_EINVAL;
-        throw std::invalid_argument("Null memory mapping output");
-    }
-}
-
-}
-
-
-int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) {
-    ValidateOutput(addr);
-    if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
-    if (physStart < 0 || (static_cast<std::uint64_t>(physStart) & (PS5_PAGE_SIZE - 1)) != 0 || static_cast<std::uint64_t>(physStart) >= DIRECT_MEMORY_SIZE || len > DIRECT_MEMORY_SIZE - static_cast<std::uint64_t>(physStart)) {
-        return SCE_KERNEL_ERROR_EINVAL;
-    }
-    GuestAllocations::Mutation mutation;
-    PrepareFixedMapping(mutation, *addr, len, flags);
-    void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, alignment);
-    try {
-        mutation.Add(mapped, len, GuestReadable(prot), GuestWritable(prot));
-    } catch (...) {
-        Unmap(mapped, len);
-        throw;
-    }
-    *addr = mapped;
-    TraceMemory("map-direct", mapped, len, prot, flags);
-    return 0;
-}
-
-int DoMapAnon(void** addr, size_t len, int prot, int flags) {
-    ValidateOutput(addr);
-    if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
-    GuestAllocations::Mutation mutation;
-    PrepareFixedMapping(mutation, *addr, len, flags);
-    void* mapped = MapAligned(*addr, len, LinuxProtFromSce(prot), flags, PS5_PAGE_SIZE);
-    try {
-        mutation.Add(mapped, len, GuestReadable(prot), GuestWritable(prot));
-    } catch (...) {
-        Unmap(mapped, len);
-        throw;
-    }
-    *addr = mapped;
-    TraceMemory("map-anon", mapped, len, prot, flags);
-    return 0;
-}
-
-int DoMprotect(const void* addr, size_t len, int prot) {
-    TraceMemory("protect", addr, len, prot, 0);
-    const auto address = reinterpret_cast<std::uintptr_t>(addr);
-    constexpr auto pageMask = static_cast<std::uintptr_t>(PS5_PAGE_SIZE - 1);
-    const auto limit = std::numeric_limits<std::uintptr_t>::max();
-    if (address == 0 || len == 0 || len > limit - address || address + len > limit - pageMask) throw std::invalid_argument("Invalid guest memory protection range");
-    const auto first = address & ~pageMask;
-    const auto end = (address + len + pageMask) & ~pageMask;
-    const auto bytes = static_cast<std::size_t>(end - first);
-    const auto* pointer = reinterpret_cast<const void*>(first);
-    const auto nativeProtection = LinuxProtFromSce(prot);
-    GuestAllocations::Mutation mutation;
+// Memory outside the guest map (the main image and other loaded modules) is protected directly;
+// the main image's pages are GPU-visible registry ranges.
+int ProtectImage(const void* pointer, size_t bytes, int prot) {
+    const bool writable = (prot & (GuestMemoryBacking::kProtCpuWrite | GuestMemoryBacking::kProtGpuWrite)) != 0;
+    const bool readable = writable || (prot & (GuestMemoryBacking::kProtCpuRead | GuestMemoryBacking::kProtGpuRead)) != 0;
 #ifdef _WIN32
-    MEMORY_BASIC_INFORMATION memory{};
-    if (VirtualQuery(pointer, &memory, sizeof(memory)) != sizeof(memory)) throw std::runtime_error("Cannot query guest memory protection range");
-    if (memory.Type == MEM_IMAGE) {
-        if (memory.AllocationBase != GetModuleHandleW(nullptr)) throw std::invalid_argument("Memory protection of a foreign image is not supported");
-        mutation.RegisterMainImage();
-    }
-#else
-    mutation.RegisterMainImage();
-    // Other loaded modules are not tracked as guest allocations; protect them directly.
-    GuestAllocations::Range overlapping{};
-    if (!mutation.Query(pointer, true, &overlapping) || overlapping.address >= end) {
+    const DWORD native = (prot & 4) != 0 ? (writable ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ) : writable ? PAGE_READWRITE : readable ? PAGE_READONLY : PAGE_NOACCESS;
+    const auto apply = [&] {
         GuestMemoryBacking::GuestMemoryBackingNoteChange_nid_postfix();
-        if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
+        DWORD previous = 0;
+        if (!VirtualProtect(const_cast<void*>(pointer), bytes, native, &previous)) throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), "VirtualProtect failed");
+    };
+    MEMORY_BASIC_INFORMATION memory{};
+    if (VirtualQuery(pointer, &memory, sizeof(memory)) != sizeof(memory)) return SCE_KERNEL_ERROR_EINVAL;
+    if (memory.Type != MEM_IMAGE) return SCE_KERNEL_ERROR_EINVAL;
+    GuestAllocations::Mutation mutation;
+    if (memory.AllocationBase != GetModuleHandleW(nullptr)) {
+        apply();
+        return 0;
+    }
+    mutation.RegisterMainImage();
+#else
+    const int native = (readable ? PROT_READ : 0) | (writable ? PROT_WRITE : 0) | ((prot & 4) != 0 ? PROT_READ | PROT_EXEC : 0);
+    const auto apply = [&] {
+        GuestMemoryBacking::GuestMemoryBackingNoteChange_nid_postfix();
+        if (mprotect(const_cast<void*>(pointer), bytes, native) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
+    };
+    GuestAllocations::Mutation mutation;
+    mutation.RegisterMainImage();
+    GuestAllocations::Range overlapping{};
+    const auto end = reinterpret_cast<std::uintptr_t>(pointer) + bytes;
+    if (!mutation.Query(pointer, true, &overlapping) || overlapping.address >= end) {
+        apply();
         return 0;
     }
 #endif
-    mutation.Protect(pointer, bytes, GuestReadable(prot), GuestWritable(prot), [&] {
-        GuestMemoryBacking::GuestMemoryBackingNoteChange_nid_postfix();
-        if (mprotect(const_cast<void*>(pointer), bytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
-    });
+    mutation.Protect(pointer, bytes, readable, writable, apply);
     return 0;
+}
+
+}
+
+int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment) {
+    return Map("map-direct", addr, len, alignment, Kind::Direct, prot, flags, physStart);
+}
+
+int DoMapAnon(void** addr, size_t len, int prot, int flags) {
+    return Map("map-flexible", addr, len, PS5_PAGE_SIZE, Kind::Flexible, prot, flags, -1);
+}
+
+int DoReserveVirtual(void** addr, size_t len, int flags, size_t alignment) {
+    return Map("reserve", addr, len, alignment, Kind::Reserved, 0, flags, -1);
+}
+
+int DoMprotect(const void* addr, size_t len, int prot) {
+    // Like the kernel, the range is widened to whole pages.
+    const auto address = reinterpret_cast<std::uintptr_t>(addr);
+    constexpr auto pageMask = static_cast<std::uintptr_t>(PS5_PAGE_SIZE - 1);
+    const auto limit = std::numeric_limits<std::uintptr_t>::max();
+    if (address == 0 || len == 0 || len > limit - address || address + len > limit - pageMask || (prot & ~0x3f7) != 0) return SCE_KERNEL_ERROR_EINVAL;
+    const auto first = address & ~pageMask;
+    const auto bytes = static_cast<std::size_t>(((address + len + pageMask) & ~pageMask) - first);
+    const auto* pointer = reinterpret_cast<const void*>(first);
+    const auto status = GuestMemoryBacking::GuestVirtualProtect_nid_postfix(pointer, bytes, prot);
+    const auto result = status == Status::Invalid ? ProtectImage(pointer, bytes, prot) : SceResult(status);
+    TraceMemory("protect", pointer, bytes, prot, 0, result);
+    return result;
 }
 
 int DoMunmap(void* addr, size_t len) {
-    TraceMemory("unmap", addr, len, 0, 0);
-    if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0 || !addr) return SCE_KERNEL_ERROR_EINVAL;
-    GuestAllocations::Mutation mutation;
-    bool released = false;
-    mutation.Unmap(addr, len, [&](const void*, bool) {
-        if (released) return;
-        Unmap(addr, len);
-        released = true;
-    });
-    return 0;
+    const auto result = SceResult(GuestMemoryBacking::GuestVirtualUnmap_nid_postfix(addr, len));
+    TraceMemory("unmap", addr, len, 0, 0, result);
+    return result;
 }
 
-int DoReserveVirtual(void** addr, size_t len, size_t alignment) {
-    ValidateOutput(addr);
-    if (len == 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
-    GuestAllocations::Mutation mutation;
-    void* mapped = MapAligned(nullptr, len, PROT_NONE, 0, alignment);
-    try {
-        mutation.Add(mapped, len, false, false);
-    } catch (...) {
-        Unmap(mapped, len);
-        throw;
-    }
-    *addr = mapped;
-    TraceMemory("reserve", mapped, len, 0, 0);
-    return 0;
+int DoReleaseDirect(int64_t start, size_t len) {
+    if (start < 0 || len == 0 || (static_cast<std::uint64_t>(start) & (PS5_PAGE_SIZE - 1)) != 0 || (len & (PS5_PAGE_SIZE - 1)) != 0) return SCE_KERNEL_ERROR_EINVAL;
+    // Releasing physical memory also unmaps every view of it.
+    const auto result = SceResult(GuestMemoryBacking::GuestVirtualReleasePhysical_nid_postfix(start, len));
+    if (result == 0) DirectMemoryFree(start, len);
+    TraceMemory("release-direct", reinterpret_cast<const void*>(start), len, 0, 0, result);
+    return result;
 }
