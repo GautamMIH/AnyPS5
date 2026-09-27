@@ -21,6 +21,7 @@ class DrawQueue;
 class GraphicsPipelineCache;
 class DescriptorCache;
 class SamplerCache;
+class GuestGpuMemory;
 
 inline void Require(bool condition, const std::string& reason) {
     if (!condition) throw std::runtime_error("AGC graphics: " + reason);
@@ -71,6 +72,8 @@ struct Context {
     bool imageGatherExtended = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
+    bool externalMemoryHost = false;
+    GuestGpuMemory* guestGpuMemory = nullptr;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {

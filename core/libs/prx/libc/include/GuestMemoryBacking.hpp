@@ -29,6 +29,17 @@ constexpr int kProtGpuWrite = 0x20;
 constexpr std::uint64_t kPhysicalBytes = 13824ull * 1024 * 1024;
 constexpr std::uint64_t kPageBytes = 0x4000;
 
+// Where guest memory lives: bytes [offset, offset + bytes) of a segment, readable and writable at
+// alias (whatever the guest protection). Segments are memory objects that outlive any one mapping;
+// direct memory is a single segment, so its translations never go stale.
+struct Translation {
+    std::uint64_t segment;
+    void* segmentAlias;
+    std::uint64_t segmentBytes;
+    std::uint64_t offset;
+    std::uint64_t bytes;
+};
+
 struct Area {
     std::uint64_t address;
     std::uint64_t bytes;
@@ -50,6 +61,13 @@ Status GuestVirtualProtect_nid_postfix(const void* address, std::size_t bytes, i
 Status GuestVirtualReleasePhysical_nid_postfix(std::int64_t physical, std::size_t bytes);
 // The area holding address (or, with findNext, the next one), merged with like neighbours.
 bool GuestVirtualQuery_nid_postfix(const void* address, bool findNext, Area* area);
+
+// Translates committed guest memory at address, following adjacent areas while they continue the
+// same segment; Translation::bytes may be less than requested. Returns false when address is not
+// committed guest memory.
+bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t bytes, Translation* translation);
+// Whether a segment still exists (its memory may still be referenced by GPU imports).
+bool GuestSegmentAlive_nid_postfix(std::uint64_t segment);
 
 // libc heap chunks.
 void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection);

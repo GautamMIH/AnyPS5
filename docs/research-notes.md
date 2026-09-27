@@ -13,6 +13,8 @@ Issues that needed research, with a short answer. Check here before researching;
 ## GPU access to guest memory
 
 - **Shaders reading guest memory by address.** shadPS4/Kyty keep a persistent GPU mirror (sparse 4 GiB arenas or per-range buffers) + page table of device addresses; upload only CPU-dirty pages before submit (write-protect tracking); missing pages read 0 and set a fault bit, made resident next frame. Read source bytes through the unprotected backing alias. (shadPS4 buffer_cache, page_manager; Kyty bufferCache)
+- **Zero-copy guest memory (tested on this machine).** VK_EXT_external_memory_host imports memfd-backed MAP_SHARED mappings (segment aliases) on Intel, NVIDIA and llvmpipe (alignment 0x1000); GPU writes are visible through other views of the segment. NVIDIA pins the whole range at import (RSS += size) and offers host-visible+coherent (uncached) types only, so import on demand in chunks, never whole segments.
+- **GuestGpuMemory (implemented).** Guest ranges translate to (segment, offset) via GuestVirtualTranslate; the segment alias is imported in 32 MiB chunks (spans for crossing ranges), kept until the segment dies (Collect at WaitIdle). Descriptors and BDA ranges use the imports; no per-draw copies or write-back. Smurfs: 2950 → 1320 ms/frame. Main image / cross-segment ranges fall back to copies. ANYPS5_GPU_MEMORY_COPY=1 forces the old path.
 - **Storage-buffer offset alignment.** Bind at aligned-down offset, pass remainder to the shader. (shadPS4 vk_rasterizer.cpp)
 
 ## Geometry / NGG

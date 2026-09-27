@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
@@ -85,6 +86,8 @@ struct VulkanDevice::State {
     bool fragmentShaderBarycentric = false;
     bool depthClipControl = false;
     bool depthRangeUnrestricted = false;
+    bool externalMemoryHost = false;
+    std::unique_ptr<Graphics::GuestGpuMemory> guestGpuMemory;
     bool depthBounds = false;
     bool depthBiasClamp = false;
     bool independentBlend = false;
@@ -184,6 +187,7 @@ struct VulkanDevice::State {
             const auto idle = reinterpret_cast<PFN_vkDeviceWaitIdle>(deviceProc(device, "vkDeviceWaitIdle"))(device);
             if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
             drawQueue.reset();
+            guestGpuMemory.reset();
             graphicsPipelines.reset();
             renderCache.reset();
             textureCache.reset();
@@ -415,6 +419,12 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->capabilities.push_back(11);
     state->capabilities.push_back(5347);
     state->spirvExtensions.push_back("SPV_KHR_physical_storage_buffer");
+    // Guest memory is shared with the GPU by importing its host pages (GuestGpuMemory).
+    state->externalMemoryHost = hasExtension(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME) && hasExtension(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+    if (state->externalMemoryHost) {
+        deviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
+        deviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
+    }
     state->depthRangeUnrestricted = hasExtension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     if (state->depthRangeUnrestricted) deviceExtensions.push_back(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     VkPhysicalDeviceDepthClipControlFeaturesEXT depthClipFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT};
@@ -502,6 +512,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->graphicsPipelines = std::make_unique<Graphics::GraphicsPipelineCache>(graphicsContext());
     state->textureCache = std::make_unique<Graphics::TextureCache>(graphicsContext());
     state->colorTransfer = std::make_unique<Graphics::GpuColorTransfer>(graphicsContext());
+    state->guestGpuMemory = Graphics::GuestGpuMemory::Create(graphicsContext());
     if (window != nullptr) {
         require(window->getDrawableSize != nullptr, "missing window drawable size query");
         std::uint32_t drawableWidth = 0;
@@ -566,6 +577,8 @@ void VulkanDevice::WaitIdle() {
     timing.Mark("draw_wait");
     check(state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(state->device), "vkDeviceWaitIdle");
     timing.Mark("device_wait");
+    // With the GPU idle, imports of freed guest memory can go.
+    if (state->guestGpuMemory) state->guestGpuMemory->Collect();
 }
 
 void VulkanDevice::WaitDraws() {
@@ -858,6 +871,8 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.imageGatherExtended = state->imageGatherExtended;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
+    context.externalMemoryHost = state->externalMemoryHost;
+    context.guestGpuMemory = state->guestGpuMemory.get();
     return context;
 }
 

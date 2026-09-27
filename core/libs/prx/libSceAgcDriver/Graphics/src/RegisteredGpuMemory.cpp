@@ -12,6 +12,11 @@ void GuestBufferMemory::AcquireRegistered() {
     regions.reserve(lease.size());
     for (const auto& range : lease) {
         validate(range->address, range->bytes);
+        // With a mirror, registered memory is used in place instead of captured.
+        if (context.guestGpuMemory != nullptr) {
+            regions.push_back({range->address, range->address + range->bytes, range->writable, {}, nullptr, true});
+            continue;
+        }
         std::vector<std::byte> snapshot;
         if (!range->writable) {
             snapshot.resize(range->bytes);

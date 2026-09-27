@@ -72,6 +72,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderAddressResources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestBufferMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/BdaResources.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestGpuMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/BufferAddress.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderValidation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/State.cpp
@@ -212,6 +213,7 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/ShaderAddressResources.cpp
         Graphics/src/GuestBufferMemory.cpp
         Graphics/src/BdaResources.cpp
+        Graphics/src/GuestGpuMemory.cpp
         Graphics/src/BufferAddress.cpp
         Graphics/src/ShaderValidation.cpp
         Graphics/src/GuestTextureResource.cpp
@@ -310,6 +312,8 @@ if(AGC_BUILD_VISUAL_TEST)
             Graphics/src/ShaderAddressResources.cpp
             Graphics/src/GuestBufferMemory.cpp
             Graphics/src/BdaResources.cpp
+            Graphics/src/GuestGpuMemory.cpp
+        Graphics/src/GuestGpuMemory.cpp
             Graphics/src/BufferAddress.cpp
             Graphics/src/ShaderValidation.cpp
             Graphics/src/GuestTextureResource.cpp

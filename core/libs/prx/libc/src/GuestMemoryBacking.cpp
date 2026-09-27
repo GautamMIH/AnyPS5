@@ -10,16 +10,29 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
 namespace GuestMemoryBacking {
 namespace {
 
+std::uint64_t nextSegmentId = 1;
+
+std::set<std::uint64_t>& liveSegments() {
+    static auto* value = new std::set<std::uint64_t>;
+    return *value;
+}
+
+// Created and destroyed under the tracking mutex.
 struct SegmentHolder {
     Platform::Segment segment;
-    explicit SegmentHolder(std::size_t bytes) : segment(Platform::CreateSegment(bytes)) {}
-    ~SegmentHolder() { Platform::DestroySegment(segment); }
+    std::uint64_t id;
+    explicit SegmentHolder(std::size_t bytes) : segment(Platform::CreateSegment(bytes)), id(nextSegmentId++) { liveSegments().insert(id); }
+    ~SegmentHolder() {
+        liveSegments().erase(id);
+        Platform::DestroySegment(segment);
+    }
     SegmentHolder(const SegmentHolder&) = delete;
     SegmentHolder& operator=(const SegmentHolder&) = delete;
 };
@@ -306,6 +319,31 @@ bool GuestVirtualQuery_nid_postfix(const void* pointer, bool findNext, Area* are
     while (std::next(last) != map.end() && mergeable(last->first, last->second, std::next(last)->first, std::next(last)->second)) ++last;
     *area = {first->first, last->second.end - first->first, first->second.kind, first->second.protection, first->second.kind == Kind::Direct ? static_cast<std::int64_t>(first->second.offset) : -1, first->second.noCoalesce};
     return true;
+}
+
+bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t bytes, Translation* translation) {
+    if (translation == nullptr || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    auto& map = areas();
+    auto it = map.upper_bound(address);
+    if (it == map.begin()) return false;
+    --it;
+    if (it->second.end <= address || !committed(it->second.kind)) return false;
+    const auto& first = it->second;
+    const auto offset = first.offset + (address - it->first);
+    const auto last = address + bytes;
+    auto covered = std::min(last, first.end);
+    // Adjacent views of the next segment bytes extend the translation.
+    for (auto next = std::next(it); covered < last && next != map.end() && next->first == covered && committed(next->second.kind) && next->second.segment == first.segment && next->second.offset == offset + (covered - address); ++next) {
+        covered = std::min(last, next->second.end);
+    }
+    *translation = {first.segment->id, first.segment->segment.alias, first.segment->segment.bytes, offset, covered - address};
+    return true;
+}
+
+bool GuestSegmentAlive_nid_postfix(std::uint64_t segment) {
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    return liveSegments().contains(segment);
 }
 
 void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection) {

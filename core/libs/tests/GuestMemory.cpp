@@ -1,6 +1,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "SceTypes.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -128,4 +129,31 @@ int main() {
     Require(sceKernelMapFlexibleMemory(&again, page, cpuReadWrite, fixed | noOverwrite) == 0 && again == reserved);
     Require(static_cast<unsigned char*>(again)[0] == 0);
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(again), page) == 0);
+
+    // Translation to segments: adjacent views of contiguous physical memory form one run.
+    std::int64_t run = -1;
+    Require(sceKernelAllocateMainDirectMemory(page * 4, page, 0, &run) == 0);
+    void* low = nullptr;
+    Require(sceKernelReserveVirtualRange(&low, page * 4, 0, page) == 0);
+    void* high = static_cast<unsigned char*>(low) + page * 2;
+    Require(sceKernelMapDirectMemory(&low, page * 2, cpuReadWrite, fixed, run, page) == 0);
+    Require(sceKernelMapDirectMemory(&high, page * 2, cpuReadWrite, fixed, run + page * 2, page) == 0);
+    GuestMemoryBacking::Translation translation{};
+    Require(GuestMemoryBacking::GuestVirtualTranslate_nid_postfix(reinterpret_cast<std::uint64_t>(low) + 16, page * 4 - 16, &translation));
+    Require(translation.bytes == page * 4 - 16 && translation.offset == static_cast<std::uint64_t>(run) + 16);
+    static_cast<unsigned char*>(high)[3] = 0x42;
+    Require(static_cast<unsigned char*>(translation.segmentAlias)[run + page * 2 + 3] == 0x42);
+    Require(GuestMemoryBacking::GuestSegmentAlive_nid_postfix(translation.segment));
+    // A view of non-adjacent physical memory ends the run.
+    Require(sceKernelMapDirectMemory(&high, page * 2, cpuReadWrite, fixed, run, page) == 0);
+    Require(GuestMemoryBacking::GuestVirtualTranslate_nid_postfix(reinterpret_cast<std::uint64_t>(low), page * 4, &translation) && translation.bytes == page * 2);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(low), page * 4) == 0);
+    Require(!GuestMemoryBacking::GuestVirtualTranslate_nid_postfix(reinterpret_cast<std::uint64_t>(low), page, &translation));
+    Require(sceKernelReleaseDirectMemory(run, page * 4) == 0);
+    // Flexible memory has a segment of its own, which dies with its last view.
+    void* flexible = nullptr;
+    Require(sceKernelMapFlexibleMemory(&flexible, page, cpuReadWrite, 0) == 0);
+    Require(GuestMemoryBacking::GuestVirtualTranslate_nid_postfix(reinterpret_cast<std::uint64_t>(flexible), page, &translation) && translation.offset == 0 && translation.segmentBytes == page);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(flexible), page) == 0);
+    Require(!GuestMemoryBacking::GuestSegmentAlive_nid_postfix(translation.segment));
 }
