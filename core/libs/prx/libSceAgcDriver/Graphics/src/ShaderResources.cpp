@@ -269,9 +269,9 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
             auto resource = DecodeTextureResource(words);
-            Require(MatchesGuestDimension(*binding.imageShape, resource.dimension), "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (" + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ") disagrees with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
-            // The view follows the shader's shape: a cube sampled as an array is viewed as its faces.
-            if (*binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2DArray) resource.dimension = TextureDimension::k2DArray;
+            const auto view = SampledViewDimension(*binding.imageShape, resource.dimension);
+            Require(view.has_value(), "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (" + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ") cannot be viewed with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
+            resource.viewDimension = *view;
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             textures.push_back(context.textureCache->Get(words, resource, components));
             item.imageAllocations.push_back(textures.size() - 1);

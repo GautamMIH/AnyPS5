@@ -3,6 +3,7 @@
 
 #include "Recompiler.hpp"
 #include <cstdint>
+#include <optional>
 #include <span>
 
 namespace AgcDriver::Graphics {
@@ -38,6 +39,9 @@ struct GuestTextureResource {
     std::uint32_t lastLevel;
     TextureTileMode tileMode;
     TextureDimension dimension;
+    // How shaders see the texture: the instruction's shape picks the view (shadPS4 ImageViewInfo),
+    // while dimension keeps describing the surface in memory.
+    TextureDimension viewDimension;
     std::uint32_t format;
     std::uint8_t dstSelX;
     std::uint8_t dstSelY;
@@ -47,6 +51,9 @@ struct GuestTextureResource {
 
 GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words);
 bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension);
+// The view a sampled image of this dimension presents to a shader of this shape: a 2D shape views
+// one layer of an array or cube, an array shape views a 2D texture or cube as layers.
+std::optional<TextureDimension> SampledViewDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension);
 
 }
 

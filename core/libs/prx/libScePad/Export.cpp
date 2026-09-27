@@ -79,11 +79,12 @@ int APS5_VABI scePadGetHandle(int user_id, int type, int index) {
  return openedPorts.contains({user_id, type, index}) ? PAD_HANDLE : PAD_ERROR_NO_HANDLE;
 }
 
+// The emulated pad has no adaptive triggers, so no effect is ever running (KytyPS5).
 int APS5_VABI scePadGetTriggerEffectState(int handle, PadTriggerEffectStateInformation* info) {
- (void)handle;
- (void)info;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ if (info == nullptr) return PAD_ERROR_INVALID_ARG;
+ *info = PadTriggerEffectStateInformation{};
+ return PAD_OK;
 }
 
 int APS5_VABI scePadInit_nid_postfix(void) {
@@ -168,18 +169,18 @@ int APS5_VABI scePadSetTiltCorrectionState(int handle, bool enabled) {
  return 0;
 }
 
+// Trigger effects and rumble are controller output the emulated pad does not render; requests are
+// accepted like on a pad without those motors.
 int APS5_VABI scePadSetTriggerEffect(int handle, const void* param) {
- (void)handle;
- (void)param;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ if (param == nullptr) return PAD_ERROR_INVALID_ARG;
+ return PAD_OK;
 }
 
 int APS5_VABI scePadSetVibration(int handle, const PadVibrationParam* param) {
- (void)handle;
- (void)param;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ if (param == nullptr) return PAD_ERROR_INVALID_ARG;
+ return PAD_OK;
 }
 
 // Selects compatible rumble or advanced haptics; the emulated pad has neither, as in KytyPS5.
@@ -193,8 +194,7 @@ int APS5_VABI scePadSetVibrationMode(int handle, int mode) {
 
 int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool enabled) {
  (void)enabled;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return PAD_OK;
 }
 
 }

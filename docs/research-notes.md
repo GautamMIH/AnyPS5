@@ -34,6 +34,14 @@ Issues that needed research, with a short answer. Check here before researching;
 - **Save data mount points.** Mount points are short guest paths `/savedataN` (16-byte field) served from the save directory, not host paths. (shadPS4 savedata)
 - **Offline NP.** Online/NP ids return SIGNED_OUT 0x80550006; bad args 0x80550003. Trophy bad args return 0x80551604 instead of failing. (shadPS4 np_manager.cpp, np_trophy.cpp)
 
+## Textures
+
+- **Shader shape vs descriptor type.** The instruction's dimension picks the view (shadPS4 ImageViewInfo uses the shader's is_array): a 2D sample of an array/cube views the base layer; an array sample of a 2D texture views it as one layer. The descriptor type still defines the memory layout.
+
+## Audio / video decode
+
+- **libSceAudiodec codec ids.** AT9 = 1, MP3 = 2, M4AAC = 3. Ctrl = {param, bsiInfo, auInfo {size 0x18, addr, bytes}, pcmItem {size 0x18, addr, bytes}}. Unfilled bsi/param info (channels 0) makes games divide by zero. shadPS4 decodes AAC/MP3 (Ajm) and video (Videodec2) with FFmpeg; AT9 with LibAtrac9 (vendored here).
+
 ## Fast clears / compression
 
 - **CMASK fast clear.** Register CMASK (only with FAST_CLEAR) as cleared on first use; DMA fill or XOR-free compute write to it re-clears; draw into a cleared target fills with CLEAR_WORD; eliminate pass = that fill for target 0. DCC ignored: surfaces stay uncompressed. (shadPS4 vk_rasterizer.cpp, texture_cache.h)

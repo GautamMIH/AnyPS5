@@ -146,6 +146,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.lastLevel = lastLevel;
     result.tileMode = tileMode;
     result.dimension = dimension;
+    result.viewDimension = dimension;
     result.format = format;
     result.dstSelX = static_cast<std::uint8_t>(dstSelX);
     result.dstSelY = static_cast<std::uint8_t>(dstSelY);
@@ -164,6 +165,19 @@ bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, Texture
         case ShaderRecompiler::DescriptorImageShape::Image3D: return dimension == TextureDimension::k3D;
     }
     throw std::runtime_error("AGC graphics: MatchesGuestDimension encountered an unknown descriptor image shape");
+}
+
+std::optional<TextureDimension> SampledViewDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension) {
+    using Shape = ShaderRecompiler::DescriptorImageShape;
+    const bool layered = dimension == TextureDimension::k2D || dimension == TextureDimension::k2DArray || dimension == TextureDimension::kCube;
+    switch (shape) {
+        case Shape::Image1D: return dimension == TextureDimension::k1D ? std::optional(TextureDimension::k1D) : std::nullopt;
+        case Shape::Image2D: return layered ? std::optional(TextureDimension::k2D) : std::nullopt;
+        case Shape::Image2DArray: return layered ? std::optional(TextureDimension::k2DArray) : std::nullopt;
+        case Shape::ImageCube: return dimension == TextureDimension::kCube ? std::optional(TextureDimension::kCube) : std::nullopt;
+        case Shape::Image3D: return dimension == TextureDimension::k3D ? std::optional(TextureDimension::k3D) : std::nullopt;
+    }
+    throw std::runtime_error("AGC graphics: SampledViewDimension encountered an unknown descriptor image shape");
 }
 
 }

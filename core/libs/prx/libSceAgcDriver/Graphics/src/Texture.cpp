@@ -203,14 +203,16 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         }
 
         const auto viewLevelCount = descriptor.lastLevel - descriptor.baseLevel + 1u;
-        const auto viewLayerCount = volume ? 1u : arrayLayers - descriptor.baseArray;
-        if (descriptor.dimension == TextureDimension::kCube) {
+        // A 1D or 2D view shows the base layer alone.
+        const bool singleLayer = descriptor.viewDimension == TextureDimension::k1D || descriptor.viewDimension == TextureDimension::k2D;
+        const auto viewLayerCount = volume || singleLayer ? 1u : arrayLayers - descriptor.baseArray;
+        if (descriptor.viewDimension == TextureDimension::kCube) {
             Require(viewLayerCount % 6u == 0, "guest cube texture view does not contain a multiple of 6 array slices");
         }
 
         VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         viewInfo.image = image;
-        viewInfo.viewType = ViewTypeFor(descriptor.dimension, viewLayerCount);
+        viewInfo.viewType = ViewTypeFor(descriptor.viewDimension, viewLayerCount);
         viewInfo.format = vkFormat;
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};

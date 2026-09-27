@@ -30,7 +30,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     trim();
     std::array<std::uint32_t, 9> key;
     std::copy(words.begin(), words.end(), key.begin());
-    key[8] = static_cast<std::uint32_t>(resource.dimension);
+    key[8] = static_cast<std::uint32_t>(resource.dimension) | (static_cast<std::uint32_t>(resource.viewDimension) << 8u);
     auto source = context.renderCache ? context.renderCache->Find(resource.baseAddress) : nullptr;
     if (source) {
         const auto& color = source->Description();
