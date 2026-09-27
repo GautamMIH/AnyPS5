@@ -34,7 +34,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     Require(draw.indexed ? draw.flags == 0 : (draw.flags & ~0x20u) == 0, "draw modifiers are unsupported");
     if (draw.indexed) {
         Require(draw.indexSize == 2 || draw.indexSize == 4, "only uint16 and uint32 index buffers are supported");
-        Require(draw.firstVertex == 0 && draw.firstInstance == 0, "indexed draw offsets are unsupported");
+        // firstVertex is the signed base vertex added to every index.
+        Require(draw.firstInstance <= std::numeric_limits<std::uint32_t>::max() - (draw.instanceCount - 1u), "indexed draw instance range overflow");
     } else {
         Require(draw.indexAddress == 0 && draw.indexSize == 0, "auto draw must not reference an index buffer");
         if (draw.indexCount == 0 || draw.instanceCount == 0) return;
@@ -62,7 +63,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     const auto shaderStages = PipelineStages(shaders);
     std::uint32_t meshGroups = 0;
     if (state.stages.mesh) {
-        Require(draw.firstVertex == 0 && draw.firstInstance == 0, "mesh draw offsets are unsupported");
+        // Auto draws pass their offsets in the mesh draw parameters; indexed ones have none.
+        Require(!draw.indexed || (draw.firstVertex == 0 && draw.firstInstance == 0), "indexed mesh draw offsets are unsupported");
         Require(context.meshShader, "device does not support mesh shaders");
         const auto& mesh = *state.stages.mesh;
         const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
@@ -93,6 +95,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             Require(index <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
             maxIndex = std::max(maxIndex, index);
         }
+        const auto highest = static_cast<std::int64_t>(maxIndex) + static_cast<std::int32_t>(draw.firstVertex);
+        Require(highest >= 0 && highest <= std::numeric_limits<std::uint32_t>::max(), "base vertex moves indices out of range");
+        maxIndex = static_cast<std::uint32_t>(highest);
     }
     timing.Mark("index_upload");
     const auto& attributes = shaders.front().program->vertexAttributes;
@@ -167,7 +172,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         if (!vertexHandles.empty()) context.Function<PFN_vkCmdBindVertexBuffers>("vkCmdBindVertexBuffers")(commands, 0, static_cast<std::uint32_t>(vertexHandles.size()), vertexHandles.data(), vertexOffsets.data());
         if (draw.indexed) {
             context.Function<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer")(commands, indices->Handle(), 0, draw.indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
-            context.Function<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed")(commands, draw.indexCount, draw.instanceCount, 0, 0, 0);
+            context.Function<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed")(commands, draw.indexCount, draw.instanceCount, 0, static_cast<std::int32_t>(draw.firstVertex), draw.firstInstance);
         } else {
             context.Function<PFN_vkCmdDraw>("vkCmdDraw")(commands, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);
         }

@@ -130,11 +130,10 @@ int APS5_VABI sceNpGetAccountIdA(int user_id, uint64_t* account_id) {
  return NP_ERROR_SIGNED_OUT;
 }
 
+// Offline, users have no PSN identity (shadPS4 sceNpGetOnlineId without shadnet).
 int APS5_VABI sceNpGetNpId(int user_id, NpId* np_id) {
- (void)user_id;
- (void)np_id;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id == USER_SERVICE_USER_ID_INVALID || !np_id) return NP_ERROR_INVALID_ARGUMENT;
+ return NP_ERROR_SIGNED_OUT;
 }
 
 int APS5_VABI sceNpGetNpReachabilityState(int user_id, uint32_t* state) {
@@ -145,10 +144,8 @@ int APS5_VABI sceNpGetNpReachabilityState(int user_id, uint32_t* state) {
 }
 
 int APS5_VABI sceNpGetOnlineId(int user_id, NpOnlineId* online_id) {
- (void)user_id;
- (void)online_id;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (user_id == USER_SERVICE_USER_ID_INVALID || !online_id) return NP_ERROR_INVALID_ARGUMENT;
+ return NP_ERROR_SIGNED_OUT;
 }
 
 int APS5_VABI sceNpGetState(int user_id, uint32_t* state) {

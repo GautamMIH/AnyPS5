@@ -103,7 +103,8 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         case 0x27: case 0x2a: case 0x2d: case 0x2f: case 0x35: case 0x37: case 0x40: case 0x42: case 0x46: case 0x50:
         case 0x58: case 0x63: case 0x64: case 0x69: case 0x76: case 0x79: case 0x7a:
         case 0x81: case 0x83: case 0x9f: return {};
-        case 0x24: case 0x25: case 0x2c: case 0x38: case 0x3a: case 0x8d:
+        case 0x24: case 0x25: case 0x2c: case 0x38: return {};
+        case 0x3a: case 0x8d:
             return "graphics draw, shader stages and guest render-target materialization are not implemented";
         case 0x20: return {};
         case 0x22: return "conditional command execution and conditional flip reservation are not implemented";
@@ -188,6 +189,24 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             require(packet[3] <= packet[1], "index count exceeds maximum index size");
             require((packet[4] & ~0x20u) == 0, "unsupported indexed draw flags");
             break;
+        // Indirect draws (KytyPS5 CpOpDrawIndirect/CpOpDrawIndirectMulti): DW2 holds the base
+        // vertex SGPR (and, indexed, the start index SGPR in bits 16-31), DW3 the start instance
+        // SGPR (bit 27 enables the start index SGPR); 0x280 means no SGPR.
+        case 0x24: case 0x25: case 0x2c: case 0x38: {
+            graphics();
+            const bool multi = opcode == 0x2c || opcode == 0x38;
+            const bool indexed = opcode == 0x25 || opcode == 0x38;
+            size(multi ? 10 : 5);
+            require((packet[1] & 3u) == 0, "misaligned indirect draw argument offset");
+            require(indexed ? (packet[3] & ~0x0800ffffu) == 0 && ((packet[3] & 0x08000000u) != 0 || (packet[2] >> 16u) == 0) : (packet[2] >> 16u) == 0 && (packet[3] >> 16u) == 0, "unsupported indirect draw patch locations");
+            require((packet.back() & ~0x20u) == 2u, "unsupported indirect draw initiator");
+            if (multi) {
+                require((packet[4] & ~(opcode == 0x2c ? 0xc000ffffu : 0x40000000u)) == 0, "unsupported indirect multi-draw control bits");
+                require((packet[8] & 3u) == 0 && packet[8] >= (indexed ? 20u : 16u), "invalid indirect multi-draw stride");
+                require((packet[4] & 0x40000000u) == 0 ? packet[6] == 0 && packet[7] == 0 : (packet[6] & 3u) == 0 && address(packet[6], packet[7]) != 0, "invalid indirect multi-draw count address");
+            }
+            break;
+        }
         case 0x15: size(5); require((packet[4] & ~0x8000u) == 0x41u, "dispatch modifiers are not implemented"); break;
         case 0x16:
             require(packet.size() == 3 || packet.size() == 4, "invalid indirect dispatch size");
@@ -379,7 +398,7 @@ std::uint64_t GpuClock() {
 
 bool AccessesMemory(std::uint32_t header) {
     switch ((header >> 8u) & 0xffu) {
-        case 0x16: case 0x20: case 0x27: case 0x2d: case 0x35: case 0x37: case 0x3c: case 0x40: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
+        case 0x16: case 0x20: case 0x24: case 0x25: case 0x27: case 0x2c: case 0x2d: case 0x35: case 0x38: case 0x37: case 0x3c: case 0x40: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
         default: return false;
     }
 }
@@ -431,6 +450,66 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
     require(bytes <= std::numeric_limits<std::size_t>::max(), "index range size overflow");
     GuestMemory::CheckRange(reinterpret_cast<const void*>(indexAddress), static_cast<std::size_t>(bytes), indexSize);
     return {indexAddress, indexCount, indexSize, queue.instanceCount, initiator};
+}
+
+std::vector<IndirectDraw> ResolveIndirectDraws(std::span<const std::uint32_t> packet, const QueueState& queue) {
+    Validate(packet, 0);
+    const auto opcode = (packet[0] >> 8u) & 0xffu;
+    const bool multi = opcode == 0x2c || opcode == 0x38;
+    const bool indexed = opcode == 0x25 || opcode == 0x38;
+    require(queue.drawIndirectBase != 0, "indirect draw base has not been set");
+    constexpr std::uint32_t noRegister = 0x280;
+    const auto baseVertexRegister = packet[2] & 0xffffu;
+    const auto startIndexRegister = indexed && (packet[3] & 0x08000000u) != 0 ? packet[2] >> 16u : noRegister;
+    const auto startInstanceRegister = packet[3] & 0xffffu;
+    const auto drawIndexRegister = opcode == 0x2c && (packet[4] & 0x80000000u) != 0 ? packet[4] & 0xffffu : noRegister;
+    std::uint32_t count = 1;
+    std::uint32_t stride = 0;
+    if (multi) {
+        count = packet[5];
+        stride = packet[8];
+        if ((packet[4] & 0x40000000u) != 0) {
+            std::uint32_t stored = 0;
+            GuestMemory::Read(address(packet[6], packet[7]), std::as_writable_bytes(std::span(&stored, 1)), 4);
+            count = std::min(count, stored);
+        }
+    }
+    std::uint32_t indexSize = 0;
+    if (indexed) {
+        require(queue.indexType <= 2, "unsupported index type");
+        indexSize = queue.indexType == 0 ? 2 : queue.indexType == 1 ? 4 : 1;
+        require(queue.indexBase != 0 && queue.indexBase % indexSize == 0, "null or misaligned index base");
+    }
+    std::vector<IndirectDraw> draws;
+    draws.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        const auto offset = static_cast<std::uint64_t>(packet[1]) + static_cast<std::uint64_t>(i) * stride;
+        require(offset <= std::numeric_limits<std::uint64_t>::max() - queue.drawIndirectBase, "indirect draw address overflow");
+        // {count, instances, start vertex or index, [base vertex,] start instance}
+        std::array<std::uint32_t, 5> arguments{};
+        GuestMemory::Read(queue.drawIndirectBase + offset, std::as_writable_bytes(std::span(arguments).first(indexed ? 5 : 4)), 4);
+        IndirectDraw draw;
+        const auto patch = [&](std::uint32_t location, std::uint32_t value) {
+            if (location != noRegister) draw.registers.emplace_back(location, value);
+        };
+        patch(baseVertexRegister, indexed ? arguments[3] : arguments[2]);
+        patch(startInstanceRegister, indexed ? arguments[4] : arguments[3]);
+        patch(startIndexRegister, arguments[2]);
+        patch(drawIndexRegister, i);
+        // Base vertex and start instance reach vertices only through those SGPRs, as on hardware.
+        if (indexed) {
+            // INDEX_BUFFER_SIZE bounds the indices a draw may read (KytyPS5).
+            const auto indexCount = queue.indexBufferSize != 0 ? std::min(arguments[0], queue.indexBufferSize) : arguments[0];
+            const auto start = static_cast<std::uint64_t>(arguments[2]) * indexSize;
+            require(start <= std::numeric_limits<std::uint64_t>::max() - queue.indexBase, "index address overflow");
+            draw.parameters = {queue.indexBase + start, indexCount, indexSize, arguments[1], packet.back() & 0x20u};
+            if (indexCount != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.parameters.indexAddress), static_cast<std::size_t>(static_cast<std::uint64_t>(indexCount) * indexSize), indexSize);
+        } else {
+            draw.parameters = {0, arguments[0], 0, arguments[1], packet.back() & 0x20u, false};
+        }
+        draws.push_back(std::move(draw));
+    }
+    return draws;
 }
 
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {

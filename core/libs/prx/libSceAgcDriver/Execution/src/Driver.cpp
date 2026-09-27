@@ -459,10 +459,10 @@ private:
         }
     }
 
-    void draw(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
+    void draw(QueueState& queue, Pm4::DrawParameters drawParameters, const Submission& submission) {
         PerformanceTimer timing("Driver.Draw");
-        auto drawParameters = Pm4::ResolveDraw(packet, queue);
-        if (!drawParameters.indexed && (drawParameters.indexCount == 0 || drawParameters.instanceCount == 0)) return;
+        // Empty draws (common with GPU-generated indirect arguments) do nothing on hardware.
+        if (drawParameters.indexCount == 0 || drawParameters.instanceCount == 0) return;
         const auto graphics = Graphics::DecodeState(queue);
         if (graphics.eliminateFastClear) {
             std::lock_guard gpuLock(gpuMutex);
@@ -615,7 +615,8 @@ private:
             results.push_back(ShaderRecompiler::Recompile(request));
             shaderTiming.Mark(results.back().cacheHit ? "cache_hit" : "compile");
             const auto& result = results.back();
-            if (!drawParameters.indexed && i == 0) {
+            // Mesh draws read indices in-shader and take no indexed offsets.
+            if (i == 0 && !(drawParameters.indexed && graphics.stages.mesh)) {
                 const auto offsetValue = [&](std::int32_t sgpr) {
                     require(sgpr >= 0 && static_cast<std::uint32_t>(sgpr) >= program.firstUserSgpr, "invalid draw offset SGPR");
                     const auto index = static_cast<std::uint32_t>(sgpr) - program.firstUserSgpr;
@@ -785,7 +786,22 @@ private:
                     }
                     withContext([&] { dispatch(queue, direct, submission); });
                 } else if (opcode == 0x35 || opcode == 0x27 || opcode == 0x2d) {
-                    withContext([&] { draw(queue, packet, submission); });
+                    withContext([&] { draw(queue, Pm4::ResolveDraw(packet, queue), submission); });
+                } else if (opcode == 0x24 || opcode == 0x25 || opcode == 0x2c || opcode == 0x38) {
+                    std::vector<Pm4::IndirectDraw> draws;
+                    {
+                        std::lock_guard gpuLock(gpuMutex);
+                        const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+                            if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+                        });
+                        withContext([&] { draws = Pm4::ResolveIndirectDraws(packet, queue); });
+                    }
+                    for (const auto& indirect : draws) {
+                        // The command processor writes the arguments into the SH registers before
+                        // each draw; they persist like any register write.
+                        for (const auto& [location, value] : indirect.registers) queue.shader[location] = value;
+                        withContext([&] { draw(queue, indirect.parameters, submission); });
+                    }
                 } else if (opcode != 0x42 && opcode != 0x46 && opcode != 0x58) {
                     std::lock_guard gpuLock(gpuMutex);
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {

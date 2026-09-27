@@ -25,6 +25,12 @@ std::uint64_t DrawPatchOffsets(std::uint64_t modifier, const char* function) {
     return vertex | (static_cast<std::uint64_t>(instance) << 32u);
 }
 
+std::uint64_t DrawIndexedPatchOffsets(std::uint64_t modifier, const char* function) {
+    auto offsets = DrawPatchOffsets(modifier, function);
+    if ((modifier & 2u) != 0) offsets |= (static_cast<std::uint64_t>(sgprBase(modifier) + static_cast<std::uint32_t>((modifier >> 14u) & 0x1fu)) << 16u) | (1ull << 59u);
+    return offsets;
+}
+
 std::uint32_t DrawIndexLocation(std::uint64_t modifier) {
     return (modifier & 8u) != 0 ? sgprBase(modifier) + static_cast<std::uint32_t>((modifier >> 24u) & 0x1fu) : 0x280u;
 }

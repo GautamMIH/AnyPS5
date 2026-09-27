@@ -9,17 +9,16 @@
 
 extern "C" {
 
-uint32_t* APS5_VABI sceAgcAcbDispatchIndirect(CommandBuffer* buf, const volatile void* indirect_args, uint32_t modifier) {
- (void)buf;
- (void)indirect_args;
- (void)modifier;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+// Compute queues address the arguments directly (KytyPS5).
+std::uint32_t* APS5_VABI sceAgcAcbDispatchIndirect(CommandBuffer* buf, const volatile void* indirectArgs, std::uint32_t modifier) {
+    Agc::Command::CheckBits(modifier, 0xa079u, __func__);
+    const auto address = reinterpret_cast<std::uintptr_t>(indirectArgs);
+    Agc::Command::CheckGpuAddress(address, 4, __func__);
+    return Agc::Command::Emit(buf, 0x16u, {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u), modifier | 0x41u}, __func__);
 }
 
 std::uint32_t APS5_VABI sceAgcAcbDispatchIndirectGetSize() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return 16;
 }
 
 }

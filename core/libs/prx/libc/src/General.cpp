@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <map>
 #include <set>
 
 namespace {
@@ -18,6 +19,8 @@ struct WorkingDirectory {
     std::mutex mutex;
     const std::filesystem::path root = std::filesystem::canonical(std::filesystem::current_path());
     std::filesystem::path current = root;
+    // Guest mount points ("/savedata0") backed by host directories outside the root.
+    std::map<std::string, std::filesystem::path> mounts;
 };
 WorkingDirectory& Directories() { static WorkingDirectory state; return state; }
 std::filesystem::path Resolve(WorkingDirectory& state, const char* path) {
@@ -30,6 +33,13 @@ std::filesystem::path Resolve(WorkingDirectory& state, const char* path) {
 #endif
     auto guest = (std::filesystem::path("/") / state.current.lexically_relative(state.root));
     guest = (input.is_absolute() ? input : guest / input).lexically_normal();
+    const auto normalised = guest.generic_string();
+    for (const auto& [mountPoint, host] : state.mounts) {
+        if (normalised == mountPoint) return host;
+        if (normalised.size() > mountPoint.size() && normalised.compare(0, mountPoint.size(), mountPoint) == 0 && normalised[mountPoint.size()] == '/') {
+            return (host / normalised.substr(mountPoint.size() + 1)).make_preferred();
+        }
+    }
     return (state.root / guest.relative_path()).make_preferred();
 }
 int DirectoryFailure(const std::error_code& error) {
@@ -48,6 +58,20 @@ AmprContainer::Container* appContainer(const std::filesystem::path& root) {
     std::call_once(once, [&root] { container = AmprContainer::Container::Open(root / "app0", root / "ampr_cache"); });
     return container.get();
 }
+}
+
+extern "C" void MountGuestPath_nid_no_patch(const char* mountPoint, const std::filesystem::path& host) {
+    if (!mountPoint || mountPoint[0] != '/' || mountPoint[1] == '\0' || std::strchr(mountPoint + 1, '/') != nullptr) { APS5_INVALID_ARG_EX; }
+    auto& state = Directories();
+    std::lock_guard lock(state.mutex);
+    state.mounts[mountPoint] = std::filesystem::absolute(host).lexically_normal().make_preferred();
+}
+
+extern "C" void UnmountGuestPath_nid_no_patch(const char* mountPoint) {
+    if (!mountPoint) { APS5_INVALID_ARG_EX; }
+    auto& state = Directories();
+    std::lock_guard lock(state.mutex);
+    state.mounts.erase(mountPoint);
 }
 
 extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path) {

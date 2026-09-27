@@ -18,6 +18,11 @@ extern "C" int APS5_VABI sceAgcWaitRegMemPatchReference(std::uint32_t* cmd, std:
 extern "C" int APS5_VABI sceAgcGetDataPacketPayloadAddressUnk(std::uint32_t** addr, std::uint32_t* cmd, int type);
 extern "C" std::uint32_t* APS5_VABI sceAgcCbSetShRegisterRangeDirect(CommandBuffer* buf, std::uint32_t offset, const std::uint32_t* values, std::uint32_t numValues);
 extern "C" std::uint32_t* APS5_VABI sceAgcDcbContextStateAnotherOp(CommandBuffer* buf, std::uint32_t operation);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetBaseIndirectArgs(CommandBuffer* buf, std::uint32_t shaderType, const volatile void* address);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbDrawIndexIndirect(CommandBuffer* buf, std::uint32_t dataOffsetInBytes, std::uint64_t modifier);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbDrawIndexIndirectMulti(CommandBuffer* buf, std::uint32_t dataOffsetInBytes, std::uint32_t countIndirect, std::uint32_t maxCountOrCount, const volatile void* countAddress, std::uint32_t strideInBytes, std::uint64_t modifier);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbDispatchIndirect(CommandBuffer* buf, std::uint32_t dataOffsetInBytes, std::uint32_t flags);
+extern "C" std::uint32_t* APS5_VABI sceAgcAcbDispatchIndirect(CommandBuffer* buf, const volatile void* indirectArgs, std::uint32_t modifier);
 
 namespace {
 
@@ -252,6 +257,30 @@ void testMemory() {
     check(storage.words == before, "invalid memory operation modified packet memory");
 }
 
+// Encodings follow KytyPS5's libAgc: modifier 0x190407 enables base vertex (s[0x8c + 2]), start
+// index (s[0x8c + 4]) and start instance (s[0x8c + 3]).
+void testIndirect() {
+    Storage storage;
+    const auto* base = reinterpret_cast<const volatile void*>(0x100000008ull);
+    sceAgcDcbSetBaseIndirectArgs(&storage.buffer, 1, base);
+    sceAgcDcbDrawIndexIndirect(&storage.buffer, 8, 0x190407u);
+    sceAgcDcbDrawIndexIndirectMulti(&storage.buffer, 0, 1, 5, reinterpret_cast<const volatile void*>(0x3000), 20, 0x190407u);
+    sceAgcDcbDispatchIndirect(&storage.buffer, 12, 0x8000);
+    sceAgcAcbDispatchIndirect(&storage.buffer, reinterpret_cast<const volatile void*>(0x200000010ull), 0);
+    const std::array<std::uint32_t, 28> expected{
+        0xc0021102u, 1, 8, 1,
+        0xc0032500u, 8, 0x0090008eu, 0x0800008fu, 2,
+        0xc0083800u, 0, 0x0090008eu, 0x0800008fu, 0x40000000u, 5, 0x3000, 0, 20, 2,
+        0xc0011600u, 12, 0x8041u,
+        0xc0021600u, 0x10, 2, 0x41u,
+        0, 0};
+    check(std::equal(expected.begin(), expected.end(), storage.words.begin()), "indirect packet mismatch");
+    expectFailure([&] { sceAgcDcbSetBaseIndirectArgs(&storage.buffer, 2, base); });
+    expectFailure([&] { sceAgcDcbDrawIndexIndirect(&storage.buffer, 2, 0); });
+    expectFailure([&] { sceAgcDcbDrawIndexIndirectMulti(&storage.buffer, 0, 0, 1, reinterpret_cast<const volatile void*>(0x3000), 20, 0); });
+    expectFailure([&] { sceAgcDcbDrawIndexIndirectMulti(&storage.buffer, 0, 0, 1, nullptr, 16, 0); });
+}
+
 void testDefaults() {
     std::uint32_t state = 0x12345678;
     check(sceAgcInit(&state, 8) == 0 && state == 0x12345678, "AGC initialization failed or modified caller state");
@@ -278,6 +307,7 @@ int main() {
         testRegisterRange();
         testPacketPayloadAddress();
         testMemory();
+        testIndirect();
         testDefaults();
         LibcRunShutdown_nid_postfix();
         std::puts("AGC command tests passed");

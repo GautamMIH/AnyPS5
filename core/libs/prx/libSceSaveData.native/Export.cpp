@@ -256,12 +256,8 @@ int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult
         throw std::runtime_error("sceSaveDataMount3: invalid directory name");
     }
     const std::string real_path = save_root() + "/" + dirName;
-    const std::string mountPoint = "/" + real_path;
-    if (mountPoint.size() >= sizeof(mount_result->mount_point.data)) {
-        throw std::runtime_error("sceSaveDataMount3: directory path exceeds mount point capacity");
-    }
-    if (find_slot_by_mount_point(mountPoint.c_str()) != -1) {
-        return SAVE_DATA_ERROR_BUSY;
+    for (const auto& mounted : g_slots) {
+        if (mounted.used && mounted.real_path == real_path) return SAVE_DATA_ERROR_BUSY;
     }
     const bool exists = std::filesystem::is_directory(real_path);
     if (create && exists) {
@@ -277,6 +273,9 @@ int APS5_VABI sceSaveDataMount3(const SaveDataMount3* mount, SaveDataMountResult
     if (create || create2) {
         std::filesystem::create_directories(real_path);
     }
+    // Games see /savedataN, as on the console (shadPS4); the filesystem serves it from real_path.
+    const std::string mountPoint = "/savedata" + std::to_string(slot);
+    MountGuestPath_nid_no_patch(mountPoint.c_str(), real_path);
     g_slots[slot].used = true;
     g_slots[slot].mount_point = mountPoint;
     g_slots[slot].real_path = real_path;
@@ -389,6 +388,7 @@ int APS5_VABI sceSaveDataUmount2(uint32_t mode, const SaveDataMountPoint* mount_
     if (slot == -1) {
         return SAVE_DATA_ERROR_NOT_MOUNTED;
     }
+    UnmountGuestPath_nid_no_patch(g_slots[slot].mount_point.c_str());
     g_slots[slot] = MountSlot{};
     return SAVE_DATA_OK;
 }

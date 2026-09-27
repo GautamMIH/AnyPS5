@@ -23,6 +23,17 @@ Issues that needed research, with a short answer. Check here before researching;
 - **Layer from vertex.** Misc export: layer bits 0–10, viewport 16–19; mesh writes it per primitive from the provoking vertex. Pixel ancillary VGPR: layer bits 16–28, sample 8–11. (Kyty spirvEmitterMesh.cpp, Mesa)
 - **Volume render targets.** CB_COLOR_VIEW SLICE_MAX may exceed ATTRIB3 depth; clamp to depth − 1. (Kyty colorRenderTarget.cpp)
 
+## Indirect draws
+
+- **SET_BASE / indirect args.** SET_BASE index 1, header bit 1 = shader type (0 draw base, 1 dispatch base). Records: auto {count, instances, start vertex, start instance}; indexed {count, instances, start index, base vertex, start instance}. (Kyty CpOpSetBase, graphicsRun.cpp)
+- **Patch SGPRs.** DW2 bits 0–15 base-vertex SGPR, bits 16–31 start-index SGPR (indexed, enabled by DW3 bit 27); DW3 bits 0–15 start-instance SGPR; 0x280 = none. The CP writes the values there and the vertex shader adds them itself. MULTI: DW4 bits 0–15 draw-index SGPR (bit 31 enables), bit 30 = count from memory (min with max count); indexed count clamps to INDEX_BUFFER_SIZE. (Kyty agc.cpp decode_indirect_modifier_patch_offsets)
+
+## System services
+
+- **Initial user login.** Some games track players only through sceUserServiceGetEvent; the boot user must arrive as one Login (type 0) event. (shadPS4 UserManager::LoginUser)
+- **Save data mount points.** Mount points are short guest paths `/savedataN` (16-byte field) served from the save directory, not host paths. (shadPS4 savedata)
+- **Offline NP.** Online/NP ids return SIGNED_OUT 0x80550006; bad args 0x80550003. Trophy bad args return 0x80551604 instead of failing. (shadPS4 np_manager.cpp, np_trophy.cpp)
+
 ## Fast clears / compression
 
 - **CMASK fast clear.** Register CMASK (only with FAST_CLEAR) as cleared on first use; DMA fill or XOR-free compute write to it re-clears; draw into a cleared target fills with CLEAR_WORD; eliminate pass = that fill for target 0. DCC ignored: surfaces stay uncompressed. (shadPS4 vk_rasterizer.cpp, texture_cache.h)

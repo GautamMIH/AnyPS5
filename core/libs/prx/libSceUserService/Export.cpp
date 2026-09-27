@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -46,9 +47,15 @@ int APS5_VABI sceUserServiceGetAgeLevel(int user_id, uint32_t* age_level) {
  return USER_SERVICE_OK;
 }
 
+// The initial user is logged in at boot, which queues one login event; games that track players
+// through events rather than the login list depend on it (shadPS4 UserManager::LoginUser).
 int APS5_VABI sceUserServiceGetEvent(SceUserServiceEvent* event) {
  if (!event) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- return USER_SERVICE_ERROR_NO_EVENT;
+ static std::atomic<bool> loginDelivered{false};
+ if (loginDelivered.exchange(true)) return USER_SERVICE_ERROR_NO_EVENT;
+ event->event_type = USER_SERVICE_EVENT_LOGIN;
+ event->user_id = USER_SERVICE_INITIAL_USER_ID;
+ return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceGetGamePresets(int user_id, UserServiceGamePresets* presets) {

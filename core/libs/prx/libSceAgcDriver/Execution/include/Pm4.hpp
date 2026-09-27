@@ -6,6 +6,8 @@
 #include <array>
 #include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace AgcDriver::Pm4 {
 
@@ -18,6 +20,13 @@ struct DrawParameters {
     bool indexed = true;
     std::uint32_t firstVertex = 0;
     std::uint32_t firstInstance = 0;
+};
+
+// One draw of an indirect packet: the SH registers the command processor patches with its
+// arguments (start vertex/index/instance, draw index), then the draw itself.
+struct IndirectDraw {
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> registers;
+    DrawParameters parameters;
 };
 
 std::string Name(std::uint32_t header);
@@ -33,6 +42,8 @@ std::uint64_t GpuClock();
 bool UsesGpuCacheBarrier(std::span<const std::uint32_t> packet);
 std::array<std::uint32_t, 5> ResolveDispatch(std::span<const std::uint32_t> packet, const QueueState& queue);
 DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueState& queue);
+// Reads the arguments of DRAW_INDIRECT, DRAW_INDEX_INDIRECT and their MULTI forms from guest memory.
+std::vector<IndirectDraw> ResolveIndirectDraws(std::span<const std::uint32_t> packet, const QueueState& queue);
 
 }
 

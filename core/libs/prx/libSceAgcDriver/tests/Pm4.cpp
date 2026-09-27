@@ -191,6 +191,48 @@ void testIndexedDraw() {
     expectFailure([&] { AgcDriver::Pm4::ResolveDraw(packet, state); }, "guest");
 }
 
+void testIndirectDraw() {
+    check(AgcDriver::Pm4::AccessesMemory(0xc0032400u) && AgcDriver::Pm4::AccessesMemory(0xc0083800u), "indirect draws must synchronize guest memory");
+    using Patches = std::vector<std::pair<std::uint32_t, std::uint32_t>>;
+    AgcDriver::QueueState state;
+    // Two auto records 16 bytes apart; two indexed records 20 bytes apart starting at byte 40.
+    alignas(8) std::array<std::uint32_t, 20> arguments{3, 2, 5, 7, 6, 1, 9, 4, 0, 0, 4, 2, 1, 0xffffffffu, 8, 0, 3, 5, 2, 1};
+    alignas(4) std::array<std::uint16_t, 16> indices{};
+    alignas(4) std::uint32_t storedCount = 1;
+    expectFailure([&] { AgcDriver::Pm4::ResolveIndirectDraws(makePacket(0x24, {0, 0x280, 0x280, 2}), state); }, "base has not been set");
+    execute(state, makePacket(0x11, {1, low(arguments.data()), high(arguments.data())}));
+    check(state.drawIndirectBase == reinterpret_cast<std::uintptr_t>(arguments.data()) && state.dispatchIndirectBase == 0, "SET_BASE selected the wrong indirect base");
+    // DRAW_INDIRECT patches base vertex (s[0x8c]) and start instance (s[0x8d]).
+    auto draws = AgcDriver::Pm4::ResolveIndirectDraws(makePacket(0x24, {0, 0x8c, 0x8d, 0x22}), state);
+    check(draws.size() == 1 && !draws[0].parameters.indexed && draws[0].parameters.indexCount == 3 && draws[0].parameters.instanceCount == 2 && draws[0].parameters.flags == 0x20 && draws[0].parameters.firstVertex == 0, "auto indirect draw parameters mismatch");
+    check(draws[0].registers == Patches{{0x8c, 5}, {0x8d, 7}}, "auto indirect draw registers mismatch");
+    check(AgcDriver::Pm4::ResolveIndirectDraws(makePacket(0x24, {0, 0x280, 0x280, 2}), state)[0].registers.empty(), "unused patch locations were written");
+    // DRAW_INDIRECT_MULTI with a draw-index SGPR and a count read from memory.
+    const auto multi = makePacket(0x2c, {0, 0x280, 0x280, 0xc000008eu, 2, low(&storedCount), high(&storedCount), 16, 2});
+    AgcDriver::Pm4::Validate(multi, 0);
+    check(AgcDriver::Pm4::ResolveIndirectDraws(multi, state).size() == 1, "indirect count was not applied");
+    storedCount = 9;
+    draws = AgcDriver::Pm4::ResolveIndirectDraws(multi, state);
+    check(draws.size() == 2 && draws[1].parameters.indexCount == 6 && draws[1].registers == Patches{{0x8e, 1}}, "multi-draw did not clamp to the maximum or index draws");
+    // Indexed records patch base vertex, start instance and start index; INDEX_BUFFER_SIZE clamps.
+    state.indexBase = reinterpret_cast<std::uintptr_t>(indices.data());
+    state.indexType = 0;
+    state.indexBufferSize = 3;
+    const auto indexed = makePacket(0x38, {40, 0x8c | (0x8eu << 16u), 0x0800008du, 0, 2, 0, 0, 20, 2});
+    AgcDriver::Pm4::Validate(indexed, 0);
+    draws = AgcDriver::Pm4::ResolveIndirectDraws(indexed, state);
+    check(draws.size() == 2 && draws[0].parameters.indexed && draws[0].parameters.indexCount == 3 && draws[0].parameters.instanceCount == 2 && draws[0].parameters.indexAddress == state.indexBase + 2 && draws[0].parameters.indexSize == 2, "indexed indirect draw parameters mismatch");
+    check(draws[0].registers == Patches{{0x8c, 0xffffffffu}, {0x8d, 8}, {0x8e, 1}}, "indexed indirect draw registers mismatch");
+    check(draws[1].parameters.indexCount == 0, "zero-count indexed record changed");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x24, {0, 0x8c, 0x8d, 2}), 0x20); }, "compute queue");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x24, {2, 0x8c, 0x8d, 2}), 0); }, "argument offset");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x24, {0, 0x8c, 0x8d, 0}), 0); }, "initiator");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x24, {0, 0x8c | (1u << 16u), 0x8d, 2}), 0); }, "patch locations");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2c, {0, 0x280, 0x280, 0x08000000u, 1, 0, 0, 16, 2}), 0); }, "control bits");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x38, {0, 0x280, 0x280, 0, 1, 0, 0, 16, 2}), 0); }, "stride");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x2c, {0, 0x280, 0x280, 0x40000000u, 1, 0, 0, 16, 2}), 0); }, "count address");
+}
+
 void testMemory() {
     AgcDriver::QueueState state;
     std::array<std::uint32_t, 4> data{0, 0, 0, 0};
@@ -467,6 +509,7 @@ int main(int argc, char** argv) {
         testRegisters();
         testContextAndBases();
         testIndexedDraw();
+    testIndirectDraw();
         testAutoDraw();
         testMemory();
         testReleaseMem();

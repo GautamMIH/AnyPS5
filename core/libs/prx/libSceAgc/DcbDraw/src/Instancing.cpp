@@ -16,12 +16,18 @@ std::uint32_t APS5_VABI sceAgcDcbSetNumInstancesGetSize() {
     return 8;
 }
 
-uint32_t* APS5_VABI sceAgcDcbSetBaseIndirectArgs(CommandBuffer* buf, uint32_t shader_type, const volatile void* indirect_base_addr) {
- (void)buf;
- (void)shader_type;
- (void)indirect_base_addr;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+// SET_BASE with base index 1; header bit 1 holds the shader type, selecting the draw (graphics)
+// or dispatch (compute) indirect-argument base (KytyPS5).
+std::uint32_t* APS5_VABI sceAgcDcbSetBaseIndirectArgs(CommandBuffer* buf, std::uint32_t shaderType, const volatile void* indirectBaseAddress) {
+    Agc::Command::CheckBits(shaderType, 1, __func__);
+    const auto address = reinterpret_cast<std::uintptr_t>(indirectBaseAddress);
+    Agc::Command::CheckGpuAddress(address, 8, __func__);
+    auto* packet = Agc::Command::Allocate(buf, 4, __func__);
+    packet[0] = Agc::Command::Header(0x11u, 4, shaderType << 1u);
+    packet[1] = 1;
+    packet[2] = static_cast<std::uint32_t>(address);
+    packet[3] = static_cast<std::uint32_t>(address >> 32u);
+    return packet;
 }
 
 }
