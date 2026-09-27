@@ -1,0 +1,98 @@
+AnyPS5 - testing a new game
+===========================
+
+Run everything from the AnyPS5 repository root. Replace the placeholders:
+  GAME = the game's dump folder (the one with eboot.bin, sce_sys/, ...)
+  OUT  = where the relinked, runnable copy goes (any empty folder)
+
+The latest work lives on branch feat/runtime-modules (pushed to origin). If this checkout is on
+another branch, first run:
+  git fetch origin
+  git checkout feat/runtime-modules
+
+
+1. One-time setup (Fedora)
+--------------------------
+  sudo dnf install ffmpeg-devel          # AAC audio and H.264/HEVC video decoding
+  cmake -S . -B build                    # configure (re-run after pulling new source files)
+
+
+2. Build
+--------
+  cmake --build build --target relinker libs -j16
+
+
+3. Relink the game
+------------------
+  GAME="/home/grim/Downloads/Some Game PPSA00000"
+  OUT=/home/grim/anyps5-runs/some-game
+
+  build/core/relinker/relinker --game "$GAME" "$OUT"
+
+  "$OUT/unresolved.txt" then lists every system function the game imports that AnyPS5 does not
+  implement yet (they only matter if the game actually calls them).
+
+
+4. Run it
+---------
+  cd "$OUT"
+
+  # Strict mode: stops at the first unimplemented function or unsupported feature and names it.
+  # This tells you what to implement next.
+  ./eboot.elf 2>&1 | tee run.log
+
+  # Report mode: logs unimplemented calls and keeps going, to see how far the game gets.
+  ANYPS5_REPORT_UNIMPLEMENTED=1 ./eboot.elf 2>&1 | tee report.log
+
+  # Time-limited run (e.g. 90 s), useful for comparing builds:
+  timeout 90 ./eboot.elf > run.log 2>&1
+
+  Where it stopped:     grep -a "what()\|unhandled" run.log
+  Unimplemented calls:  grep -a "^\[AnyPS5\]" report.log | sort | uniq -c
+  Frames reached:       grep -a -o "FrameTiming\] frame=[0-9]*" run.log | tail -1
+
+  Saves go to "$OUT/_sd"; delete that folder to start with fresh save data.
+
+
+5. Useful environment variables (put them before ./eboot.elf)
+-------------------------------------------------------------
+  General
+    ANYPS5_REPORT_UNIMPLEMENTED=1   log unimplemented calls instead of stopping
+    ANYPS5_GPU=<index>              pick the Vulkan GPU (default: discrete GPU first)
+    ANYPS5_TRACE_FILES=1            log file accesses
+    ANYPS5_TRACE_MEMORY=1           log guest memory map/unmap/protect calls
+    ANYPS5_TRACE_UNWIND=1           log exception unwinding
+
+  GPU / driver
+    ANYPS5_DUMP_FRAMES=<N>          save every Nth presented frame as anyps5-frame-<n>.ppm
+                                    in the current folder (to see what the game renders)
+    ANYPS5_TRACE_PM4=1              log every GPU command packet
+    ANYPS5_SYNC_DRAWS=1             finish each draw before the next (isolates GPU faults)
+    ANYPS5_GPU_MEMORY_COPY=1        use the old per-draw memory copies instead of shared memory
+    ANYPS5_CHECK_STORAGE_TILING=1   verify GPU storage-image tiling against the CPU tiler
+
+  Shaders
+    APS5_DUMP_SPIRV=<dir>           save compiled SPIR-V shaders to <dir>
+    APS5_DUMP_IR=all                print recompiler IR (or a list of shader addresses in hex)
+    APS5_TRACE_STRUCTURIZE=1        trace control-flow structurizing
+    APS5_TRACE_BDA=1                trace shader accesses to guest memory by address
+
+  Audio / video
+    APS5_TRACE_AJM=1                trace the AJM audio decoder
+    APS5_TRACE_AUDIOOUT2=1          trace audio output
+    ANYPS5_TRACE_AUDIODEC=1         trace libSceAudiodec (codec, control blocks, decoded frames)
+    ANYPS5_TRACE_VIDEODEC=1         trace libSceVideodec2 (decoded pictures)
+
+
+6. Debugging a crash
+--------------------
+  cd "$OUT"
+  gdb -q -ex "handle SIGUSR1 SIGUSR2 SIGPIPE nostop noprint pass" -ex run -ex "bt 20" -ex "info registers rip" ./eboot.elf
+
+  For crashes in game code AnyPS5 prints "unhandled SIGSEGV ... in ./eboot.elf+0xOFFSET";
+  OFFSET is the address to disassemble in eboot.elf.
+
+
+7. Before researching a problem
+-------------------------------
+  Check docs/research-notes.md first: it records issues already researched and their answers.
