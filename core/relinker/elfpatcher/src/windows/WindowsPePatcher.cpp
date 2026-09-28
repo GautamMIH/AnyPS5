@@ -30,9 +30,11 @@ void writeDiagnosticsImports(const std::vector<PeImport>& imports) {
 
 void writeGotStub(std::vector<PeSection>& sections, const std::uint32_t targetRva, const std::uint32_t stubRva) {
     for (auto& section : sections) {
-        if (targetRva < section.Rva || targetRva - section.Rva > section.Data.size() - 4)
+        if (section.Data.size() < 8 || targetRva < section.Rva || targetRva - section.Rva > section.Data.size() - 8)
             continue;
-        Io::WriteU32(section.Data, targetRva - section.Rva, stubRva);
+        // A DIR64 base relocation only adds the load delta to the stored value, so the slot must hold the
+        // preferred-VA form (ImageBase + rva); a bare RVA would end up as (loadBase - ImageBase + rva) at runtime.
+        Io::WriteU64(section.Data, targetRva - section.Rva, ImageBase + stubRva);
         return;
     }
     throw Domain::RelinkerException("Lazy import GOT slot is not contained in any section", targetRva);
@@ -74,12 +76,6 @@ std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t
     }
     directories[9] = WindowsTlsBuilder().Build(sourceElf, originalHeaders, image, sections, relocations.BaseRelocations, nextRva);
     WindowsTrampolineBuilder().Build(trampolines, image, sections, nextRva);
-    auto relocationData = relocationBuilder.BuildBaseRelocations(relocations.BaseRelocations);
-    if (!relocationData.empty()) {
-        directories[5] = {nextRva, CheckedRva(relocationData.size())};
-        sections.push_back({".reloc", nextRva, SectionRead | 0x02000040u, std::move(relocationData)});
-        nextRva = AlignRva(nextRva + sections.back().Data.size());
-    }
     const WindowsImportBuilder importBuilder;
     auto nativeImports = importBuilder.Build(nextRva);
     directories[1] = nativeImports.Directory;
@@ -98,11 +94,20 @@ std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t
     auto entry = WindowsEntryStubBuilder().Build(nextRva, image.GetEntryRva(), nativeImports, libraries, relocations.Imports, runPath, lazyBinding, dependencyDiagnostics, dynamicSection.GuestModules);
     directories[3] = entry.ExceptionDirectory;
     const auto entryRva = entry.Code.Rva;
+    nextRva = AlignRva(entry.Code.Rva + entry.Code.Data.size());
     sections.push_back(std::move(nativeImports.Section));
     sections.push_back(std::move(entry.Data));
     sections.push_back(std::move(entry.Code));
-    for (const auto& lazyStub : entry.LazyStubs)
+    for (const auto& lazyStub : entry.LazyStubs) {
         writeGotStub(sections, lazyStub.TargetRva, lazyStub.StubRva);
+        relocations.BaseRelocations.push_back(lazyStub.TargetRva);
+    }
+    auto relocationData = relocationBuilder.BuildBaseRelocations(relocations.BaseRelocations);
+    if (!relocationData.empty()) {
+        directories[5] = {nextRva, CheckedRva(relocationData.size())};
+        sections.push_back({".reloc", nextRva, SectionRead | 0x02000040u, std::move(relocationData)});
+        nextRva = AlignRva(nextRva + sections.back().Data.size());
+    }
     return WindowsPeWriter().Write(sections, entryRva, directories, _windowsGui);
 }
 
