@@ -322,6 +322,8 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
     case RdnaOpcode::SInstPrefetch:
         sInstPrefetch();
         return true;
+    case RdnaOpcode::SCbranchCdbg:
+        return true;
     case RdnaOpcode::SBranch:
     case RdnaOpcode::SCbranchScc0:
     case RdnaOpcode::SCbranchScc1:

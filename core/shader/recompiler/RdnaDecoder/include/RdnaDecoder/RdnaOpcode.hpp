@@ -579,6 +579,7 @@ enum class RdnaOpcode : std::uint16_t {
     STtracedata,
     SInstPrefetch,
     SClause,
+    SCbranchCdbg,
     Exp,
     Count
 };

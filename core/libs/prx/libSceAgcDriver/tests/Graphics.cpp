@@ -1125,6 +1125,29 @@ void validationTests() {
 
 }
 
+bool recompilesDebugBranch(std::uint32_t opcode) {
+    auto queue = makeState();
+    queue.context[0x1b3] = 0x2u;
+    queue.context[0x1b4] = 0x2u;
+    const auto pixel = AgcDriver::Graphics::DecodePixelStageInfo(queue.context, true, 0xe4u);
+    const std::array<std::uint32_t, 4> code{0xbf800000u | (opcode << 16u) | 1u, 0xf800180fu, 0x00000000u, 0xbf810000u};
+    ShaderRecompiler::RecompileRequest request{};
+    request.shader = {ShaderRecompiler::ShaderStage::Fragment, 0x30000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.pixel = pixel;
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 64;
+    request.target.fragmentShaderBarycentricEnabled = true;
+    request.layout.pushConstantSizeBytes = 128;
+    request.useCache = false;
+    return !ShaderRecompiler::Recompile(request).spirv.Words().empty();
+}
+
+void debugBranchTests() {
+    for (const auto opcode : {0x17u, 0x18u, 0x19u, 0x1au}) Require(recompilesDebugBranch(opcode), "a conditional debug branch did not recompile");
+}
+
 int main() {
     try {
         {
@@ -1156,6 +1179,7 @@ int main() {
         InitialContextTests();
         pushConstantTests();
         resourceTests();
+        debugBranchTests();
         validationTests();
         rectListTests();
         mock = MockVulkan{};
