@@ -12,6 +12,8 @@ namespace {
 
 constexpr std::uint32_t PathCapacity = 32768;
 constexpr std::uint32_t ErrorMessageCapacity = 32768;
+constexpr std::uint32_t ArgumentCapacity = 32768;
+constexpr std::uint32_t ArgumentTextCapacity = ArgumentCapacity * 3;
 
 std::string normalizeRunPath(std::string path) {
     if (path.empty() || std::any_of(path.begin(), path.end(), [](const unsigned char value) { return value == 0 || value >= 128; }))
@@ -54,6 +56,12 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
 
     const auto programPath = reserve(PathCapacity);
     const auto modulePath = reserve(PathCapacity);
+    const auto argumentBlock = reserve(8);
+    const auto argumentCount = reserve(4);
+    const auto wideArguments = reserve(8);
+    const auto shellHandle = reserve(8);
+    const auto shellLibrary = addString("shell32.dll");
+    const auto parseArguments = addString("CommandLineToArgvW");
     const auto handles = reserve(libraries.size() * 8);
     const auto guestFinished = reserve(4);
     const WindowsGuestStartup guestStartup;
@@ -98,6 +106,8 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
     std::vector<std::string> errors = {"FAIL: cannot obtain executable path\n", "FAIL: executable or library path is too long\n", "FAIL: executable path has no directory\n"};
     for (const auto& import : imports)
         errors.push_back("FAIL: unresolved ELF import " + import.Name + "\n");
+    const auto argumentError = errors.size();
+    errors.push_back("FAIL: cannot prepare command-line arguments\n");
     std::vector<std::uint32_t> errorRvas;
     for (const auto& error : errors)
         errorRvas.push_back(addString(error));
@@ -327,9 +337,54 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
 
     guestStartup.Initialize(code, guestModules, handles);
     writeString(enteringElf);
-    code.Emit({0x48, 0xc7, 0x44, 0x24, 0x40, 1, 0, 0, 0});
-    code.Rip({0x48, 0x8d, 0x05}, programPath);
-    code.Emit({0x48, 0x89, 0x44, 0x24, 0x48, 0x31, 0xc0, 0x48, 0x89, 0x44, 0x24, 0x50, 0x48, 0x89, 0x44, 0x24, 0x58, 0x48, 0x8d, 0x7c, 0x24, 0x40});
+    code.Rip({0x48, 0x8d, 0x0d}, shellLibrary);
+    code.Emit({0x31, 0xd2, 0x41, 0xb8, 0, 8, 0, 0});
+    call("LoadLibraryExA");
+    requireNonzero(argumentError, 0xc0000135u);
+    code.Rip({0x48, 0x89, 0x05}, shellHandle);
+    code.Emit({0x48, 0x89, 0xc1});
+    code.Rip({0x48, 0x8d, 0x15}, parseArguments);
+    call("GetProcAddress");
+    requireNonzero(argumentError, 0xc0000139u);
+    code.Emit({0x48, 0x89, 0xc3});
+    call("GetCommandLineW");
+    code.Emit({0x48, 0x89, 0xc1});
+    code.Rip({0x48, 0x8d, 0x15}, argumentCount);
+    code.Emit({0xff, 0xd3});
+    requireNonzero(argumentError, 0xc000000du);
+    code.Rip({0x48, 0x89, 0x05}, wideArguments);
+    code.Emit({0x48, 0x89, 0xc3});
+    code.Rip({0x8b, 0x2d}, argumentCount);
+    code.Emit({0x8d, 0x45, 0xff, 0x3d});
+    code.U32(ArgumentCapacity - 1);
+    const auto countFits = code.Branch({0x0f, 0x82});
+    fail(argumentError, 0xc000000du);
+    code.PatchBranch(countFits, code.GetRva());
+    code.Emit({0x31, 0xc9, 0xba});
+    code.U32((ArgumentCapacity + 3) * 8 + ArgumentTextCapacity);
+    code.Emit({0x41, 0xb8, 0, 0x30, 0, 0, 0x41, 0xb9, 4, 0, 0, 0});
+    call("VirtualAlloc");
+    requireNonzero(argumentError, 0xc0000017u);
+    code.Rip({0x48, 0x89, 0x05}, argumentBlock);
+    code.Emit({0x48, 0x89, 0x28, 0x48, 0x8d, 0x70, 8, 0x48, 0x8d, 0xb8});
+    code.U32((ArgumentCapacity + 3) * 8);
+    code.Emit({0x41, 0xbc});
+    code.U32(ArgumentTextCapacity);
+    const auto convertArgument = code.GetRva();
+    code.Emit({0x48, 0x89, 0x3e, 0xb9});
+    code.U32(65001);
+    code.Emit({0xba, 0x80, 0, 0, 0, 0x4c, 0x8b, 0x03, 0x41, 0xb9, 0xff, 0xff, 0xff, 0xff});
+    code.Emit({0x48, 0x89, 0x7c, 0x24, 0x20, 0x44, 0x89, 0x64, 0x24, 0x28});
+    code.Emit({0x48, 0xc7, 0x44, 0x24, 0x30, 0, 0, 0, 0, 0x48, 0xc7, 0x44, 0x24, 0x38, 0, 0, 0, 0});
+    call("WideCharToMultiByte");
+    requireNonzero(argumentError, 0xc000000du);
+    code.Emit({0x48, 0x01, 0xc7, 0x41, 0x29, 0xc4, 0x48, 0x83, 0xc3, 8, 0x48, 0x83, 0xc6, 8, 0xff, 0xcd});
+    code.Rip({0x0f, 0x85}, convertArgument);
+    code.Rip({0x48, 0x8b, 0x0d}, wideArguments);
+    call("LocalFree");
+    code.Rip({0x48, 0x8b, 0x0d}, shellHandle);
+    call("FreeLibrary");
+    code.Rip({0x48, 0x8b, 0x3d}, argumentBlock);
     const auto exitCallback = code.Branch({0x48, 0x8d, 0x35});
     code.Rip({0xe8}, entryRva);
     code.Emit({0x89, 0x44, 0x24, 0x58});
