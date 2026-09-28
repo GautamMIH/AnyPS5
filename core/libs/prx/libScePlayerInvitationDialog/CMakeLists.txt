@@ -1,0 +1,3 @@
+add_library(libScePlayerInvitationDialog SHARED EXCLUDE_FROM_ALL libScePlayerInvitationDialog.cpp)
+target_include_directories(libScePlayerInvitationDialog PRIVATE ${LIBS_INCLUDE_DIR})
+configure_windows_unwind(libScePlayerInvitationDialog)
