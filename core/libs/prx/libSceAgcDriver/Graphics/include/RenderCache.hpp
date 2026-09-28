@@ -57,6 +57,12 @@ public:
     void ReleaseMemory();
     bool Overlaps(std::uint64_t address, std::size_t bytes) const;
     bool SharesPages(const DepthTarget& other) const;
+    // Changes whenever a draw may have written the depth image.
+    std::uint64_t Generation() const { return generation; }
+    // Bytes per depth texel in the host image (and in CopyDepth's output).
+    std::uint32_t HostDepthBytes() const;
+    // Records a copy of the depth plane, row-major and unpadded, into buffer.
+    void CopyDepth(VkCommandBuffer commands, VkBuffer buffer);
 
 private:
     void transition(VkCommandBuffer commands, VkImageLayout next);
@@ -75,6 +81,7 @@ private:
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     bool valid = false;
     bool dirty = false;
+    std::uint64_t generation = 1;
     std::vector<std::unique_ptr<GuestMemoryTracking::Watch>> watches;
 };
 
@@ -85,6 +92,8 @@ public:
     std::shared_ptr<ResidentColor> Get(const ColorTarget& color, bool blending);
     std::shared_ptr<ResidentDepth> GetDepth(const DepthTarget& depth);
     std::shared_ptr<ResidentColor> Find(std::uint64_t address) const;
+    // The resident depth surface whose depth plane starts at address, if its image is current.
+    std::shared_ptr<ResidentDepth> FindDepth(std::uint64_t address) const;
     void Resolve(std::uint64_t address, std::size_t bytes, bool writable);
     void Flush();
 

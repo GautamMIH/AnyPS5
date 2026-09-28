@@ -238,4 +238,8 @@ VkImageView Texture::View() const {
     return view;
 }
 
+bool Texture::UploadComplete() const {
+    return upload == nullptr || upload->IsComplete();
+}
+
 }

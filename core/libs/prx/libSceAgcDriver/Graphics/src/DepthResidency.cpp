@@ -138,7 +138,21 @@ void ResidentDepth::Begin(VkCommandBuffer commands) {
     transition(commands, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     valid = true;
     dirty = true;
+    ++generation;
     protect(GuestMemoryTracking::Protection::None);
+}
+
+std::uint32_t ResidentDepth::HostDepthBytes() const {
+    return hostDepthBytes(depth);
+}
+
+void ResidentDepth::CopyDepth(VkCommandBuffer commands, VkBuffer buffer) {
+    Require(valid && depth.depthElementBytes != 0, "resident depth has no current depth plane");
+    transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    region.imageExtent = {depth.extent.width, depth.extent.height, 1};
+    context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, target->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer, 1, &region);
 }
 
 void ResidentDepth::Download(VkCommandBuffer commands) {

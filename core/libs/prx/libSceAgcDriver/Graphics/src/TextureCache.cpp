@@ -21,9 +21,9 @@ namespace {
 // Soft-dirty bits are cleared once enough lookups had to compare pages written since the last clear,
 // and not more often than kClearInterval (a clear walks every page table of the process). A clear
 // also runs every kIdleClearInterval, so snapshots of unchanged textures are released.
-constexpr std::uint64_t kComparesBeforeClear = 16;
-constexpr auto kClearInterval = std::chrono::milliseconds(100);
-constexpr auto kIdleClearInterval = std::chrono::seconds(1);
+constexpr std::uint64_t kComparesBeforeClear = 64;
+constexpr auto kClearInterval = std::chrono::seconds(1);
+constexpr auto kIdleClearInterval = std::chrono::seconds(2);
 
 }
 
@@ -47,11 +47,13 @@ TextureCache::~TextureCache() {
 
 void TextureCache::erase(Entries::iterator it) {
     retainedBytes -= it->snapshot.size() + it->texture->AllocationBytes();
+    if (it->texture.use_count() == 1 && !it->texture->UploadComplete()) retiring.push_back(std::move(it->texture));
     index.erase(it->descriptor);
     entries.erase(it);
 }
 
 void TextureCache::trim() {
+    std::erase_if(retiring, [](const std::shared_ptr<Texture>& texture) { return texture->UploadComplete(); });
     for (auto it = entries.begin(); it != entries.end() && (retainedBytes > budget || entries.size() > maxEntries);) {
         if (it->texture.use_count() != 1) {
             ++it;
@@ -114,7 +116,9 @@ void TextureCache::clearWhenUseful() {
     const auto now = std::chrono::steady_clock::now();
     const auto elapsed = now - lastClear;
     if (elapsed < kClearInterval || (dirtyCompares < kComparesBeforeClear && elapsed < kIdleClearInterval)) return;
+    PerformanceTimer timing("Graphics.TextureCache.SoftDirtyClear");
     WriteTracker::Clear();
+    timing.Mark("clear");
     dirtyCompares = 0;
     lastClear = now;
 }
@@ -133,13 +137,23 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         const auto compatibleTiling = (color.tileMode == ColorTileMode::RenderTarget && resource.tileMode == TextureTileMode::RenderTarget64KB) || (color.tileMode == ColorTileMode::Linear && resource.tileMode == TextureTileMode::kLinear);
         if (!compatibleTiling || resource.width != color.extent.width || resource.height != color.extent.height || resource.dimension != TextureDimension::k2D || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || IsBlockCompressed(resource.format) || BytesPerElement(resource.format) != color.elementBytes) source.reset();
     }
+    // A texture over a resident depth plane in its depth layout is copied from the depth image.
+    std::shared_ptr<ResidentDepth> depthSource;
+    if (!source && context.renderCache && resource.tileMode == TextureTileMode::Depth64KB) {
+        depthSource = context.renderCache->FindDepth(resource.baseAddress);
+        if (depthSource) {
+            const auto& depth = depthSource->Description();
+            if (resource.dimension != TextureDimension::k2D || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || IsBlockCompressed(resource.format) || resource.width != depth.extent.width || resource.height != depth.extent.height || BytesPerElement(resource.format) != depth.depthElementBytes || depthSource->HostDepthBytes() != depth.depthElementBytes) depthSource.reset();
+        }
+    }
     // Why a lookup misses, for the frame profile: the entry's memory changed, or no entry exists.
     const char* missReason = "miss_absent";
     if (const auto found = index.find(key); found != index.end()) {
         const auto it = found->second;
         missReason = "miss_changed";
-        if (source || it->generation != 0) {
-            if (source && it->source.lock() == source && it->generation == source->Generation()) {
+        if (source || depthSource || it->generation != 0) {
+            const bool current = (source && it->source.lock() == source && it->generation == source->Generation()) || (depthSource && it->depthSource.lock() == depthSource && it->generation == depthSource->Generation());
+            if (current) {
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
                 return result;
@@ -178,6 +192,17 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     }
 create:
     timing.Mark("lookup");
+    if (depthSource) {
+        auto texture = std::make_shared<Texture>(context, depthSource, resource, components);
+        timing.Mark("depth_texture");
+        Entry entry{key, {}, texture, {}, depthSource->Generation()};
+        entry.depthSource = depthSource;
+        entries.push_back(std::move(entry));
+        index[key] = std::prev(entries.end());
+        retainedBytes += texture->AllocationBytes();
+        trim();
+        return texture;
+    }
     if (source) {
         auto texture = std::make_shared<Texture>(context, source, resource, components);
         timing.Mark("render_texture");

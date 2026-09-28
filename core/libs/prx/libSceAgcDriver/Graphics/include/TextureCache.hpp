@@ -30,7 +30,9 @@ private:
         std::vector<std::byte> snapshot;
         std::shared_ptr<Texture> texture;
         std::weak_ptr<ResidentColor> source;
+        // Non-zero for entries copied from a resident target: that target's generation at the copy.
         std::uint64_t generation = 0;
+        std::weak_ptr<ResidentDepth> depthSource;
         // Write tracking of the snapshot's guest range (see WriteTracker): the snapshot is still the
         // guest's contents while no write can have reached the range since it was taken or compared.
         std::uint64_t address = 0;
@@ -58,6 +60,8 @@ private:
     Context context;
     Entries entries;
     std::unordered_map<Key, Entries::iterator, KeyHash> index;
+    // Evicted textures whose upload may still run on the GPU, released once it completed.
+    std::vector<std::shared_ptr<Texture>> retiring;
     std::uint64_t retainedBytes = 0;
     std::uint64_t dirtyCompares = 0;
     std::chrono::steady_clock::time_point lastClear = std::chrono::steady_clock::now();
