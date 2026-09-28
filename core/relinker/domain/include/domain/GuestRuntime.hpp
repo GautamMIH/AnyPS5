@@ -17,6 +17,8 @@ struct GuestImport {
 struct GuestRuntime {
     std::string Path;
     std::vector<GuestImport> Imports;
+    std::vector<std::uint32_t> InitArrayRvas;
+    std::vector<std::uint32_t> FiniArrayRvas;
     std::uint32_t InitRva = 0;
     std::uint32_t FiniRva = 0;
     bool UsePlatformTlsResolver = true;

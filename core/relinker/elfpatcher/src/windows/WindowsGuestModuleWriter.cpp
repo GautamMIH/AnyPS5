@@ -14,7 +14,7 @@ namespace Elfpatcher {
 
 std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestImage& guest, Domain::GuestRuntime& runtime) const {
     using namespace Windows;
-    WindowsLoadImage image(guest.Bytes, guest.Headers);
+    WindowsLoadImage image(guest.Bytes, guest.Headers, false);
     std::vector<std::uint32_t> relocations;
     std::vector<std::pair<std::uint64_t, std::uint32_t>> tlsModules;
     std::map<std::uint64_t, std::uint64_t> targets;
@@ -164,6 +164,8 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     }
     const auto entry = nextRva;
     sections.push_back({".dllmain", entry, SectionRead | SectionExecute | 0x20u, {0xb8, 1, 0, 0, 0, 0xc3}});
+    for (const auto slot : guest.InitArray) runtime.InitArrayRvas.push_back(image.GetRva(slot, 8));
+    for (const auto slot : guest.FiniArray) runtime.FiniArrayRvas.push_back(image.GetRva(slot, 8));
     runtime.InitRva = guest.Init == 0 ? 0 : image.GetRva(guest.Init);
     runtime.FiniRva = guest.Fini == 0 ? 0 : image.GetRva(guest.Fini);
     auto result = WindowsPeWriter().Write(sections, entry, directories);

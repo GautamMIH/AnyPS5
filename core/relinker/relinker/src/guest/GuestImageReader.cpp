@@ -146,10 +146,14 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
         Io::AppendString(image.Dynamic.DynStrData, name);
         image.Symbols.push_back({name, info, visibility, section, value, size});
     }
+    if (tags.contains(14)) {
+        image.Soname = string(tags.at(14));
+        if (image.Soname.empty() || image.Soname.find_first_of("\\:$\r\n") != std::string::npos) fail("Invalid guest SONAME: " + image.Soname);
+    }
     std::set<std::string> dependencies;
     for (const auto offset : needed) {
         const auto name = string(offset);
-        if (name.empty() || name.find_first_of("/\\:$") != std::string::npos || !dependencies.insert(name).second) fail("Invalid or duplicate dependency: " + name);
+        if (name.empty() || name.find_first_of("\\:$\r\n") != std::string::npos || !dependencies.insert(name).second) fail("Invalid or duplicate dependency: " + name);
         image.Dependencies.push_back(name);
     }
     std::map<std::uint64_t, std::uint64_t> relocationTargets;
@@ -192,7 +196,38 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
     if (tags.contains(13)) image.Fini = tags.at(13);
     if (image.Init != 0) mapped(image.Init, 1, 1);
     if (image.Fini != 0) mapped(image.Fini, 1, 1);
-    if ((tags.contains(27) && tags.at(27) != 0) || (tags.contains(28) && tags.at(28) != 0)) fail("Separate guest INIT_ARRAY/FINI_ARRAY is not supported");
+    const auto readLifecycleArray = [&](std::uint64_t addressTag, std::uint64_t sizeTag, std::vector<std::uint64_t>& entries) {
+        if (!tags.contains(addressTag) && !tags.contains(sizeTag)) return;
+        if (!tags.contains(sizeTag) || (tags.at(sizeTag) != 0 && !tags.contains(addressTag))) fail("Incomplete guest lifecycle array");
+        const auto size = tags.at(sizeTag);
+        if (size == 0) return;
+        if (size % 8 != 0) fail("Unaligned guest lifecycle array size");
+        const auto address = tags.at(addressTag);
+        mapped(address, size, 4);
+        const auto fileOffset = translate(address, size);
+        for (std::uint64_t offset = 0; offset < size; offset += 8) {
+            bool relocated = false;
+            for (const auto* table : {&image.Dynamic.RelaData, &image.Dynamic.RelaPltData}) {
+                for (std::size_t position = 0; position < table->size(); position += 24) {
+                    if (Io::ReadU64(*table, position) != address + offset) continue;
+                    relocated = true;
+                    const auto info = Io::ReadU64(*table, position + 8);
+                    const auto addend = Io::ReadU64(*table, position + 16);
+                    const auto type = static_cast<std::uint32_t>(info);
+                    if (type == 8) mapped(addend, 1, 1);
+                    else if (type == 1) {
+                        const auto& symbol = image.Symbols.at(info >> 32);
+                        if ((symbol.Info & 15) != 2 || addend != 0) fail("Invalid guest lifecycle function relocation");
+                        if (symbol.Section != 0) mapped(symbol.Value, 1, 1);
+                    } else fail("Unsupported guest lifecycle relocation");
+                }
+            }
+            if (!relocated && Io::ReadU64(bytes, fileOffset + offset) != 0) fail("Unrelocated guest lifecycle pointer");
+            entries.push_back(address + offset);
+        }
+    };
+    readLifecycleArray(25, 27, image.InitArray);
+    readLifecycleArray(26, 28, image.FiniArray);
     if (tags.contains(33) && tags.at(33) != 0 && image.Init == 0) fail("Guest PREINIT_ARRAY has no module initializer");
     image.Bytes = std::move(bytes);
     return image;

@@ -13,7 +13,7 @@ public:
     void Finalize(WindowsStubEmitter& code, const std::vector<Domain::GuestRuntime>& modules, std::uint32_t handles, std::uint32_t finished) const;
     std::uint32_t EmitTlsResolver(WindowsStubEmitter& code) const;
 private:
-    void callLifecycle(WindowsStubEmitter& code, std::uint32_t handle, std::uint32_t rva) const;
+    void callLifecycle(WindowsStubEmitter& code, std::uint32_t handle, std::uint32_t rva, bool indirect = false) const;
 };
 
 }

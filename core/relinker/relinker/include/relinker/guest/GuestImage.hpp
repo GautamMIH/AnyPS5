@@ -24,12 +24,15 @@ struct GuestSymbol {
 struct GuestImage {
     std::filesystem::path SourcePath;
     std::string OutputName;
+    std::string Soname;
     std::vector<std::uint8_t> Bytes;
     std::vector<Codegen::TrampolineSite> Trampolines;
     std::vector<Domain::ProgramHeader> Headers;
     std::vector<GuestSymbol> Symbols;
     std::vector<std::string> Dependencies;
     Domain::SysVDynamicSection Dynamic;
+    std::vector<std::uint64_t> InitArray;
+    std::vector<std::uint64_t> FiniArray;
     std::uint64_t Init = 0;
     std::uint64_t Fini = 0;
     std::uint64_t Got = 0;

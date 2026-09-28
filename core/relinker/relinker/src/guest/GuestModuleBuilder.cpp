@@ -70,9 +70,21 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         }
         images.push_back(std::move(image));
     }
+    std::map<std::string, std::size_t> guestNames;
+    for (std::size_t index = 0; index < images.size(); ++index) {
+        for (const auto& name : {images[index].SourcePath.filename().string(), images[index].Soname}) {
+            if (name.empty()) continue;
+            const auto [found, inserted] = guestNames.emplace(name, index);
+            if (!inserted && found->second != index) throw Domain::RelinkerException("Ambiguous guest dependency name: " + name);
+        }
+    }
     std::vector<std::set<std::size_t>> dependencies(images.size());
     for (auto& image : images) image.UsePlatformTlsResolver = !exports.contains("vNe1w4diLCs");
     for (std::size_t index = 0; index < images.size(); ++index) {
+        for (const auto& name : images[index].Dependencies) {
+            const auto found = guestNames.find(name);
+            if (found != guestNames.end() && found->second != index) dependencies[index].insert(found->second);
+        }
         for (const auto& symbol : images[index].Symbols) {
             if (symbol.Section != 0 || symbol.Name.empty()) continue;
             const auto found = exports.find(symbol.Name);
@@ -98,6 +110,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     std::vector<std::string> hostLibraries;
     std::set<std::string> uniqueHosts;
     const auto addHost = [&](const std::string& name) {
+        if (guestNames.contains(name)) return;
         if (name.empty() || name.find_first_of("/\\:$") != std::string::npos) throw Domain::RelinkerException("Invalid host dependency: " + name);
         if (uniqueHosts.insert(name).second) hostLibraries.push_back(name);
     };
