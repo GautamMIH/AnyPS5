@@ -6,17 +6,64 @@
 #include <cctype>
 #include <cstring>
 #include <string>
+#include <cerrno>
+#include <cstdlib>
+#include <memory>
 
 #include "prx/libc/include/General.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/VarArgsAbi.hpp"
 #include "prx/libc/include/FileStream.hpp"
+#include "prx/libc/include/ApplicationHeap.hpp"
 
 #ifdef _WIN32
 #include "prx/libc/include/WindowsFormatting.hpp"
+#include "prx/libc/include/WindowsScanning.hpp"
+#include "prx/libc/include/WindowsWideFormatting.hpp"
 #endif
 
 extern "C" {
+
+int APS5_VABI swprintf_nid_postfix(wchar_t* output, size_t capacity, const wchar_t* format, ...) {
+#ifdef _WIN32
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+    const int result = LibcDetail::FormatWideWindows(output, capacity, format, args);
+    __builtin_sysv_va_end(args);
+#else
+    std::va_list args;
+    va_start(args, format);
+    const int result = std::vswprintf(output, capacity, format, args);
+    va_end(args);
+#endif
+    return result;
+}
+
+int APS5_VABI vasprintf_nid_postfix(char** destination, const char* format, VaList* args) {
+    if (!destination) { errno = 22; return -1; }
+    *destination = nullptr;
+    if (!format || !args) { errno = 22; return -1; }
+    try {
+#ifdef _WIN32
+        std::string text;
+        const int count = LibcDetail::FormatWindows(nullptr, 0, format, args, &text);
+        const char* source = text.c_str();
+#else
+        char* text = nullptr;
+        const int count = ::vasprintf(&text, format, *reinterpret_cast<std::va_list*>(args));
+        std::unique_ptr<char, decltype(&std::free)> owner(text, std::free);
+        if (count < 0) return -1;
+        const char* source = text;
+#endif
+        auto* output = static_cast<char*>(ApplicationHeapAllocate_nid_no_patch(static_cast<size_t>(count) + 1));
+        std::memcpy(output, source, static_cast<size_t>(count) + 1);
+        *destination = output;
+        return count;
+    } catch (const std::bad_alloc&) {
+        errno = 12;
+        return -1;
+    }
+}
 
 int APS5_VABI vfprintf_nid_postfix(FileStream* stream, const char* format, VaList* args) {
     auto* native = GetNativeStream(stream);
@@ -152,6 +199,23 @@ int APS5_VABI sprintf_nid_postfix(VA_ARGS) {
 
 #endif
 
+int APS5_VABI vsscanf_nid_postfix(const char* input, const char* format, VaList* args) {
+#ifdef _WIN32
+    return LibcDetail::ScanWindows(input, format, args);
+#else
+    return std::vsscanf(input, format, *reinterpret_cast<std::va_list*>(args));
+#endif
+}
+
+#ifdef _WIN32
+int APS5_VABI sscanf_nid_postfix(const char* input, const char* format, ...) {
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+    const int result = vsscanf_nid_postfix(input, format, reinterpret_cast<VaList*>(args));
+    __builtin_sysv_va_end(args);
+    return result;
+}
+#else
 int APS5_VABI sscanf_nid_postfix(VA_ARGS) {
     LibcDetail::RegSaveArea regs;
     LibcDetail::FillRegSaveArea(regs, rdx, rcx, r8, r9, 0, 0,
@@ -165,6 +229,7 @@ int APS5_VABI sscanf_nid_postfix(VA_ARGS) {
         *va
     );
 }
+#endif
 
 #ifdef _WIN32
 
