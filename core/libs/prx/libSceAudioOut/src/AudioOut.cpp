@@ -288,6 +288,12 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
     if (!portTypeValid(type)) {
         return -2144993270;
     }
+    if (len == 0) {
+        return -2144993274;
+    }
+    if (freq == 0) {
+        return -2144993272;
+    }
     if (index != 0) {
         throw std::runtime_error("sceAudioOutOpen: index != 0 not supported");
     }

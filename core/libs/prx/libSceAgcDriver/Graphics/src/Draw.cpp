@@ -1,3 +1,6 @@
+#include <algorithm>
+#include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
@@ -29,6 +32,7 @@ struct DrawStorage {
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
     PerformanceTimer timing("Graphics.Draw");
     ApplyFastClears(state);
+    const bool depthFastClear = TakeDepthFastClear(state);
     // With surfaces kept uncompressed, resolving the fast clear is all an elimination pass does.
     if (state.eliminateFastClear) return;
     Require(draw.indexed ? draw.flags == 0 : (draw.flags & ~0x20u) == 0, "draw modifiers are unsupported");
@@ -82,7 +86,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     std::uint32_t maxIndex = draw.indexed ? 0u : draw.firstVertex + draw.indexCount - 1u;
     if (draw.indexed) {
         indices = std::make_unique<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-        GuestMemory::Read(draw.indexAddress, indices->Bytes(), draw.indexSize);
+        {
+            const GuestMemory::AccessSite site("cpu_wait_index");
+            GuestMemory::Read(draw.indexAddress, indices->Bytes(), draw.indexSize);
+        }
         for (std::size_t offset = 0; offset < indexBytes; offset += draw.indexSize) {
             std::uint32_t index = 0;
             if (draw.indexSize == 2) {
@@ -105,11 +112,26 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     auto& vertexBuffers = storage->vertices;
     std::vector<VkBuffer> vertexHandles;
     std::vector<VkDeviceSize> vertexOffsets(attributes.size(), 0);
-    for (const auto& attribute : attributes) {
+    for (std::size_t index = 0; index < attributes.size(); ++index) {
+        const auto& attribute = attributes[index];
         const auto bytes = VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance);
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
         Require(!aliasesTargets(address, bytes), "vertex buffer aliases a render target");
+        // The GPU fetches vertices from guest memory itself when it is imported: earlier draws' writes
+        // then need a barrier, and nothing is copied.
+        if (context.guestGpuMemory != nullptr) {
+            {
+                const GuestMemory::GpuAccessScope gpuAccess;
+                GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
+            }
+            if (const auto view = context.guestGpuMemory->Resolve(address, bytes); view && view->bytes >= bytes) {
+                vertexHandles.push_back(view->buffer);
+                vertexOffsets[index] = view->offset;
+                continue;
+            }
+        }
+        const GuestMemory::AccessSite site("cpu_wait_vertex");
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
         auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         GuestMemory::Read(address, buffer->Bytes(), 1);
@@ -145,6 +167,14 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     }
     if (storage->depth) storage->depth->Begin(commands);
     pipeline.Begin(commands, state.renderExtent);
+    if (depthFastClear) {
+        // An HTILE fast clear stands for the whole surface holding the clear values.
+        VkClearAttachment clear{};
+        clear.aspectMask = (state.depth.depthElementBytes != 0 ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) | (state.depth.hasStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+        clear.clearValue.depthStencil = {std::clamp(state.depthState.depthClearValue, 0.0f, 1.0f), state.depthState.stencilClearValue};
+        const VkClearRect rect{{{0, 0}, state.renderExtent}, 0, 1};
+        context.Function<PFN_vkCmdClearAttachments>("vkCmdClearAttachments")(commands, 1, &clear, 1, &rect);
+    }
     if (state.hasDepthTarget && (state.depthState.clearDepth || state.depthState.clearStencil) && state.scissor.extent.width != 0 && state.scissor.extent.height != 0) {
         // DB_RENDER_CONTROL clears replace the draw's depth/stencil results with the clear values
         // wherever it rasterizes; clear draws cover the scissor rectangle.

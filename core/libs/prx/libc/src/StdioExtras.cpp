@@ -44,10 +44,6 @@ bool isCLocale(const char* name) {
 }
 
 thread_local char* tokenState = nullptr;
-std::mt19937& randomEngine() {
-    static std::mt19937 engine(1);
-    return engine;
-}
 std::mt19937_64& rand48Engine() {
     static std::mt19937_64 engine(0x1234abcd330eULL);
     return engine;
@@ -60,6 +56,15 @@ extern "C" {
 extern FileStream _Stdout_nid_postfix;
 extern FileStream _Stderr_nid_postfix;
 FileStream _Stdin_nid_postfix{stdin};
+
+// std::nothrow: an empty tag object whose address guest code passes to the nothrow operators.
+unsigned char _ZSt7nothrow_nid_postfix = 0;
+
+[[noreturn]] void APS5_VABI _Assert_nid_postfix(const char* message, const char* location) {
+    std::fprintf(stderr, "[libc] guest assertion failed: %s (%s)\n", message ? message : "?", location ? location : "?");
+    std::fflush(stderr);
+    std::abort();
+}
 
 int APS5_VABI fgetpos_nid_postfix(FileStream* stream, std::int64_t* position) {
     if (position == nullptr) {
@@ -170,14 +175,6 @@ int APS5_VABI strncpy_s_nid_postfix(char* destination, std::size_t destinationSi
     std::memcpy(destination, source, length);
     destination[length] = '\0';
     return 0;
-}
-
-int APS5_VABI rand_nid_postfix() {
-    return static_cast<int>(randomEngine()() & 0x7fffffffu);
-}
-
-void APS5_VABI srand_nid_postfix(unsigned int seed) {
-    randomEngine().seed(seed);
 }
 
 void APS5_VABI srand48_nid_postfix(long seed) {

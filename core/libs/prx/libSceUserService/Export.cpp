@@ -85,11 +85,13 @@ int APS5_VABI sceUserServiceGetLoginUserIdList(UserServiceLoginUserIdList* user_
  return USER_SERVICE_OK;
 }
 
+// The buffer must hold the longest possible user name and its terminator.
 int APS5_VABI sceUserServiceGetUserName(int user_id, char* name, size_t size) {
- if (user_id != USER_SERVICE_INITIAL_USER_ID || !name || size == 0) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID || !name) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ if (size < USER_SERVICE_MAX_USER_NAME_LENGTH + 1) return USER_SERVICE_ERROR_BUFFER_TOO_SHORT;
  const char* host = std::getenv(USER_SERVICE_NAME_VARIABLE);
  const std::string userName = host != nullptr && host[0] != '\0' ? host : USER_SERVICE_DEFAULT_NAME;
- const std::size_t count = std::min(size - 1, userName.size());
+ const std::size_t count = std::min(USER_SERVICE_MAX_USER_NAME_LENGTH, userName.size());
  std::memcpy(name, userName.data(), count);
  name[count] = '\0';
  return USER_SERVICE_OK;
@@ -114,10 +116,17 @@ int APS5_VABI sceUserServiceTerminate(void) {
  return USER_SERVICE_OK;
 }
 
-
 int APS5_VABI sceUserServiceGetAccessibilityZoomFollowFocus(int user_id, int32_t* zoom_follow_focus) {
  if (user_id != USER_SERVICE_INITIAL_USER_ID || !zoom_follow_focus) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
  *zoom_follow_focus = 0;
+ return USER_SERVICE_OK;
+}
+
+// No PSN account exists, so the platform privacy setting reports the feature as not permitted.
+int APS5_VABI sceUserServiceGetPlatformPrivacyWs1(int32_t user_id, int32_t* value) {
+ (void)user_id;
+ if (!value) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ *value = 0;
  return USER_SERVICE_OK;
 }
 

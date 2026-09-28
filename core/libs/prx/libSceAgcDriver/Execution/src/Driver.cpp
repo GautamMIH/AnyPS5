@@ -218,7 +218,12 @@ public:
                 std::lock_guard lock(gpuMutex);
                 timing.Mark("gpu_mutex_wait");
                 if (device == nullptr || device->Window() == nullptr) {
-                    if (device) device->WaitIdle();
+                    if (device) {
+                        device->WaitIdle();
+                        // Cached textures and pipelines may still reference the old device's handles.
+                        static std::vector<std::shared_ptr<VulkanDevice>> replacedDevices;
+                        replacedDevices.push_back(device);
+                    }
                     device = std::make_shared<VulkanDevice>(&window);
                 }
                 require(device->Window() == window.context, "presentation window does not match device surface");
@@ -473,6 +478,8 @@ private:
         // Empty draws (common with GPU-generated indirect arguments) do nothing on hardware.
         if (drawParameters.indexCount == 0 || drawParameters.instanceCount == 0) return;
         const auto graphics = Graphics::DecodeState(queue);
+        if (drawParameters.indexed && queue.userConfig.at(0x24b) != 0)
+            throw std::runtime_error("AGC graphics: primitive restart (GE_MULTI_PRIM_IB_RESET_EN) is unsupported for indexed draws");
         if (graphics.eliminateFastClear) {
             std::lock_guard gpuLock(gpuMutex);
             device->ResolveFastClears(graphics);
@@ -750,11 +757,18 @@ private:
                 timing.Mark("failure_check");
                 if (opcode == 0x3c || opcode == 0x93) {
                     std::lock_guard gpuLock(gpuMutex);
-                    if (device != nullptr) device->WaitIdle();
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                     });
-                    if (!Pm4::WaitSatisfied(packet)) {
+                    // The packet only waits until memory satisfies its condition: when it already
+                    // does (labels are usually written by then), the GPU need not go idle first.
+                    bool satisfied = Pm4::WaitSatisfied(packet);
+                    timing.Mark("memory_check");
+                    if (!satisfied && device != nullptr) {
+                        device->WaitIdle();
+                        satisfied = Pm4::WaitSatisfied(packet);
+                    }
+                    if (!satisfied) {
                         blockedWait = Pm4::DescribeWait(packet);
                         return false;
                     }

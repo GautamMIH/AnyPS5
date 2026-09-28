@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 
 namespace AgcDriver::Pm4 {
@@ -60,6 +61,54 @@ void copyMemory(std::uint64_t source, std::uint64_t destination, std::size_t byt
     } else {
         GuestMemory::Read(source, data);
     }
+    GuestMemory::Write(destination, data);
+}
+
+// DMA_DATA selector 1: the 64 KiB global data share, shared by every queue.
+constexpr std::uint32_t DmaSelectGds = 1;
+constexpr std::size_t GdsBytes = 0x10000;
+
+struct GdsStorage {
+    std::mutex mutex;
+    std::array<std::byte, GdsBytes> bytes{};
+};
+
+GdsStorage& Gds() {
+    static GdsStorage storage;
+    return storage;
+}
+
+bool gdsRange(std::uint64_t offset, std::size_t bytes) {
+    return offset <= GdsBytes && bytes <= GdsBytes - offset;
+}
+
+void dmaData(std::span<const std::uint32_t> packet) {
+    const std::size_t bytes = packet[6] & 0x3ffffffu;
+    if (bytes == 0) return;
+    const bool fromGds = dmaSource(packet) == DmaSelectGds;
+    const bool toGds = dmaDestination(packet) == DmaSelectGds;
+    if (!fromGds && !toGds) {
+        copyMemory(address(packet[2], packet[3]), address(packet[4], packet[5]), bytes, dmaSource(packet) == 2);
+        return;
+    }
+    std::vector<std::byte> data(bytes);
+    if (fromGds) {
+        auto& gds = Gds();
+        std::lock_guard lock(gds.mutex);
+        std::copy_n(gds.bytes.begin() + packet[2], bytes, data.begin());
+    } else if (dmaSource(packet) == 2) {
+        for (std::size_t i = 0; i < bytes; ++i) data[i] = static_cast<std::byte>(packet[2] >> ((i % 4) * 8));
+    } else {
+        GuestMemory::Read(address(packet[2], packet[3]), data);
+    }
+    if (toGds) {
+        auto& gds = Gds();
+        std::lock_guard lock(gds.mutex);
+        std::copy(data.begin(), data.end(), gds.bytes.begin() + packet[4]);
+        return;
+    }
+    const auto destination = address(packet[4], packet[5]);
+    GuestMemory::CheckRange(reinterpret_cast<void*>(destination), bytes, 1, true);
     GuestMemory::Write(destination, data);
 }
 
@@ -180,6 +229,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         case 0x27:
             graphics();
             size(6);
+            require(packet[3] <= 0xffffu, "unsupported index address bits");
             require(packet[4] <= packet[1], "index count exceeds maximum index size");
             require((packet[5] & ~0x20u) == 0, "unsupported indexed draw flags");
             break;
@@ -199,9 +249,11 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             size(multi ? 10 : 5);
             require((packet[1] & 3u) == 0, "misaligned indirect draw argument offset");
             require(indexed ? (packet[3] & ~0x0800ffffu) == 0 && ((packet[3] & 0x08000000u) != 0 || (packet[2] >> 16u) == 0) : (packet[2] >> 16u) == 0 && (packet[3] >> 16u) == 0, "unsupported indirect draw patch locations");
-            require((packet.back() & ~0x20u) == 2u, "unsupported indirect draw initiator");
+            // Source select: 2 (auto index) for DRAW_INDIRECT; 0 (DMA) for the indexed forms, which
+            // earlier AnyPS5 builders encoded as 2.
+            require((packet.back() & ~0x20u) == 2u || (indexed && (packet.back() & ~0x20u) == 0u), "unsupported indirect draw initiator");
             if (multi) {
-                require((packet[4] & ~(opcode == 0x2c ? 0xc000ffffu : 0x40000000u)) == 0, "unsupported indirect multi-draw control bits");
+                require((packet[4] & ~(opcode == 0x2c ? 0xc000ffffu : 0x4000ffffu)) == 0, "unsupported indirect multi-draw control bits");
                 require((packet[8] & 3u) == 0 && packet[8] >= (indexed ? 20u : 16u), "invalid indirect multi-draw stride");
                 require((packet[4] & 0x40000000u) == 0 ? packet[6] == 0 && packet[7] == 0 : (packet[6] & 3u) == 0 && address(packet[6], packet[7]) != 0, "invalid indirect multi-draw count address");
             }
@@ -350,8 +402,10 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             // Source/destination cache policy (bits 13-14, 25-26) and volatile hints (15, 27) do not
             // change results because copies go through coherent host memory.
             require((packet[1] & ~0xee30e001u) == 0, "DMA_DATA reserved control fields are not implemented");
-            require(memorySelector(dmaDestination(packet)), "DMA_DATA register, GDS or prefetch destination is not implemented");
-            require(memorySelector(dmaSource(packet)) || dmaSource(packet) == 2, "DMA_DATA register or GDS source is not implemented");
+            require(memorySelector(dmaDestination(packet)) || dmaDestination(packet) == DmaSelectGds, "DMA_DATA register or prefetch destination is not implemented");
+            require(memorySelector(dmaSource(packet)) || dmaSource(packet) == 2 || dmaSource(packet) == DmaSelectGds, "DMA_DATA register source is not implemented");
+            require(dmaSource(packet) != DmaSelectGds || (packet[3] == 0 && gdsRange(packet[2], packet[6] & 0x3ffffffu)), "DMA_DATA GDS source range exceeds the GDS");
+            require(dmaDestination(packet) != DmaSelectGds || (packet[5] == 0 && gdsRange(packet[4], packet[6] & 0x3ffffffu)), "DMA_DATA GDS destination range exceeds the GDS");
             require(dmaSource(packet) != 2 || packet[3] == 0, "DMA_DATA immediate exceeds 32 bits");
             break;
         default: throw std::runtime_error("known packet has no validator");
@@ -491,7 +545,11 @@ std::vector<IndirectDraw> ResolveIndirectDraws(std::span<const std::uint32_t> pa
     const auto baseVertexRegister = packet[2] & 0xffffu;
     const auto startIndexRegister = indexed && (packet[3] & 0x08000000u) != 0 ? packet[2] >> 16u : noRegister;
     const auto startInstanceRegister = packet[3] & 0xffffu;
-    const auto drawIndexRegister = opcode == 0x2c && (packet[4] & 0x80000000u) != 0 ? packet[4] & 0xffffu : noRegister;
+    // DRAW_INDIRECT_MULTI enables its draw-index SGPR with bit 31; the indexed form always carries a
+    // location, where 0x280 (or 0, from earlier AnyPS5 builders) means none.
+    const auto indexedDrawIndex = packet[4] & 0xffffu;
+    const auto drawIndexRegister = opcode == 0x2c ? ((packet[4] & 0x80000000u) != 0 ? packet[4] & 0xffffu : noRegister)
+        : opcode == 0x38 && indexedDrawIndex != 0 ? indexedDrawIndex : noRegister;
     std::uint32_t count = 1;
     std::uint32_t stride = 0;
     if (multi) {
@@ -637,7 +695,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             return;
         }
         case 0x50:
-            copyMemory(address(packet[2], packet[3]), address(packet[4], packet[5]), packet[6] & 0x3ffffffu, dmaSource(packet) == 2);
+            dmaData(packet);
             return;
         case 0x49: {
             const auto dataSelect = packet[2] >> 29u;

@@ -1,6 +1,7 @@
 #ifndef ELFPATCHER_IELFPATCHER_HPP
 #define ELFPATCHER_IELFPATCHER_HPP
 
+#include <codegen/CodegenTypes.hpp>
 #include <domain/Types.hpp>
 #include <cstdint>
 #include <string>
@@ -20,6 +21,7 @@ public:
         const std::string& runPath,
         bool lazyBinding,
         bool dependencyDiagnostics,
+        const std::vector<Codegen::TrampolineSite>& trampolines,
         const Domain::ModuleLinkInfo& linkInfo
     ) = 0;
 };

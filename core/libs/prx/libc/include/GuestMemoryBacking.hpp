@@ -68,6 +68,9 @@ bool GuestVirtualQuery_nid_postfix(const void* address, bool findNext, Area* are
 bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t bytes, Translation* translation);
 // Whether a segment still exists (its memory may still be referenced by GPU imports).
 bool GuestSegmentAlive_nid_postfix(std::uint64_t segment);
+// Whether [address, address + bytes) is committed guest memory whose segment bytes no other guest
+// mapping shows, so every write to them goes through these addresses (or the host alias).
+bool GuestVirtualSingleView_nid_postfix(std::uint64_t address, std::uint64_t bytes);
 
 // libc heap chunks.
 void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection);

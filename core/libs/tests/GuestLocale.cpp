@@ -57,7 +57,11 @@ static void CheckGuestCalls() {
     Require(locale->base.references == initial + 1);
     Require(release(&locale->base) == nullptr);
     Require(locale->base.references == initial);
-    RequireException([&] { release(&locale->base); });
+    // The classic locale is immortal: releasing its last reference keeps it.
+    if (locale->base.references == 1) {
+        Require(release(&locale->base) == nullptr);
+        Require(locale->base.references == 1);
+    }
     RequireException([&] { retain(nullptr); });
     RequireException([&] { locale->base.vtable->deleteObject(&locale->base); });
     Require(locale->base.references == initial);

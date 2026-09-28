@@ -2,6 +2,7 @@
 #define CORE_SHADER_RECOMPILER_CACHEKEY_HPP
 
 #include "Recompiler.hpp"
+#include "prx/libc/include/HostThreadLocal.hpp"
 #include <cstdlib>
 #include <stdexcept>
 #include <type_traits>

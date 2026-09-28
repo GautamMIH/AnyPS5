@@ -53,8 +53,9 @@ std::uint32_t* WriteWait(CommandBuffer* buffer, std::uint8_t size, std::uint8_t 
     CheckBits(cachePolicy, 3, function);
     Require((pollCycles >> 4u) <= 0xffffu, function, "wait poll interval overflow");
     if (size == 0) {
-        CheckBits(reference, 0xffffffffu, function);
-        CheckBits(mask, 0xffffffffu, function);
+        // 32-bit waits only use the low halves; guests commonly pass a full 64-bit mask.
+        reference &= 0xffffffffu;
+        mask &= 0xffffffffu;
     }
     const auto guestAddress = reinterpret_cast<std::uintptr_t>(address);
     CheckGpuAddress(guestAddress, size == 0 ? 4 : 8, function);

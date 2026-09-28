@@ -1,6 +1,7 @@
-#include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include "DirectMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +11,10 @@
 
 #if defined(__linux__)
 #include <sys/mman.h>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
 #else
 #include <windows.h>
 #endif

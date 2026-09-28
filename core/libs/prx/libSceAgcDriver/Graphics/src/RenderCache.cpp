@@ -125,6 +125,12 @@ std::shared_ptr<ResidentColor> RenderCache::Find(std::uint64_t address) const {
     return it != entries.end() && it->second->Valid() ? it->second : nullptr;
 }
 
+std::shared_ptr<ResidentDepth> RenderCache::FindDepth(std::uint64_t address) const {
+    for (const auto& entry : depthEntries)
+        if (entry->Valid() && entry->Description().depthElementBytes != 0 && entry->Description().depthAddress == address) return entry;
+    return nullptr;
+}
+
 void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writable) {
     std::vector<std::shared_ptr<ResidentColor>> affected;
     for (const auto& [base, entry] : entries) {

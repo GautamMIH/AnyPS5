@@ -60,4 +60,10 @@ int APS5_VABI sceAcmContextDestroy(AcmContextId context) {
  return 0;
 }
 
+// Builds a convolution-reverb command into a batch; batch encoding is not modelled yet.
+int APS5_VABI sceAcm_ConvReverb_SharedInput(void) {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
 }

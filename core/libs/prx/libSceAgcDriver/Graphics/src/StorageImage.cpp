@@ -1,3 +1,5 @@
+#include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
 #include <cstdio>
 #include "prx/libSceAgcDriver/Graphics/include/StorageImage.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
@@ -49,11 +51,17 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
     Require(guestBytes <= std::numeric_limits<std::size_t>::max(), "storage image exceeds the host address space");
     // Resolving as writable hands the range to this image: resident render targets are written
     // back and invalidated first.
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(guestBase), static_cast<std::size_t>(guestBytes), 1, true);
+    {
+        // Reads of the texels go through GuestMemory::Read below, which waits as a CPU access.
+        const GuestMemory::GpuAccessScope gpuAccess;
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(guestBase), static_cast<std::size_t>(guestBytes), 1, true);
+    }
     // Thick volumes interleave slices within blocks, which the GPU tiler does not model.
     if (context.guestGpuMemory != nullptr && context.detiler != nullptr && !thick) {
         guest = context.guestGpuMemory->Resolve(guestBase, guestBytes);
         if (guest && guest->bytes != guestBytes) guest.reset();
+        // The GPU writes the image's texels into guest memory without passing the guest mappings.
+        if (guest) WriteTracker::NoteGpuWrite(guestBase, guestBytes);
     }
     if (guest) {
         const auto deviceUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -316,9 +324,9 @@ void StorageImage::WriteBack() {
         if (thick) continue;
         // Only this mip's bytes are written, so other mips of the surface keep their contents.
         const auto offset = layer * sliceBytes + mip.tiledOffset;
-        GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(guestBase + offset, tiled.data() + offset, static_cast<std::size_t>(mip.tiledSize));
+        GuestMemory::WriteThroughAlias(guestBase + offset, tiled.data() + offset, static_cast<std::size_t>(mip.tiledSize));
     }
-    if (thick) GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(guestBase, tiled.data(), tiled.size());
+    if (thick) GuestMemory::WriteThroughAlias(guestBase, tiled.data(), tiled.size());
     timing.Mark("guest_write", mip.tiledSize * layers);
 }
 

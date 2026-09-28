@@ -48,6 +48,11 @@ void ApplyFastClears(const State& state) {
     }
 }
 
+bool TakeDepthFastClear(const State& state) {
+    if (!state.hasDepthTarget || state.depth.htileAddress == 0) return false;
+    return takeCleared(state.depth.htileAddress);
+}
+
 void NoteMetadataClear(std::uint64_t address) {
     std::lock_guard lock(metaMutex);
     const auto it = metaCleared.find(address);

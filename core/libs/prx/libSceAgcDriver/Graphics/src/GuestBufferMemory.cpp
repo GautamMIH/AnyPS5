@@ -1,3 +1,6 @@
+#include <optional>
+#include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include <stdexcept>
 #include <string>
@@ -24,6 +27,10 @@ void GuestBufferMemory::validate(std::uint64_t address, std::size_t bytes) const
 void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes, std::size_t leading) {
     validate(address, bytes);
     Require(leading <= address, "guest memory range underflow");
+    // With imported guest memory the GPU writes the range itself (an upload fallback reads it
+    // through GuestMemory::Read, which waits as a CPU access).
+    std::optional<GuestMemory::GpuAccessScope> gpuAccess;
+    if (context.guestGpuMemory != nullptr) gpuAccess.emplace();
     GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
     if (leading != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), leading, 1, false);
     regions.push_back({address - leading, address + bytes, true, {}, nullptr});
@@ -91,9 +98,16 @@ void GuestBufferMemory::Upload(bool addressable) {
         Require(bytes <= std::numeric_limits<std::size_t>::max(), "guest GPU allocation size overflow");
         if (context.guestGpuMemory != nullptr && (region.writable || region.live)) {
             // Resident render targets over the range reach guest memory first, as a read would.
-            GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(bytes), 1, region.writable);
+            {
+                const GuestMemory::GpuAccessScope gpuAccess;
+                GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(bytes), 1, region.writable);
+            }
             region.view = context.guestGpuMemory->Resolve(region.begin, bytes);
-            if (region.view && region.view->bytes == bytes) continue;
+            if (region.view && region.view->bytes == bytes) {
+                // Shaders write writable regions straight into guest memory.
+                if (region.writable) WriteTracker::NoteGpuWrite(region.begin, bytes);
+                continue;
+            }
             region.view.reset();
         }
         const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);

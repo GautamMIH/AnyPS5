@@ -4,6 +4,7 @@
 #include <string>
 #include <cstdint>
 #include <vector>
+#include <codegen/CodegenTypes.hpp>
 #include <relinker/domain/RelinkResult.hpp>
 
 namespace Cli {
@@ -19,6 +20,7 @@ struct Args {
     bool windowsDiagnostics = false;
     bool gameMode = false;
     bool runPathSpecified = false;
+    bool windowsGui = false;
     std::uint32_t unusedFilterLevel = 0;
     std::string inputPath;
     std::string outputPath;
@@ -29,6 +31,8 @@ struct Args {
 struct PreparedModule {
     std::vector<std::uint8_t> Image;
     Relinker::RelinkResult Result;
+    // Stubs for AMD-only instructions lowered by --to-intel; appended when the module is emitted.
+    std::vector<Codegen::TrampolineSite> Trampolines;
 };
 
 struct ModuleRelinkOutcome {

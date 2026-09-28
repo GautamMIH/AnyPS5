@@ -15,6 +15,7 @@
 #endif
 
 #include "SceTypes.hpp"
+#include "prx/libc/include/General.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
@@ -28,6 +29,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -38,6 +40,8 @@
 #endif
 
 namespace {
+
+constexpr int sceInvalidArgument = static_cast<int>(0x80020016u);
 
 std::atomic<std::uint32_t> gpoBits{0};
 constexpr std::array<std::uint8_t, 16> openPsId{'A', 'n', 'y', 'P', 'S', '5', 'O', 'p', 'e', 'n', 'P', 's', 'I', 'd', 0, 1};

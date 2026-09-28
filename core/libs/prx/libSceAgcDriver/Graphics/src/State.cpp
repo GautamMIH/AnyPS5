@@ -1,3 +1,6 @@
+#include <string>
+#include <set>
+#include <cstdlib>
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -259,6 +262,12 @@ void decodeDepth(const Registers& cx, State& result) {
     target.depthElementBytes = depthFormat ? ((zInfo & 3u) == 1 ? 2u : 4u) : 0u;
     target.hasStencil = hasStencil;
     target.format = hasStencil ? VK_FORMAT_D32_SFLOAT_S8_UINT : target.depthElementBytes == 2 ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT;
+    // Compressed depth: HTILE metadata can mark the whole surface cleared without writing it.
+    if ((zInfo & (1u << 29u)) != 0 && cx.contains(0x005)) {
+        const auto extension = cx.contains(0x01e) ? cx.at(0x01e) : 0u;
+        Require((extension & ~0xffu) == 0, "invalid HTILE address extension");
+        target.htileAddress = (static_cast<std::uint64_t>(extension) << 40u) | (static_cast<std::uint64_t>(cx.at(0x005)) << 8u);
+    }
     const bool depthReadOnly = (view & 0x01000000u) != 0;
     const bool stencilReadOnly = (view & 0x02000000u) != 0;
     if (depthFormat) {
@@ -284,7 +293,10 @@ void decodeDepth(const Registers& cx, State& result) {
     state.depthClearValue = std::bit_cast<float>(read(cx, 0x00b));
     state.stencilClearValue = read(cx, 0x00a) & 0xffu;
     Require(!state.clearDepth || (state.depthClearValue >= 0 && state.depthClearValue <= 1), "depth clear value outside [0, 1]");
-    state.depthTest = depthFormat && (control & 2u) != 0;
+    // Debug aid: ANYPS5_IGNORE_DEPTH_TEST=1 draws as if depth testing were off (depth writes too), to
+    // tell missing geometry caused by depth contents from other failures.
+    static const bool ignoreDepthTest = std::getenv("ANYPS5_IGNORE_DEPTH_TEST") != nullptr;
+    state.depthTest = depthFormat && (control & 2u) != 0 && !ignoreDepthTest;
     state.depthWrite = state.depthTest && (control & 4u) != 0 && !depthReadOnly && !state.clearDepth;
     state.depthCompare = static_cast<VkCompareOp>((control >> 4u) & 7u);
     state.depthBounds = depthFormat && (control & 8u) != 0;
@@ -369,7 +381,8 @@ State DecodeState(const QueueState& queue) {
         case 6: result.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
         default: throw std::runtime_error("AGC graphics: unsupported primitive type " + std::to_string(primitive));
     }
-    zero(queue.userConfig, 0x24b, ~0u, "primitive restart (GE_MULTI_PRIM_IB_RESET_EN)", "user-config");
+    // Primitive restart only affects indexed draws; Driver::draw rejects it there.
+    (void)read(queue.userConfig, 0x24b, "user-config");
     // PA_CL_VS_OUT_CNTL: USE_VTX_RENDER_TARGET_INDX (bit 18) takes the layer from the misc vector
     // (VS_OUT_MISC_VEC_ENA, bit 21), which may travel on the side bus (bit 24); the recompiler
     // writes it to Layer. Other auxiliary outputs are not modelled.
@@ -598,6 +611,22 @@ State DecodeState(const QueueState& queue) {
             state.alphaBlendOp = blendOp((alpha >> 5u) & 7u);
             for (std::uint32_t i = 0; i < 4; ++i) result.blendConstants[i] = readFloat(cx, 0x105 + i);
         }
+    }
+    // Debug aid: ANYPS5_TRACE_DEPTH=1 prints each distinct depth configuration of a draw once.
+    static const bool traceDepth = std::getenv("ANYPS5_TRACE_DEPTH") != nullptr;
+    if (traceDepth && result.hasDepthTarget) {
+        static std::mutex traceMutex;
+        static std::set<std::string> seen;
+        const auto& depth = result.depthState;
+        char line[400];
+        std::snprintf(line, sizeof(line), "[depth] target=0x%llx htile=0x%llx %ux%u format=%d test=%d write=%d compare=%d clear=%d clearValue=%g bounds=%d [%g,%g] viewportZ=[%g,%g] negOneToOne=%d DB_DEPTH_CONTROL=0x%x DB_RENDER_CONTROL=0x%x",
+            static_cast<unsigned long long>(result.depth.depthAddress), static_cast<unsigned long long>(result.depth.htileAddress), result.depth.extent.width, result.depth.extent.height, static_cast<int>(result.depth.format),
+            depth.depthTest, depth.depthWrite, static_cast<int>(depth.depthCompare), depth.clearDepth, depth.depthClearValue, depth.depthBounds,
+            depth.depthBounds ? depth.minDepthBounds : 0.0f, depth.depthBounds ? depth.maxDepthBounds : 0.0f,
+            result.viewport.minDepth, result.viewport.maxDepth, result.negativeOneToOne,
+            queue.context.contains(0x200) ? queue.context.at(0x200) : 0u, queue.context.contains(0x000) ? queue.context.at(0x000) : 0u);
+        std::lock_guard lock(traceMutex);
+        if (seen.insert(line).second) std::fprintf(stderr, "%s\n", line);
     }
     return result;
 }

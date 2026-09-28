@@ -1,5 +1,7 @@
 #include "Translation/TranslationContext.hpp"
 #include <array>
+#include <bit>
+#include <cstdint>
 
 namespace ShaderRecompiler {
 
@@ -8,7 +10,15 @@ IrU32 TranslationContext::readU32(const RdnaOperand& operand) {
 }
 
 std::array<IrU32, 2> TranslationContext::readU32Pair(const RdnaOperand& operand) {
-    return {readU32(operand), readU32(offsetOperand(operand, 1u))};
+    switch (operand.kind) {
+        case RdnaOperandKind::LiteralConstant: return {readU32(operand), IrU32(ir.Constant(0u))};
+        case RdnaOperandKind::IntegerInlineConstant: return {readU32(operand), IrU32(ir.Constant(operand.signedVal < 0 ? 0xffffffffu : 0u))};
+        case RdnaOperandKind::FloatInlineConstant: {
+            const auto bits = std::bit_cast<std::uint64_t>(static_cast<double>(std::bit_cast<float>(operand.value)));
+            return {IrU32(ir.Constant(static_cast<std::uint32_t>(bits))), IrU32(ir.Constant(static_cast<std::uint32_t>(bits >> 32u)))};
+        }
+        default: return {readU32(operand), readU32(offsetOperand(operand, 1u))};
+    }
 }
 
 IrU64 TranslationContext::readU64(const RdnaOperand& operand) {

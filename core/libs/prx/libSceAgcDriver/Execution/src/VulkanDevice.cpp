@@ -689,6 +689,12 @@ void writeFrame(const DisplayBuffer& buffer, std::span<const std::byte> bgra, st
 }
 
 void VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
+    // Linear (tiling mode 1) scanout surfaces are never render-target images: present their pixels.
+    if (buffer.tilingMode == 1) {
+        ResolveMemory(buffer.address, DisplayBufferSize(buffer), false);
+        present(buffer.width, buffer.height, true, ReadDisplayBuffer(buffer));
+        return;
+    }
     if (const auto interval = frameDumpInterval(); interval != 0) {
         static std::uint64_t presented = 0;
         if (presented++ % interval == 0) {
@@ -877,9 +883,13 @@ Graphics::Context VulkanDevice::graphicsContext() const {
 }
 
 void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable) {
+    PerformanceTimer timing("Vulkan.ResolveMemory");
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    timing.Mark("lock");
     state->drawQueue->Resolve(address, bytes);
+    timing.Mark("draw_queue");
     state->renderCache->Resolve(address, bytes, writable);
+    timing.Mark("render_cache");
 }
 
 void VulkanDevice::ResolveFastClears(const Graphics::State& graphics) {

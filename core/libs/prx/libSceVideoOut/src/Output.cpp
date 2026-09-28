@@ -29,7 +29,7 @@ static int validateOutputConfig(int handle, uint64_t mode, const VideoOutOutputO
 
 extern "C" {
 
-int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* param) {
+int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* param) try {
     constexpr std::uint32_t kOpenParamSize = 16;
     if (param != nullptr) {
         std::uint32_t size = 0;
@@ -52,13 +52,17 @@ int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* pa
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_RESOURCE_BUSY");
     }
     return handle;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutClose(int handle) {
+int APS5_VABI sceVideoOutClose(int handle) try {
     return VideoOutDriver::Get().Close(handle) ? 0 : VIDEO_OUT_ERROR_INVALID_HANDLE;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutSetFlipRate(int handle, int rate) {
+int APS5_VABI sceVideoOutSetFlipRate(int handle, int rate) try {
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
@@ -70,9 +74,11 @@ int APS5_VABI sceVideoOutSetFlipRate(int handle, int rate) {
     cfg->Check();
     cfg->flipRate = rate;
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status) {
+int APS5_VABI sceVideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status) try {
     if (status == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_ADDRESS");
     }
@@ -84,9 +90,11 @@ int APS5_VABI sceVideoOutGetFlipStatus(int handle, VideoOutFlipStatus* status) {
     cfg->Check();
     *status = cfg->flipStatus;
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status) {
+int APS5_VABI sceVideoOutGetVblankStatus(int handle, VideoOutVblankStatus* status) try {
     if (status == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_ADDRESS");
     }
@@ -98,9 +106,11 @@ int APS5_VABI sceVideoOutGetVblankStatus(int handle, VideoOutVblankStatus* statu
     cfg->Check();
     *status = cfg->vblankStatus;
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutGetOutputStatus(int handle, VideoOutOutputStatus* status) {
+int APS5_VABI sceVideoOutGetOutputStatus(int handle, VideoOutOutputStatus* status) try {
     if (status == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_ADDRESS");
     }
@@ -118,9 +128,11 @@ int APS5_VABI sceVideoOutGetOutputStatus(int handle, VideoOutOutputStatus* statu
     status->reserved[1] = 0;
     status->reserved[2] = 0;
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutIsFlipPending(int handle) {
+int APS5_VABI sceVideoOutIsFlipPending(int handle) try {
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
@@ -128,9 +140,11 @@ int APS5_VABI sceVideoOutIsFlipPending(int handle) {
     std::unique_lock lock(cfg->mutex);
     cfg->Check();
     return cfg->flipStatus.flipPendingNum;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutWaitVblank(int handle) {
+int APS5_VABI sceVideoOutWaitVblank(int handle) try {
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
@@ -138,12 +152,11 @@ int APS5_VABI sceVideoOutWaitVblank(int handle) {
     std::unique_lock lock(cfg->mutex);
     cfg->Check();
     const uint64_t count = cfg->vblankStatus.count;
-    while (cfg->opened && !cfg->failure && cfg->vblankStatus.count == count) {
-        cfg->vblankCond.wait(lock);
-    }
-    if (cfg->failure) std::rethrow_exception(cfg->failure);
-    if (!cfg->opened || cfg->closing) throw std::runtime_error("sceVideoOutWaitVblank: port closed during wait");
+    cfg->vblankCond.wait(lock, cfg->shutdownToken, [&] { return !cfg->opened || cfg->closing || cfg->failure || cfg->vblankStatus.count != count; });
+    cfg->Check();
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceVideoOutInitializeOutputOptions(VideoOutOutputOptions* options) {
@@ -154,15 +167,17 @@ int APS5_VABI sceVideoOutInitializeOutputOptions(VideoOutOutputOptions* options)
     return 0;
 }
 
-int APS5_VABI sceVideoOutIsOutputSupported(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) {
+int APS5_VABI sceVideoOutIsOutputSupported(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) try {
     const int result = validateOutputConfig(handle, mode, options, reservedPtr, reserved);
     if (result != 0) {
         return result;
     }
     return (mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ) ? 0 : 1;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) {
+int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) try {
     const int supported = sceVideoOutIsOutputSupported(handle, mode, options, reservedPtr, reserved);
     if (supported < 0) {
         return supported;
@@ -178,32 +193,40 @@ int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoO
     cfg->Check();
     cfg->outputMode = mode;
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
 // Margins apply only while the system UI shows the title in window mode, which AnyPS5 never
 // does, so they are accepted without effect (as in KytyPS5).
-int APS5_VABI sceVideoOutSetWindowModeMargins(int handle, int top, int bottom) {
+int APS5_VABI sceVideoOutSetWindowModeMargins(int handle, int top, int bottom) try {
     (void)top;
     (void)bottom;
     if (!VideoOutDriver::Get().IsOpen(handle)) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
     return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutLatencyControlWaitBeforeInput(int handle) {
+int APS5_VABI sceVideoOutLatencyControlWaitBeforeInput(int handle) try {
     if (!VideoOutDriver::Get().IsOpen(handle)) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
-    throw std::runtime_error(std::string(__func__) + " not implemented");
+    return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutLatencyMeasureSetStartPoint(int handle, uint32_t point) {
+int APS5_VABI sceVideoOutLatencyMeasureSetStartPoint(int handle, uint32_t point) try {
     (void)point;
     if (!VideoOutDriver::Get().IsOpen(handle)) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
-    throw std::runtime_error(std::string(__func__) + " not implemented");
+    return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceVideoOutColorSettingsSetGamma(VideoOutColorSettings* settings, float gamma) {
@@ -217,7 +240,7 @@ int APS5_VABI sceVideoOutColorSettingsSetGamma(VideoOutColorSettings* settings, 
     return 0;
 }
 
-int APS5_VABI sceVideoOutAdjustColor(int handle, const VideoOutColorSettings* settings) {
+int APS5_VABI sceVideoOutAdjustColor(int handle, const VideoOutColorSettings* settings) try {
     if (settings == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_ADDRESS");
     }
@@ -225,7 +248,10 @@ int APS5_VABI sceVideoOutAdjustColor(int handle, const VideoOutColorSettings* se
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
     }
-    throw std::runtime_error(std::string(__func__) + " not implemented");
+    // Output gamma is accepted but not yet applied to presentation.
+    return 0;
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
 }

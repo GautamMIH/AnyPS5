@@ -29,6 +29,8 @@ int APS5_VABI scePthreadMutexattrSettype(PthreadMutexattr* attr, int type) {
     case 1: (*attr)->type = MutexType::ErrorCheck; break;
     case 2: (*attr)->type = MutexType::Recursive; break;
     case 3: (*attr)->type = MutexType::Normal; break;
+    // PTHREAD_MUTEX_ADAPTIVE_NP spins before sleeping; otherwise it behaves as a normal mutex.
+    case 4: (*attr)->type = MutexType::Normal; break;
     default: return PthreadSync::SceError(PthreadSync::kErrorInvalid);
     }
     return SCE_OK;

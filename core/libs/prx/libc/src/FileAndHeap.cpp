@@ -149,6 +149,10 @@ void* APS5_VABI memalign_nid_postfix(size_t alignment, size_t size) {
     return ApplicationHeapAlign_nid_no_patch(alignment, size);
 }
 
+void* APS5_VABI aligned_alloc_nid_postfix(size_t alignment, size_t size) {
+    return ApplicationHeapAlign_nid_no_patch(alignment, size);
+}
+
 void* APS5_VABI calloc_nid_postfix(size_t count, size_t size) {
     return ApplicationHeapCalloc_nid_no_patch(count, size);
 }

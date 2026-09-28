@@ -60,7 +60,17 @@ Issues that needed research, with a short answer. Check here before researching;
 
 ## Fast clears / compression
 
+- **HTILE depth fast clear.** Titles clear (reversed-Z) depth through HTILE (DB_Z_INFO.TILE_SURFACE_ENABLE, DB_HTILE_DATA_BASE 0x005/0x01e) without writing depth memory; ignoring it leaves stale depth and the depth test rejects the world (Zorro: HUD over black). Treat HTILE like CMASK: registered as cleared on first use, re-cleared by DMA fill or XOR-free compute write; a draw into a cleared target first clears depth/stencil to DB_DEPTH_CLEAR/DB_STENCIL_CLEAR. Debug: ANYPS5_IGNORE_DEPTH_TEST=1, ANYPS5_TRACE_DEPTH=1. (shadPS4 IsMetaCleared)
 - **CMASK fast clear.** Register CMASK (only with FAST_CLEAR) as cleared on first use; DMA fill or XOR-free compute write to it re-clears; draw into a cleared target fills with CLEAR_WORD; eliminate pass = that fill for target 0. DCC ignored: surfaces stay uncompressed. (shadPS4 vk_rasterizer.cpp, texture_cache.h)
+
+## Driver performance (Zorro gameplay, September 2026)
+
+- **Soft-dirty write tracking works for guest memory.** memfd shared mappings report CPU writes and kernel writes (read(2) into the page) through /proc/self/pagemap bit 55; a 1024-page check is one pread (~7 us). Writes through another mapping of the same memory (our host alias, GPU imports, a second guest view of direct memory) do not mark the guest mapping. clear_refs costs ~4 ms per 2 GiB resident and must not run often. See WriteTracker.
+- **CPU waits after every draw.** Every shader buffer is bound writable, so each draw's constant buffers count as pending GPU writes and the next draw's range check waited for the GPU. Accesses the GPU makes through imported memory only need a barrier (GpuAccessScope); only CPU reads wait.
+- **Depth sampled as a texture.** Games sample depth planes (Depth64KB layout) many times a frame; writing the resident depth back to guest memory and re-uploading it cost ~31 ms each. Copy from the depth image on the GPU instead.
+- **Destroying a pending CommandBatch drains the queue** (vkQueueWaitIdle); release GPU-filled objects after their fence.
+- **Out-of-memory at exit.** SDL reports SIGTERM/SIGINT and window close as SDL_QUIT; treating it as an error aborted the process, and the core dump read every page of the guest's shared memory segments (allocating untouched ones), ~4 GB more on Zorro, which the OOM killer then hit. SDL_QUIT now exits (fflush + _Exit(0)); guest segments set /proc/self/coredump_filter to leave shared memory out (ANYPS5_FULL_COREDUMP=1 keeps it).
+- **Profiling runs.** ANYPS5_SCRIPTED_INPUT="25:cross,30:cross" reaches gameplay unattended; frames after the scene settles are the ones to compare (scenes vary 200-1000+ draws a frame).
 
 ## Upstream merges
 
@@ -68,6 +78,10 @@ Issues that needed research, with a short answer. Check here before researching;
 - **Guest locale.** Upstream's std::locale rewrite (e526f1f) breaks titles whose inlined Dinkumware code reads locale internals (Zorro then parsed its settings wrong and asked for flip mode 2) and dropped the facet id exports (ctype<char>::id, num_put id/vtable, locale::id::_Id_cnt). Kept our layout-compatible GuestLocale; _Getptolower/_Getptoupper return short tables.
 - **Game modules.** Upstream's single-file mode relinks sce_module/ ELF modules as eagerly linked guest modules (GuestModuleBuilder, --skip-sce-module); our --game mode relinks a whole dump (SELF unwrapping, runtime loading). Both kept: builder runs between PrepareModule and EmitModule in single-file mode only.
 - **Bisecting a merge regression.** Build the pre-merge branch in a temp worktree (symlink its empty 3rdparty/ submodule dirs to a populated checkout), then swap .prx files into the run folder; libc.prx and libSceLibcInternal.prx must be swapped together.
+- **Upstream September 2026 (53bda68).** Pure upstream cannot launch our three test titles: no SELF unwrapping, and single-file mode relinks only sce_module/, not modules like Il2CppUserAssemblies.prx elsewhere in the dump. Its libraries under our relinker stop all three before the first frame (mutex priority protocols, allocator registration, vswprintf). Merged function by function onto our base.
+- **Upstream GPU driver (recorder, recipes, UnitShadow, bindless tables).** Faster design (asynchronous batches, per-queue workers, draw/dispatch caches), but it needs libc's GuestArena, which exists only on Windows (MEM_WRITE_WATCH); on Linux it falls back to byte compares. It also lacks depth targets, layered targets, CMASK clears and nested/conditional/predicated command buffers. Not merged; migrating needs Linux write tracking first (soft-dirty, userfaultfd-WP or mprotect faults).
+- **Same-named game modules and AnyPS5 libraries.** Upstream added partial stand-ins (libSceNpCppWebApi, libfmod, libfmodstudio, libcohtml, libRenoirCore). If an AnyPS5 library always wins, it shadows complete game copies: Smurfs then calls missing FMOD functions. The relinker now decides by provenance and import coverage (see README).
+- **Indexed indirect draws (DRAW_INDEX_INDIRECT 0x25, _MULTI 0x38).** The hardware encoding uses draw-initiator source select 0 (DMA) and, for _MULTI, the draw-index SGPR location in DW4 bits 0-15 (0x280 = none). Only the non-indexed forms use source select 2.
 
 ## Other projects
 

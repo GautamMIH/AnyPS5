@@ -23,6 +23,10 @@ inline constexpr std::uint32_t kOpcodeWriteKernelEventQueueFlagged = 0x78;
 inline constexpr std::uint32_t kReadFileShortSize = 20;
 inline constexpr std::uint32_t kReadFileLongSize = 24;
 inline constexpr std::uint32_t kWriteKernelEventQueueSize = 20;
+// The hardware encoding of WriteAddress is not documented; this opcode is private to AnyPS5 and only
+// has to agree between libSceAmpr (encoder) and libkernel (executor). Flags sit in header bits 16..31.
+inline constexpr std::uint32_t kOpcodeWriteAddress = 0xf0;
+inline constexpr std::uint32_t kWriteAddressSize = 20;
 inline constexpr std::uint64_t kMaxReadSize = 0x100000000ull;
 inline constexpr std::uint64_t kAddressLimit = 0xF00000000000ull;
 inline constexpr std::uint64_t kFileOffsetLimit = 1ull << 40;
@@ -39,6 +43,12 @@ struct WriteKernelEventQueue {
     std::uint64_t Queue;
     std::int32_t Id;
     std::uint64_t Data;
+};
+
+struct WriteAddress {
+    std::uint64_t Address;
+    std::uint64_t Value;
+    std::uint16_t Flags;
 };
 
 inline bool ReadFileArgumentsValid(std::uint64_t destination, std::uint64_t size, std::uint64_t fileOffset) {
@@ -89,6 +99,22 @@ inline WriteKernelEventQueue DecodeWriteKernelEventQueue(const std::uint32_t* in
     packet.Queue = static_cast<std::uint64_t>(in[1]) | (static_cast<std::uint64_t>(in[0] >> 16) << 32);
     packet.Id = static_cast<std::int32_t>(in[2]);
     packet.Data = static_cast<std::uint64_t>(in[3]) | (static_cast<std::uint64_t>(in[4]) << 32);
+    return packet;
+}
+
+inline void EncodeWriteAddress(std::uint32_t* out, const WriteAddress& packet) {
+    out[0] = kOpcodeWriteAddress | (((kWriteAddressSize / 4) - 1) << 8) | (static_cast<std::uint32_t>(packet.Flags) << 16);
+    out[1] = static_cast<std::uint32_t>(packet.Address);
+    out[2] = static_cast<std::uint32_t>(packet.Address >> 32);
+    out[3] = static_cast<std::uint32_t>(packet.Value);
+    out[4] = static_cast<std::uint32_t>(packet.Value >> 32);
+}
+
+inline WriteAddress DecodeWriteAddress(const std::uint32_t* in) {
+    WriteAddress packet{};
+    packet.Address = static_cast<std::uint64_t>(in[1]) | (static_cast<std::uint64_t>(in[2]) << 32);
+    packet.Value = static_cast<std::uint64_t>(in[3]) | (static_cast<std::uint64_t>(in[4]) << 32);
+    packet.Flags = static_cast<std::uint16_t>(in[0] >> 16);
     return packet;
 }
 

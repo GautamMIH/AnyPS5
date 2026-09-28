@@ -4,6 +4,13 @@
 #include <cstdint>
 #include "SceTypes.hpp"
 
+namespace Agc::Marker {
+
+std::uint32_t* Push(CommandBuffer* buf, const char* str, const char* function);
+std::uint32_t* Pop(CommandBuffer* buf, const char* function);
+
+}
+
 extern "C" {
 
 std::uint32_t* APS5_VABI sceAgcDcbSetMarker(CommandBuffer* buf, const char* str, std::uint32_t color);

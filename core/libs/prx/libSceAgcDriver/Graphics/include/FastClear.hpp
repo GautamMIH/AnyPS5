@@ -15,8 +15,14 @@ namespace AgcDriver::Graphics {
 // Must run inside a guest memory access scope so cached copies of the surface are resolved.
 void ApplyFastClears(const State& state);
 
-// A write whose destination starts exactly at a registered CMASK (shadPS4's ClearMeta).
+// A write whose destination starts exactly at a registered CMASK or HTILE (shadPS4's ClearMeta).
 void NoteMetadataClear(std::uint64_t address);
+
+// HTILE depth fast clears, the same way: a depth target's HTILE is registered as cleared when the
+// target is first drawn to and cleared again by NoteMetadataClear. Returns whether the draw must
+// first clear the depth (and stencil) planes to DB_DEPTH_CLEAR / DB_STENCIL_CLEAR; the HTILE is
+// then no longer cleared.
+bool TakeDepthFastClear(const State& state);
 
 }
 

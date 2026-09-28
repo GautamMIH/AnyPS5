@@ -114,7 +114,7 @@ ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOut
     auto byteWriter = std::make_shared<Io::ByteWriter>();
     std::shared_ptr<Elfpatcher::IElfPatcher> patcher;
     if (args.toWindows) {
-        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>();
+        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui);
     } else {
         patcher = std::make_shared<Elfpatcher::Linux::LinuxElfPatcher>(
             std::make_shared<Elfpatcher::EntryStubBuilder>(),
@@ -127,7 +127,7 @@ ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOut
         );
     }
 
-    fileWriter.Write(absOutputPath, patcher->Patch(module.Image, result.OriginalHeaders, result.DynamicSection, result.OriginalPltGotVaddr, runPath, args.lazyBinding, args.windowsDiagnostics, result.LinkInfo));
+    fileWriter.Write(absOutputPath, patcher->Patch(module.Image, result.OriginalHeaders, result.DynamicSection, result.OriginalPltGotVaddr, runPath, args.lazyBinding, args.windowsDiagnostics, module.Trampolines, result.LinkInfo));
     std::cout << "External prx references: " << result.RegistryEntries.size() << "\nOutput file: " << absOutputPath << '\n';
 
     return ModuleRelinkOutcome{ReadNeededLibraries(result.DynamicSection), isLibrary};

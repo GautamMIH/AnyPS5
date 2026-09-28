@@ -1,14 +1,18 @@
 #include <cstdint>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <mutex>
+#include <regex>
+#include <set>
+#include <string>
 #include <system_error>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
-// A dumped or installed title is fully present on local storage, so PlayGo reports a single chunk
-// (id 0, the only chunk a title without playgo-chunk.dat has) that is already installed on fast
-// local storage, an empty to-do list and completed progress.
+// A dumped or installed title is fully present on local storage, so PlayGo reports every chunk the
+// title defines as already installed on fast local storage, an empty to-do list and completed progress.
 
 namespace {
 
@@ -37,11 +41,38 @@ int checkHandle(int handle) {
     return PLAYGO_OK;
 }
 
+// The package's chunk table is not part of the dump, so the chunk set comes from the title's
+// playgo-chunkdefs.xml: every listed chunk plus chunks 0 through the default chunk. A title without
+// it has only chunk 0. Games probe chunk IDs and size arrays from the result, so unknown IDs are rejected.
+const std::set<uint16_t>& validChunks() {
+    static const std::set<uint16_t> chunks = [] {
+        std::set<uint16_t> result{0};
+        std::ifstream file(ResolvePath_nid_no_patch("/app0/playgo-chunkdefs.xml"));
+        if (!file) return result;
+        const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+        static const std::regex chunk(R"re(<chunk\s+id="(\d+)")re");
+        for (auto it = std::sregex_iterator(text.begin(), text.end(), chunk); it != std::sregex_iterator(); ++it)
+            result.insert(static_cast<uint16_t>(std::stoul((*it)[1].str())));
+        static const std::regex defaultChunk(R"re(default_chunk="(\d+)")re");
+        std::smatch match;
+        if (std::regex_search(text, match, defaultChunk)) {
+            const auto last = std::stoul(match[1].str());
+            for (unsigned long id = 0; id <= last && id <= 0xFFFF; ++id) result.insert(static_cast<uint16_t>(id));
+        }
+        return result;
+    }();
+    return chunks;
+}
+
+bool isValidChunk(uint16_t chunkId) {
+    return validChunks().contains(chunkId);
+}
+
 int checkChunks(const uint16_t* chunkIds, uint32_t count) {
     if (chunkIds == nullptr) return PLAYGO_ERROR_BAD_POINTER;
     if (count == 0) return PLAYGO_ERROR_BAD_SIZE;
     for (uint32_t i = 0; i < count; ++i)
-        if (chunkIds[i] != 0) return PLAYGO_ERROR_BAD_CHUNK_ID;
+        if (!isValidChunk(chunkIds[i])) return PLAYGO_ERROR_BAD_CHUNK_ID;
     return PLAYGO_OK;
 }
 
@@ -103,13 +134,18 @@ int APS5_VABI scePlayGoGetChunkId(int handle, uint16_t* out_chunk_id_list, uint3
     std::lock_guard lock(stateMutex);
     if (const int error = checkHandle(handle)) return error;
     if (out_entries == nullptr) return PLAYGO_ERROR_BAD_POINTER;
+    const auto& chunks = validChunks();
     if (out_chunk_id_list == nullptr) {
-        *out_entries = 1;
+        *out_entries = static_cast<uint32_t>(chunks.size());
         return PLAYGO_OK;
     }
     if (number_of_entries == 0) return PLAYGO_ERROR_BAD_SIZE;
-    out_chunk_id_list[0] = 0;
-    *out_entries = 1;
+    uint32_t written = 0;
+    for (const auto id : chunks) {
+        if (written == number_of_entries) break;
+        out_chunk_id_list[written++] = id;
+    }
+    *out_entries = written;
     return PLAYGO_OK;
 }
 
@@ -184,7 +220,7 @@ int APS5_VABI scePlayGoSetToDoList(int handle, const PlayGoToDo* todo_list, uint
     if (todo_list == nullptr) return PLAYGO_ERROR_BAD_POINTER;
     if (number_of_entries == 0) return PLAYGO_ERROR_BAD_SIZE;
     for (uint32_t i = 0; i < number_of_entries; ++i) {
-        if (todo_list[i].chunk_id != 0) return PLAYGO_ERROR_BAD_CHUNK_ID;
+        if (!isValidChunk(todo_list[i].chunk_id)) return PLAYGO_ERROR_BAD_CHUNK_ID;
         if (todo_list[i].locus < 0 || todo_list[i].locus > kLocusLocalFast) return PLAYGO_ERROR_BAD_LOCUS;
     }
     return PLAYGO_OK;
@@ -198,27 +234,30 @@ int APS5_VABI scePlayGoPrefetch(int handle, const uint16_t* chunk_ids, uint32_t 
 }
 
 int APS5_VABI scePlayGoGetOptionalChunk(int handle, int32_t type, PlayGoOptionalChunk* option) {
-    (void)handle;
     (void)type;
-    (void)option;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    std::lock_guard lock(stateMutex);
+    if (const int error = checkHandle(handle)) return error;
+    if (option == nullptr) return PLAYGO_ERROR_BAD_POINTER;
+    option->bitmask = 0;
+    return PLAYGO_OK;
 }
 
 int APS5_VABI scePlayGoGetSupportedOptionalChunk(int handle, int32_t type, PlayGoOptionalChunk* option) {
-    (void)handle;
     (void)type;
-    (void)option;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    std::lock_guard lock(stateMutex);
+    if (const int error = checkHandle(handle)) return error;
+    if (option == nullptr) return PLAYGO_ERROR_BAD_POINTER;
+    option->bitmask = 0;
+    return PLAYGO_OK;
 }
 
 int APS5_VABI scePlayGoPrefetchOptionalChunk(int handle, int32_t type, const PlayGoOptionalChunk* option) {
-    (void)handle;
     (void)type;
-    (void)option;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    std::lock_guard lock(stateMutex);
+    if (const int error = checkHandle(handle)) return error;
+    if (option == nullptr) return PLAYGO_ERROR_BAD_POINTER;
+    // Everything is already local, so there is nothing to fetch.
+    return PLAYGO_OK;
 }
 
 }

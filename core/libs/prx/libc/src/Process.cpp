@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cerrno>
@@ -7,6 +8,8 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <stdexcept>
 #include "prx/libc/include/Shutdown.hpp"
 
 #include "prx/libc/include/General.hpp"
@@ -21,7 +24,33 @@ std::thread::id shutdownThread;
 bool shutdownStarted = false;
 bool shutdownFinished = false;
 std::exception_ptr shutdownFailure;
+std::stop_source shutdownSource;
+std::atomic<bool> exitRequested{false};
+std::atomic<bool> exitStarted{false};
 
+}
+
+extern "C" std::stop_token LibcShutdownToken_nid_postfix() {
+    return shutdownSource.get_token();
+}
+
+extern "C" void LibcRequestShutdown_nid_postfix() {
+    shutdownSource.request_stop();
+}
+
+extern "C" void LibcRequestExit_nid_postfix(int code) {
+    if (exitRequested.exchange(true)) return;
+    LibcRequestShutdown_nid_postfix();
+    std::thread([code] { LibcExit_nid_no_patch(code); }).detach();
+}
+
+extern "C" [[noreturn]] void LibcAwaitExit_nid_postfix() {
+    if (!exitRequested.load()) throw ProcessShutdown{};
+    {
+        std::lock_guard lock(shutdownMutex);
+        if (shutdownThread == std::this_thread::get_id()) throw std::runtime_error("libc: exit thread cannot wait for itself");
+    }
+    for (;;) exitRequested.wait(true);
 }
 
 extern "C" void LibcRegisterShutdown_nid_postfix(void (*callback)()) {
@@ -42,6 +71,7 @@ extern "C" void LibcRunShutdown_nid_postfix() {
     shutdownThread = std::this_thread::get_id();
     auto callbacks = std::move(shutdownCallbacks);
     lock.unlock();
+    LibcRequestShutdown_nid_postfix();
     std::exception_ptr error;
     for (auto it = callbacks.rbegin(); it != callbacks.rend(); ++it) {
         try { (*it)(); }
@@ -58,15 +88,27 @@ extern "C" void LibcRunShutdown_nid_postfix() {
 extern "C" {
 
 [[noreturn]] void APS5_VABI _Exit_nid_postfix(int code) {
+    static const bool trace = std::getenv("APS5_TRACE_EXIT") != nullptr;
+    if (trace) {
+        std::fprintf(stderr, "[libc] _Exit(%d) called from %p\n", code, __builtin_return_address(0));
+        std::fflush(stderr);
+    }
     std::_Exit(code);
 }
 
 [[noreturn]] void LibcExit_nid_no_patch(int code) {
+    exitRequested.store(true);
+    if (exitStarted.exchange(true)) LibcAwaitExit_nid_postfix();
     LibcRunShutdown_nid_postfix();
     std::exit(code);
 }
 
 void APS5_VABI exit_nid_postfix(int code) {
+    static const bool trace = std::getenv("APS5_TRACE_EXIT") != nullptr;
+    if (trace) {
+        std::fprintf(stderr, "[libc] exit(%d) called from %p\n", code, __builtin_return_address(0));
+        std::fflush(stderr);
+    }
     LibcExit_nid_no_patch(code);
 }
 
@@ -76,6 +118,8 @@ void APS5_VABI exit_nid_postfix(int code) {
 ) {
     (void)arg0; (void)arg1; (void)arg2;
     (void)arg3; (void)arg4; (void)arg5;
+    std::fprintf(stderr, "[libc] abort() called from %p\n", __builtin_return_address(0));
+    std::fflush(nullptr);
     std::abort();
 }
 

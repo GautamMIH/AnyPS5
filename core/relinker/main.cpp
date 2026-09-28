@@ -7,6 +7,7 @@
 #include <relinker/analysis/SyscallScanner.hpp>
 #include <relinker/guest/GuestImage.hpp>
 #include <codegen/IAmd64OnlyConverter.hpp>
+#include <codegen/CodegenException.hpp>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -31,19 +32,16 @@ int main(const int argc, char* argv[]) {
         auto inputBytes = fileReader.Read(args.inputPath);
         const std::string absPath = std::filesystem::absolute(args.outputPath).string();
 
+        std::vector<Codegen::TrampolineSite> trampolines;
         if (args.toIntel) {
-            std::cout << "Mode: Intel instruction conversion; system unchanged; unused-filter=" << args.unusedFilterLevel << " (not applied)\n";
-
             auto sourceBytes = Relinker::SelfUnwrapper().Unwrap(inputBytes);
-            const Relinker::ElfReader elfReader(sourceBytes);
-            const auto converter = Codegen::MakeAmd64OnlyConverter();
-
-            auto codeSegments = elfReader.ReadCodeSegments();
-            auto result = converter->Convert(std::move(sourceBytes), codeSegments);
-
-            std::cout << "OK: " << result.ReplacedCount << " instructions replaced\n";
-            // The converted image continues through the general relink pipeline.
-            inputBytes = std::move(result.Bytes);
+            const auto codeSegments = Relinker::ElfReader(sourceBytes).ReadCodeSegments();
+            auto converted = Codegen::MakeAmd64OnlyConverter()->Convert(std::move(sourceBytes), codeSegments);
+            inputBytes = std::move(converted.Bytes);
+            trampolines = std::move(converted.Trampolines);
+            for (const auto& report : converted.Reports)
+                std::cout << "Intel substitution: " << report.InstructionName << " at 0x" << std::hex << report.Offset << std::dec << " (" << report.OriginalLength << " bytes) -> " << (report.Lowering == Codegen::Amd64OnlyLowering::InPlace ? "in place " : "stub ") << report.ReplacementLength << " bytes\n";
+            std::cout << "Intel conversion: " << converted.ReplacedCount << " in place, " << trampolines.size() << " stubs\n";
         }
 
         // A single executable: modules shipped beside it (sce_module/) are relinked as guest
@@ -55,6 +53,7 @@ int main(const int argc, char* argv[]) {
             const auto syscallScanner = args.skipSyscallCheck ? Relinker::MakeNullSyscallScanner() : Relinker::MakeSyscallScanner();
             guestArtifacts = Relinker::GuestModuleBuilder().Build(args.inputPath, absPath, module.Result.DynamicSection, args.toWindows, args.toIntel, *syscallScanner, args.lazyBinding, args.runPath);
         }
+        module.Trampolines = std::move(trampolines);
         Cli::EmitModule(module, absPath, args);
         for (const auto& artifact : guestArtifacts) {
             std::filesystem::create_directories(artifact.Path.parent_path());
@@ -65,6 +64,11 @@ int main(const int argc, char* argv[]) {
         if (args.autorun) return Cli::Autorun(absPath, args.toWindows);
 
     } catch (const Domain::RelinkerException& e) {
+        std::cerr << "FAIL: " << e.what();
+        if (e.FailureOffset != 0) std::cerr << " (offset 0x" << std::hex << e.FailureOffset << ")";
+        std::cerr << "\n";
+        return 2;
+    } catch (const Codegen::CodegenException& e) {
         std::cerr << "FAIL: " << e.what();
         if (e.FailureOffset != 0) std::cerr << " (offset 0x" << std::hex << e.FailureOffset << ")";
         std::cerr << "\n";

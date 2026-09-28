@@ -19,6 +19,7 @@ namespace {
 
 constexpr std::size_t kBsdDirentHeader = 8;
 constexpr std::size_t kHostBufferSize = 32768;
+constexpr int kErrorFault = 14;
 constexpr int kErrorInvalid = 22;
 
 std::size_t bsdRecordLength(std::size_t nameLength) {
@@ -27,7 +28,8 @@ std::size_t bsdRecordLength(std::size_t nameLength) {
 
 int readDirectory(int fd, char* buf, int nbytes) {
 #if defined(__linux__)
-    if (buf == nullptr || nbytes <= 0) return FileErrors::SceBsd(kErrorInvalid);
+    if (buf == nullptr) return FileErrors::SceBsd(kErrorFault);
+    if (nbytes <= 0) return FileErrors::SceBsd(kErrorInvalid);
     std::vector<char> host(kHostBufferSize);
     const off_t start = ::lseek(fd, 0, SEEK_CUR);
     if (start < 0) return FileErrors::Sce(errno);
@@ -48,7 +50,11 @@ int readDirectory(int fd, char* buf, int nbytes) {
         const std::size_t nameLength = std::strlen(name);
         const std::size_t length = bsdRecordLength(nameLength);
         if (nameLength > 255 || written + length > static_cast<std::size_t>(nbytes)) {
-            if (written == 0) return FileErrors::SceBsd(kErrorInvalid);
+            if (written == 0) {
+                // Nothing fits: the call fails without moving the directory position.
+                if (::lseek(fd, start, SEEK_SET) < 0) return FileErrors::Sce(errno);
+                return FileErrors::SceBsd(kErrorInvalid);
+            }
             if (::lseek(fd, position, SEEK_SET) < 0) return FileErrors::Sce(errno);
             break;
         }

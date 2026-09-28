@@ -60,7 +60,11 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         }
         std::vector<Domain::ProgramHeader> codeHeaders;
         for (const auto& header : image.Headers) if (header.Type == 1 && (header.Flags & 1) != 0) codeHeaders.push_back(header);
-        if (toIntel) image.Bytes = Codegen::MakeAmd64OnlyConverter()->Convert(std::move(image.Bytes), codeHeaders).Bytes;
+        if (toIntel) {
+            auto converted = Codegen::MakeAmd64OnlyConverter()->Convert(std::move(image.Bytes), codeHeaders);
+            if (!converted.Trampolines.empty()) throw Domain::RelinkerException("--to-intel needs " + std::to_string(converted.Trampolines.size()) + " stub(s) in guest module " + path.string() + "; stub sections are not written for guest modules");
+            image.Bytes = std::move(converted.Bytes);
+        }
         for (const auto& header : codeHeaders) {
             const std::vector<std::uint8_t> code(image.Bytes.begin() + header.Offset, image.Bytes.begin() + header.Offset + header.FileSize);
             syscallScanner.ScanCodeSectionForSyscalls(code, header.MappedAddress, header.FileSize);

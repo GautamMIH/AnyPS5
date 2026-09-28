@@ -23,9 +23,10 @@ struct alignas(16) Arena {
     Block* first;
     std::uintptr_t end;
     std::size_t inUse;
-    std::size_t maxInUse;
+    std::size_t peakInUse;
     bool ownsMemory;
 };
+constexpr unsigned MspaceThreadUnsafe = 1;
 std::mutex arenaMutex;
 Arena* arenas = nullptr;
 
@@ -67,15 +68,23 @@ void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
         }
         block->pointer = reinterpret_cast<void*>(aligned);
         block->used = size;
-        arena->inUse += size;
-        arena->maxInUse = std::max(arena->maxInUse, arena->inUse);
+        arena->inUse += sizeof(Block) + block->capacity;
+        arena->peakInUse = std::max(arena->peakInUse, arena->inUse);
         return block->pointer;
     }
     Error(12);
     return nullptr;
 }
+bool InsideAllocation(Arena* arena, std::uintptr_t start, std::size_t size) {
+    for (auto* block = arena->first; block; block = block->next) {
+        const auto pointer = reinterpret_cast<std::uintptr_t>(block->pointer);
+        if (pointer && start >= pointer && size <= block->used && start - pointer <= block->used - size) return true;
+    }
+    return false;
+}
+
 void Release(Arena* arena, Block* released) {
-    arena->inUse -= released->used;
+    arena->inUse -= sizeof(Block) + released->capacity;
     released->pointer = nullptr;
     released->used = 0;
     for (auto* block = arena->first; block && block->next;) {
@@ -94,8 +103,6 @@ void* Reallocate(Arena* arena, void* pointer, std::size_t size, std::size_t alig
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
     const auto padding = address - reinterpret_cast<std::uintptr_t>(block + 1);
     if ((address & (alignment - 1)) == 0 && size <= block->capacity - padding) {
-        arena->inUse = arena->inUse - block->used + size;
-        arena->maxInUse = std::max(arena->maxInUse, arena->inUse);
         block->used = size;
         return pointer;
     }
@@ -112,7 +119,7 @@ extern "C" {
 void* APS5_VABI sceLibcMspaceCreate_nid_postfix(const char* name, void* base,
                                               std::size_t size, unsigned flags) {
     (void)name;
-    if (size < sizeof(Arena) + sizeof(Block) + 16 || flags != 0) {
+    if (size < sizeof(Arena) + sizeof(Block) + 16 || (flags & ~MspaceThreadUnsafe) != 0) {
         Error(22);
         return nullptr;
     }
@@ -133,7 +140,7 @@ void* APS5_VABI sceLibcMspaceCreate_nid_postfix(const char* name, void* base,
     }
     std::lock_guard lock(arenaMutex);
     for (auto* arena = arenas; arena; arena = arena->next) {
-        if (start < arena->end && reinterpret_cast<std::uintptr_t>(arena) < start + size) {
+        if (start < arena->end && reinterpret_cast<std::uintptr_t>(arena) < start + size && !InsideAllocation(arena, start, size)) {
             if (ownsMemory) std::free(base);
             Error(22);
             return nullptr;
@@ -233,14 +240,15 @@ std::size_t APS5_VABI sceLibcMspaceMallocUsableSize_nid_postfix(const void* poin
 }
 
 int APS5_VABI sceLibcMspaceMallocStats_nid_postfix(void* handle, MallocStatistics::ManagedSize* statistics) {
-    if (!statistics) return 22;
+    // The caller declares the structure's size; a shorter structure cannot hold the statistics.
+    if (!statistics || statistics->size < sizeof(MallocStatistics::ManagedSize)) return 22;
     std::lock_guard lock(arenaMutex);
     auto* arena = Find(handle);
     if (!arena) return 22;
     const auto capacity = static_cast<std::size_t>(arena->end - reinterpret_cast<std::uintptr_t>(arena));
     statistics->maxSystemSize = capacity;
     statistics->currentSystemSize = capacity;
-    statistics->maxInuseSize = arena->maxInUse;
+    statistics->maxInuseSize = arena->peakInUse;
     statistics->currentInuseSize = arena->inUse;
     return 0;
 }

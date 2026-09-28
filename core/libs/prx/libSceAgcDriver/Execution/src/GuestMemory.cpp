@@ -2,6 +2,8 @@
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -88,8 +90,11 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         require(false, (std::string("null or misaligned address") + detail).c_str());
     }
     require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "address range overflow");
+    PerformanceTimer timing("GuestMemory.CheckRange");
     MemoryAccessScope::Resolve(address, bytes, writable);
+    timing.Mark("resolve_scope");
     GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
+    timing.Mark("resolve_watches");
     auto cursor = address;
     const auto end = address + bytes;
 #ifdef _WIN32
@@ -108,8 +113,12 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     auto& cache = mappingCache();
     const std::lock_guard lock(cache.mutex);
     const auto generation = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
-    if (cache.generation == generation && checkMappings(cache.entries, cursor, end, writable).empty()) return;
+    if (cache.generation == generation && checkMappings(cache.entries, cursor, end, writable).empty()) {
+        timing.Mark("cached");
+        return;
+    }
     loadMappings(cache.entries);
+    timing.Mark(cache.generation == generation ? "reload_uncovered" : "reload_changed");
     cache.generation = generation;
     const auto failure = checkMappings(cache.entries, cursor, end, writable);
     require(failure.empty(), failure.c_str());
@@ -134,6 +143,11 @@ void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t
     timing.Mark("range_check");
     std::memcpy(destination, source.data(), source.size());
     timing.Mark("copy", source.size());
+}
+
+void WriteThroughAlias(std::uint64_t address, const void* source, std::size_t bytes) {
+    GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(address, source, bytes);
+    WriteTracker::NoteAliasWrite(address, bytes);
 }
 
 }
