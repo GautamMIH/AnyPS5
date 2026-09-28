@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBC_INCLUDE_WINDOWSWIDEFORMATTING_HPP
 
 #include "WindowsFormatting.hpp"
+#include "General.hpp"
 #include <cerrno>
 #include <cwchar>
 #include <deque>
@@ -45,7 +46,11 @@ inline int FormatWideWindows(wchar_t* output, size_t capacity, const wchar_t* fo
             if ((length == L"h" && *format == L'h') || (length == L"l" && *format == L'l')) length += *format++;
         }
         const wchar_t conversion = *format;
-        if (!conversion || !std::wcschr(L"diouxXaAeEfFgGcspn", conversion)) { errno = 22; return -1; }
+        if (!conversion) { errno = 22; return -1; }
+        if (!std::wcschr(L"diouxXaAeEfFgGcspn", conversion)) {
+            NotImplemented_nid_no_patch("swprintf format conversion");
+            return -1;
+        }
         ++format;
         if (std::wcschr(L"diouxXn", conversion) && (length == L"l" || length == L"j" || length == L"z" || length == L"t"))
             translated += L"ll";

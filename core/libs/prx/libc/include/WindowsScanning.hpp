@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBC_INCLUDE_WINDOWSSCANNING_HPP
 
 #include "WindowsFormatting.hpp"
+#include "General.hpp"
 #include <cerrno>
 
 namespace LibcDetail {
@@ -25,7 +26,11 @@ inline int ScanWindows(const char* input, const char* format, const void* source
             if ((length == "h" && *format == 'h') || (length == "l" && *format == 'l')) length += *format++;
         }
         const char conversion = *format;
-        if (!conversion || !std::strchr("diouxXaAeEfFgGcspn[", conversion)) { errno = 22; return EOF; }
+        if (!conversion) { errno = 22; return EOF; }
+        if (!std::strchr("diouxXaAeEfFgGcspn[", conversion)) {
+            NotImplemented_nid_no_patch("vsscanf format conversion");
+            return EOF;
+        }
         ++format;
         if (std::strchr("diouxXn", conversion) && (length == "l" || length == "j" || length == "z" || length == "t"))
             translated += "ll";
