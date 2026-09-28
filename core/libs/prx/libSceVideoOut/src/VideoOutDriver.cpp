@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <cstdio>
 #include <bit>
 #include <chrono>
 #include <limits>
@@ -448,7 +450,14 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
         while (!token.stop_requested()) {
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
-                require(event.type != SDL_QUIT, "window was closed");
+                if (event.type == SDL_QUIT) {
+                    // Closing the window (SDL also reports SIGINT/SIGTERM this way) ends the title the
+                    // way the console's power menu does: immediately. Guest threads are still running,
+                    // so no guest destructors run; buffered output is flushed.
+                    std::fprintf(stderr, "[videoout] window closed; exiting\n");
+                    std::fflush(nullptr);
+                    std::_Exit(0);
+                }
                 padInput.HandleEvent(event, window);
                 if (window.Handle() != nullptr) mouseInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
             }

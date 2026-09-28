@@ -69,6 +69,7 @@ Issues that needed research, with a short answer. Check here before researching;
 - **CPU waits after every draw.** Every shader buffer is bound writable, so each draw's constant buffers count as pending GPU writes and the next draw's range check waited for the GPU. Accesses the GPU makes through imported memory only need a barrier (GpuAccessScope); only CPU reads wait.
 - **Depth sampled as a texture.** Games sample depth planes (Depth64KB layout) many times a frame; writing the resident depth back to guest memory and re-uploading it cost ~31 ms each. Copy from the depth image on the GPU instead.
 - **Destroying a pending CommandBatch drains the queue** (vkQueueWaitIdle); release GPU-filled objects after their fence.
+- **Out-of-memory at exit.** SDL reports SIGTERM/SIGINT and window close as SDL_QUIT; treating it as an error aborted the process, and the core dump read every page of the guest's shared memory segments (allocating untouched ones), ~4 GB more on Zorro, which the OOM killer then hit. SDL_QUIT now exits (fflush + _Exit(0)); guest segments set /proc/self/coredump_filter to leave shared memory out (ANYPS5_FULL_COREDUMP=1 keeps it).
 - **Profiling runs.** ANYPS5_SCRIPTED_INPUT="25:cross,30:cross" reaches gameplay unattended; frames after the scene settles are the ones to compare (scenes vary 200-1000+ draws a frame).
 
 ## Upstream merges

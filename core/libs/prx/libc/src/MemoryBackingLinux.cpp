@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "prx/libc/include/MemoryBackingPlatform.hpp"
 #include <cerrno>
 #include <cstdio>
@@ -164,8 +165,30 @@ AddressSpace& space() {
 
 }
 
+// Guest memory reserves the console's whole address space in shared segments. A core dump reads every
+// page of shared mappings, allocating the ones never touched, so dumping a crashed title could need
+// more memory than the host has; dumps leave shared memory out (ANYPS5_FULL_COREDUMP=1 keeps it).
+void excludeSharedMemoryFromCoreDumps() {
+    static const bool done = [] {
+        if (std::getenv("ANYPS5_FULL_COREDUMP") != nullptr) return true;
+        std::FILE* filter = std::fopen("/proc/self/coredump_filter", "r+");
+        if (filter == nullptr) return true;
+        unsigned long bits = 0;
+        if (std::fscanf(filter, "%lx", &bits) == 1) {
+            constexpr unsigned long sharedAnonymous = 1ul << 1u;
+            constexpr unsigned long sharedHuge = 1ul << 6u;
+            std::rewind(filter);
+            std::fprintf(filter, "0x%lx", bits & ~(sharedAnonymous | sharedHuge));
+        }
+        std::fclose(filter);
+        return true;
+    }();
+    static_cast<void>(done);
+}
+
 Segment CreateSegment(std::size_t bytes) {
     if (bytes == 0 || bytes > static_cast<std::size_t>(std::numeric_limits<off_t>::max())) throw std::overflow_error("guest segment size");
+    excludeSharedMemoryFromCoreDumps();
     const int descriptor = memfd_create("AnyPS5 guest memory", MFD_CLOEXEC);
     check(descriptor >= 0, "memfd_create guest segment");
     if (ftruncate(descriptor, static_cast<off_t>(bytes)) != 0) {
