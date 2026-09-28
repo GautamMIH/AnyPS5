@@ -4,6 +4,7 @@
 #include <elfpatcher/windows/WindowsPeWriter.hpp>
 #include <elfpatcher/windows/WindowsRelocationBuilder.hpp>
 #include <elfpatcher/windows/WindowsTlsBuilder.hpp>
+#include <elfpatcher/windows/WindowsTrampolineBuilder.hpp>
 #include <io/BufferUtils.hpp>
 #include <filesystem>
 #include <fstream>
@@ -39,7 +40,10 @@ void writeGotStub(std::vector<PeSection>& sections, const std::uint32_t targetRv
 
 }
 
-std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t>& sourceElf, const std::vector<Domain::ProgramHeader>& originalHeaders, const Domain::SysVDynamicSection& dynamicSection, const std::uint64_t originalPltGotVaddr, const std::string& runPath, const bool lazyBinding, const bool dependencyDiagnostics, const Domain::ModuleLinkInfo& linkInfo) {
+WindowsPePatcher::WindowsPePatcher(const bool windowsGui) : _windowsGui(windowsGui) {
+}
+
+std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t>& sourceElf, const std::vector<Domain::ProgramHeader>& originalHeaders, const Domain::SysVDynamicSection& dynamicSection, const std::uint64_t originalPltGotVaddr, const std::string& runPath, const bool lazyBinding, const bool dependencyDiagnostics, const std::vector<Codegen::TrampolineSite>& trampolines, const Domain::ModuleLinkInfo& linkInfo) {
     if (linkInfo.Kind == Domain::ModuleKind::Library)
         throw Domain::RelinkerException("Converting SCE library modules to Windows DLLs is not implemented");
     WindowsLoadImage image(sourceElf, originalHeaders);
@@ -69,6 +73,7 @@ std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t
         nextRva = AlignRva(nextRva + sections.back().Data.size());
     }
     directories[9] = WindowsTlsBuilder().Build(sourceElf, originalHeaders, image, sections, relocations.BaseRelocations, nextRva);
+    WindowsTrampolineBuilder().Build(trampolines, image, sections, nextRva);
     auto relocationData = relocationBuilder.BuildBaseRelocations(relocations.BaseRelocations);
     if (!relocationData.empty()) {
         directories[5] = {nextRva, CheckedRva(relocationData.size())};
@@ -98,7 +103,7 @@ std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t
     sections.push_back(std::move(entry.Code));
     for (const auto& lazyStub : entry.LazyStubs)
         writeGotStub(sections, lazyStub.TargetRva, lazyStub.StubRva);
-    return WindowsPeWriter().Write(sections, entryRva, directories);
+    return WindowsPeWriter().Write(sections, entryRva, directories, _windowsGui);
 }
 
 }

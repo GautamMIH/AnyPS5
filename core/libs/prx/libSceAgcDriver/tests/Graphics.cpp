@@ -84,7 +84,8 @@ void stateTests() {
     Require(state.viewport.y == 4 && state.viewport.height == -4, "negative viewport height was lost");
     Require(state.colors[0].format == VK_FORMAT_R8G8B8A8_UNORM, "RGBA format changed");
     queue.userConfig[0x24b] = 1;
-    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "GE_MULTI_PRIM_IB_RESET_EN");
+    // Primitive restart is rejected per draw (indexed draws only), not when decoding state.
+    (void)AgcDriver::Graphics::DecodeState(queue);
     queue = makeState();
     queue.userConfig.erase(0x24b);
     queue.context[0x2a5] = 0;

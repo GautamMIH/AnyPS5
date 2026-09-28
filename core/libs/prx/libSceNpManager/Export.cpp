@@ -3,6 +3,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceUserService/UserService.hpp"
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -11,6 +12,7 @@ static constexpr int NP_ERROR_SIGNED_OUT = static_cast<int>(0x80550006);
 static constexpr uint32_t NP_STATE_SIGNED_OUT = 1;
 static constexpr uint32_t NP_REACHABILITY_STATE_UNAVAILABLE = 0;
 static constexpr int NP_ERROR_CALLBACK_ALREADY_REGISTERED = static_cast<int>(0x80550008);
+static constexpr int NP_POLL_ASYNC_FINISHED = 0;
 
 namespace {
 
@@ -27,13 +29,15 @@ struct StateCallback {
 std::mutex stateMutex;
 std::vector<StateCallback> stateCallbacks;
 
+// Requests carry no state offline: every request finishes at once with the signed-out error.
+std::atomic<int> nextRequest{1};
+
 }
 
 extern "C" {
 
 int APS5_VABI sceNpAbortRequest(int req_id) {
  (void)req_id;
- NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
@@ -88,24 +92,20 @@ int APS5_VABI sceNpCheckPremium(int req_id, const NpCheckPremiumParameter* param
  (void)req_id;
  (void)param;
  (void)result;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return NP_ERROR_SIGNED_OUT;
 }
 
 int APS5_VABI sceNpCreateAsyncRequest(const NpCreateAsyncRequestParameter* param) {
  (void)param;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return nextRequest.fetch_add(1, std::memory_order_relaxed);
 }
 
 int APS5_VABI sceNpCreateRequest(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ return nextRequest.fetch_add(1, std::memory_order_relaxed);
 }
 
 int APS5_VABI sceNpDeleteRequest(int req_id) {
  (void)req_id;
- NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
@@ -164,9 +164,8 @@ int APS5_VABI sceNpHasSignedUp(int user_id, bool* has_signed_up) {
 
 int APS5_VABI sceNpPollAsync(int req_id, int* result) {
  (void)req_id;
- (void)result;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (result) *result = NP_ERROR_SIGNED_OUT;
+ return NP_POLL_ASYNC_FINISHED;
 }
 
 void APS5_VABI sceNpRegisterGamePresenceCallback(void* callback, void* userdata) {
@@ -212,12 +211,23 @@ int APS5_VABI sceNpSetContentRestriction(const NpContentRestriction* restriction
 int APS5_VABI sceNpSetNpTitleId(const NpTitleId* title_id, const NpTitleSecret* title_secret) {
  (void)title_id;
  (void)title_secret;
- NotImplemented_nid_no_patch(__func__);
  return 0;
 }
 
 int APS5_VABI sceNpUnregisterStateCallback(void) {
  NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceNpGetAccountLanguage2(int req_id, int user_id, void* language) {
+ (void)req_id;
+ (void)user_id;
+ (void)language;
+ return NP_ERROR_SIGNED_OUT;
+}
+
+int APS5_VABI sceNpNotifyPremiumFeature(const void* param) {
+ (void)param;
  return 0;
 }
 

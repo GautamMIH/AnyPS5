@@ -12,8 +12,9 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
     for (auto header : image.Headers) {
         if (header.Type != 1 && header.Type != 7 && header.Type != 0x6474e550 && header.Type != 0x6474e551) continue;
         if (header.Type == 1) {
-            header.Flags |= 4;
             end = std::max(end, header.MappedAddress + header.MemorySize);
+            if (header.Flags == 0) continue;
+            header.Flags |= 4;
         }
         headers.push_back(header);
     }

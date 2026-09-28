@@ -95,6 +95,20 @@ std::string aliasCandidate(const std::string& file) {
     return stem + native + kModuleExtension;
 }
 
+// Dumps place stand-ins for system libraries in fakelib/; they are never the real implementation.
+bool isPlaceholderModule(const fs::path& relative) {
+    for (const auto& part : relative)
+        if (toLower(part.string()) == "fakelib")
+            return true;
+    return false;
+}
+
+// PS5 system libraries (the ones AnyPS5 reimplements), as opposed to middleware a game ships.
+bool isSystemLibrary(const std::string& file) {
+    const std::string name = toLower(file);
+    return name.rfind("libsce", 0) == 0 || name.rfind("libkernel", 0) == 0 || name == "libc.prx";
+}
+
 struct UnresolvedUse {
     bool IsObject = false;
     std::set<std::string> Users;
@@ -179,6 +193,10 @@ int RelinkGame(const Args& args, const std::string& executablePath) {
     std::map<std::string, std::string> preparedSources;
     std::vector<std::string> failures;
     std::vector<std::string> overridden;
+    std::vector<std::string> preferredGameCopies;
+    // Game modules that AnyPS5 also provides: the side that resolves more of the game's imports wins.
+    std::map<std::string, PreparedModule> contested;
+    std::map<std::string, std::string> contestedSources;
 
     for (auto& [name, paths] : gameModules) {
         std::sort(paths.begin(), paths.end(), [](const fs::path& left, const fs::path& right) {
@@ -189,10 +207,7 @@ int RelinkGame(const Args& args, const std::string& executablePath) {
         const fs::path& chosen = paths.front();
         const std::string relative = chosen.lexically_relative(gameDirectory).string();
 
-        if (providedLibraries.count(name) != 0) {
-            overridden.push_back(name + " (game copy " + relative + ")");
-            continue;
-        }
+        const bool provided = providedLibraries.count(name) != 0;
 
         std::cout << "\n== Preparing module " << relative << "\n";
         for (std::size_t index = 1; index < paths.size(); ++index)
@@ -202,9 +217,18 @@ int RelinkGame(const Args& args, const std::string& executablePath) {
             auto module = PrepareModule(readFile(chosen), moduleArgs);
             if (module.Result.LinkInfo.Kind != Domain::ModuleKind::Library)
                 throw std::runtime_error("module is not an SCE library");
-            prepared.emplace(name, std::move(module));
-            preparedSources.emplace(name, relative);
+            if (provided) {
+                contested.emplace(name, std::move(module));
+                contestedSources.emplace(name, relative);
+            } else {
+                prepared.emplace(name, std::move(module));
+                preparedSources.emplace(name, relative);
+            }
         } catch (const std::exception& e) {
+            if (provided) {
+                overridden.push_back(name + " (game copy " + relative + " could not be relinked)");
+                continue;
+            }
             std::cerr << "FAIL: " << relative << ": " << e.what() << "\n";
             failures.push_back(relative + ": " + e.what());
         }
@@ -215,11 +239,62 @@ int RelinkGame(const Args& args, const std::string& executablePath) {
     if (executable.Result.LinkInfo.Kind == Domain::ModuleKind::Library)
         throw std::runtime_error(std::string(kGameExecutableName) + " is a library module, not an executable");
 
-    std::map<std::string, std::vector<std::string>> providedExports;
+    std::map<std::string, std::set<std::string>> exportsByProvided;
     for (const auto& name : providedLibraries)
         for (const auto& symbol : ReadDynamicObject(readFile(outputLibs / name)).Symbols)
             if (symbol.Defined)
-                providedExports[symbol.Name].push_back(name);
+                exportsByProvided[name].insert(symbol.Name);
+
+    // Which copy of a module both the game and AnyPS5 provide is used: a fakelib/ placeholder never
+    // wins. For a system library, AnyPS5's implementation wins unless the game's copy resolves more of
+    // the game's imports from it. For middleware the game ships, the game's code is authoritative and
+    // an AnyPS5 library replaces it only when it resolves every import the game uses.
+    std::map<std::string, std::set<std::string>> importsByLibrary;
+    const auto collectImports = [&](const Domain::SysVDynamicSection& section) {
+        for (const auto& symbol : listSymbols(section)) {
+            const auto& version = section.SymbolVersions.at(symbol.Index);
+            if (!symbol.Defined && !version.File.empty())
+                importsByLibrary[version.File].insert(symbol.Name);
+        }
+    };
+    collectImports(executable.Result.DynamicSection);
+    for (const auto& [file, module] : prepared)
+        collectImports(module.Result.DynamicSection);
+    for (const auto& [file, module] : contested)
+        collectImports(module.Result.DynamicSection);
+    for (auto& [name, module] : contested) {
+        std::set<std::string> gameCopyExports;
+        for (const auto& symbol : listSymbols(module.Result.DynamicSection))
+            if (symbol.Defined)
+                gameCopyExports.insert(symbol.Name);
+        std::size_t resolvedByAnyPS5 = 0;
+        std::size_t onlyInGameCopy = 0;
+        for (const auto& symbol : importsByLibrary[name]) {
+            if (exportsByProvided[name].count(symbol) != 0)
+                ++resolvedByAnyPS5;
+            else if (gameCopyExports.count(symbol) != 0)
+                ++onlyInGameCopy;
+        }
+        const std::string coverage = std::to_string(resolvedByAnyPS5) + " imports resolved by AnyPS5, " + std::to_string(onlyInGameCopy) + " only by the game copy";
+        const bool placeholder = isPlaceholderModule(fs::path(contestedSources[name]));
+        const bool preferGameCopy = !placeholder && (isSystemLibrary(name) ? onlyInGameCopy > resolvedByAnyPS5 : onlyInGameCopy > 0);
+        if (preferGameCopy) {
+            preferredGameCopies.push_back(name + " (" + coverage + ")");
+            providedLibraries.erase(name);
+            exportsByProvided.erase(name);
+            fs::remove(outputLibs / name);
+            preparedSources.emplace(name, contestedSources[name]);
+            prepared.emplace(name, std::move(module));
+        } else {
+            overridden.push_back(name + " (game copy " + contestedSources[name] + "; " + coverage + ")");
+        }
+    }
+    contested.clear();
+
+    std::map<std::string, std::vector<std::string>> providedExports;
+    for (const auto& [name, symbols] : exportsByProvided)
+        for (const auto& symbol : symbols)
+            providedExports[symbol].push_back(name);
 
     std::map<std::pair<std::string, std::string>, std::vector<std::string>> gameExports;
     for (const auto& [file, module] : prepared) {
@@ -398,6 +473,9 @@ int RelinkGame(const Args& args, const std::string& executablePath) {
         std::cout << "  " << name << "\n";
     std::cout << "Game libraries replaced by AnyPS5: " << overridden.size() << "\n";
     for (const auto& name : overridden)
+        std::cout << "  " << name << "\n";
+    std::cout << "Game copies kept over partial AnyPS5 libraries: " << preferredGameCopies.size() << "\n";
+    for (const auto& name : preferredGameCopies)
         std::cout << "  " << name << "\n";
     std::cout << "Failed modules: " << failures.size() << "\n";
     for (const auto& failure : failures)

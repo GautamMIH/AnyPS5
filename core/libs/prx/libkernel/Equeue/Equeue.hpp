@@ -1,7 +1,6 @@
 #ifndef CORE_LIBS_PRX_LIBKERNEL_EQUEUE_EQUEUE_HPP
 #define CORE_LIBS_PRX_LIBKERNEL_EQUEUE_EQUEUE_HPP
 
-#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <list>
@@ -12,6 +11,7 @@
 
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libkernel/Time/include/TimedWait.hpp"
 
 static constexpr int16_t EVFILT_USER = -11;
 static constexpr int16_t EVFILT_VIDEO_OUT = -13;
@@ -78,7 +78,7 @@ private:
 
     std::list<KernelEqueueEvent> m_events;
     std::mutex m_mutex;
-    std::condition_variable_any m_cond;
+    TimedWait::Condition m_cond;
     std::string m_name;
     KernelEqueue m_handle;
     bool m_closed = false;

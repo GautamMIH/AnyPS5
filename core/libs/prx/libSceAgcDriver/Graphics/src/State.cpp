@@ -369,7 +369,8 @@ State DecodeState(const QueueState& queue) {
         case 6: result.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; break;
         default: throw std::runtime_error("AGC graphics: unsupported primitive type " + std::to_string(primitive));
     }
-    zero(queue.userConfig, 0x24b, ~0u, "primitive restart (GE_MULTI_PRIM_IB_RESET_EN)", "user-config");
+    // Primitive restart only affects indexed draws; Driver::draw rejects it there.
+    (void)read(queue.userConfig, 0x24b, "user-config");
     // PA_CL_VS_OUT_CNTL: USE_VTX_RENDER_TARGET_INDX (bit 18) takes the layer from the misc vector
     // (VS_OUT_MISC_VEC_ENA, bit 21), which may travel on the side bus (bit 24); the recompiler
     // writes it to Layer. Other auxiliary outputs are not modelled.

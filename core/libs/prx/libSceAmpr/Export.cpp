@@ -133,4 +133,230 @@ int APS5_VABI sceAmprMeasureCommandSizeWriteKernelEventQueue_04_00(KernelEqueue,
     return static_cast<int>(AmprPackets::kWriteKernelEventQueueSize);
 }
 
+
+int APS5_VABI sceAmprCommandBufferWriteAddress_04_00(AmprCommandBuffer* cb, uint64_t* address, uint64_t value, uint32_t flags) {
+    const auto target = reinterpret_cast<std::uint64_t>(address);
+    if (target == 0 || (target & 7) != 0 || flags > 0xffff) return AMPR_ERROR_INVALID;
+    std::uint32_t* packet = nullptr;
+    const int result = reserve(cb, AmprPackets::kWriteAddressSize, &packet);
+    if (result != 0) return result;
+    AmprPackets::EncodeWriteAddress(packet, {target, value, static_cast<std::uint16_t>(flags)});
+    commit(cb, AmprPackets::kWriteAddressSize, 0);
+    return 0;
+}
+
+uint32_t APS5_VABI sceAmprMeasureCommandSizeWriteAddress_04_00(void) {
+    return AmprPackets::kWriteAddressSize;
+}
+
+int APS5_VABI sceAmprAprCommandBufferMapBegin() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprAprCommandBufferMapDirectBegin() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprAprCommandBufferMapEnd() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprAprCommandBufferReadFileGather() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprAprCommandBufferReadFileGatherScatter() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprAprCommandBufferReadFileScatter() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprAprCommandBufferResetGatherScatterState() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferConstructMarker() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferConstructNop() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferNop() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferNopWithData() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferPopMarker() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferPushMarker() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferPushMarkerWithColor() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferSetMarker() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferSetMarkerWithColor() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWaitOnAddress_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWaitOnCounter_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWriteAddressFromCounterPair_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWriteAddressFromCounter_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWriteAddressFromTimeCounter_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWriteCounter_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeMapBegin() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeMapDirectBegin() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeMapEnd() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeNop() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeNopWithData() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizePopMarker() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizePushMarker() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizePushMarkerWithColor() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeReadFileGather() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeReadFileGatherScatter() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeReadFileScatter() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeResetGatherScatterState() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeSetMarker() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeSetMarkerWithColor() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeWaitOnAddress_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeWaitOnCounter_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeWriteAddressFromCounterPair_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeWriteAddressFromCounter_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeWriteAddressFromTimeCounter_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeWriteCounter_04_00() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
 }

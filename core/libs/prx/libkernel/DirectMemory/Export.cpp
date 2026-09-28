@@ -4,10 +4,13 @@
 #include <cstring>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
 #include "DirectMemory.hpp"
 #include "prx/libkernel/Pthread/include/PthreadStacks.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include <cstdint>
+#include <iterator>
 #include <map>
 #include <mutex>
 #include <string>
@@ -15,7 +18,7 @@
 namespace VirtualRangeNames {
 
 struct Range {
-    std::uint64_t Length;
+    std::uintptr_t End;
     std::string Name;
 };
 
@@ -29,23 +32,102 @@ std::map<std::uintptr_t, Range>& Ranges() {
     return instance;
 }
 
-void Set(std::uintptr_t start, std::uint64_t length, const char* name) {
-    const std::lock_guard lock(Mutex());
-    Ranges()[start] = {length, name};
+// Removes names from [start, end); a named range that straddles either end keeps its outside part.
+void EraseLocked(std::uintptr_t start, std::uintptr_t end) {
+    auto& ranges = Ranges();
+    auto it = ranges.lower_bound(start);
+    if (it != ranges.begin() && std::prev(it)->second.End > start) --it;
+    while (it != ranges.end() && it->first < end) {
+        const auto rangeStart = it->first;
+        const auto range = it->second;
+        it = ranges.erase(it);
+        if (rangeStart < start) ranges.emplace(rangeStart, Range{start, range.Name});
+        if (range.End > end) it = ranges.emplace(end, Range{range.End, range.Name}).first;
+    }
 }
 
-void Get(std::uintptr_t address, char* output, std::size_t outputSize) {
+void Set(std::uintptr_t start, std::uint64_t length, const char* name) {
+    const std::lock_guard lock(Mutex());
+    EraseLocked(start, start + length);
+    // Names hold at most 31 characters, as in SceKernelVirtualQueryInfo.
+    Ranges().emplace(start, Range{start + length, std::string(name, strnlen(name, 31))});
+}
+
+void Clear(std::uintptr_t start, std::uint64_t length) {
+    const std::lock_guard lock(Mutex());
+    EraseLocked(start, start + length);
+}
+
+// Names the query result at `address` and narrows [start, end) to the named range around it, or to
+// the unnamed gap between named ranges: named sub-ranges are separate VirtualQuery entries.
+void Apply(std::uintptr_t address, std::uintptr_t& start, std::uintptr_t& end, char* output, std::size_t outputSize) {
     const std::lock_guard lock(Mutex());
     auto& ranges = Ranges();
-    auto it = ranges.upper_bound(address);
-    if (it == ranges.begin())
-        return;
-    --it;
-    if (address - it->first >= it->second.Length || outputSize == 0)
-        return;
-    const std::size_t count = std::min(outputSize - 1, it->second.Name.size());
-    std::memcpy(output, it->second.Name.data(), count);
-    output[count] = '\0';
+    auto next = ranges.upper_bound(address);
+    if (next != ranges.begin()) {
+        const auto containing = std::prev(next);
+        if (address < containing->second.End) {
+            start = std::max(start, containing->first);
+            end = std::min(end, containing->second.End);
+            if (outputSize == 0) return;
+            const std::size_t count = std::min(outputSize - 1, containing->second.Name.size());
+            std::memcpy(output, containing->second.Name.data(), count);
+            output[count] = '\0';
+            return;
+        }
+        start = std::max(start, containing->second.End);
+    }
+    if (next != ranges.end()) end = std::min(end, next->first);
+}
+
+}
+
+namespace {
+
+// Flexible memory the title configured; sceKernelAvailableFlexibleMemorySize reports what remains.
+// Mappings are not refused past it: titles configure their own size, which is not read yet.
+constexpr size_t FLEXIBLE_MEMORY_SIZE = 448ULL * 1024 * 1024;
+constexpr int PRT_APERTURE_COUNT = 3;
+
+struct PrtAperture {
+    void* address;
+    size_t length;
+};
+
+std::mutex g_prtLock;
+PrtAperture g_prtApertures[PRT_APERTURE_COUNT] = {};
+
+std::mutex g_flexibleLock;
+std::map<uintptr_t, size_t> g_flexibleRanges;
+
+size_t _flexibleUsedLocked() {
+    size_t used = 0;
+    for (const auto& [start, len] : g_flexibleRanges) used += len;
+    return used;
+}
+
+int _mapFlexible(void** addr, size_t len, int prot, int flags) {
+    const int result = DoMapAnon(addr, len, prot, flags);
+    if (result == 0) {
+        std::lock_guard lock(g_flexibleLock);
+        g_flexibleRanges[reinterpret_cast<uintptr_t>(*addr)] = len;
+    }
+    return result;
+}
+
+void _releaseFlexible(uintptr_t start, size_t len) {
+    std::lock_guard lock(g_flexibleLock);
+    const uintptr_t end = start + len;
+    auto it = g_flexibleRanges.upper_bound(start);
+    if (it != g_flexibleRanges.begin()) --it;
+    while (it != g_flexibleRanges.end() && it->first < end) {
+        const uintptr_t rangeStart = it->first;
+        const uintptr_t rangeEnd = rangeStart + it->second;
+        if (rangeEnd <= start) { ++it; continue; }
+        it = g_flexibleRanges.erase(it);
+        if (rangeStart < start) g_flexibleRanges[rangeStart] = start - rangeStart;
+        if (rangeEnd > end) g_flexibleRanges[end] = rangeEnd - end;
+    }
 }
 
 }
@@ -103,17 +185,21 @@ int APS5_VABI sceKernelMapDirectMemory2(void** addr, size_t len, int type, int p
 }
 
 int APS5_VABI sceKernelMapFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags) {
- return DoMapAnon(addr_in_out, len, prot, flags);
+ return _mapFlexible(addr_in_out, len, prot, flags);
 }
 
+int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name);
+
 int APS5_VABI sceKernelMapNamedDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment, const char* name) {
- (void)name;
- return DoMapDirect(addr, len, prot, flags, direct_memory_start, alignment);
+ const int result = DoMapDirect(addr, len, prot, flags, direct_memory_start, alignment);
+ if (result == 0 && name) sceKernelSetVirtualRangeName(*addr, len, name);
+ return result;
 }
 
 int32_t APS5_VABI sceKernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags, const char* name) {
- (void)name;
- return DoMapAnon(addr_in_out, len, prot, flags);
+ const int result = _mapFlexible(addr_in_out, len, prot, flags);
+ if (result == 0 && name) sceKernelSetVirtualRangeName(*addr_in_out, len, name);
+ return result;
 }
 
 int APS5_VABI sceKernelMprotect(const void* addr, size_t len, int prot) {
@@ -121,7 +207,9 @@ int APS5_VABI sceKernelMprotect(const void* addr, size_t len, int prot) {
 }
 
 int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
- return DoMunmap(reinterpret_cast<void*>(vaddr), len);
+ const int result = DoMunmap(reinterpret_cast<void*>(vaddr), len);
+ if (result == 0) _releaseFlexible(static_cast<uintptr_t>(vaddr), len);
+ return result;
 }
 
 int APS5_VABI sceKernelReleaseDirectMemory(int64_t start, size_t len) {
@@ -172,7 +260,14 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
    info->memory_type = kDefaultMemoryType;
   }
  }
- VirtualRangeNames::Get(info->start, info->name, sizeof(info->name));
+ {
+  std::uintptr_t start = info->start;
+  std::uintptr_t end = info->end;
+  VirtualRangeNames::Apply(std::max(reinterpret_cast<std::uintptr_t>(addr), start), start, end, info->name, sizeof(info->name));
+  if (info->is_direct) info->offset += start - info->start;
+  info->start = start;
+  info->end = end;
+ }
  return 0;
 }
 
@@ -208,20 +303,29 @@ int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
 }
 
 int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size) {
- (void)size;
- NotImplemented_nid_no_patch(__func__);
+ if (!size) return SCE_KERNEL_ERROR_EINVAL;
+ std::lock_guard lock(g_flexibleLock);
+ *size = FLEXIBLE_MEMORY_SIZE - std::min(FLEXIBLE_MEMORY_SIZE, _flexibleUsedLocked());
  return 0;
 }
 
 int APS5_VABI sceKernelConfiguredFlexibleMemorySize(size_t* size) {
- (void)size;
- NotImplemented_nid_no_patch(__func__);
+ if (!size) return SCE_KERNEL_ERROR_EINVAL;
+ *size = FLEXIBLE_MEMORY_SIZE;
  return 0;
 }
 
 int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name) {
- if (!addr || len == 0 || !name) return SCE_KERNEL_ERROR_EINVAL;
- VirtualRangeNames::Set(reinterpret_cast<std::uintptr_t>(addr), len, name);
+ const auto start = reinterpret_cast<std::uintptr_t>(addr);
+ if (!addr || len == 0 || !name || len > UINTPTR_MAX - start) return SCE_KERNEL_ERROR_EINVAL;
+ VirtualRangeNames::Set(start, len, name);
+ return 0;
+}
+
+int APS5_VABI sceKernelClearVirtualRangeName(const void* addr, uint64_t len) {
+ const auto start = reinterpret_cast<std::uintptr_t>(addr);
+ if (!addr || len == 0 || len > UINTPTR_MAX - start) return SCE_KERNEL_ERROR_EINVAL;
+ VirtualRangeNames::Clear(start, len);
  return 0;
 }
 
@@ -235,18 +339,17 @@ int APS5_VABI sceKernelGetPageTableStats(int* cpu_total, int* cpu_available, int
 }
 
 int APS5_VABI sceKernelGetPrtAperture(int index, void** addr, size_t* len) {
- (void)index;
- (void)addr;
- (void)len;
- NotImplemented_nid_no_patch(__func__);
+ if (index < 0 || index >= PRT_APERTURE_COUNT || !addr || !len) return SCE_KERNEL_ERROR_EINVAL;
+ std::lock_guard lock(g_prtLock);
+ *addr = g_prtApertures[index].address;
+ *len = g_prtApertures[index].length;
  return 0;
 }
 
 int APS5_VABI sceKernelSetPrtAperture(int index, void* addr, size_t len) {
- (void)index;
- (void)addr;
- (void)len;
- NotImplemented_nid_no_patch(__func__);
+ if (index < 0 || index >= PRT_APERTURE_COUNT) return SCE_KERNEL_ERROR_EINVAL;
+ std::lock_guard lock(g_prtLock);
+ g_prtApertures[index] = {addr, len};
  return 0;
 }
 
@@ -268,14 +371,14 @@ int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, 
    result = DoMapDirect(&address, entry.length, protection, flags, static_cast<int64_t>(entry.offset), 0);
    break;
   case kOperationUnmap:
-   result = DoMunmap(address, entry.length);
+   result = sceKernelMunmap(reinterpret_cast<uint64_t>(address), entry.length);
    break;
   case kOperationProtect:
   case kOperationTypeProtect:
    result = DoMprotect(address, entry.length, protection);
    break;
   case kOperationMapFlexible:
-   result = DoMapAnon(&address, entry.length, protection, flags);
+   result = _mapFlexible(&address, entry.length, protection, flags);
    break;
   default:
    result = SCE_KERNEL_ERROR_EINVAL;

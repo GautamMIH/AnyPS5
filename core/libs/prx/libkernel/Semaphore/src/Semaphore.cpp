@@ -1,4 +1,6 @@
 #include "prx/libkernel/Semaphore/include/Semaphore.hpp"
+#include "prx/libkernel/Time/include/Time.hpp"
+#include <chrono>
 
 #include <stdexcept>
 #include <string>
@@ -43,7 +45,7 @@ int APS5_VABI sceKernelSignalSema(KernelSema sem, int count) {
   return KERNEL_SEMA_ERROR_EINVAL;
  }
  sem->tokenCount += count;
- sem->condition.notify_all();
+ sem->condition.NotifyAll();
  return KERNEL_SEMA_OK;
 }
 
@@ -59,18 +61,19 @@ int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) 
  const auto generation = sem->cancelGeneration;
  const auto ready = [&] { return sem->deleted || sem->cancelGeneration != generation || sem->tokenCount >= need; };
  ++sem->waiters;
+ const auto waitStart = std::chrono::steady_clock::now();
  bool acquired = true;
  if (time == nullptr) {
-  sem->condition.wait(lock, ready);
+  sem->condition.Wait(lock, ready);
  } else {
-  const auto start = std::chrono::steady_clock::now();
-  acquired = sem->condition.wait_for(lock, std::chrono::microseconds(*time), ready);
-  const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+  acquired = sem->condition.WaitUntil(lock, TimedWait::DeadlineNanos(*time), ready);
+  const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - waitStart).count();
   *time = elapsed >= static_cast<std::int64_t>(*time) ? 0 : static_cast<KernelUseconds>(*time - elapsed);
  }
+ KernelTraceWait_nid_postfix("sema", __builtin_return_address(0), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count()), !acquired);
  --sem->waiters;
  if (sem->deleted) {
-  sem->condition.notify_all();
+  sem->condition.NotifyAll();
   return KERNEL_SEMA_ERROR_EACCES;
  }
  if (sem->cancelGeneration != generation) {
@@ -97,7 +100,7 @@ int APS5_VABI sceKernelCancelSema(KernelSema sem, int count, int* threads) {
  }
  sem->tokenCount = count < 0 ? sem->initCount : count;
  ++sem->cancelGeneration;
- sem->condition.notify_all();
+ sem->condition.NotifyAll();
  return KERNEL_SEMA_OK;
 }
 
@@ -109,8 +112,8 @@ int APS5_VABI sceKernelDeleteSema(KernelSema sem) {
  {
   std::unique_lock<std::mutex> lock(sem->mutex);
   sem->deleted = true;
-  sem->condition.notify_all();
-  sem->condition.wait(lock, [&] { return sem->waiters == 0; });
+  sem->condition.NotifyAll();
+  sem->condition.Wait(lock, [&] { return sem->waiters == 0; });
  }
  delete sem;
  return KERNEL_SEMA_OK;

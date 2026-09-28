@@ -10,6 +10,7 @@
 #include <mutex>
 #include <new>
 #include <stdexcept>
+#include <algorithm>
 
 #if defined(__linux__)
 #include <malloc.h>
@@ -106,7 +107,7 @@ std::size_t APS5_VABI defaultUsableSize(void* pointer) {
     return pointer == nullptr ? 0 : malloc_usable_size(pointer);
 }
 
-void registerDefaultHeap() {
+std::array<void*, 10> defaultApi() {
     std::array<void*, 10> api{};
     api[0] = reinterpret_cast<void*>(&defaultAllocate);
     api[1] = reinterpret_cast<void*>(&defaultFree);
@@ -118,14 +119,19 @@ void registerDefaultHeap() {
     api[7] = reinterpret_cast<void*>(&defaultStatistics);
     api[8] = reinterpret_cast<void*>(&defaultStatistics);
     api[9] = reinterpret_cast<void*>(&defaultUsableSize);
-    ApplicationHeapRegister_nid_no_patch(api.data());
+    return api;
 }
 
 #else
-void registerDefaultHeap() {
+std::array<void*, 10> defaultApi() {
     throw std::runtime_error("application heap: the default allocator is not implemented on this platform");
 }
 #endif
+
+void registerDefaultHeap() {
+    const auto api = defaultApi();
+    ApplicationHeapRegister_nid_no_patch(api.data());
+}
 
 void ensureInitialized() {
     bool registered;
@@ -178,8 +184,13 @@ void ApplicationHeapRegister_nid_no_patch(void* const* api) {
     if (api == nullptr) throw std::invalid_argument("application heap: null allocator API");
     std::array<void*, 10> replacement;
     std::memcpy(replacement.data(), api, sizeof(replacement));
-    for (std::size_t index = 0; index < 7; ++index) {
-        if (replacement[index] == nullptr) throw std::invalid_argument("application heap: incomplete allocator API");
+    // An SDK that does not replace the allocator registers an all-null table: use the default heap.
+    if (std::all_of(replacement.begin(), replacement.end(), [](const void* entry) { return entry == nullptr; })) {
+        replacement = defaultApi();
+    } else {
+        for (std::size_t index = 0; index < 7; ++index) {
+            if (replacement[index] == nullptr) throw std::invalid_argument("application heap: incomplete allocator API");
+        }
     }
     std::lock_guard lock(heapMutex);
     if (heapFailure) std::rethrow_exception(heapFailure);

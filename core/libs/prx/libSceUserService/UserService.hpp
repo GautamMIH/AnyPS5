@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEUSERSERVICE_USERSERVICE_HPP
 #define CORE_LIBS_PRX_LIBSCEUSERSERVICE_USERSERVICE_HPP
 
+#include <cstddef>
 #include <cstdint>
 
 constexpr int USER_SERVICE_OK = 0;
@@ -12,5 +13,7 @@ constexpr std::uint32_t USER_SERVICE_EVENT_LOGIN = 0;
 constexpr std::uint32_t USER_SERVICE_ADULT_AGE_LEVEL = 18;
 constexpr char USER_SERVICE_NAME_VARIABLE[] = "USER";
 constexpr char USER_SERVICE_DEFAULT_NAME[] = "Player";
+constexpr int USER_SERVICE_ERROR_BUFFER_TOO_SHORT = -2137653238;
+constexpr std::size_t USER_SERVICE_MAX_USER_NAME_LENGTH = 16;
 
 #endif

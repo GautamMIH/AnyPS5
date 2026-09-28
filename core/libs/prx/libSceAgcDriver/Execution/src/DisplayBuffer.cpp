@@ -39,14 +39,19 @@ std::size_t DisplayBufferSize(const DisplayBuffer& buffer) {
     require(buffer.width != 0 && buffer.height != 0 && buffer.width <= 16384 && buffer.height <= 16384, "VideoOut: invalid display buffer dimensions");
     static_cast<void>(DecodeDisplayPixelFormat(buffer.pixelFormat));
     require(buffer.address != 0 && (buffer.address & 65535u) == 0, "VideoOut: display buffer requires 64 KiB alignment");
-    const auto size = static_cast<std::uint64_t>((buffer.width + 127u) / 128u) * ((buffer.height + 127u) / 128u) * 65536u;
+    require(buffer.tilingMode <= 1, "VideoOut: unsupported display tiling mode");
+    require(buffer.tilingMode != 0 || buffer.pitchInPixel == 0, "VideoOut: tiled display pitch is unsupported");
+    const auto pitch = buffer.pitchInPixel == 0 ? buffer.width : buffer.pitchInPixel;
+    require(pitch >= buffer.width && pitch <= 16384, "VideoOut: invalid linear display pitch");
+    const auto size = buffer.tilingMode == 1 ? static_cast<std::uint64_t>(pitch) * buffer.height * 4u
+        : static_cast<std::uint64_t>((buffer.width + 127u) / 128u) * ((buffer.height + 127u) / 128u) * 65536u;
     require(size <= std::numeric_limits<std::size_t>::max() && size <= std::numeric_limits<std::uintptr_t>::max() - buffer.address, "VideoOut: display buffer range overflow");
     return static_cast<std::size_t>(size);
 }
 
 std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::span<const std::byte> source) {
     PerformanceTimer timing("DisplayBuffer.Decode");
-    require(source.size() == DisplayBufferSize(buffer), "VideoOut: invalid tiled display buffer size");
+    require(source.size() == DisplayBufferSize(buffer), "VideoOut: invalid display buffer size");
     std::vector<std::byte> pixels(static_cast<std::size_t>(buffer.width) * buffer.height * 4);
     const auto blocksPerRow = (buffer.width + 127u) / 128u;
     const auto layout = DecodeDisplayPixelFormat(buffer.pixelFormat);
@@ -55,7 +60,9 @@ std::vector<std::byte> DecodeDisplayBuffer(const DisplayBuffer& buffer, std::spa
     timing.Mark("validate_allocate");
     for (std::uint32_t y = 0; y < buffer.height; ++y) {
         for (std::uint32_t x = 0; x < buffer.width; ++x) {
-            const auto tiled = (static_cast<std::size_t>(y / 128u) * blocksPerRow + x / 128u) * 65536u + tileOffset(x, y);
+            const auto pitch = buffer.pitchInPixel == 0 ? buffer.width : buffer.pitchInPixel;
+            const auto tiled = buffer.tilingMode == 1 ? (static_cast<std::size_t>(y) * pitch + x) * 4u
+                : (static_cast<std::size_t>(y / 128u) * blocksPerRow + x / 128u) * 65536u + tileOffset(x, y);
             const auto linear = (static_cast<std::size_t>(y) * buffer.width + x) * 4;
             if (packed) {
                 std::uint32_t texel = 0;

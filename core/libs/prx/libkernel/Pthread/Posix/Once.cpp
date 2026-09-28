@@ -42,16 +42,3 @@ extern "C" int APS5_VABI pthread_once_nid_postfix(
     onceChanged.notify_all();
     return 0;
 }
-
-using OnceRoutine = void (APS5_VABI *)();
-
-extern "C" {
-
-int APS5_VABI scePthreadOnce_nid_postfix(void* onceControl, OnceRoutine initRoutine) {
-    (void)onceControl;
-    (void)initRoutine;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-}

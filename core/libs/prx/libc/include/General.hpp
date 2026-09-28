@@ -10,6 +10,7 @@
 #include "general/ExportMacros.hpp"
 
 extern "C" void NotImplemented_nid_no_patch(const char* funcName);
+extern "C" void CxaFinalize_nid_no_patch(void* dsoHandle);
 
 extern "C" std::uint64_t APS5_VABI UnresolvedImport_nid_no_patch(const char* nid, const char* library);
 
@@ -17,6 +18,10 @@ extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path);
 // Serves a top-level guest directory ("/savedata0") from a host directory until unmounted.
 extern "C" void MountGuestPath_nid_no_patch(const char* mountPoint, const std::filesystem::path& host);
 extern "C" void UnmountGuestPath_nid_no_patch(const char* mountPoint);
+// Guest path aliases: a guest prefix such as "/_sm/0" (a save-data mount point) resolves to a host
+// directory instead of the run directory; the prefix matches whole path components only.
+extern "C" void AddPathAlias_nid_no_patch(const char* guestPrefix, const char* hostPath);
+extern "C" void RemovePathAlias_nid_no_patch(const char* guestPrefix);
 
 #define APS5_INVALID_ARG_EX throw std::invalid_argument(std::string(__func__) + ": invalid argument")
 

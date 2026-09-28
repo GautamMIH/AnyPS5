@@ -6,6 +6,7 @@
 #include "SDL.h"
 #include "SDL_vulkan.h"
 #include "prx/libSceVideoOut/include/PadInput.hpp"
+#include "prx/libSceVideoOut/include/MouseInput.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
@@ -55,7 +56,8 @@ public:
     }
 
     std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo& info) override {
-        require(info.mode == VIDEO_OUT_FLIP_MODE_VSYNC, ("unsupported flip mode " + std::to_string(info.mode) + " (index " + std::to_string(info.index) + ", argument " + std::to_string(info.argument) + ")").c_str());
+        // Every flip mode (VSYNC 1 through WINDOW_2 6) is presented at the next host vsync.
+        require(info.mode >= VIDEO_OUT_FLIP_MODE_VSYNC && info.mode <= 6, ("unsupported flip mode " + std::to_string(info.mode) + " (index " + std::to_string(info.index) + ", argument " + std::to_string(info.argument) + ")").c_str());
         require(info.index >= VIDEO_OUT_BUFFER_INDEX_BLACK && info.index < VIDEO_OUT_BUFFER_NUM_MAX, "invalid flip index");
         auto request = std::make_shared<FlipRequest>();
         request->cfg = cfg;
@@ -176,8 +178,8 @@ VideoOutDriver& VideoOutDriver::Get() {
 }
 
 VideoOutDriver::VideoOutDriver() {
-    if (SDL_InitSubSystem(SDL_INIT_VIDEO) < 0) {
-        throw std::runtime_error(std::string("SDL_InitSubSystem(VIDEO) failed: ") + SDL_GetError());
+    if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
+        throw std::runtime_error(std::string("SDL_InitSubSystem(VIDEO | GAMECONTROLLER) failed: ") + SDL_GetError());
     }
     try {
         AgcDriverWaitIdle_nid_postfix();
@@ -195,7 +197,7 @@ VideoOutDriver::VideoOutDriver() {
             flipQueue->changed.notify_all();
             presentThread.join();
         }
-        SDL_QuitSubSystem(SDL_INIT_VIDEO);
+        SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
         throw;
     }
 }
@@ -227,7 +229,7 @@ void VideoOutDriver::Shutdown() {
         AgcDriverReleaseWindow_nid_postfix(window.Handle());
         window.Destroy();
     }
-    SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
     stopped = true;
     std::lock_guard lock(flipQueue->mutex);
     if (flipQueue->failure) std::rethrow_exception(flipQueue->failure);
@@ -312,11 +314,14 @@ bool VideoOutDriver::IsOpen(int handle) {
     return GetConfig(handle) != nullptr;
 }
 
-void VideoOutDriver::SubmitFlip(int handle, int index, int flipMode, int64_t flipArg) {
+int VideoOutDriver::SubmitFlip(int handle, int index, int flipMode, int64_t flipArg) {
+    // A title that runs ahead of the presenter gets the documented error, not a failure.
+    if (flipQueue->reservations.load() >= VIDEO_OUT_FLIP_QUEUE_CAPACITY) return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
     std::array<uint32_t, AgcDriver::FlipPacketWords> words{AgcDriver::FlipPacketHeader, static_cast<uint32_t>(handle), static_cast<uint32_t>(index), static_cast<uint32_t>(flipMode), static_cast<uint32_t>(static_cast<uint64_t>(flipArg)), static_cast<uint32_t>(static_cast<uint64_t>(flipArg) >> 32u)};
     Packet packet{words.data(), static_cast<uint32_t>(words.size()), 0, {}};
     const auto result = sceAgcDriverSubmitDcb(&packet);
     require(result == 0, "driver rejected flip submission");
+    return 0;
 }
 
 void VideoOutDriver::triggerEvents(VideoOutConfig& cfg, int eventKind, void* triggerData) {
@@ -438,12 +443,14 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
 void VideoOutDriver::presentLoop(std::stop_token token) {
     std::shared_ptr<FlipRequest> current;
     PadInput padInput;
+    MouseInput mouseInput;
     try {
         while (!token.stop_requested()) {
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
                 require(event.type != SDL_QUIT, "window was closed");
                 padInput.HandleEvent(event, window);
+                if (window.Handle() != nullptr) mouseInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
             }
             padInput.Update();
             {

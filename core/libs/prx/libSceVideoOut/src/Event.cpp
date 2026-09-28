@@ -107,35 +107,49 @@ static int deleteVideoOutEvent(int handle, KernelEqueue eq, int16_t eventKind) {
 
 extern "C" {
 
-int APS5_VABI sceVideoOutAddFlipEvent(KernelEqueue eq, int handle, void* udata) {
+int APS5_VABI sceVideoOutAddFlipEvent(KernelEqueue eq, int handle, void* udata) try {
     return registerVideoOutEvent(handle, eq, VIDEO_OUT_EVENT_FLIP, udata);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutAddVblankEvent(KernelEqueue eq, int handle, void* udata) {
+int APS5_VABI sceVideoOutAddVblankEvent(KernelEqueue eq, int handle, void* udata) try {
     return registerVideoOutEvent(handle, eq, VIDEO_OUT_EVENT_VBLANK, udata);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutAddPreVblankStartEvent(KernelEqueue eq, int handle, void* udata) {
+int APS5_VABI sceVideoOutAddPreVblankStartEvent(KernelEqueue eq, int handle, void* udata) try {
     static_cast<void>(eq);
     static_cast<void>(udata);
     VideoOutDriver::Get().GetConfig(handle);
     throw std::runtime_error("VideoOut: physical pre-vblank timing is not implemented");
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutAddOutputModeEvent(KernelEqueue eq, int handle, void* udata) {
+int APS5_VABI sceVideoOutAddOutputModeEvent(KernelEqueue eq, int handle, void* udata) try {
     return registerVideoOutEvent(handle, eq, VIDEO_OUT_EVENT_SET_MODE, udata);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutDeleteFlipEvent(KernelEqueue eq, int handle) {
+int APS5_VABI sceVideoOutDeleteFlipEvent(KernelEqueue eq, int handle) try {
     return deleteVideoOutEvent(handle, eq, VIDEO_OUT_EVENT_FLIP);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutDeleteVblankEvent(KernelEqueue eq, int handle) {
+int APS5_VABI sceVideoOutDeleteVblankEvent(KernelEqueue eq, int handle) try {
     return deleteVideoOutEvent(handle, eq, VIDEO_OUT_EVENT_VBLANK);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutDeletePreVblankStartEvent(KernelEqueue eq, int handle) {
+int APS5_VABI sceVideoOutDeletePreVblankStartEvent(KernelEqueue eq, int handle) try {
     return deleteVideoOutEvent(handle, eq, VIDEO_OUT_EVENT_PRE_VBLANK_START);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceVideoOutGetEventId(const KernelEvent* ev) {

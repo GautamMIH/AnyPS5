@@ -107,6 +107,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/Acb.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/CommandBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/Dcb.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Unimplemented.cpp
 )
 
 target_include_directories(libSceAgcDriver PRIVATE

@@ -149,7 +149,11 @@ std::uint16_t ProgramHeaderLayoutBuilder::WriteLayout(
     const std::uint16_t neededPh = hasGnuStack ? static_cast<std::uint16_t>(requiredPh + 1) : requiredPh;
 
     const std::uint64_t headerBlockSize = request.PhOff + static_cast<std::uint64_t>(neededPh) * request.PhEntSize;
-    const std::uint64_t headerBlockAlign = kDefaultLoadAlignment;
+    std::uint64_t headerBlockAlign = kDefaultLoadAlignment;
+    for (const auto& ph : request.OriginalHeaders) {
+        if (ph.Type == PT_LOAD && !_segmentFilter->ShouldSkip(ph) && ph.Alignment > headerBlockAlign && (ph.Alignment & (ph.Alignment - 1)) == 0)
+            headerBlockAlign = ph.Alignment;
+    }
     const std::uint64_t headerBlockVaddr =
         (request.ExtraBlockVaddr + request.ExtraBlockSize + headerBlockAlign - 1) & ~(headerBlockAlign - 1);
 

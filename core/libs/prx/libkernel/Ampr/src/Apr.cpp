@@ -166,6 +166,16 @@ AprResult execute(const AmprCommandBuffer& cb) {
             EqueueTriggerEvent_nid_postfix(static_cast<KernelEqueue>(event.Queue), static_cast<uintptr_t>(static_cast<std::uint32_t>(event.Id)), EVFILT_AMPR, reinterpret_cast<void*>(static_cast<uintptr_t>(event.Data)));
             break;
         }
+        case AmprPackets::kOpcodeWriteAddress: {
+            const auto write = AmprPackets::DecodeWriteAddress(packet);
+            if (write.Flags != 0) {
+                NotImplemented_nid_no_patch("sceKernelApr WriteAddress flags");
+                return {kResultInvalid, offset};
+            }
+            if (write.Address == 0 || (write.Address & 7) != 0) return {kResultInvalid, offset};
+            std::atomic_ref<std::uint64_t>(*reinterpret_cast<std::uint64_t*>(write.Address)).store(write.Value, std::memory_order_release);
+            break;
+        }
         default:
             return {kResultInvalid, offset};
         }
