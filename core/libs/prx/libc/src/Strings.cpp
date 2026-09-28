@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cwchar>
 #include <cstdio>
+#include <limits>
 
 #include "prx/libc/include/General.hpp"
 
@@ -13,6 +14,10 @@ extern "C" {
 void* APS5_VABI memset_nid_postfix(void* s, int c, size_t n) {
     // APS5_LOG_OUT("s=%p c=%d n=%zu", s, c, n);
     return std::memset(s, c, n);
+}
+
+void APS5_VABI bzero_nid_postfix(void* destination, size_t count) {
+    std::memset(destination, 0, count);
 }
 
 void* APS5_VABI memcpy_nid_postfix(void* dest, const void* src, size_t n) {
@@ -207,6 +212,28 @@ size_t APS5_VABI wcsspn_nid_postfix(const wchar_t* s, const wchar_t* accept) {
 
 wchar_t* APS5_VABI wmemset_nid_postfix(wchar_t* s, wchar_t c, size_t n) {
     return std::wmemset(s, c, n);
+}
+
+long double APS5_VABI wcstold_nid_postfix(const wchar_t* str, wchar_t** endptr) {
+    static_assert(sizeof(long double) == 16);
+    static_assert(std::numeric_limits<long double>::digits == 64);
+    return std::wcstold(str, endptr);
+}
+
+unsigned long long APS5_VABI wcstoul_nid_postfix(const wchar_t* str, wchar_t** endptr, int base) {
+    return std::wcstoull(str, endptr, base);
+}
+
+int APS5_VABI wcscoll_nid_postfix(const wchar_t* first, const wchar_t* second) {
+    return std::wcscoll(first, second);
+}
+
+size_t APS5_VABI wcsxfrm_nid_postfix(wchar_t* destination, const wchar_t* source, size_t count) {
+    return std::wcsxfrm(destination, source, count);
+}
+
+size_t APS5_VABI strxfrm_nid_postfix(char* destination, const char* source, size_t count) {
+    return std::strxfrm(destination, source, count);
 }
 
 }
