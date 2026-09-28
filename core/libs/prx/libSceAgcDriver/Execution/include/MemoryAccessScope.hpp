@@ -34,6 +34,36 @@ private:
     Resolver previousResolver;
 };
 
+// Profiling: names the access a guest memory check is made for (a static timing mark name).
+class AccessSite {
+public:
+    explicit AccessSite(const char* name) : previous(current) { current = name; }
+    ~AccessSite() { current = previous; }
+    AccessSite(const AccessSite&) = delete;
+    AccessSite& operator=(const AccessSite&) = delete;
+    static const char* Current() { return current != nullptr ? current : "cpu_wait_other"; }
+
+private:
+    inline static thread_local const char* current = nullptr;
+    const char* previous;
+};
+
+// Marks guest memory checks made for accesses the GPU performs itself, through imported guest
+// memory: earlier GPU writes to the range then need a GPU memory barrier, not a CPU wait. Checks
+// for CPU reads (snapshots, uploads) are made outside such a scope.
+class GpuAccessScope {
+public:
+    GpuAccessScope() : previous(active) { active = true; }
+    ~GpuAccessScope() { active = previous; }
+    GpuAccessScope(const GpuAccessScope&) = delete;
+    GpuAccessScope& operator=(const GpuAccessScope&) = delete;
+    static bool Active() { return active; }
+
+private:
+    inline static thread_local bool active = false;
+    bool previous;
+};
+
 }
 
 #endif

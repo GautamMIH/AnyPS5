@@ -20,7 +20,7 @@ void GpuColorTransfer::writeBack(std::uint64_t address, bool tracked) {
     Require(address != 0 && address % layout.Alignment() == 0, "misaligned color writeback address");
     timing.Mark("validate");
     readback->Invalidate();
-    if (tracked) GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(address, readback->Bytes().data(), readback->Bytes().size());
+    if (tracked) GuestMemory::WriteThroughAlias(address, readback->Bytes().data(), readback->Bytes().size());
     else GuestMemory::Write(address, readback->Bytes(), layout.Alignment());
     timing.Mark("guest_write", layout.Bytes());
 }

@@ -32,6 +32,8 @@ private:
     std::vector<Batch> pending;
     std::vector<std::unique_ptr<CommandBatch>> available;
     std::size_t drawCount = 0;
+    // A GPU access overlaps writes of queued draws: the next recording starts with a memory barrier.
+    bool barrierRequested = false;
 };
 
 }

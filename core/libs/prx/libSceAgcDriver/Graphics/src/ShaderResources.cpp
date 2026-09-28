@@ -1,3 +1,5 @@
+#include <optional>
+#include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -206,6 +208,11 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     if (address == 0 || byteSize == 0) return unusable("null address or size");
     if (byteSize > context.limits.maxStorageBufferRange || byteSize > std::numeric_limits<std::size_t>::max()) return unusable("size");
     const auto size = static_cast<std::size_t>(byteSize);
+    // With imported guest memory the shader reads and writes the range itself: earlier draws'
+    // writes need a GPU barrier, not a CPU wait (an upload fallback reads through GuestMemory::Read,
+    // which waits as a CPU access).
+    std::optional<GuestMemory::GpuAccessScope> gpuAccess;
+    if (context.guestGpuMemory != nullptr) gpuAccess.emplace();
     try {
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, false);
     } catch (const std::runtime_error&) {

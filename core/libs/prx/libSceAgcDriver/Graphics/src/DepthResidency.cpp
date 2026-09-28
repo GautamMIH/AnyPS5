@@ -167,13 +167,13 @@ void ResidentDepth::Commit() {
         depthToGuest(depth, depthLinear->Bytes(), linear);
         // Padding texels outside the extent keep their uploaded contents.
         plane.Tile(linear, depthTiled);
-        GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(depth.depthAddress, depthTiled.data(), depthTiled.size());
+        GuestMemory::WriteThroughAlias(depth.depthAddress, depthTiled.data(), depthTiled.size());
     }
     if (stencilLinear) {
         stencilLinear->Invalidate();
         const DepthTargetLayout plane(depth.extent.width, depth.extent.height, 1);
         plane.Tile(stencilLinear->Bytes(), stencilTiled);
-        GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(depth.stencilAddress, stencilTiled.data(), stencilTiled.size());
+        GuestMemory::WriteThroughAlias(depth.stencilAddress, stencilTiled.data(), stencilTiled.size());
     }
     timing.Mark("guest_write", depth.depthBytes + depth.stencilBytes);
     dirty = false;

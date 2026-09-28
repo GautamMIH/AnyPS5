@@ -63,6 +63,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/GuestMemory.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/WriteTracker.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/BdaFeatures.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
@@ -169,6 +170,7 @@ add_executable(agc_shader_memory_tests EXCLUDE_FROM_ALL
         tests/ShaderMemory.cpp
         Execution/src/ShaderMemory.cpp
         Execution/src/GuestMemory.cpp
+        Execution/src/WriteTracker.cpp
 )
 target_include_directories(agc_shader_memory_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(agc_shader_memory_tests PRIVATE shader_recompiler_agc_driver libc)
@@ -244,6 +246,7 @@ add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         ${agcTextureDetileShaderHeader}
         ${agcTextureMergeShaderHeader}
         Execution/src/GuestMemory.cpp
+        Execution/src/WriteTracker.cpp
 )
 
 target_include_directories(agc_driver_graphics_tests PRIVATE
@@ -329,6 +332,7 @@ if(AGC_BUILD_VISUAL_TEST)
             Execution/src/AspectFit.cpp
             Execution/src/PresentationScaler.cpp
             Execution/src/GuestMemory.cpp
+            Execution/src/WriteTracker.cpp
             Execution/src/BdaFeatures.cpp
             Graphics/src/Draw.cpp
             Graphics/src/FastClear.cpp

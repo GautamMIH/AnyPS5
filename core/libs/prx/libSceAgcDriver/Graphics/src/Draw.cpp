@@ -1,3 +1,5 @@
+#include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
@@ -82,7 +84,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     std::uint32_t maxIndex = draw.indexed ? 0u : draw.firstVertex + draw.indexCount - 1u;
     if (draw.indexed) {
         indices = std::make_unique<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-        GuestMemory::Read(draw.indexAddress, indices->Bytes(), draw.indexSize);
+        {
+            const GuestMemory::AccessSite site("cpu_wait_index");
+            GuestMemory::Read(draw.indexAddress, indices->Bytes(), draw.indexSize);
+        }
         for (std::size_t offset = 0; offset < indexBytes; offset += draw.indexSize) {
             std::uint32_t index = 0;
             if (draw.indexSize == 2) {
@@ -105,11 +110,26 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     auto& vertexBuffers = storage->vertices;
     std::vector<VkBuffer> vertexHandles;
     std::vector<VkDeviceSize> vertexOffsets(attributes.size(), 0);
-    for (const auto& attribute : attributes) {
+    for (std::size_t index = 0; index < attributes.size(); ++index) {
+        const auto& attribute = attributes[index];
         const auto bytes = VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance);
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
         Require(!aliasesTargets(address, bytes), "vertex buffer aliases a render target");
+        // The GPU fetches vertices from guest memory itself when it is imported: earlier draws' writes
+        // then need a barrier, and nothing is copied.
+        if (context.guestGpuMemory != nullptr) {
+            {
+                const GuestMemory::GpuAccessScope gpuAccess;
+                GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
+            }
+            if (const auto view = context.guestGpuMemory->Resolve(address, bytes); view && view->bytes >= bytes) {
+                vertexHandles.push_back(view->buffer);
+                vertexOffsets[index] = view->offset;
+                continue;
+            }
+        }
+        const GuestMemory::AccessSite site("cpu_wait_vertex");
         GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
         auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
         GuestMemory::Read(address, buffer->Bytes(), 1);

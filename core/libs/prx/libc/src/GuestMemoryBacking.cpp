@@ -341,6 +341,31 @@ bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t byte
     return true;
 }
 
+bool GuestVirtualSingleView_nid_postfix(std::uint64_t address, std::uint64_t bytes) {
+    if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    auto& map = areas();
+    const auto last = address + bytes;
+    auto it = map.upper_bound(address);
+    if (it == map.begin()) return false;
+    --it;
+    auto cursor = address;
+    for (; cursor < last; ++it) {
+        if (it == map.end() || it->first > cursor || it->second.end <= cursor || !committed(it->second.kind)) return false;
+        const auto& record = it->second;
+        const auto first = record.offset + (cursor - it->first);
+        const auto end = record.offset + (std::min(last, record.end) - it->first);
+        for (const auto& [otherBegin, other] : map) {
+            if (other.segment != record.segment || otherBegin == it->first || !committed(other.kind)) continue;
+            const auto otherFirst = other.offset;
+            const auto otherEnd = other.offset + (other.end - otherBegin);
+            if (otherFirst < end && first < otherEnd) return false;
+        }
+        cursor = std::min(last, record.end);
+    }
+    return true;
+}
+
 bool GuestSegmentAlive_nid_postfix(std::uint64_t segment) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     return liveSegments().contains(segment);

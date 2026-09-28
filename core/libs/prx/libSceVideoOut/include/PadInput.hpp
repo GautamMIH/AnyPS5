@@ -23,6 +23,18 @@ private:
     void openFirstAvailableController();
     void openController(int deviceIndex);
     void closeController();
+    void loadScript();
+    std::uint32_t scriptedButtons(std::chrono::steady_clock::time_point now) const;
+    // Debug aid: ANYPS5_SCRIPTED_INPUT="30:cross,34.5:cross:0.5,..." holds a pad button for the given
+    // seconds (default 0.2) starting that many seconds after input starts.
+    struct ScriptedPress {
+        double at;
+        double hold;
+        std::uint32_t button;
+    };
+    std::vector<ScriptedPress> script;
+    std::chrono::steady_clock::time_point scriptStart = std::chrono::steady_clock::now();
+    std::uint32_t scriptedPressed = 0;
     std::vector<Pad::InputBinding> bindings;
     std::vector<bool> pressed;
     std::vector<std::chrono::steady_clock::time_point> wheelReleaseTimes;

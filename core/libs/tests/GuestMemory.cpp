@@ -64,8 +64,28 @@ static void CheckNamedAndHintedMappings() {
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(first), length) == 0);
 }
 
+static void CheckSingleViews() {
+    constexpr std::size_t length = 0x10000;
+    std::int64_t physical = 0;
+    Require(sceKernelAllocateMainDirectMemory(length, 0x10000, 0, &physical) == 0);
+    void* first = nullptr;
+    Require(sceKernelMapDirectMemory(&first, length, 3, 0, physical, 0x10000) == 0);
+    const auto address = reinterpret_cast<std::uint64_t>(first);
+    Require(GuestMemoryBacking::GuestVirtualSingleView_nid_postfix(address, length));
+    void* second = nullptr;
+    Require(sceKernelMapDirectMemory(&second, 0x4000, 3, 0, physical + 0x8000, 0x4000) == 0);
+    Require(!GuestMemoryBacking::GuestVirtualSingleView_nid_postfix(address, length));
+    Require(GuestMemoryBacking::GuestVirtualSingleView_nid_postfix(address, 0x8000));
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(second), 0x4000) == 0);
+    Require(GuestMemoryBacking::GuestVirtualSingleView_nid_postfix(address, length));
+    Require(!GuestMemoryBacking::GuestVirtualSingleView_nid_postfix(0x1000, 0x1000));
+    Require(sceKernelMunmap(address, length) == 0);
+    Require(sceKernelReleaseDirectMemory(physical, length) == 0);
+}
+
 int main() {
     CheckNamedAndHintedMappings();
+    CheckSingleViews();
     constexpr std::size_t page = 0x4000;
     const auto failed = reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
     const auto reject = [&](std::size_t length, int protection, int flags, int fd,

@@ -883,9 +883,13 @@ Graphics::Context VulkanDevice::graphicsContext() const {
 }
 
 void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable) {
+    PerformanceTimer timing("Vulkan.ResolveMemory");
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    timing.Mark("lock");
     state->drawQueue->Resolve(address, bytes);
+    timing.Mark("draw_queue");
     state->renderCache->Resolve(address, bytes, writable);
+    timing.Mark("render_cache");
 }
 
 void VulkanDevice::ResolveFastClears(const Graphics::State& graphics) {

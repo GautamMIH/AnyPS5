@@ -14,7 +14,44 @@
 
 PadInput::PadInput()
     : bindings(Pad::LoadInputMapping()), pressed(bindings.size()), wheelReleaseTimes(bindings.size()) {
+    loadScript();
     openFirstAvailableController();
+}
+
+void PadInput::loadScript() {
+    const char* text = std::getenv("ANYPS5_SCRIPTED_INPUT");
+    if (text == nullptr) return;
+    static const std::pair<const char*, Pad::PadButton> names[] = {
+        {"cross", Pad::PadButton::Cross}, {"circle", Pad::PadButton::Circle}, {"square", Pad::PadButton::Square},
+        {"triangle", Pad::PadButton::Triangle}, {"options", Pad::PadButton::Options}, {"up", Pad::PadButton::Up},
+        {"down", Pad::PadButton::Down}, {"left", Pad::PadButton::Left}, {"right", Pad::PadButton::Right},
+        {"l1", Pad::PadButton::L1}, {"r1", Pad::PadButton::R1}, {"l2", Pad::PadButton::L2}, {"r2", Pad::PadButton::R2},
+        {"l3", Pad::PadButton::L3}, {"r3", Pad::PadButton::R3}, {"touchpad", Pad::PadButton::TouchPad}};
+    std::string entries(text);
+    std::size_t start = 0;
+    while (start < entries.size()) {
+        const auto end = std::min(entries.find(',', start), entries.size());
+        const auto entry = entries.substr(start, end - start);
+        start = end + 1;
+        const auto first = entry.find(':');
+        if (first == std::string::npos) throw std::runtime_error("ANYPS5_SCRIPTED_INPUT: expected seconds:button in '" + entry + "'");
+        const auto second = entry.find(':', first + 1);
+        const auto name = entry.substr(first + 1, second == std::string::npos ? std::string::npos : second - first - 1);
+        ScriptedPress press{std::stod(entry.substr(0, first)), second == std::string::npos ? 0.2 : std::stod(entry.substr(second + 1)), 0};
+        for (const auto& [candidate, button] : names)
+            if (name == candidate) press.button = static_cast<std::uint32_t>(button);
+        if (press.button == 0) throw std::runtime_error("ANYPS5_SCRIPTED_INPUT: unknown button '" + name + "'");
+        script.push_back(press);
+    }
+    APS5_LOG_OUT("Pad: %zu scripted presses", script.size());
+}
+
+std::uint32_t PadInput::scriptedButtons(std::chrono::steady_clock::time_point now) const {
+    const auto elapsed = std::chrono::duration<double>(now - scriptStart).count();
+    std::uint32_t buttons = 0;
+    for (const auto& press : script)
+        if (elapsed >= press.at && elapsed < press.at + press.hold) buttons |= press.button;
+    return buttons;
 }
 
 PadInput::~PadInput() {
@@ -125,6 +162,14 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
 
 void PadInput::Update() {
     const auto now = std::chrono::steady_clock::now();
+    if (!script.empty()) {
+        const auto scripted = scriptedButtons(now);
+        if (scripted != scriptedPressed) {
+            scriptedPressed = scripted;
+            APS5_LOG_OUT("Pad: scripted buttons 0x%x", scripted);
+            publish();
+        }
+    }
     if (controller != nullptr) {
         SDL_GameControllerUpdate();
         publish();
@@ -236,5 +281,6 @@ void PadInput::publish() {
         state.sticks[2] = mouseStick[0];
         state.sticks[3] = mouseStick[1];
     }
+    state.buttons |= scriptedPressed;
     PadPublishInput_nid_postfix(state);
 }

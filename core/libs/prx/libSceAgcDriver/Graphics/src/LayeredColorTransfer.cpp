@@ -64,7 +64,7 @@ void LayeredColorTransfer::WriteBackTracked() {
         }
     }
     timing.Mark("tile");
-    GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(color.address, tiled.data(), tiled.size());
+    GuestMemory::WriteThroughAlias(color.address, tiled.data(), tiled.size());
     timing.Mark("guest_write", color.bytes);
 }
 
