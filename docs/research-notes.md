@@ -62,6 +62,14 @@ Issues that needed research, with a short answer. Check here before researching;
 
 - **CMASK fast clear.** Register CMASK (only with FAST_CLEAR) as cleared on first use; DMA fill or XOR-free compute write to it re-clears; draw into a cleared target fills with CLEAR_WORD; eliminate pass = that fill for target 0. DCC ignored: surfaces stay uncompressed. (shadPS4 vk_rasterizer.cpp, texture_cache.h)
 
+## Driver performance (Zorro gameplay, September 2026)
+
+- **Soft-dirty write tracking works for guest memory.** memfd shared mappings report CPU writes and kernel writes (read(2) into the page) through /proc/self/pagemap bit 55; a 1024-page check is one pread (~7 us). Writes through another mapping of the same memory (our host alias, GPU imports, a second guest view of direct memory) do not mark the guest mapping. clear_refs costs ~4 ms per 2 GiB resident and must not run often. See WriteTracker.
+- **CPU waits after every draw.** Every shader buffer is bound writable, so each draw's constant buffers count as pending GPU writes and the next draw's range check waited for the GPU. Accesses the GPU makes through imported memory only need a barrier (GpuAccessScope); only CPU reads wait.
+- **Depth sampled as a texture.** Games sample depth planes (Depth64KB layout) many times a frame; writing the resident depth back to guest memory and re-uploading it cost ~31 ms each. Copy from the depth image on the GPU instead.
+- **Destroying a pending CommandBatch drains the queue** (vkQueueWaitIdle); release GPU-filled objects after their fence.
+- **Profiling runs.** ANYPS5_SCRIPTED_INPUT="25:cross,30:cross" reaches gameplay unattended; frames after the scene settles are the ones to compare (scenes vary 200-1000+ draws a frame).
+
 ## Upstream merges
 
 - **C++ exception runtime on Linux.** Upstream (a4c519b) interposes libstdc++ process-wide with libc.prx's runtime; ours (60e4393) keeps host code on libstdc++ and serves guest code through NID exports (interposing broke try/catch in host libraries: driver, Vulkan, SDL). Kept ours on Linux, upstream's exports on Windows. tests/ExceptionRuntime.cpp assumes the process-wide model, so it is built but not registered on Linux.
