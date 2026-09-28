@@ -757,11 +757,18 @@ private:
                 timing.Mark("failure_check");
                 if (opcode == 0x3c || opcode == 0x93) {
                     std::lock_guard gpuLock(gpuMutex);
-                    if (device != nullptr) device->WaitIdle();
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                     });
-                    if (!Pm4::WaitSatisfied(packet)) {
+                    // The packet only waits until memory satisfies its condition: when it already
+                    // does (labels are usually written by then), the GPU need not go idle first.
+                    bool satisfied = Pm4::WaitSatisfied(packet);
+                    timing.Mark("memory_check");
+                    if (!satisfied && device != nullptr) {
+                        device->WaitIdle();
+                        satisfied = Pm4::WaitSatisfied(packet);
+                    }
+                    if (!satisfied) {
                         blockedWait = Pm4::DescribeWait(packet);
                         return false;
                     }
