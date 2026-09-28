@@ -60,6 +60,7 @@ Issues that needed research, with a short answer. Check here before researching;
 
 ## Fast clears / compression
 
+- **HTILE depth fast clear.** Titles clear (reversed-Z) depth through HTILE (DB_Z_INFO.TILE_SURFACE_ENABLE, DB_HTILE_DATA_BASE 0x005/0x01e) without writing depth memory; ignoring it leaves stale depth and the depth test rejects the world (Zorro: HUD over black). Treat HTILE like CMASK: registered as cleared on first use, re-cleared by DMA fill or XOR-free compute write; a draw into a cleared target first clears depth/stencil to DB_DEPTH_CLEAR/DB_STENCIL_CLEAR. Debug: ANYPS5_IGNORE_DEPTH_TEST=1, ANYPS5_TRACE_DEPTH=1. (shadPS4 IsMetaCleared)
 - **CMASK fast clear.** Register CMASK (only with FAST_CLEAR) as cleared on first use; DMA fill or XOR-free compute write to it re-clears; draw into a cleared target fills with CLEAR_WORD; eliminate pass = that fill for target 0. DCC ignored: surfaces stay uncompressed. (shadPS4 vk_rasterizer.cpp, texture_cache.h)
 
 ## Driver performance (Zorro gameplay, September 2026)

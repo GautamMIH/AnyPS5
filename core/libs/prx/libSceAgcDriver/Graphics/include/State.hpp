@@ -60,6 +60,8 @@ struct DepthTarget {
     VkFormat format;
     std::size_t depthBytes;
     std::size_t stencilBytes;
+    // DB_HTILE_DATA_BASE when DB_Z_INFO.TILE_SURFACE_ENABLE is set, else 0 (see FastClear.hpp).
+    std::uint64_t htileAddress = 0;
 };
 
 struct DepthState {

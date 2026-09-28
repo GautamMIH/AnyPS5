@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
@@ -31,6 +32,7 @@ struct DrawStorage {
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
     PerformanceTimer timing("Graphics.Draw");
     ApplyFastClears(state);
+    const bool depthFastClear = TakeDepthFastClear(state);
     // With surfaces kept uncompressed, resolving the fast clear is all an elimination pass does.
     if (state.eliminateFastClear) return;
     Require(draw.indexed ? draw.flags == 0 : (draw.flags & ~0x20u) == 0, "draw modifiers are unsupported");
@@ -165,6 +167,14 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     }
     if (storage->depth) storage->depth->Begin(commands);
     pipeline.Begin(commands, state.renderExtent);
+    if (depthFastClear) {
+        // An HTILE fast clear stands for the whole surface holding the clear values.
+        VkClearAttachment clear{};
+        clear.aspectMask = (state.depth.depthElementBytes != 0 ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) | (state.depth.hasStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+        clear.clearValue.depthStencil = {std::clamp(state.depthState.depthClearValue, 0.0f, 1.0f), state.depthState.stencilClearValue};
+        const VkClearRect rect{{{0, 0}, state.renderExtent}, 0, 1};
+        context.Function<PFN_vkCmdClearAttachments>("vkCmdClearAttachments")(commands, 1, &clear, 1, &rect);
+    }
     if (state.hasDepthTarget && (state.depthState.clearDepth || state.depthState.clearStencil) && state.scissor.extent.width != 0 && state.scissor.extent.height != 0) {
         // DB_RENDER_CONTROL clears replace the draw's depth/stencil results with the clear values
         // wherever it rasterizes; clear draws cover the scissor rectangle.
