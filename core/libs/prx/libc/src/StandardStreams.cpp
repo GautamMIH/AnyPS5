@@ -1,5 +1,6 @@
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <cerrno>
 #ifdef _WIN32
 #include <io.h>
 #else
@@ -15,6 +16,21 @@ int __isthreaded_nid_postfix = 1;
 
 int APS5_VABI fgetc_nid_postfix(FileStream* stream) {
     const int result = std::fgetc(GetNativeStream(stream));
+    stream->SyncStatus();
+    return result;
+}
+std::int32_t APS5_VABI fgetwc_nid_postfix(FileStream* stream) {
+    return fgetc_nid_postfix(stream);
+}
+
+std::int32_t APS5_VABI ungetwc_nid_postfix(std::int32_t value, FileStream* stream) {
+    if (value == -1) return -1;
+    if (value < 0 || value > 255) {
+        errno = 86;
+        stream->SetEncodingError();
+        return -1;
+    }
+    const int result = std::ungetc(value, GetNativeStream(stream));
     stream->SyncStatus();
     return result;
 }
@@ -48,8 +64,7 @@ int APS5_VABI ferror_nid_postfix(FileStream* stream) {
     return (stream->GuestState().flags & 0x40) != 0;
 }
 void APS5_VABI clearerr_nid_postfix(FileStream* stream) {
-    std::clearerr(GetNativeStream(stream));
-    stream->SyncStatus();
+    stream->ClearError();
 }
 int APS5_VABI fileno_nid_postfix(FileStream* stream) {
 #ifdef _WIN32
