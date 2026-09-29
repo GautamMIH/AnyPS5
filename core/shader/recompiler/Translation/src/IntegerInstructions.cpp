@@ -252,13 +252,14 @@ bool TranslationContext::sFlbitI32B64(const RdnaInstruction& inst) {
     return true;
 }
 
-bool TranslationContext::integer24(const RdnaInstruction& inst, bool sign, bool addend) {
+bool TranslationContext::integer24(const RdnaInstruction& inst, bool sign, bool addend, bool high) {
     const IrOpcode extractOpcode = sign ? IrOpcode::BitFieldSExtract : IrOpcode::BitFieldUExtract;
     const IrU32 lhsSource = readU32(sourceAt(inst, 0u));
     const IrU32 rhsSource = readU32(sourceAt(inst, 1u));
     const IrU32 lhs(ir.Emit(extractOpcode, IrType::U32, {&lhsSource.Value(), &ir.Constant(0u), &ir.Constant(24u)}));
     const IrU32 rhs(ir.Emit(extractOpcode, IrType::U32, {&rhsSource.Value(), &ir.Constant(0u), &ir.Constant(24u)}));
-    IrU32 result(ir.IMul(lhs.Value(), rhs.Value()));
+    const IrOpcode multiplyOpcode = high ? (sign ? IrOpcode::SMulHi : IrOpcode::UMulHi) : IrOpcode::IMul32;
+    IrU32 result(ir.Emit(multiplyOpcode, IrType::U32, {&lhs.Value(), &rhs.Value()}));
     if (addend) {
         result = IrU32(ir.IAdd(result.Value(), readU32(sourceAt(inst, 2u)).Value()));
     }

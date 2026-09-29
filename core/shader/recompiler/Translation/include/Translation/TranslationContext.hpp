@@ -166,7 +166,7 @@ private:
     bool sFf1I32B64(const RdnaInstruction& inst);
     bool vFfbh32(const RdnaInstruction& inst, bool sign);
     bool sFlbitI32B64(const RdnaInstruction& inst);
-    bool integer24(const RdnaInstruction& inst, bool sign, bool addend);
+    bool integer24(const RdnaInstruction& inst, bool sign, bool addend, bool high = false);
     bool vMadU64U32(const RdnaInstruction& inst);
     bool vSadU32(const RdnaInstruction& inst);
     bool vAdd3U32(const RdnaInstruction& inst);
