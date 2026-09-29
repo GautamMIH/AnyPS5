@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
+#include <vector>
 
 namespace AgcDriver::Graphics {
 
@@ -26,9 +27,15 @@ public:
     VkDeviceSize AllocationBytes() const { return allocationBytes; }
     // Whether the GPU finished filling the image (destroying it earlier waits for the queue).
     bool UploadComplete() const;
+    // Resident copies: copies the source again into the same image after the source changed.
+    void Refresh();
+    // Frees the buffers of a completed upload; false while it still runs.
+    bool ReleaseUpload();
 
 private:
     void release() noexcept;
+    void recordCopy();
+    void releaseUploadResources() noexcept;
 
     Context context;
     VkImage image = VK_NULL_HANDLE;
@@ -39,6 +46,14 @@ private:
     std::shared_ptr<ResidentDepth> depthSource;
     std::unique_ptr<Buffer> staging;
     std::unique_ptr<CommandBatch> upload;
+    // Copies still running on the GPU when a refresh needed a new batch.
+    std::vector<std::unique_ptr<CommandBatch>> previousUploads;
+    VkExtent3D extent{};
+    // Snapshot uploads: detiling input and output, and the detiler's descriptor pool.
+    std::unique_ptr<Buffer> uploadStaging;
+    std::unique_ptr<Buffer> uploadLinear;
+    TextureDetiler* uploadDetiler = nullptr;
+    VkDescriptorPool uploadPool = VK_NULL_HANDLE;
 };
 
 }

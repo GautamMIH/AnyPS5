@@ -97,14 +97,22 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory");
 
         {
-            Buffer staging(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            // The upload runs asynchronously: it is submitted ahead of the draws that sample the
+            // texture (one queue, in order), and its buffers and descriptor pool live until it
+            // completes (ReleaseUpload). Waiting here stalled every miss on all queued GPU work.
+            uploadStaging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            auto& staging = *uploadStaging;
             std::memcpy(staging.Bytes().data(), snapshot.data(), snapshot.size());
-            Buffer linear(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            uploadLinear = std::make_unique<Buffer>(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+            auto& linear = *uploadLinear;
+            if (!thick) {
+                uploadDetiler = &detiler;
+                uploadPool = detiler.CreatePool(static_cast<std::uint32_t>(arrayLayers * mips.size()));
+            }
 
-            detiler.BeginBatch();
             if (context.drawQueue) context.drawQueue->Flush();
-            CommandBatch batch(context);
-            const auto commands = batch.Handle();
+            upload = std::make_unique<CommandBatch>(context);
+            const auto commands = upload->Handle();
 
             VkBufferMemoryBarrier stagingReadBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
             stagingReadBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
@@ -144,7 +152,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                     const auto guestLayerOffset = static_cast<std::uint64_t>(layer) * guestSliceBytes;
                     const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
                     for (const auto& mip : mips) {
-                        detiler.Dispatch(commands, descriptor.tileMode, elementBytes, staging.Handle(), guestLayerOffset + mip.tiledOffset, linear.Handle(), linearLayerOffset + mip.linearOffset, mip, layer);
+                        detiler.Dispatch(commands, descriptor.tileMode, elementBytes, staging.Handle(), guestLayerOffset + mip.tiledOffset, linear.Handle(), linearLayerOffset + mip.linearOffset, mip, layer, false, uploadPool);
                     }
                 }
             }
@@ -199,7 +207,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             toShaderRead.subresourceRange = toTransferDst.subresourceRange;
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShaderRead);
 
-            batch.SubmitAndWait();
+            upload->Submit();
         }
 
         const auto viewLevelCount = descriptor.lastLevel - descriptor.baseLevel + 1u;
@@ -229,6 +237,8 @@ Texture::~Texture() {
 
 void Texture::release() noexcept {
     upload.reset();
+    previousUploads.clear();
+    releaseUploadResources();
     if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
     if (image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
     if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
@@ -238,7 +248,23 @@ VkImageView Texture::View() const {
     return view;
 }
 
+void Texture::releaseUploadResources() noexcept {
+    if (uploadPool != VK_NULL_HANDLE && uploadDetiler != nullptr) uploadDetiler->DestroyPool(uploadPool);
+    uploadPool = VK_NULL_HANDLE;
+    uploadDetiler = nullptr;
+    uploadStaging.reset();
+    uploadLinear.reset();
+}
+
+bool Texture::ReleaseUpload() {
+    if (!UploadComplete()) return false;
+    releaseUploadResources();
+    return true;
+}
+
 bool Texture::UploadComplete() const {
+    for (const auto& batch : previousUploads)
+        if (!batch->IsComplete()) return false;
     return upload == nullptr || upload->IsComplete();
 }
 

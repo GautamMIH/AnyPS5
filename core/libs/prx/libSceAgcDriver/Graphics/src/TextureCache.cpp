@@ -40,6 +40,7 @@ void TextureCache::erase(Entries::iterator it) {
 
 void TextureCache::trim() {
     std::erase_if(retiring, [](const std::shared_ptr<Texture>& texture) { return texture->UploadComplete(); });
+    std::erase_if(uploading, [](const std::shared_ptr<Texture>& texture) { return texture->ReleaseUpload(); });
     for (auto it = entries.begin(); it != entries.end() && (retainedBytes > budget || entries.size() > maxEntries);) {
         if (it->texture.use_count() != 1) {
             ++it;
@@ -82,12 +83,14 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     if (source) {
         const auto& color = source->Description();
         const auto compatibleTiling = (color.tileMode == ColorTileMode::RenderTarget && resource.tileMode == TextureTileMode::RenderTarget64KB) || (color.tileMode == ColorTileMode::Linear && resource.tileMode == TextureTileMode::kLinear);
+        timing.Mark("find_color");
         if (!compatibleTiling || resource.width != color.extent.width || resource.height != color.extent.height || resource.dimension != TextureDimension::k2D || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || IsBlockCompressed(resource.format) || BytesPerElement(resource.format) != color.elementBytes) source.reset();
     }
     // A texture over a resident depth plane in its depth layout is copied from the depth image.
     std::shared_ptr<ResidentDepth> depthSource;
     if (!source && context.renderCache && resource.tileMode == TextureTileMode::Depth64KB) {
         depthSource = context.renderCache->FindDepth(resource.baseAddress);
+        timing.Mark("find_depth");
         if (depthSource) {
             const auto& depth = depthSource->Description();
             if (resource.dimension != TextureDimension::k2D || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || IsBlockCompressed(resource.format) || resource.width != depth.extent.width || resource.height != depth.extent.height || BytesPerElement(resource.format) != depth.depthElementBytes || depthSource->HostDepthBytes() != depth.depthElementBytes) depthSource.reset();
@@ -99,13 +102,22 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
         const auto it = found->second;
         missReason = "miss_changed";
         if (source || depthSource || it->generation != 0) {
-            const bool current = (source && it->source.lock() == source && it->generation == source->Generation()) || (depthSource && it->depthSource.lock() == depthSource && it->generation == depthSource->Generation());
-            if (current) {
+            const bool sameSource = (source && it->source.lock() == source) || (depthSource && it->depthSource.lock() == depthSource);
+            if (sameSource) {
+                // Render targets change every frame: the copy is refreshed in place instead of
+                // recreated (allocating, destroying and a new command batch cost ~2 ms each time).
+                const auto generation = source ? source->Generation() : depthSource->Generation();
+                if (it->generation != generation) {
+                    it->texture->Refresh();
+                    it->generation = generation;
+                    timing.Mark("refresh");
+                }
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
                 return result;
             }
             erase(it);
+            timing.Mark("stale_erase");
         } else {
             // Resident render targets over the range reach guest memory first (written through the
             // alias, which the write tracker records).
@@ -193,6 +205,7 @@ create:
             static_cast<unsigned long long>(retainedBytes >> 20u), sameAddress, key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7]);
     }
     auto texture = std::make_shared<Texture>(context, *context.detiler, resource, components, snapshot);
+    uploading.push_back(texture);
     timing.Mark("miss_create");
     const auto retained = snapshot.size() + texture->AllocationBytes();
     Entry entry{key, std::move(snapshot), texture};

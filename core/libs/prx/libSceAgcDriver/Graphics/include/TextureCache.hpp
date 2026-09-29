@@ -58,6 +58,8 @@ private:
     std::unordered_map<Key, Entries::iterator, KeyHash> index;
     // Evicted textures whose upload may still run on the GPU, released once it completed.
     std::vector<std::shared_ptr<Texture>> retiring;
+    // Textures whose upload buffers are freed once the GPU completes the upload.
+    std::vector<std::shared_ptr<Texture>> uploading;
     std::uint64_t retainedBytes = 0;
     static constexpr std::uint64_t budget = 1024ull * 1024 * 1024;
     static constexpr std::size_t maxEntries = 8192;
