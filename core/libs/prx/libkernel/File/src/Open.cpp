@@ -4,6 +4,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/File/include/File.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include "SceTypes.hpp"
 
 #include <cerrno>

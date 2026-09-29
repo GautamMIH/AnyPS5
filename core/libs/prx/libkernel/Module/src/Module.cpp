@@ -7,6 +7,7 @@
 #include <vector>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include <nid/NidCompute.hpp>
 
 #if defined(__linux__)
@@ -16,9 +17,9 @@
 
 namespace {
 
-constexpr int kErrorNoEntry = static_cast<int>(0x80020002);
-constexpr int kErrorNoSuchModule = static_cast<int>(0x80020003);
-constexpr int kErrorInvalidArgument = static_cast<int>(0x80020016);
+constexpr int kErrorNoEntry = SCE_KERNEL_ERROR_ENOENT;
+constexpr int kErrorNoSuchModule = SCE_KERNEL_ERROR_ESRCH;
+constexpr int kErrorInvalidArgument = SCE_KERNEL_ERROR_EINVAL;
 constexpr char kModuleStartName[] = "module_start";
 constexpr char kModuleStopName[] = "module_stop";
 constexpr char kLibrariesDirectoryName[] = "libs";
@@ -148,6 +149,18 @@ std::string moduleFileName(const char* guestPath) {
     return name.string();
 }
 
+// A module requested by guest path: the relinked copy in libs/ (game mode layout) first, then the
+// guest path itself through the app0 mapping (single-executable layout, app0/sce_module/).
+std::filesystem::path resolveModulePath(const char* guestPath) {
+    const std::filesystem::path relinked = librariesDirectory() / moduleFileName(guestPath);
+    if (std::filesystem::is_regular_file(relinked))
+        return relinked;
+    std::filesystem::path mapped = ResolvePath_nid_no_patch(guestPath);
+    if (mapped.extension() == kSignedModuleExtension)
+        mapped.replace_extension(kModuleExtension);
+    return mapped;
+}
+
 void* findSymbol(void* handle, const char* symbol) {
     const std::string nid = Nid::ComputeNid(symbol, {});
     if (void* address = dlsym(handle, nid.c_str()))
@@ -221,7 +234,7 @@ KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, si
     if (module_file_name == nullptr || module_file_name[0] == '\0')
         return kErrorInvalidArgument;
 #if defined(__linux__)
-    const std::filesystem::path path = librariesDirectory() / moduleFileName(module_file_name);
+    const std::filesystem::path path = resolveModulePath(module_file_name);
     if (!std::filesystem::is_regular_file(path))
         return kErrorNoEntry;
     // The relinked init runs module_start itself; see __anyps5_module_init.

@@ -130,6 +130,7 @@ inline constexpr std::uint8_t TwoByteModRmRangeFMin = 0x38;
 inline constexpr std::uint8_t TwoByteModRmRangeFMax = 0x3A;
 inline constexpr std::uint8_t TwoByteModRmRangeGMin = 0x54;
 inline constexpr std::uint8_t TwoByteModRmRangeGMax = 0x7F;
+inline constexpr std::uint8_t TwoByteEmms = 0x77;
 inline constexpr std::uint8_t TwoByteModRmRangeHMin = 0xD0;
 inline constexpr std::uint8_t TwoByteModRmRangeHMax = 0xFE;
 inline constexpr std::uint8_t TwoByteNopModRm = 0x1F;

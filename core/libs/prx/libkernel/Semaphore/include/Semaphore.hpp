@@ -8,14 +8,10 @@
 
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
 
 constexpr int KERNEL_SEMA_OK = 0;
-constexpr int KERNEL_SEMA_ERROR_EINVAL = static_cast<int>(0x80020016);
-constexpr int KERNEL_SEMA_ERROR_EACCES = static_cast<int>(0x8002000D);
-constexpr int KERNEL_SEMA_ERROR_EBUSY = static_cast<int>(0x80020010);
-constexpr int KERNEL_SEMA_ERROR_ETIMEDOUT = static_cast<int>(0x8002003C);
-constexpr int KERNEL_SEMA_ERROR_ECANCELED = static_cast<int>(0x80020055);
 
 struct KernelSemaPrivate {
     KernelSemaPrivate(std::int32_t initCount, std::int32_t maxCount, std::string name, bool isFifo);

@@ -22,19 +22,19 @@ def main():
         source.write_bytes(fixture())
 
         cui_output = work / "cui.exe"
-        result = subprocess.run([str(relinker), "--windows", str(source), str(cui_output)],
+        result = subprocess.run([str(relinker), "--skip-sce-module", "--windows", str(source), str(cui_output)],
                                 capture_output=True, text=True, timeout=20)
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert subsystem(cui_output.read_bytes()) == 3, "expected IMAGE_SUBSYSTEM_WINDOWS_CUI by default"
 
         gui_output = work / "gui.exe"
-        result = subprocess.run([str(relinker), "--windows", "--windows-gui", str(source), str(gui_output)],
+        result = subprocess.run([str(relinker), "--skip-sce-module", "--windows", "--windows-gui", str(source), str(gui_output)],
                                 capture_output=True, text=True, timeout=20)
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert subsystem(gui_output.read_bytes()) == 2, "expected IMAGE_SUBSYSTEM_WINDOWS_GUI with --windows-gui"
 
         bad_output = work / "bad.exe"
-        result = subprocess.run([str(relinker), "--windows-gui", str(source), str(bad_output)],
+        result = subprocess.run([str(relinker), "--skip-sce-module", "--windows-gui", str(source), str(bad_output)],
                                 capture_output=True, text=True, timeout=20)
         assert result.returncode != 0 and not bad_output.exists(), result
     print("Windows GUI subsystem integration tests passed")

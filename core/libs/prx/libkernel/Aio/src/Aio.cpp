@@ -3,22 +3,25 @@
 #include <cstddef>
 #include <cstring>
 #include <mutex>
+#include <stdexcept>
 #include <unordered_map>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/File/include/FileErrors.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 
 #ifdef _WIN32
 #include <io.h>
+#include <limits>
+#include <stdio.h>
 #else
 #include <unistd.h>
 #endif
 
 namespace {
 
-constexpr int kErrorNoSuchRequest = static_cast<int>(0x80020003);
-constexpr int kErrorInvalid = static_cast<int>(0x80020016);
-constexpr std::uint32_t kStateCompleted = 3;
+constexpr std::int32_t kStateCompleted = 3;
+constexpr std::int32_t kStateAborted = 4;
 constexpr std::uint32_t kWaitAnd = 1;
 constexpr std::uint32_t kWaitOr = 2;
 
@@ -36,54 +39,87 @@ struct AioParam {
     SchedulingParam high;
 };
 
+// Submitted requests run to completion before the submit call returns; the table keeps each
+// request's final state until the guest deletes it.
 std::mutex requestMutex;
-std::unordered_map<std::int32_t, std::uint32_t> requests;
+std::unordered_map<std::int32_t, std::int32_t> requests;
 std::int32_t nextRequest = 1;
+
+#ifdef _WIN32
+// Windows has no pread/pwrite: a duplicated descriptor keeps the caller's file position intact.
+template <typename Transfer>
+std::int64_t atOffset(const std::int32_t fd, const std::size_t nbyte, const std::int64_t offset, Transfer transfer) {
+    if (nbyte > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max()))
+        throw std::runtime_error("sceKernelAio: transfer size exceeds the platform limit");
+    const int duped = ::_dup(fd);
+    if (duped < 0) return -1;
+    if (::_lseeki64(duped, offset, SEEK_SET) < 0) {
+        const int error = errno;
+        ::_close(duped);
+        errno = error;
+        return -1;
+    }
+    const int result = transfer(duped, static_cast<unsigned int>(nbyte));
+    const int error = errno;
+    ::_close(duped);
+    errno = error;
+    return result;
+}
+#endif
 
 std::int64_t transfer(const KernelAioRwRequest& request, const bool write) {
 #ifdef _WIN32
-    (void)request;
-    (void)write;
-    NotImplemented_nid_no_patch("sceKernelAio transfer");
-    return 0;
+    const auto result = atOffset(request.fd, request.nbyte, static_cast<std::int64_t>(request.offset), [&](const int fd, const unsigned int count) {
+        return write ? ::_write(fd, request.buf, count) : ::_read(fd, request.buf, count);
+    });
 #else
     const auto result = write ? ::pwrite(request.fd, request.buf, request.nbyte, static_cast<off_t>(request.offset)) : ::pread(request.fd, request.buf, request.nbyte, static_cast<off_t>(request.offset));
-    return result < 0 ? FileErrors::Sce(errno) : static_cast<std::int64_t>(result);
 #endif
+    return result < 0 ? FileErrors::Sce(errno) : static_cast<std::int64_t>(result);
 }
 
 std::int32_t complete(KernelAioRwRequest* requestsToRun, const std::int32_t count, const bool write) {
+    bool aborted = false;
     for (std::int32_t index = 0; index < count; ++index) {
         const std::int64_t result = transfer(requestsToRun[index], write);
-        if (requestsToRun[index].result != nullptr) {
-            requestsToRun[index].result->return_value = result;
-            requestsToRun[index].result->state = kStateCompleted;
-        }
+        const bool failed = result < 0;
+        requestsToRun[index].result->return_value = result;
+        requestsToRun[index].result->state = static_cast<std::uint32_t>(failed ? kStateAborted : kStateCompleted);
+        aborted = aborted || failed;
     }
     const std::lock_guard lock(requestMutex);
     const std::int32_t id = nextRequest++;
-    requests.emplace(id, kStateCompleted);
+    requests.emplace(id, aborted ? kStateAborted : kStateCompleted);
     return id;
 }
 
+int validate(const KernelAioRwRequest* request, const std::int32_t size, const void* ids) {
+    if (!request || !ids) return SCE_KERNEL_ERROR_EFAULT;
+    if (size <= 0) return SCE_KERNEL_ERROR_EINVAL;
+    for (std::int32_t index = 0; index < size; ++index)
+        if (!request[index].result) return SCE_KERNEL_ERROR_EFAULT;
+    return 0;
+}
+
 int submit(KernelAioRwRequest* request, const std::int32_t size, std::int32_t* id, const bool write) {
-    if (!request || size <= 0 || !id) return kErrorInvalid;
+    if (const int error = validate(request, size, id)) return error;
     *id = complete(request, size, write);
     return 0;
 }
 
 int submitMultiple(KernelAioRwRequest* request, const std::int32_t size, std::int32_t* ids, const bool write) {
-    if (!request || size <= 0 || !ids) return kErrorInvalid;
+    if (const int error = validate(request, size, ids)) return error;
     for (std::int32_t index = 0; index < size; ++index)
         ids[index] = complete(&request[index], 1, write);
     return 0;
 }
 
 int stateOf(const std::int32_t id, std::int32_t* state) {
+    if (!state) return SCE_KERNEL_ERROR_EFAULT;
     const std::lock_guard lock(requestMutex);
     const auto found = requests.find(id);
-    if (found == requests.end()) return kErrorNoSuchRequest;
-    if (state) *state = static_cast<std::int32_t>(found->second);
+    if (found == requests.end()) return SCE_KERNEL_ERROR_EINVAL;
+    *state = found->second;
     return 0;
 }
 
@@ -100,13 +136,15 @@ void APS5_VABI sceKernelAioInitializeParam(void* param) {
     value->high = defaults;
 }
 
+// Scheduling parameters only tune the PS5 I/O scheduler; requests here complete synchronously.
 int APS5_VABI sceKernelAioInitializeImpl(void* param, int32_t size) {
-    if (!param || size < static_cast<int32_t>(sizeof(AioParam))) return kErrorInvalid;
+    (void)param;
+    (void)size;
     return 0;
 }
 
 int APS5_VABI sceKernelAioSetParam(void* param, int32_t window, int32_t delay, int32_t enable_split, int32_t split_size, int32_t split_chunk_size) {
-    if (!param) return kErrorInvalid;
+    if (!param) return SCE_KERNEL_ERROR_EINVAL;
     auto* value = static_cast<SchedulingParam*>(param);
     value->schedulingWindowSize = window;
     value->delay = delay;
@@ -141,14 +179,16 @@ int APS5_VABI sceKernelAioPollRequest(int32_t id, int32_t* state) {
 }
 
 int APS5_VABI sceKernelAioPollRequests(const int32_t* ids, int32_t count, int32_t* states) {
-    if (!ids || count <= 0) return kErrorInvalid;
+    if (!ids || !states) return SCE_KERNEL_ERROR_EFAULT;
+    if (count <= 0) return SCE_KERNEL_ERROR_EINVAL;
     for (int32_t index = 0; index < count; ++index) {
-        const int result = stateOf(ids[index], states ? &states[index] : nullptr);
+        const int result = stateOf(ids[index], &states[index]);
         if (result != 0) return result;
     }
     return 0;
 }
 
+// Requests never stay in the processing state, so a wait returns the final state at once.
 int APS5_VABI sceKernelAioWaitRequest(int32_t id, int32_t* state, uint32_t* usec) {
     (void)usec;
     return stateOf(id, state);
@@ -156,7 +196,7 @@ int APS5_VABI sceKernelAioWaitRequest(int32_t id, int32_t* state, uint32_t* usec
 
 int APS5_VABI sceKernelAioWaitRequests(const int32_t* ids, int32_t count, int32_t* states, uint32_t mode, uint32_t* usec) {
     (void)usec;
-    if (mode != kWaitAnd && mode != kWaitOr) return kErrorInvalid;
+    if (mode != kWaitAnd && mode != kWaitOr) return SCE_KERNEL_ERROR_EINVAL;
     return sceKernelAioPollRequests(ids, count, states);
 }
 
@@ -165,16 +205,18 @@ int APS5_VABI sceKernelAioCancelRequest(int32_t id, int32_t* state) {
 }
 
 int APS5_VABI sceKernelAioDeleteRequest(int32_t id, int32_t* ret) {
+    if (!ret) return SCE_KERNEL_ERROR_EFAULT;
     const std::lock_guard lock(requestMutex);
-    if (requests.erase(id) == 0) return kErrorNoSuchRequest;
-    if (ret) *ret = 0;
+    if (requests.erase(id) == 0) return SCE_KERNEL_ERROR_EINVAL;
+    *ret = 0;
     return 0;
 }
 
 int APS5_VABI sceKernelAioDeleteRequests(const int32_t* ids, int32_t count, int32_t* rets) {
-    if (!ids || count <= 0) return kErrorInvalid;
+    if (!ids || !rets) return SCE_KERNEL_ERROR_EFAULT;
+    if (count <= 0) return SCE_KERNEL_ERROR_EINVAL;
     for (int32_t index = 0; index < count; ++index) {
-        const int result = sceKernelAioDeleteRequest(ids[index], rets ? &rets[index] : nullptr);
+        const int result = sceKernelAioDeleteRequest(ids[index], &rets[index]);
         if (result != 0) return result;
     }
     return 0;

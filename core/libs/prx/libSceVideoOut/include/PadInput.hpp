@@ -4,6 +4,7 @@
 #include "SDL_events.h"
 #include "SDL_gamecontroller.h"
 #include "prx/libScePad/include/InputMapping.hpp"
+#include "prx/libScePad/include/PadState.hpp"
 #include <array>
 #include <chrono>
 #include <vector>
@@ -23,6 +24,9 @@ private:
     void openFirstAvailableController();
     void openController(int deviceIndex);
     void closeController();
+    PadInputState sampleController() const;
+    void applyOutput();
+    void enableSensors();
     void loadScript();
     std::uint32_t scriptedButtons(std::chrono::steady_clock::time_point now) const;
     // Debug aid: ANYPS5_SCRIPTED_INPUT="30:cross,34.5:cross:0.5,..." holds a pad button for the given
@@ -40,8 +44,13 @@ private:
     std::vector<std::chrono::steady_clock::time_point> wheelReleaseTimes;
     std::array<std::uint8_t, 2> mouseStick{128, 128};
     std::chrono::steady_clock::time_point nextMousePoll{};
-    SDL_GameController* controller = nullptr;
     bool mouseEnabled = false;
+    SDL_GameController* controller = nullptr;
+    PadInputState controllerState{};
+    std::uint32_t outputSequence = 0;
+    PadOutputState outputState{};
+    bool outputPending = false;
+    std::chrono::steady_clock::time_point nextRumbleRefresh{};
 };
 
 #endif

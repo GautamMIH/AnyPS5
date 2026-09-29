@@ -203,6 +203,13 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         return simpleInteger(inst, IrOpcode::BitwiseNot32, IrType::U32, false, false, true);
     case RdnaOpcode::SBrevB32:
         return simpleInteger(inst, IrOpcode::BitReverse32, IrType::U32, false, false, false);
+    case RdnaOpcode::SBrevB64: {
+        const auto source = readU32Pair(sourceAt(inst, 0u));
+        const IrU32 low(ir.Emit(IrOpcode::BitReverse32, IrType::U32, {&source[1].Value()}));
+        const IrU32 high(ir.Emit(IrOpcode::BitReverse32, IrType::U32, {&source[0].Value()}));
+        writeU32Pair(inst.destination, {low, high});
+        return true;
+    }
     case RdnaOpcode::SSextI32I8:
     case RdnaOpcode::SSextI32I16: {
         const auto source = readU32(sourceAt(inst, 0u));
@@ -235,6 +242,8 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         return simpleInteger(inst, IrOpcode::ShiftRightLogical32, IrType::U32, false, true, true);
     case RdnaOpcode::SAshrI32:
         return simpleInteger(inst, IrOpcode::ShiftRightArithmetic32, IrType::U32, false, true, true);
+    case RdnaOpcode::SAshrI64:
+        return simpleInteger(inst, IrOpcode::ShiftRightArithmetic64, IrType::U64, false, false, true);
     case RdnaOpcode::SLshlB64:
         return simpleInteger(inst, IrOpcode::ShiftLeftLogical64, IrType::U64, false, false, true);
     case RdnaOpcode::SLshrB64:
@@ -291,6 +300,7 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
     case RdnaOpcode::SSleep:
     case RdnaOpcode::SSetprio:
     case RdnaOpcode::STrap:
+    case RdnaOpcode::SClause:
         emitControlNop();
         return true;
     case RdnaOpcode::SWaitcntDepctr:

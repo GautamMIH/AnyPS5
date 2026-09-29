@@ -41,7 +41,11 @@ def main():
         source = Path(directory) / "input.elf"
         output = Path(directory) / "output.elf"
         source.write_bytes(fixture())
-        result = subprocess.run([str(relinker), str(source), str(output)], capture_output=True, text=True, timeout=20)
+        missing = subprocess.run([str(relinker), str(source), str(output)], capture_output=True, text=True, timeout=20)
+        assert missing.returncode != 0 and not output.exists(), missing
+        assert "sce_module/sce_modules was not found" in missing.stderr, missing.stderr
+        assert "--skip-sce-module only if this game" in missing.stderr, missing.stderr
+        result = subprocess.run([str(relinker), "--skip-sce-module", str(source), str(output)], capture_output=True, text=True, timeout=20)
         if result.returncode != 0:
             raise AssertionError((result.returncode, result.stdout, result.stderr))
         segments = loads(output.read_bytes())
@@ -49,6 +53,12 @@ def main():
         alignment = max(segment[7] for segment in segments)
         if alignment != 0x4000 or first[3] % alignment != 0 or first[7] != alignment:
             raise AssertionError(("first PT_LOAD is not aligned to the largest segment alignment", segments))
+        assert "output.elf\nlibs/\n    *.prx\napp0/" in result.stdout, result.stdout
+        named_exe = Path(directory) / "linux.EXE"
+        warning = subprocess.run([str(relinker), "--skip-sce-module", str(source), str(named_exe)], capture_output=True, text=True, timeout=20)
+        assert warning.returncode == 0, (warning.stdout, warning.stderr)
+        assert "--windows was not specified" in warning.stderr, warning.stderr
+        assert named_exe.read_bytes().startswith(b"\x7fELF"), "The filename must not select the output format"
     print("Linux load alignment test passed")
 
 

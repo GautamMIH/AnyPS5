@@ -17,6 +17,7 @@ void APS5_VABI sceLibcMspaceFree_nid_postfix(void*, void*);
 int APS5_VABI sceLibcMspacePosixMemalign_nid_postfix(void*, void**, std::size_t, std::size_t);
 std::size_t APS5_VABI sceLibcMspaceMallocUsableSize_nid_postfix(const void*);
 void* APS5_VABI sceLibcMspaceMemalign_nid_postfix(void*, std::size_t, std::size_t);
+void* APS5_VABI sceLibcMspaceReallocalign_nid_postfix(void*, void*, std::size_t, std::size_t);
 int APS5_VABI sceLibcMspaceMallocStats_nid_postfix(void*, void*);
 int APS5_VABI sceLibcMspaceMallocStatsFast_nid_postfix(void*, void*);
 }
@@ -60,6 +61,21 @@ int main() {
     void* large = sceLibcMspaceMalloc_nid_postfix(arena, storage.size() - 256);
     Require(large != nullptr); // freeing coalesced all the fragmented blocks
     sceLibcMspaceFree_nid_postfix(arena, large);
+    void* head = sceLibcMspaceMalloc_nid_postfix(arena, 64);
+    Require(head != nullptr && sceLibcMspaceRealloc_nid_postfix(arena, head, 1024) == head);
+    Require(sceLibcMspaceMallocUsableSize_nid_postfix(head) == 1024);
+    sceLibcMspaceFree_nid_postfix(arena, head);
+    std::array<void*, 2000> small{};
+    for (auto& pointer : small) {
+        pointer = sceLibcMspaceMalloc_nid_postfix(arena, 16);
+        Require(pointer != nullptr);
+    }
+    for (std::size_t i = 0; i < small.size(); i += 2) sceLibcMspaceFree_nid_postfix(arena, small[i]);
+    Require(sceLibcMspaceMalloc_nid_postfix(arena, storage.size() - 256) == nullptr);
+    for (std::size_t i = 1; i < small.size(); i += 2) sceLibcMspaceFree_nid_postfix(arena, small[i]);
+    large = sceLibcMspaceMalloc_nid_postfix(arena, storage.size() - 256);
+    Require(large != nullptr);
+    sceLibcMspaceFree_nid_postfix(arena, large);
     std::array<std::thread, 4> workers;
     for (auto& worker : workers) worker = std::thread([&] {
         for (int i = 0; i < 1000; ++i) {
@@ -80,6 +96,15 @@ int main() {
     void* memaligned = sceLibcMspaceMemalign_nid_postfix(arena, 256, 100);
     Require(memaligned && (reinterpret_cast<std::uintptr_t>(memaligned) & 255) == 0);
     Require(sceLibcMspaceMemalign_nid_postfix(arena, 24, 100) == nullptr);
+    unsigned char* realigned = static_cast<unsigned char*>(sceLibcMspaceReallocalign_nid_postfix(arena, nullptr, 64, 64));
+    Require(realigned && (reinterpret_cast<std::uintptr_t>(realigned) & 63) == 0);
+    for (int i = 0; i < 64; ++i) realigned[i] = static_cast<unsigned char>(i + 1);
+    unsigned char* regrown = static_cast<unsigned char*>(sceLibcMspaceReallocalign_nid_postfix(arena, realigned, 256, 64));
+    Require(regrown && (reinterpret_cast<std::uintptr_t>(regrown) & 63) == 0);
+    for (int i = 0; i < 64; ++i) Require(regrown[i] == static_cast<unsigned char>(i + 1));
+    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, 16, 0) == nullptr);
+    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, 16, 3) == nullptr);
+    Require(sceLibcMspaceReallocalign_nid_postfix(arena, regrown, 0, 16) == nullptr);
     Require(sceLibcMspaceMallocStatsFast_nid_postfix(arena, &stats) == 0 && stats.currentInuseSize >= 100);
     sceLibcMspaceFree_nid_postfix(arena, memaligned);
     void* region = sceLibcMspaceMalloc_nid_postfix(arena, 8192);
@@ -89,6 +114,7 @@ int main() {
     Require(nested == region);
     void* inner = sceLibcMspaceMalloc_nid_postfix(nested, 64);
     Require(inner > region && inner < static_cast<unsigned char*>(region) + 8192);
+    Require(sceLibcMspaceMallocUsableSize_nid_postfix(inner) == 64 && sceLibcMspaceMallocUsableSize_nid_postfix(region) == 8192);
     Require(sceLibcMspaceCreate_nid_postfix("flags", storage.data(), storage.size(), 2) == nullptr);
     Require(sceLibcMspaceDestroy_nid_postfix(nested) == 0);
     sceLibcMspaceFree_nid_postfix(arena, region);

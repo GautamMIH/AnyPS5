@@ -5,7 +5,7 @@ Game `DT_NEEDED` expects exactly: `libcohtml.Prospero.prx`.
 Copy next to the relinked eboot (same directory):
 
 - `build/core/libs/libs/libcohtml.Prospero.prx` (patched build output, 50 NIDs) — required.
-- `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll` from `winlibs-gcc15/mingw64/bin` — required on Windows (see `docs/TechnicalDebt.md`).
+- `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll` from `winlibs-gcc15/mingw64/bin` — required on Windows (see [technical debt](../../../../docs/dev/TechnicalDebt.md)).
 
 Do NOT deploy:
 

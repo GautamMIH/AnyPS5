@@ -4,17 +4,21 @@
 #include <cstdint>
 #include <cstddef>
 
+#include "prx/libkernel/KernelErrors.hpp"
+
 static constexpr size_t DIRECT_MEMORY_SIZE = 13824ULL * 1024 * 1024;
 static constexpr size_t PS5_PAGE_SIZE = 0x4000;
 
-static constexpr int SCE_KERNEL_ERROR_EINVAL = static_cast<int>(0x80020016);
-static constexpr int SCE_KERNEL_ERROR_EAGAIN = static_cast<int>(0x80020023);
-static constexpr int SCE_KERNEL_ERROR_ENOMEM = static_cast<int>(0x8002000C);
-static constexpr int SCE_KERNEL_ERROR_EACCES = static_cast<int>(0x8002000D);
-static constexpr int SCE_KERNEL_ERROR_EFAULT = static_cast<int>(0x8002000E);
+struct DirectMemoryBlock {
+    uint64_t start;
+    uint64_t end;
+    int memoryType;
+};
 
-int DirectMemoryAlloc(int64_t searchStart, int64_t searchEnd, size_t len, size_t alignment, int64_t* physOut);
+int DirectMemoryAlloc(int64_t searchStart, int64_t searchEnd, size_t len, size_t alignment, int memoryType, int64_t* physOut);
 void DirectMemoryFree(int64_t start, size_t len);
+bool DirectMemoryQueryBlock(uint64_t offset, DirectMemoryBlock* block);
+size_t DirectMemoryFreeRun(uint64_t offset, uint64_t limit);
 int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment);
 int DoMapAnon(void** addr, size_t len, int prot, int flags);
 int DoMprotect(const void* addr, size_t len, int prot);

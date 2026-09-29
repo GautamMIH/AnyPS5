@@ -187,7 +187,8 @@ void TranslationContext::sInstPrefetch() {
 }
 
 void TranslationContext::sGetpcB64(const RdnaInstruction& inst) {
-    const IrU64 pc(ir.ConstantU64(static_cast<std::uint64_t>(currentProgramCounter) + 4u));
+    IrValue& base = ir.Emit(IrOpcode::GetShaderBase, IrType::U64, {});
+    const IrU64 pc(ir.Emit(IrOpcode::IAdd64, IrType::U64, {&base, &ir.ConstantU64(static_cast<std::uint64_t>(currentProgramCounter) + 4u)}));
     writeU32Pair(inst.destination, extractU64(pc));
 }
 

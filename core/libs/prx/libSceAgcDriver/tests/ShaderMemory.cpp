@@ -66,12 +66,57 @@ void verifyRegisterSources() {
     require(!EquivalentValue(plan, &samplerRegister, &firstVector), "different register types were merged");
 }
 
+void verifyProgramCounterRelativeData() {
+    using namespace ShaderRecompiler;
+    static const std::array<std::uint32_t, 15> code{
+        0xbe801f00u,
+        0x800000ffu, 52u,
+        0x82010180u,
+        0xb0020010u,
+        0xbe8303ffu, 0x10005004u,
+        0xf4200100u, 0xfa000000u,
+        0xbf8cc07fu,
+        0x7e000204u,
+        0xf80008cfu, 0u,
+        0xbf810000u,
+        0x3f800000u
+    };
+    const auto codeAddress = reinterpret_cast<std::uintptr_t>(code.data());
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Vertex, codeAddress, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.userDataBaseRegister = 8;
+    request.context.vertex = ShaderVertexStageInfo{};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 64;
+    request.target.fragmentShaderBarycentricEnabled = false;
+    request.layout.pushConstantSizeBytes = 128;
+    const auto dataBase = [](const RecompileResult& result) {
+        for (const auto& binding : result.bindings) {
+            if (binding.role != DescriptorRole::GuestBuffers || binding.guestDescriptor.size() < 4u) continue;
+            return static_cast<std::uint64_t>(binding.guestDescriptor[0]) | (static_cast<std::uint64_t>(binding.guestDescriptor[1] & 0xffffu) << 32u);
+        }
+        throw std::runtime_error("program counter data: no guest buffer was bound");
+    };
+    AgcDriver::ShaderMemory memory({});
+    static_cast<void>(memory.Capture(request));
+    request.context.memory = memory.Regions();
+    const auto first = Recompile(request);
+    require(dataBase(first) == codeAddress + 56u, "program counter data: the V# does not name the data at the shader's address");
+    auto relocated = request;
+    relocated.shader.codeAddress += 0x1000u;
+    const auto moved = Recompile(relocated);
+    require(moved.cacheHit, "program counter data: relocating the shader recompiled it");
+    require(dataBase(moved) == codeAddress + 0x1000u + 56u, "program counter data: the relocated shader bound the old address");
+}
 }
 
 int main() {
     try {
         using namespace ShaderRecompiler;
         verifyRegisterSources();
+        verifyProgramCounterRelativeData();
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         const std::vector<std::uint32_t> minimalSpirv{
             0x07230203u, 0x00010000u, 0u, 5u, 0u,

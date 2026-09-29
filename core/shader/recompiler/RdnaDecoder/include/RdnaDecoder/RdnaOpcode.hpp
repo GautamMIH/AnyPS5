@@ -21,6 +21,7 @@ enum class RdnaOpcode : std::uint16_t {
     SLshlB32,
     SLshrB32,
     SAshrI32,
+    SAshrI64,
     SBfeU32,
     SBfeI32,
     SCmpEqI32,
@@ -119,6 +120,7 @@ enum class RdnaOpcode : std::uint16_t {
     SAbsI32,
     SAbsdiffI32,
     SBrevB32,
+    SBrevB64,
     SSextI32I8,
     SSextI32I16,
     SBcnt0I32B32,
@@ -563,6 +565,7 @@ enum class RdnaOpcode : std::uint16_t {
     ImageGather4CO,
     ImageGather4CLzO,
     ImageGather4h,
+    ImageBvhIntersectRay,
     VInterpP1F32,
     VInterpP2F32,
     VInterpMovF32,
@@ -573,6 +576,7 @@ enum class RdnaOpcode : std::uint16_t {
     STrap,
     STtracedata,
     SInstPrefetch,
+    SClause,
     Exp,
     Count
 };

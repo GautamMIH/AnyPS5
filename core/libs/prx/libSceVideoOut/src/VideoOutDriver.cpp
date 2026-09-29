@@ -282,7 +282,7 @@ bool VideoOutDriver::close(int handle) {
     const auto removeEvents = [](const auto& events, int kind) {
         for (const auto& event : events) {
             const auto result = EqueueDeleteEvent_nid_postfix(event.eq, static_cast<uintptr_t>(kind), EVFILT_VIDEO_OUT);
-            require(result == EQUEUE_OK || result == EQUEUE_ERROR_EBADF || result == EQUEUE_ERROR_ENOENT, "event removal during close failed");
+            require(result == EQUEUE_OK || result == SCE_KERNEL_ERROR_EBADF || result == SCE_KERNEL_ERROR_ENOENT, "event removal during close failed");
         }
     };
     removeEvents(cfg->flipEvents, VIDEO_OUT_EVENT_FLIP);
@@ -336,7 +336,7 @@ void VideoOutDriver::triggerEvents(VideoOutConfig& cfg, int eventKind, void* tri
     for (auto it = events->begin(); it != events->end();) {
         require(it->generation == cfg.generation, "stale event registration");
         const auto result = EqueueTriggerEvent_nid_postfix(it->eq, static_cast<uintptr_t>(eventKind), EVFILT_VIDEO_OUT, triggerData);
-        if (result == EQUEUE_ERROR_EBADF || result == EQUEUE_ERROR_ENOENT) it = events->erase(it);
+        if (result == SCE_KERNEL_ERROR_EBADF || result == SCE_KERNEL_ERROR_ENOENT) it = events->erase(it);
         else {
             require(result == EQUEUE_OK, "event delivery failed");
             ++it;

@@ -26,7 +26,7 @@ OPCODE_ALIASES = {
 }
 REPORT_ROWS = 100
 PANEL_WIDTH, GAP, MAP_HEIGHT, HEADER = 495, 10, 280, 30
-DONE_COLOR, TODO_COLOR, BORDER, TEXT = "#2ea043", "#1f6feb", "#0d1117", "#ffffff"
+DONE_COLOR, TODO_COLOR, BORDER, TEXT = "#2ea043", "#6e7681", "#0d1117", "#ffffff"
 
 
 def body_end(text, start):

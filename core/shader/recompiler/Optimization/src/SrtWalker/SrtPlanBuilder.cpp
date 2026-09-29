@@ -70,7 +70,8 @@ void PlanBuilder::Collect(IrValue* raw, std::uint32_t usePc) {
         return;
     }
     IrValue* offset = inst->Argument(1)->Resolve();
-    if (!offset->HasImmediate() || offset->Type() != IrType::U32) {
+    const auto foldable = offset->HasImmediate() && offset->Type() == IrType::U32 && RuntimeValidator(_program.Resources(), RuntimeValueType::Any).Run(inst);
+    if (!foldable) {
         if (std::find(_program.Metadata().dynamicReads.begin(), _program.Metadata().dynamicReads.end(), value) == _program.Metadata().dynamicReads.end()) {
             _program.Metadata().dynamicReads.push_back(value);
         }

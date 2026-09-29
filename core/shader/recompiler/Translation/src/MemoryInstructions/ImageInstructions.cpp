@@ -40,6 +40,14 @@ MemoryInfo imageMemoryInfoFromInstruction(const RdnaInstruction& inst) {
 
 }
 
+bool TranslationContext::imageBvhIntersectRay(const RdnaInstruction& inst) {
+    IrValue& miss = ir.Constant(0xffffffffu);
+    for (std::uint32_t i = 0u; i < inst.dataDwordCount; ++i) {
+        writeOperand(offsetOperand(inst.destination, i), &miss);
+    }
+    return true;
+}
+
 bool TranslationContext::imageAtomic(const RdnaInstruction& inst, IrOpcode opcode) {
     const MemoryInfo memory = imageMemoryInfoFromInstruction(inst);
     IrValue* resource = getImageResource(memory);

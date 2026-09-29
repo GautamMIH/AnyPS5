@@ -72,7 +72,7 @@ static int registerVideoOutEvent(int handle, KernelEqueue eq, int16_t eventKind,
         e->event.data = 0;
     };
     const int result = EqueueAddEvent_nid_postfix(eq, event);
-    if (result == EQUEUE_ERROR_EBADF) {
+    if (result == SCE_KERNEL_ERROR_EBADF) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE");
     }
     if (result != EQUEUE_OK) throw std::runtime_error("VideoOut: event registration failed");
@@ -99,10 +99,10 @@ static int deleteVideoOutEvent(int handle, KernelEqueue eq, int16_t eventKind) {
         events->erase(std::remove_if(events->begin(), events->end(), [eq](const EventRegistration& r) { return r.eq == eq; }), events->end());
     }
     const int result = EqueueDeleteEvent_nid_postfix(eq, static_cast<uintptr_t>(eventKind), EVFILT_VIDEO_OUT);
-    if (result == EQUEUE_ERROR_EBADF) {
+    if (result == SCE_KERNEL_ERROR_EBADF) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE");
     }
-    return (result == EQUEUE_ERROR_ENOENT) ? 0 : result;
+    return (result == SCE_KERNEL_ERROR_ENOENT) ? 0 : result;
 }
 
 extern "C" {

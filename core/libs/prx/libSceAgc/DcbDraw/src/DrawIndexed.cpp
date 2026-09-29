@@ -65,19 +65,24 @@ std::uint32_t APS5_VABI sceAgcDcbDrawIndexIndirectMultiGetSize() {
 }
 
 uint32_t* APS5_VABI sceAgcDcbDrawIndexMultiInstanced(CommandBuffer* buf, uint32_t index_count, const volatile void* index_addr, const volatile void* object_ids, uint32_t instance_count, uint64_t modifier) {
- (void)buf;
- (void)index_count;
- (void)index_addr;
- (void)object_ids;
- (void)instance_count;
- (void)modifier;
- NotImplemented_nid_no_patch(__func__);
- return nullptr;
+    const auto geometry = reinterpret_cast<std::uintptr_t>(index_addr);
+    Agc::Command::CheckAddress(geometry, 2, __func__);
+    Agc::Command::Require(object_ids == nullptr, __func__, "per-object id base has no executor contract; expanding to one instanced draw");
+    const auto initiator = Agc::Command::DrawInitiator(modifier, true, __func__);
+    auto* packet = Agc::Command::Allocate(buf, 8, __func__);
+    packet[0] = Agc::Command::Header(0x2fu, 2);
+    packet[1] = instance_count;
+    packet[2] = Agc::Command::Header(0x27u, 6);
+    packet[3] = index_count == 0 ? 1u : index_count;
+    packet[4] = static_cast<std::uint32_t>(geometry);
+    packet[5] = static_cast<std::uint32_t>(static_cast<std::uint64_t>(geometry) >> 32u);
+    packet[6] = index_count;
+    packet[7] = initiator;
+    return packet;
 }
 
 uint32_t APS5_VABI sceAgcDcbDrawIndexMultiInstancedGetSize(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return 32;
 }
 
 }

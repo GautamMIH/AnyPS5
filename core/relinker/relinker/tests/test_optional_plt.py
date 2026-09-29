@@ -38,7 +38,7 @@ def main():
             source = work / (name + ".elf")
             output = work / (name + ".exe")
             source.write_bytes(fixture(tags))
-            result = subprocess.run([str(relinker), "--windows", str(source), str(output)],
+            result = subprocess.run([str(relinker), "--skip-sce-module", "--windows", str(source), str(output)],
                                     capture_output=True, text=True, timeout=20)
             if error is not None:
                 if result.returncode != 2 or error not in result.stderr or output.exists():

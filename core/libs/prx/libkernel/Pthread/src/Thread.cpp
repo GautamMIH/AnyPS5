@@ -2,6 +2,7 @@
 #include "../include/PthreadSync.hpp"
 #include "../include/PthreadStacks.hpp"
 #include "../include/ThreadLifecycle.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include <atomic>
 #include <algorithm>
 #include <cstring>
@@ -20,7 +21,6 @@
 #endif
 
 static constexpr int SCE_OK = 0;
-static constexpr int SCE_KERNEL_ERROR_EINVAL = 0x80020016;
 
 static constexpr std::size_t DEFAULT_STACK_SIZE = 1u << 20;
 static constexpr int DETACH_DETACHED = 1;

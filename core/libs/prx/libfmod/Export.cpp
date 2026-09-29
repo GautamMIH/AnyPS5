@@ -1635,7 +1635,7 @@ public:
             } else {
                 // Compressed (Vorbis/MP3/FSB/AT9...) or unknown: audible
                 // placeholder so the mixer path can be heard. Real decoders
-                // (Vorbis/MP3/AT9) remain future work — see docs/TechnicalDebt.
+                // (Vorbis/MP3/AT9) remain future work — see docs/dev/TechnicalDebt.
                 FmodMakeSine(created->pcm, kFmodOutRate, 2, 440.0f, 1.0f);
                 created->pcmRate = kFmodOutRate;
                 created->pcmCh = 2;

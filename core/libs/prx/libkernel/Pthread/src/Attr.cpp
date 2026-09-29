@@ -1,10 +1,10 @@
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include <stdexcept>
 
 static constexpr int SCE_OK = 0;
-static constexpr int SCE_KERNEL_ERROR_ENOMEM = 0x8002000C;
 
 static constexpr std::size_t DEFAULT_STACK_SIZE = 1u << 20;
 static constexpr int DETACH_JOINABLE = 0;

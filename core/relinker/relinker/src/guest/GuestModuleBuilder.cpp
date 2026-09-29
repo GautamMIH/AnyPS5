@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <fstream>
 #include <functional>
-#include <iostream>
 #include <set>
 
 namespace Relinker {
@@ -18,10 +17,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
     const bool hasSingular = std::filesystem::exists(singular);
     const bool hasPlural = std::filesystem::exists(plural);
     if (hasSingular && hasPlural) throw Domain::RelinkerException("Both sce_module and sce_modules exist beside the input executable");
-    if (!hasSingular && !hasPlural) {
-        std::cout << "WARNING: sce_module not found beside the input executable; it may be unnecessary or missing.\n";
-        return {};
-    }
+    if (!hasSingular && !hasPlural) throw Domain::RelinkerException("sce_module/sce_modules was not found beside the input executable: " + root.string() + ". Use --skip-sce-module only if this game can run without these modules.");
     const auto directory = hasSingular ? singular : plural;
     if (!std::filesystem::is_directory(directory)) throw Domain::RelinkerException("Guest module path is not a directory: " + directory.string());
     std::vector<std::filesystem::path> paths;
@@ -119,18 +115,17 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         Io::AppendU64(dynamic.DynamicSegmentData, dynamic.DynStrData.size());
         Io::AppendString(dynamic.DynStrData, name);
     };
-    const auto relativeDirectory = directory.filename().generic_string();
+    const auto relativeDirectory = "app0/" + directory.filename().generic_string();
     for (const auto index : order) if (!windows) addNeeded("$ORIGIN/" + relativeDirectory + "/" + images[index].OutputName);
     for (const auto& name : hostLibraries) addNeeded(name);
     std::string guestRunPath = runPath;
     if (!windows) {
-        if (guestRunPath == "$ORIGIN") guestRunPath = "$ORIGIN/..";
-        else if (guestRunPath.starts_with("$ORIGIN/")) guestRunPath.insert(8, "../");
+        if (guestRunPath == "$ORIGIN") guestRunPath = "$ORIGIN/../..";
+        else if (guestRunPath.starts_with("$ORIGIN/")) guestRunPath.insert(8, "../../");
         else if (!std::filesystem::path(guestRunPath).is_absolute()) throw Domain::RelinkerException("Guest Linux run path must be absolute or begin with $ORIGIN");
     }
     std::vector<GuestArtifact> artifacts;
-    const auto destination = std::filesystem::absolute(outputPath).parent_path() / directory.filename();
-    if (std::filesystem::exists(destination) && std::filesystem::equivalent(destination, directory)) throw Domain::RelinkerException("Guest output directory must differ from the source module directory");
+    const auto destination = std::filesystem::absolute(outputPath).parent_path() / relativeDirectory;
     for (const auto index : order) {
         const auto& image = images[index];
         const auto target = destination / image.OutputName;

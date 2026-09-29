@@ -252,7 +252,7 @@ std::size_t X64InstructionDecoder::Decode(const std::uint8_t* data, std::size_t 
                    (opcode >= TwoByteModRmRangeCMin && opcode <= TwoByteModRmRangeCMax) ||
                    (opcode >= TwoByteModRmRangeDMin && opcode <= TwoByteModRmRangeDMax) ||
                    (opcode >= TwoByteModRmRangeEMin && opcode <= TwoByteModRmRangeEMax) ||
-                   (opcode >= TwoByteModRmRangeGMin && opcode <= TwoByteModRmRangeGMax) ||
+                   (opcode >= TwoByteModRmRangeGMin && opcode <= TwoByteModRmRangeGMax && opcode != TwoByteEmms) ||
                    (opcode >= TwoByteModRmRangeHMin && opcode <= TwoByteModRmRangeHMax) ||
                    (opcode >= TwoByteModRmRangeIMin && opcode <= TwoByteModRmRangeIMax) ||
                    (opcode >= TwoBytePrefetchGrpMin && opcode <= TwoBytePrefetchGrpMax) ||

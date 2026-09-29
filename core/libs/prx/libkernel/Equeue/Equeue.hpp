@@ -11,6 +11,7 @@
 
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
 
 static constexpr int16_t EVFILT_USER = -11;
@@ -25,11 +26,11 @@ static constexpr uint16_t EV_CLEAR = 0x0020;
 static constexpr uint16_t EV_ERROR = 0x4000;
 
 static constexpr int EQUEUE_OK = 0;
-static constexpr int EQUEUE_ERROR_EBADF = static_cast<int>(0x80020009);
-static constexpr int EQUEUE_ERROR_EFAULT = static_cast<int>(0x8002000E);
-static constexpr int EQUEUE_ERROR_EINVAL = static_cast<int>(0x80020016);
-static constexpr int EQUEUE_ERROR_ENOENT = static_cast<int>(0x80020002);
-static constexpr int EQUEUE_ERROR_ETIMEDOUT = static_cast<int>(0x8002003C);
+static constexpr int EQUEUE_ERROR_EBADF = SCE_KERNEL_ERROR_EBADF;
+static constexpr int EQUEUE_ERROR_EFAULT = SCE_KERNEL_ERROR_EFAULT;
+static constexpr int EQUEUE_ERROR_EINVAL = SCE_KERNEL_ERROR_EINVAL;
+static constexpr int EQUEUE_ERROR_ENOENT = SCE_KERNEL_ERROR_ENOENT;
+static constexpr int EQUEUE_ERROR_ETIMEDOUT = SCE_KERNEL_ERROR_ETIMEDOUT;
 
 struct KernelEqueueEvent;
 

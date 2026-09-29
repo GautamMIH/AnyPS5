@@ -29,7 +29,7 @@ int APS5_VABI sceKernelPollSema(KernelSema sem, int need) {
 
  std::lock_guard<std::mutex> lock(sem->mutex);
  if (sem->tokenCount < need) {
-  return KERNEL_SEMA_ERROR_EBUSY;
+  return SCE_KERNEL_ERROR_EBUSY;
  }
  sem->tokenCount -= need;
  return KERNEL_SEMA_OK;
@@ -42,7 +42,7 @@ int APS5_VABI sceKernelSignalSema(KernelSema sem, int count) {
 
  std::lock_guard<std::mutex> lock(sem->mutex);
  if (sem->tokenCount + count > sem->maxCount) {
-  return KERNEL_SEMA_ERROR_EINVAL;
+  return SCE_KERNEL_ERROR_EINVAL;
  }
  sem->tokenCount += count;
  sem->condition.NotifyAll();
@@ -56,7 +56,7 @@ int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) 
 
  std::unique_lock<std::mutex> lock(sem->mutex);
  if (need > sem->maxCount) {
-  return KERNEL_SEMA_ERROR_EINVAL;
+  return SCE_KERNEL_ERROR_EINVAL;
  }
  const auto generation = sem->cancelGeneration;
  const auto ready = [&] { return sem->deleted || sem->cancelGeneration != generation || sem->tokenCount >= need; };
@@ -74,13 +74,13 @@ int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) 
  --sem->waiters;
  if (sem->deleted) {
   sem->condition.NotifyAll();
-  return KERNEL_SEMA_ERROR_EACCES;
+  return SCE_KERNEL_ERROR_EACCES;
  }
  if (sem->cancelGeneration != generation) {
-  return KERNEL_SEMA_ERROR_ECANCELED;
+  return SCE_KERNEL_ERROR_ECANCELED;
  }
  if (!acquired) {
-  return KERNEL_SEMA_ERROR_ETIMEDOUT;
+  return SCE_KERNEL_ERROR_ETIMEDOUT;
  }
  sem->tokenCount -= need;
  return KERNEL_SEMA_OK;
@@ -93,7 +93,7 @@ int APS5_VABI sceKernelCancelSema(KernelSema sem, int count, int* threads) {
 
  std::lock_guard<std::mutex> lock(sem->mutex);
  if (count > sem->maxCount) {
-  return KERNEL_SEMA_ERROR_EINVAL;
+  return SCE_KERNEL_ERROR_EINVAL;
  }
  if (threads != nullptr) {
   *threads = sem->waiters;

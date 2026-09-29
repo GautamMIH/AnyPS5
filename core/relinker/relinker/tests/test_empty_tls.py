@@ -29,7 +29,7 @@ def main():
             if access:
                 data[0x200:0x20a] = bytes.fromhex("64 48 8b 04 25 00 00 00 00 c3")
             source.write_bytes(data)
-            result = subprocess.run([str(relinker), "--windows", str(source), str(output)],
+            result = subprocess.run([str(relinker), "--skip-sce-module", "--windows", str(source), str(output)],
                                     capture_output=True, text=True, timeout=20)
             if error:
                 assert result.returncode == 2 and error in result.stderr and not output.exists(), result

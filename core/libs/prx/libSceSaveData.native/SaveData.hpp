@@ -9,12 +9,15 @@
 constexpr int SAVE_DATA_OK = 0;
 constexpr int SAVE_DATA_ERROR_PARAMETER = static_cast<int>(0x809F0000);
 constexpr int SAVE_DATA_ERROR_NOT_INITIALIZED = static_cast<int>(0x809F0001);
+constexpr int SAVE_DATA_ERROR_ALREADY_INITIALIZED = static_cast<int>(0x809F0005);
 constexpr int SAVE_DATA_ERROR_OUT_OF_MEMORY = static_cast<int>(0x809F0002);
 constexpr int SAVE_DATA_ERROR_BUSY = static_cast<int>(0x809F0003);
 constexpr int SAVE_DATA_ERROR_NOT_MOUNTED = static_cast<int>(0x809F0004);
 constexpr int SAVE_DATA_ERROR_EXISTS = static_cast<int>(0x809F0007);
 constexpr int SAVE_DATA_ERROR_NOT_FOUND = static_cast<int>(0x809F0008);
+constexpr int SAVE_DATA_ERROR_INTERNAL = static_cast<int>(0x809F000B);
 constexpr int SAVE_DATA_ERROR_MOUNT_FULL = static_cast<int>(0x809F000C);
+constexpr int SAVE_DATA_ERROR_MEMORY_NOT_READY = static_cast<int>(0x809F0012);
 
 constexpr std::uint32_t SAVE_DATA_MOUNT_MODE_RDONLY = 1;
 constexpr std::uint32_t SAVE_DATA_MOUNT_MODE_RDWR = 2;

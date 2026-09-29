@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <array>
 #include <condition_variable>
+#include <shared_mutex>
 #include <cstring>
 #include <chrono>
 #include <deque>

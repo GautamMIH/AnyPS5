@@ -78,7 +78,7 @@ def main():
             source = work / (name + ".elf")
             output = source.with_suffix(".exe")
             source.write_bytes(image)
-            result = subprocess.run([str(relinker), "--windows", str(source), str(output)],
+            result = subprocess.run([str(relinker), "--skip-sce-module", "--windows", str(source), str(output)],
                                     capture_output=True, text=True, timeout=30)
             if error is not None:
                 assert result.returncode == 2 and error in result.stderr and not output.exists(), result
