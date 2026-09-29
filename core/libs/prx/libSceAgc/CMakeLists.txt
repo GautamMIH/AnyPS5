@@ -69,3 +69,16 @@ target_include_directories(agc_command_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(agc_command_tests PRIVATE libSceAgc libc)
 configure_windows_unwind(agc_command_tests)
 configure_windows_unwind(libSceAgc)
+
+add_executable(agc_register_command_tests EXCLUDE_FROM_ALL
+        tests/RegisterCommands.cpp
+        Command/src/Packet.cpp
+        DcbState/src/Registers.cpp
+        Patch/src/IndirectRegisters.cpp
+)
+target_include_directories(agc_register_command_tests PRIVATE ${LIBS_INCLUDE_DIR})
+configure_windows_unwind(agc_register_command_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_register_command_tests PROPERTIES EXCLUDE_FROM_ALL FALSE)
+    add_test(NAME agc_register_command_tests COMMAND agc_register_command_tests)
+endif()
