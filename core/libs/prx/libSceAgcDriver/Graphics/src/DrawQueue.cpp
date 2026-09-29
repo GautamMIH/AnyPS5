@@ -21,6 +21,7 @@ VkCommandBuffer DrawQueue::Begin(const Context& context) {
             available.pop_back();
             recording.commands->Reset();
         }
+        recording.commands->Label("draws_and_dispatches");
     }
     if (barrierRequested) {
         barrierRequested = false;

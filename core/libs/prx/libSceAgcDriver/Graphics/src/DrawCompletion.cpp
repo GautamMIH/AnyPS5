@@ -66,6 +66,7 @@ std::uint64_t DrawQueue::SubmitMarker(const Context& context) {
         available.pop_back();
         commands->Reset();
     }
+    commands->Label("marker");
     commands->Submit();
     const auto serial = nextMarker++;
     markers.push_back({serial, std::move(commands)});

@@ -113,6 +113,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             timing.Mark("detiler_pool");
             if (context.drawQueue) context.drawQueue->Flush();
             upload = std::make_unique<CommandBatch>(context);
+            upload->Label("texture_upload");
             const auto commands = upload->Handle();
             timing.Mark("batch");
 

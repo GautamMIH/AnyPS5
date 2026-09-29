@@ -29,6 +29,7 @@ class DescriptorCache;
 class SamplerCache;
 class GuestGpuMemory;
 class ImageMemory;
+class GpuTimestamps;
 
 inline void Require(bool condition, const std::string& reason) {
     if (!condition) throw std::runtime_error("AGC graphics: " + reason);
@@ -121,6 +122,8 @@ struct Context {
     }
     // Device-local memory for texture images (see ImageMemory).
     mutable std::shared_ptr<ImageMemory> imageMemory;
+    // GPU timing of command batches (ANYPS5_GPU_TIMING=1), null otherwise.
+    mutable std::shared_ptr<GpuTimestamps> gpuTimestamps;
 };
 
 }

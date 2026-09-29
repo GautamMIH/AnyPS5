@@ -1023,6 +1023,10 @@ private:
             if (header == FlipPacketHeader) {
                 WriteTracker::NextEpoch();
                 frameTiming->SetFlip(submission.serial, cursor, submission.received, FrameTiming::Clock::now());
+                {
+                    std::lock_guard gpuLock(gpuMutex);
+                    if (device) device->ReportGpuTime(*frameTiming);
+                }
                 const auto completedFrame = std::exchange(frameTiming, nullptr);
                 submission.flips.at(cursor)->GpuReady(completedFrame);
             }

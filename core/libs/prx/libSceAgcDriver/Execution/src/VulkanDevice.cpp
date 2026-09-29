@@ -122,6 +122,7 @@ struct VulkanDevice::State {
     std::unique_ptr<Graphics::GpuColorTransfer> colorTransfer;
     std::shared_ptr<Graphics::BufferPool> bufferPool;
     std::shared_ptr<Graphics::ImageMemory> imageMemory;
+    std::shared_ptr<Graphics::GpuTimestamps> gpuTimestamps;
     // Compute pipelines by compiled variant (or SPIR-V), descriptor layout and push stages.
     std::map<std::string, std::shared_ptr<ComputePipeline>> computePipelines;
     std::shared_ptr<Graphics::DescriptorCache> descriptorCache;
@@ -224,6 +225,7 @@ struct VulkanDevice::State {
             pipelineCache.reset();
             bufferPool.reset();
             imageMemory.reset();
+            gpuTimestamps.reset();
             descriptorCache.reset();
             samplerCache.reset();
             const auto destroyFence = reinterpret_cast<PFN_vkDestroyFence>(deviceProc(device, "vkDestroyFence"));
@@ -531,6 +533,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     poolInfo.queueFamilyIndex = family;
     check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &poolInfo, nullptr, &state->pool), "vkCreateCommandPool");
     state->imageMemory = std::make_shared<Graphics::ImageMemory>(state->device, state->deviceProc, state->memoryProperties);
+    if (std::getenv("ANYPS5_GPU_TIMING") != nullptr) {
+        if (state->properties.limits.timestampComputeAndGraphics) state->gpuTimestamps = std::make_shared<Graphics::GpuTimestamps>(state->device, state->deviceProc, state->properties.limits.timestampPeriod);
+        else std::fprintf(stderr, "[AnyPS5] ANYPS5_GPU_TIMING: the device has no graphics timestamps\n");
+    }
     state->bufferPool = std::make_shared<Graphics::BufferPool>(graphicsContext());
     state->descriptorCache = std::make_shared<Graphics::DescriptorCache>();
     state->samplerCache = std::make_shared<Graphics::SamplerCache>();
@@ -914,6 +920,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.externalMemoryHost = state->externalMemoryHost;
     context.guestGpuMemory = state->guestGpuMemory.get();
     context.imageMemory = state->imageMemory;
+    context.gpuTimestamps = state->gpuTimestamps;
     return context;
 }
 
@@ -1031,6 +1038,16 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     timing.Mark("command_record");
     state->drawQueue->Enqueue(std::move(resources), std::move(pipeline));
     timing.Mark("enqueue");
+}
+
+void VulkanDevice::ReportGpuTime(FrameTiming& frame) {
+    if (!state->gpuTimestamps) return;
+    std::uint64_t total = 0;
+    for (const auto& [label, nanoseconds, batches] : state->gpuTimestamps->Drain()) {
+        frame.Add("GPU", label, std::chrono::nanoseconds(nanoseconds), batches);
+        total += nanoseconds;
+    }
+    frame.Add("GPU", "busy", std::chrono::nanoseconds(total));
 }
 
 }

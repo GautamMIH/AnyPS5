@@ -9,6 +9,7 @@ bool CommandBatch::IsComplete() {
     if (result == VK_NOT_READY) return false;
     Check(result, "vkGetFenceStatus graphics");
     pending = false;
+    reportTiming();
     return true;
 }
 

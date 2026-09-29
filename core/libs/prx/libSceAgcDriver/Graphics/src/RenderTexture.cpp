@@ -112,6 +112,7 @@ void Texture::recordCopy() {
         timing.Mark("new_batch");
     }
     timing.Mark("batch");
+    upload->Label("texture_copy");
     const auto commands = upload->Handle();
     const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     VkMemoryBarrier earlier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};

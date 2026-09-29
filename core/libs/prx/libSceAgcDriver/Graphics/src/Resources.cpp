@@ -213,6 +213,7 @@ CommandBatch::CommandBatch(const Context& context) : context(context) {
             VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             Check(context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer recycled batch");
+            beginTiming();
             return;
         }
         VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
@@ -225,6 +226,7 @@ CommandBatch::CommandBatch(const Context& context) : context(context) {
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         Check(context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer");
+        beginTiming();
     } catch (...) {
         release();
         throw;
@@ -241,6 +243,7 @@ void CommandBatch::release() noexcept {
         if (result == VK_NOT_READY) result = context.Function<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(context.queue);
         if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) std::terminate();
     }
+    reportTiming();
     // Completed (or never submitted): the command buffer and fence serve the next batch.
     if (commands && fence && keepRecycled(context.device, context.pool, commands, fence)) return;
     if (commands) context.Function<PFN_vkFreeCommandBuffers>("vkFreeCommandBuffers")(context.device, context.pool, 1, &commands);
@@ -258,17 +261,20 @@ void CommandBatch::SubmitAndWait() {
 
 void CommandBatch::Reset() {
     Require(submitted && !pending, "command batch must complete before reuse");
+    reportTiming();
     Check(context.Function<PFN_vkResetFences>("vkResetFences")(context.device, 1, &fence), "vkResetFences graphics");
     Check(context.Function<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(commands, 0), "vkResetCommandBuffer graphics");
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     Check(context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer graphics");
     submitted = false;
+    beginTiming();
 }
 
 void CommandBatch::Submit() {
     PerformanceTimer timing("Graphics.Submit");
     Require(!submitted, "command batch has already been submitted");
+    if (timestamp != UINT32_MAX) context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, context.gpuTimestamps->Pool(), timestamp + 1);
     Check(context.Function<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(commands), "vkEndCommandBuffer");
     VkSubmitInfo submission{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submission.commandBufferCount = 1;
@@ -288,6 +294,7 @@ void CommandBatch::Wait() {
     timing.Mark("fence_wait");
     if (result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST) pending = false;
     Check(result, "vkWaitForFences graphics");
+    reportTiming();
 }
 
 ImageMemory::ImageMemory(VkDevice device, PFN_vkGetDeviceProcAddr deviceProc, const VkPhysicalDeviceMemoryProperties& properties) : device(device), deviceProc(deviceProc), properties(properties) {}
@@ -381,6 +388,59 @@ void ImageMemory::Free(const Allocation& allocation) noexcept {
     freeMemory(device, block.memory, nullptr);
     block.memory = VK_NULL_HANDLE;
     block.free.clear();
+}
+
+GpuTimestamps::GpuTimestamps(VkDevice device, PFN_vkGetDeviceProcAddr deviceProc, float period) : device(device), deviceProc(deviceProc), period(period) {
+    VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    info.queryCount = Pairs * 2;
+    Check(reinterpret_cast<PFN_vkCreateQueryPool>(deviceProc(device, "vkCreateQueryPool"))(device, &info, nullptr, &pool), "vkCreateQueryPool timestamps");
+}
+
+GpuTimestamps::~GpuTimestamps() {
+    if (pool != VK_NULL_HANDLE) reinterpret_cast<PFN_vkDestroyQueryPool>(deviceProc(device, "vkDestroyQueryPool"))(device, pool, nullptr);
+}
+
+std::uint32_t GpuTimestamps::Acquire() {
+    return (next.fetch_add(1, std::memory_order_relaxed) % Pairs) * 2;
+}
+
+void GpuTimestamps::Report(std::uint32_t first, const char* label) {
+    std::array<std::uint64_t, 2> values{};
+    const auto result = reinterpret_cast<PFN_vkGetQueryPoolResults>(deviceProc(device, "vkGetQueryPoolResults"))(device, pool, first, 2, sizeof(values), values.data(), sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT);
+    if (result != VK_SUCCESS || values[1] < values[0]) return;
+    const auto nanoseconds = static_cast<std::uint64_t>(static_cast<double>(values[1] - values[0]) * period);
+    std::lock_guard lock(mutex);
+    auto& total = totals[label];
+    total.first += nanoseconds;
+    ++total.second;
+}
+
+std::vector<std::tuple<const char*, std::uint64_t, std::uint64_t>> GpuTimestamps::Drain() {
+    std::lock_guard lock(mutex);
+    std::vector<std::tuple<const char*, std::uint64_t, std::uint64_t>> result;
+    for (const auto& [label, total] : totals) result.emplace_back(label, total.first, total.second);
+    totals.clear();
+    return result;
+}
+
+void CommandBatch::beginTiming() {
+    if (!context.gpuTimestamps) return;
+    timestamp = context.gpuTimestamps->Acquire();
+    const auto pool = context.gpuTimestamps->Pool();
+    context.Function<PFN_vkCmdResetQueryPool>("vkCmdResetQueryPool")(commands, pool, timestamp, 2);
+    context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(commands, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool, timestamp);
+}
+
+void CommandBatch::reportTiming() noexcept {
+    if (timestamp == UINT32_MAX) return;
+    const auto first = timestamp;
+    timestamp = UINT32_MAX;
+    if (!submitted || pending || !context.gpuTimestamps) return;
+    try {
+        context.gpuTimestamps->Report(first, label);
+    } catch (...) {
+    }
 }
 
 }

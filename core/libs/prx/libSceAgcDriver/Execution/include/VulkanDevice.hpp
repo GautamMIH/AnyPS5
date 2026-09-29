@@ -11,6 +11,8 @@
 
 namespace AgcDriver {
 
+class FrameTiming;
+
 class VulkanDevice {
 public:
     explicit VulkanDevice(const PresentationWindow* window = nullptr);
@@ -34,6 +36,9 @@ public:
     void PresentPixels(std::uint32_t width, std::uint32_t height, std::span<const std::byte> pixels);
     void PresentDisplayBuffer(const DisplayBuffer& buffer);
     void DumpFrame(const DisplayBuffer& buffer);
+    // ANYPS5_GPU_TIMING: adds the GPU time of batches completed since the last report to the frame
+    // (GPU.<label>, bytes = batches; GPU.busy = their sum).
+    void ReportGpuTime(FrameTiming& frame);
     void Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});
     void Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});
     void EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});

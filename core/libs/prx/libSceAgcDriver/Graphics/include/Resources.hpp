@@ -3,6 +3,8 @@
 
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include <cstdint>
+#include <tuple>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <span>
@@ -91,6 +93,32 @@ private:
     std::vector<Block> blocks;
 };
 
+// GPU time of command batches: each batch writes timestamps at its start and end; completed
+// batches add their duration to a total per label, drained into each frame's timing.
+class GpuTimestamps {
+public:
+    GpuTimestamps(VkDevice device, PFN_vkGetDeviceProcAddr deviceProc, float period);
+    ~GpuTimestamps();
+    GpuTimestamps(const GpuTimestamps&) = delete;
+    GpuTimestamps& operator=(const GpuTimestamps&) = delete;
+    VkQueryPool Pool() const { return pool; }
+    // The first of two consecutive queries (start, end).
+    std::uint32_t Acquire();
+    void Report(std::uint32_t first, const char* label);
+    // Totals since the last drain, as (label, nanoseconds, batches).
+    std::vector<std::tuple<const char*, std::uint64_t, std::uint64_t>> Drain();
+
+private:
+    static constexpr std::uint32_t Pairs = 4096;
+    VkDevice device;
+    PFN_vkGetDeviceProcAddr deviceProc;
+    double period;
+    VkQueryPool pool = VK_NULL_HANDLE;
+    std::atomic<std::uint32_t> next{0};
+    std::mutex mutex;
+    std::map<const char*, std::pair<std::uint64_t, std::uint64_t>> totals;
+};
+
 // Frees the command buffers and fences recycled from destroyed command batches of the pool (before
 // the pool or its device is destroyed).
 void DropRecycledCommandBatches(VkDevice device, VkCommandPool pool, PFN_vkGetDeviceProcAddr deviceProc);
@@ -107,6 +135,8 @@ public:
     void Wait();
     bool IsComplete();
     void Reset();
+    // What the batch does, for GPU timing (a string literal).
+    void Label(const char* name) { label = name; }
 
 private:
     void release() noexcept;
@@ -115,6 +145,10 @@ private:
     VkFence fence = VK_NULL_HANDLE;
     bool pending = false;
     bool submitted = false;
+    const char* label = "other";
+    std::uint32_t timestamp = UINT32_MAX;
+    void beginTiming();
+    void reportTiming() noexcept;
 };
 
 }
