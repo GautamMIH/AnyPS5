@@ -154,7 +154,8 @@ int APS5_VABI sceSysmoduleUnloadModule(std::uint16_t id) {
         throw std::runtime_error("sceSysmoduleUnloadModule: invalid id 0");
     }
     if (!findModuleName(id)) {
-        throw std::runtime_error(std::string("sceSysmoduleUnloadModule: unknown id ") + std::to_string(id));
+        APS5_LOG_OUT("unknown id: %u", static_cast<unsigned>(id));
+        return 0;
     }
     std::lock_guard<std::mutex> lock(gMutex);
     auto it = gLoadCount.find(id);
