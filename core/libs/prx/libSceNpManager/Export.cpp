@@ -156,10 +156,10 @@ int APS5_VABI sceNpGetState(int user_id, uint32_t* state) {
 }
 
 int APS5_VABI sceNpHasSignedUp(int user_id, bool* has_signed_up) {
- (void)user_id;
- (void)has_signed_up;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    (void)user_id;
+    if (!has_signed_up) return NP_ERROR_INVALID_ARGUMENT;
+    *has_signed_up = false;
+    return 0;
 }
 
 int APS5_VABI sceNpPollAsync(int req_id, int* result) {
@@ -175,31 +175,31 @@ void APS5_VABI sceNpRegisterGamePresenceCallback(void* callback, void* userdata)
 }
 
 int APS5_VABI sceNpRegisterNpReachabilityStateCallback(void* callback, void* userdata) {
- (void)callback;
- (void)userdata;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    (void)userdata;
+    // The signed-out state never changes, so registered callbacks never fire.
+    if (!callback) return NP_ERROR_INVALID_ARGUMENT;
+    return 0;
 }
 
 int APS5_VABI sceNpRegisterPlusEventCallback(void* callback, void* userdata) {
- (void)callback;
- (void)userdata;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    (void)userdata;
+    // The signed-out state never changes, so registered callbacks never fire.
+    if (!callback) return NP_ERROR_INVALID_ARGUMENT;
+    return 0;
 }
 
 int APS5_VABI sceNpRegisterPremiumEventCallback(void* callback, void* userdata) {
- (void)callback;
- (void)userdata;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    (void)userdata;
+    // The signed-out state never changes, so registered callbacks never fire.
+    if (!callback) return NP_ERROR_INVALID_ARGUMENT;
+    return 0;
 }
 
 int APS5_VABI sceNpRegisterStateCallback(void* callback, void* userdata) {
- (void)callback;
- (void)userdata;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    (void)userdata;
+    // The signed-out state never changes, so registered callbacks never fire.
+    if (!callback) return NP_ERROR_INVALID_ARGUMENT;
+    return 0;
 }
 
 int APS5_VABI sceNpSetContentRestriction(const NpContentRestriction* restriction) {
@@ -215,8 +215,7 @@ int APS5_VABI sceNpSetNpTitleId(const NpTitleId* title_id, const NpTitleSecret* 
 }
 
 int APS5_VABI sceNpUnregisterStateCallback(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    return 0;
 }
 
 int APS5_VABI sceNpGetAccountLanguage2(int req_id, int user_id, void* language) {
@@ -229,6 +228,10 @@ int APS5_VABI sceNpGetAccountLanguage2(int req_id, int user_id, void* language) 
 int APS5_VABI sceNpNotifyPremiumFeature(const void* param) {
  (void)param;
  return 0;
+}
+
+int APS5_VABI sceNpUnregisterPremiumEventCallback(void) {
+    return 0;
 }
 
 }

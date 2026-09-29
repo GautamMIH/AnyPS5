@@ -1,5 +1,9 @@
 #include <cstdint>
 #include <cstddef>
+#include <mutex>
+#include <set>
+#include <stdexcept>
+#include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include <cstring>
@@ -18,6 +22,15 @@ constexpr int IME_ERROR_INVALID_ADDRESS = static_cast<int>(0x80BC0031);
 
 std::mutex keyboardMutex;
 std::set<std::int32_t> keyboardUsers;
+
+}
+
+namespace {
+
+// The host keyboard drives the virtual pad (docs/INPUT_MAPPING.md), so no USB keyboard is attached:
+// opening the keyboard succeeds, as on a console with none plugged in, and it never reports events.
+std::mutex g_keyboardMutex;
+std::set<int32_t> g_openKeyboards;
 
 }
 

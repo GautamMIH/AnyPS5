@@ -9,6 +9,12 @@
 #include <system_error>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
+#include <algorithm>
+#include <cstring>
+#include <filesystem>
+#include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -52,6 +58,20 @@ bool isMountPoint(const AppContentMountPoint* mountPoint, const char* expected) 
     return mountPoint && std::strncmp(mountPoint->data, expected, sizeof(mountPoint->data)) == 0;
 }
 
+}
+
+static constexpr char TEMPORARY_MOUNT_POINT[] = "/temp0";
+static constexpr char DOWNLOAD_MOUNT_POINT[] = "/download0";
+static constexpr uint32_t TEMPORARY_DATA_OPTION_FORMAT = 1;
+
+// Temporary data lives in <root>/temp0 on the host and survives until the title formats it.
+static std::filesystem::path TemporaryDirectory(const AppContentMountPoint* mount_point) {
+    if (!mount_point || std::strncmp(mount_point->data, TEMPORARY_MOUNT_POINT, sizeof(mount_point->data)) != 0) APS5_INVALID_ARG_EX;
+    return ResolvePath_nid_no_patch(TEMPORARY_MOUNT_POINT);
+}
+
+static void ClearDirectory(const std::filesystem::path& directory) {
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) std::filesystem::remove_all(entry.path());
 }
 
 extern "C" {
