@@ -259,6 +259,7 @@ void Texture::releaseUploadResources() noexcept {
 bool Texture::ReleaseUpload() {
     if (!UploadComplete()) return false;
     releaseUploadResources();
+    if (source == nullptr && depthSource == nullptr) upload.reset();
     return true;
 }
 

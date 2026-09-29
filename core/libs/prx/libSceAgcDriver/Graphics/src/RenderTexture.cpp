@@ -105,7 +105,6 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& d
 }
 
 void Texture::Refresh() {
-    PerformanceTimer timing("Graphics.TextureRefresh");
     Require(source != nullptr || depthSource != nullptr, "only resident copies can be refreshed");
     recordCopy();
 }
@@ -114,15 +113,19 @@ void Texture::Refresh() {
 // the leading barrier makes earlier work (draws still sampling the previous contents, the previous
 // copy's use of the staging buffer) finish before the copy overwrites the image.
 void Texture::recordCopy() {
+    PerformanceTimer timing("Graphics.TextureCopy");
     // Draws that wrote the source are submitted first; the queue runs them before this copy.
     if (context.drawQueue) context.drawQueue->Flush();
+    timing.Mark("flush");
     std::erase_if(previousUploads, [](const std::unique_ptr<CommandBatch>& batch) { return batch->IsComplete(); });
     if (upload && upload->IsComplete()) {
         upload->Reset();
     } else {
         if (upload) previousUploads.push_back(std::move(upload));
         upload = std::make_unique<CommandBatch>(context);
+        timing.Mark("new_batch");
     }
+    timing.Mark("batch");
     const auto commands = upload->Handle();
     const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     VkMemoryBarrier earlier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -161,7 +164,9 @@ void Texture::recordCopy() {
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     pipelineBarrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+    timing.Mark("record");
     upload->Submit();
+    timing.Mark("submit");
 }
 
 }

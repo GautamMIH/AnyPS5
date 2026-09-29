@@ -215,9 +215,11 @@ struct VulkanDevice::State {
             const auto destroyPool = reinterpret_cast<PFN_vkDestroyCommandPool>(deviceProc(device, "vkDestroyCommandPool"));
             const auto destroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(deviceProc(device, "vkDestroyDevice"));
             if (pool != VK_NULL_HANDLE) {
+                Graphics::DropRecycledCommandBatches(device, pool, deviceProc);
                 destroyPool(device, pool, nullptr);
             }
             destroyDevice(device, nullptr);
+            Graphics::DeviceFunctionEpoch.fetch_add(1, std::memory_order_acq_rel);
         }
         if (instance != VK_NULL_HANDLE) {
             if (surface) reinterpret_cast<PFN_vkDestroySurfaceKHR>(instanceProc(instance, "vkDestroySurfaceKHR"))(instance, surface, nullptr);

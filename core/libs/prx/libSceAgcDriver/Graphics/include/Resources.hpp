@@ -52,6 +52,10 @@ private:
     VkDeviceMemory memory = VK_NULL_HANDLE;
 };
 
+// Frees the command buffers and fences recycled from destroyed command batches of the pool (before
+// the pool or its device is destroyed).
+void DropRecycledCommandBatches(VkDevice device, VkCommandPool pool, PFN_vkGetDeviceProcAddr deviceProc);
+
 class CommandBatch {
 public:
     explicit CommandBatch(const Context& context);

@@ -547,9 +547,13 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
         append(attribute.components);
         append(attribute.resource.fields[3]);
     }
-    append(shader.spirv.size());
-    const auto code = std::as_bytes(std::span(shader.spirv));
-    if (!code.empty()) key.append(reinterpret_cast<const char*>(code.data()), code.size());
+    // A compiled variant's id stands for its SPIR-V; results without one key by their code.
+    append(shader.variantId);
+    if (shader.variantId == 0) {
+        append(shader.spirv.size());
+        const auto code = std::as_bytes(std::span(shader.spirv));
+        if (!code.empty()) key.append(reinterpret_cast<const char*>(code.data()), code.size());
+    }
     timing.Mark("key", key.size());
     static thread_local std::map<std::string, std::shared_ptr<const ValidatedInterface>> cache;
     const auto found = cache.find(key);

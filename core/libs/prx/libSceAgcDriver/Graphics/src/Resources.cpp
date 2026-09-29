@@ -2,6 +2,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <exception>
+#include <mutex>
+#include <vector>
 
 namespace AgcDriver::Graphics {
 
@@ -153,8 +155,64 @@ VkImageView RenderTarget::View() const {
     return view;
 }
 
+namespace {
+
+// A destroyed batch's command buffer and fence are kept for the next batch: allocating them costs
+// hundreds of microseconds on some drivers, and textures and copies create batches every frame.
+struct RecycledBatch {
+    VkDevice device;
+    VkCommandPool pool;
+    VkCommandBuffer commands;
+    VkFence fence;
+};
+constexpr std::size_t MaxRecycledBatches = 256;
+std::mutex recycledMutex;
+std::vector<RecycledBatch> recycledBatches;
+
+bool takeRecycled(VkDevice device, VkCommandPool pool, VkCommandBuffer& commands, VkFence& fence) {
+    std::lock_guard lock(recycledMutex);
+    for (auto it = recycledBatches.rbegin(); it != recycledBatches.rend(); ++it) {
+        if (it->device != device || it->pool != pool) continue;
+        commands = it->commands;
+        fence = it->fence;
+        recycledBatches.erase(std::next(it).base());
+        return true;
+    }
+    return false;
+}
+
+bool keepRecycled(VkDevice device, VkCommandPool pool, VkCommandBuffer commands, VkFence fence) {
+    std::lock_guard lock(recycledMutex);
+    if (recycledBatches.size() >= MaxRecycledBatches) return false;
+    recycledBatches.push_back({device, pool, commands, fence});
+    return true;
+}
+
+}
+
+void DropRecycledCommandBatches(VkDevice device, VkCommandPool pool, PFN_vkGetDeviceProcAddr deviceProc) {
+    std::lock_guard lock(recycledMutex);
+    for (auto it = recycledBatches.begin(); it != recycledBatches.end();) {
+        if (it->device != device || it->pool != pool) {
+            ++it;
+            continue;
+        }
+        reinterpret_cast<PFN_vkFreeCommandBuffers>(deviceProc(device, "vkFreeCommandBuffers"))(device, pool, 1, &it->commands);
+        reinterpret_cast<PFN_vkDestroyFence>(deviceProc(device, "vkDestroyFence"))(device, it->fence, nullptr);
+        it = recycledBatches.erase(it);
+    }
+}
+
 CommandBatch::CommandBatch(const Context& context) : context(context) {
     try {
+        if (takeRecycled(context.device, context.pool, commands, fence)) {
+            Check(context.Function<PFN_vkResetFences>("vkResetFences")(context.device, 1, &fence), "vkResetFences recycled batch");
+            Check(context.Function<PFN_vkResetCommandBuffer>("vkResetCommandBuffer")(commands, 0), "vkResetCommandBuffer recycled batch");
+            VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+            begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            Check(context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer recycled batch");
+            return;
+        }
         VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         allocation.commandPool = context.pool;
         allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -181,6 +239,8 @@ void CommandBatch::release() noexcept {
         if (result == VK_NOT_READY) result = context.Function<PFN_vkQueueWaitIdle>("vkQueueWaitIdle")(context.queue);
         if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) std::terminate();
     }
+    // Completed (or never submitted): the command buffer and fence serve the next batch.
+    if (commands && fence && keepRecycled(context.device, context.pool, commands, fence)) return;
     if (commands) context.Function<PFN_vkFreeCommandBuffers>("vkFreeCommandBuffers")(context.device, context.pool, 1, &commands);
     if (fence) context.Function<PFN_vkDestroyFence>("vkDestroyFence")(context.device, fence, nullptr);
 }

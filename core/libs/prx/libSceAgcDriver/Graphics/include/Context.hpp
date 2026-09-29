@@ -5,12 +5,18 @@
 #define VK_NO_PROTOTYPES
 #endif
 #include <vulkan/vulkan.h>
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <string>
 
 namespace AgcDriver::Graphics {
+
+// Advanced whenever a Vulkan device is destroyed: cached device functions of an older epoch are
+// resolved again (a new device may reuse a destroyed one's handle).
+inline std::atomic<std::uint64_t> DeviceFunctionEpoch{0};
 
 class TextureDetiler;
 class GpuColorTransfer;
@@ -75,12 +81,27 @@ struct Context {
     bool externalMemoryHost = false;
     GuestGpuMemory* guestGpuMemory = nullptr;
 
+    // Call sites pass string literals, so a resolved function is cached per resolver, device and
+    // name address: resolving by name is a loader lookup, and draws make dozens of calls.
     template<typename TFunction>
     TFunction Function(const char* name) const {
         Require(deviceProc != nullptr, "missing Vulkan device function resolver");
-        const auto function = reinterpret_cast<TFunction>(deviceProc(device, name));
-        if (function == nullptr) throw std::runtime_error(std::string("AGC graphics: missing Vulkan function: ") + name);
-        return function;
+        struct Resolved {
+            PFN_vkGetDeviceProcAddr resolver;
+            VkDevice device;
+            const char* name;
+            std::uint64_t epoch;
+            PFN_vkVoidFunction function;
+        };
+        static thread_local std::array<Resolved, 512> resolved{};
+        auto& entry = resolved[(reinterpret_cast<std::uintptr_t>(name) >> 3u) % resolved.size()];
+        const auto epoch = DeviceFunctionEpoch.load(std::memory_order_acquire);
+        if (entry.name != name || entry.device != device || entry.resolver != deviceProc || entry.epoch != epoch) {
+            const auto function = deviceProc(device, name);
+            if (function == nullptr) throw std::runtime_error(std::string("AGC graphics: missing Vulkan function: ") + name);
+            entry = {deviceProc, device, name, epoch, function};
+        }
+        return reinterpret_cast<TFunction>(entry.function);
     }
 
     std::uint32_t MemoryType(std::uint32_t mask, VkMemoryPropertyFlags flags) const {
