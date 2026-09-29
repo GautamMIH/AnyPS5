@@ -19,6 +19,25 @@ constexpr std::uint32_t ATTRIBUTE_NONE = 0;
 constexpr std::uint32_t MEMORY_SIZE = 0x800;
 constexpr std::uintptr_t HANDLE_ALIGNMENT = 0x20;
 
+constexpr std::uint16_t PIXEL_FORMAT_R8G8B8A8 = 0;
+constexpr std::uint16_t PIXEL_FORMAT_B8G8R8A8 = 1;
+constexpr std::uint16_t PIXEL_FORMAT_Y8U8Y8V8 = 10;
+constexpr std::uint16_t PIXEL_FORMAT_Y8 = 11;
+
+constexpr std::uint16_t ENCODE_MODE_NORMAL = 0;
+constexpr std::uint16_t ENCODE_MODE_MJPEG = 1;
+
+constexpr std::uint16_t COLOR_SPACE_YCC = 1;
+constexpr std::uint16_t COLOR_SPACE_GRAYSCALE = 2;
+
+constexpr std::uint8_t SAMPLING_TYPE_FULL = 0;
+constexpr std::uint8_t SAMPLING_TYPE_422 = 1;
+constexpr std::uint8_t SAMPLING_TYPE_420 = 2;
+
+constexpr std::uint32_t MAX_IMAGE_DIMENSION = 0xFFFF;
+constexpr std::uint32_t MAX_IMAGE_PITCH = 0xFFFFFFF;
+constexpr std::uint64_t MAX_IMAGE_SIZE = 0x7FFFFFFF;
+
 struct Encoder {
     Encoder* self;
 };
@@ -35,6 +54,46 @@ Encoder* toEncoder(void* handle) {
     if (address == 0 || address % HANDLE_ALIGNMENT != 0) return nullptr;
     auto* encoder = reinterpret_cast<Encoder*>(handle);
     return encoder->self == encoder ? encoder : nullptr;
+}
+
+std::int32_t validateEncodeParam(const JpegEncEncodeParam* param) {
+    if (!param) return SCE_JPEG_ENC_ERROR_INVALID_ADDR;
+    const bool grayscaleInput = param->pixel_format == PIXEL_FORMAT_Y8;
+    if (!param->image) return SCE_JPEG_ENC_ERROR_INVALID_ADDR;
+    if (!grayscaleInput && reinterpret_cast<std::uintptr_t>(param->image) % 4 != 0) return SCE_JPEG_ENC_ERROR_INVALID_ADDR;
+    if (!param->jpeg) return SCE_JPEG_ENC_ERROR_INVALID_ADDR;
+
+    if (param->image_size == 0 || param->jpeg_size == 0) return SCE_JPEG_ENC_ERROR_INVALID_SIZE;
+
+    if (param->image_width > MAX_IMAGE_DIMENSION || param->image_height > MAX_IMAGE_DIMENSION) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+    if (param->image_pitch == 0 || param->image_pitch > MAX_IMAGE_PITCH) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+    if (!grayscaleInput && param->image_pitch % 4 != 0) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+    const std::uint64_t requiredSize = static_cast<std::uint64_t>(param->image_height) * param->image_pitch;
+    if (requiredSize > MAX_IMAGE_SIZE || requiredSize > param->image_size) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+    if (param->encode_mode != ENCODE_MODE_NORMAL && param->encode_mode != ENCODE_MODE_MJPEG) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+    if (param->color_space != COLOR_SPACE_YCC && param->color_space != COLOR_SPACE_GRAYSCALE) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+    if (param->sampling_type != SAMPLING_TYPE_FULL && param->sampling_type != SAMPLING_TYPE_422 && param->sampling_type != SAMPLING_TYPE_420) {
+        return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+    }
+    if (param->restart_interval > static_cast<std::int32_t>(MAX_IMAGE_DIMENSION)) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+
+    switch (param->pixel_format) {
+    case PIXEL_FORMAT_R8G8B8A8:
+    case PIXEL_FORMAT_B8G8R8A8:
+        if (param->image_pitch / 4 < param->image_width) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+        if (param->color_space != COLOR_SPACE_YCC || param->sampling_type == SAMPLING_TYPE_FULL) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+        return 0;
+    case PIXEL_FORMAT_Y8U8Y8V8:
+        if (param->image_pitch / 2 < ((param->image_width + 1) & ~1u)) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+        if (param->color_space != COLOR_SPACE_YCC || param->sampling_type == SAMPLING_TYPE_FULL) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+        return 0;
+    case PIXEL_FORMAT_Y8:
+        if (param->image_pitch < param->image_width) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+        if (param->color_space != COLOR_SPACE_GRAYSCALE || param->sampling_type != SAMPLING_TYPE_FULL) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+        return 0;
+    default:
+        return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
+    }
 }
 
 }  // namespace
@@ -63,8 +122,9 @@ int32_t APS5_VABI sceJpegEncDelete(void* handle) {
 }
 
 int32_t APS5_VABI sceJpegEncEncode(void* handle, const JpegEncEncodeParam* param, JpegEncOutputInfo* output_info) {
-    (void)handle;
-    (void)param;
+    if (!toEncoder(handle)) return SCE_JPEG_ENC_ERROR_INVALID_HANDLE;
+    const std::int32_t result = validateEncodeParam(param);
+    if (result != 0) return result;
     (void)output_info;
     NotImplemented_nid_no_patch(__func__);
     return 0;
