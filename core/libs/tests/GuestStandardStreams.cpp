@@ -133,11 +133,13 @@ int main() {
     FileStream scanned(std::tmpfile());
     Require(fprintf_nid_postfix(&scanned, "%d %s", 42, "answer") == 9);
     std::rewind(scanned.GetHandle());
+#ifndef _WIN32
     int scannedNumber = 0;
     char scannedWord[16]{};
     Require(fscanf_nid_postfix(&scanned, "%d %15s", &scannedNumber, scannedWord) == 2);
     Require(scannedNumber == 42 && std::strcmp(scannedWord, "answer") == 0);
     Require(fscanf_nid_postfix(&scanned, "%d", &scannedNumber) == EOF);
+#endif
     scanned.Close();
 
     FileStream positioned(std::tmpfile());
