@@ -51,10 +51,11 @@ int main(const int argc, char* argv[]) {
         // modules it loads first. --game mode relinks a whole dump, modules included.
         auto module = Cli::PrepareModule(inputBytes, args);
         std::cout << "sce_module/sce_modules processing: " << (args.skipSceModule ? "disabled (--skip-sce-module)" : "enabled") << '\n';
+        for (const auto& name : args.excludedSceModules) std::cout << "sce_module excluded: " << name << '\n';
         std::vector<Relinker::GuestArtifact> guestArtifacts;
         if (!args.skipSceModule) {
             const auto syscallScanner = args.skipSyscallCheck ? Relinker::MakeNullSyscallScanner() : Relinker::MakeSyscallScanner();
-            guestArtifacts = Relinker::GuestModuleBuilder().Build(args.inputPath, absPath, module.Result.DynamicSection, args.toWindows, args.toIntel, *syscallScanner, args.lazyBinding, args.runPath);
+            guestArtifacts = Relinker::GuestModuleBuilder().Build(args.inputPath, absPath, module.Result.DynamicSection, args.toWindows, args.toIntel, *syscallScanner, args.lazyBinding, args.runPath, args.excludedSceModules);
         }
         module.Trampolines = std::move(trampolines);
         Cli::EmitModule(module, absPath, args);

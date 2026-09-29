@@ -1,6 +1,7 @@
 #ifndef CORE_RELINKER_CLI_INCLUDE_CLI_HPP
 #define CORE_RELINKER_CLI_INCLUDE_CLI_HPP
 
+#include <set>
 #include <string>
 #include <cstdint>
 #include <vector>
@@ -26,6 +27,7 @@ struct Args {
     std::string outputPath;
     std::string runPath = "$ORIGIN/libs";
     std::string libsPath;
+    std::set<std::string> excludedSceModules;
 };
 
 struct PreparedModule {
