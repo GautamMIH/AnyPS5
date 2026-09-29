@@ -48,6 +48,27 @@ void require(bool condition, const char* reason) {
 
 }
 
+namespace {
+
+// A compute shader's module, pipeline layout and pipeline, kept while dispatches may still run it.
+struct ComputePipeline {
+    VkDevice device = VK_NULL_HANDLE;
+    PFN_vkGetDeviceProcAddr deviceProc = nullptr;
+    VkShaderModule module = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    ComputePipeline() = default;
+    ComputePipeline(const ComputePipeline&) = delete;
+    ComputePipeline& operator=(const ComputePipeline&) = delete;
+    ~ComputePipeline() {
+        if (pipeline != VK_NULL_HANDLE) reinterpret_cast<PFN_vkDestroyPipeline>(deviceProc(device, "vkDestroyPipeline"))(device, pipeline, nullptr);
+        if (layout != VK_NULL_HANDLE) reinterpret_cast<PFN_vkDestroyPipelineLayout>(deviceProc(device, "vkDestroyPipelineLayout"))(device, layout, nullptr);
+        if (module != VK_NULL_HANDLE) reinterpret_cast<PFN_vkDestroyShaderModule>(deviceProc(device, "vkDestroyShaderModule"))(device, module, nullptr);
+    }
+};
+
+}
+
 struct VulkanDevice::State {
     void* library = nullptr;
     PFN_vkGetInstanceProcAddr instanceProc = nullptr;
@@ -101,6 +122,8 @@ struct VulkanDevice::State {
     std::unique_ptr<Graphics::GpuColorTransfer> colorTransfer;
     std::shared_ptr<Graphics::BufferPool> bufferPool;
     std::shared_ptr<Graphics::ImageMemory> imageMemory;
+    // Compute pipelines by compiled variant (or SPIR-V), descriptor layout and push stages.
+    std::map<std::string, std::shared_ptr<ComputePipeline>> computePipelines;
     std::shared_ptr<Graphics::DescriptorCache> descriptorCache;
     std::shared_ptr<Graphics::SamplerCache> samplerCache;
     std::unique_ptr<Graphics::TextureCache> textureCache;
@@ -188,6 +211,7 @@ struct VulkanDevice::State {
             const auto idle = reinterpret_cast<PFN_vkDeviceWaitIdle>(deviceProc(device, "vkDeviceWaitIdle"))(device);
             if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
             drawQueue.reset();
+            computePipelines.clear();
             guestGpuMemory.reset();
             graphicsPipelines.reset();
             renderCache.reset();
@@ -942,98 +966,71 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     if (x > limit[0] || y > limit[1] || z > limit[2]) {
         throw std::runtime_error("Vulkan dispatch: workgroup count exceeds device limits");
     }
-    state->drawQueue->Wait();
-    timing.Mark("draw_wait");
-    const auto destroyModule = state->DeviceFunction<PFN_vkDestroyShaderModule>("vkDestroyShaderModule");
-    const auto destroyLayout = state->DeviceFunction<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout");
-    const auto destroyPipeline = state->DeviceFunction<PFN_vkDestroyPipeline>("vkDestroyPipeline");
-    const auto destroyFence = state->DeviceFunction<PFN_vkDestroyFence>("vkDestroyFence");
-    const auto freeCommands = state->DeviceFunction<PFN_vkFreeCommandBuffers>("vkFreeCommandBuffers");
-    const auto wait = state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences");
-    const auto submit = state->DeviceFunction<PFN_vkQueueSubmit>("vkQueueSubmit");
-    VkShaderModule module = VK_NULL_HANDLE;
-    VkPipelineLayout layout = VK_NULL_HANDLE;
-    VkPipeline pipeline = VK_NULL_HANDLE;
-    VkFence fence = VK_NULL_HANDLE;
-    VkCommandBuffer commands = VK_NULL_HANDLE;
-    const auto cleanup = [&] {
-        if (commands != VK_NULL_HANDLE) freeCommands(state->device, state->pool, 1, &commands);
-        if (fence != VK_NULL_HANDLE) destroyFence(state->device, fence, nullptr);
-        if (pipeline != VK_NULL_HANDLE) destroyPipeline(state->device, pipeline, nullptr);
-        if (layout != VK_NULL_HANDLE) destroyLayout(state->device, layout, nullptr);
-        if (module != VK_NULL_HANDLE) destroyModule(state->device, module, nullptr);
-    };
-    try {
+    auto resources = std::make_shared<Graphics::ShaderResources>(context, shaders[0], snapshots);
+    timing.Mark("shader_resources");
+    // One pipeline per compiled variant and descriptor layout (creating and destroying the module,
+    // layout and pipeline for every dispatch cost over a millisecond).
+    std::string key;
+    const auto append = [&](const void* data, std::size_t bytes) { key.append(static_cast<const char*>(data), bytes); };
+    append(&shader.variantId, sizeof(shader.variantId));
+    if (shader.variantId == 0) append(shader.spirv.data(), shader.spirv.size() * sizeof(std::uint32_t));
+    append(&pushStages, sizeof(pushStages));
+    const auto& layoutKey = resources->LayoutKey();
+    append(layoutKey.data(), layoutKey.size() * sizeof(std::uint32_t));
+    auto& cached = state->computePipelines[key];
+    if (!cached) {
+        auto created = std::make_shared<ComputePipeline>();
+        created->device = state->device;
+        created->deviceProc = state->deviceProc;
         VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         moduleInfo.codeSize = shader.spirv.size() * sizeof(std::uint32_t);
         moduleInfo.pCode = shader.spirv.data();
-        check(state->DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule")(state->device, &moduleInfo, nullptr, &module), "vkCreateShaderModule");
-        timing.Mark("validate_shader_module");
-        Graphics::ShaderResources resources(context, shaders[0], snapshots);
-        timing.Mark("shader_resources");
-        const auto setLayout = resources.Layout();
+        check(state->DeviceFunction<PFN_vkCreateShaderModule>("vkCreateShaderModule")(state->device, &moduleInfo, nullptr, &created->module), "vkCreateShaderModule");
+        const auto setLayout = resources->Layout();
         const VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes};
         VkPipelineLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         layoutInfo.setLayoutCount = 1;
         layoutInfo.pSetLayouts = &setLayout;
         layoutInfo.pushConstantRangeCount = pushStages != 0 ? 1 : 0;
         layoutInfo.pPushConstantRanges = pushStages != 0 ? &push : nullptr;
-        check(state->DeviceFunction<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(state->device, &layoutInfo, nullptr, &layout), "vkCreatePipelineLayout");
+        check(state->DeviceFunction<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(state->device, &layoutInfo, nullptr, &created->layout), "vkCreatePipelineLayout");
         VkComputePipelineCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
         pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        pipelineInfo.stage.module = module;
+        pipelineInfo.stage.module = created->module;
         pipelineInfo.stage.pName = "main";
-        pipelineInfo.layout = layout;
-        check(state->DeviceFunction<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(state->device, context.pipelineCache, 1, &pipelineInfo, nullptr, &pipeline), "vkCreateComputePipelines");
+        pipelineInfo.layout = created->layout;
+        check(state->DeviceFunction<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(state->device, context.pipelineCache, 1, &pipelineInfo, nullptr, &created->pipeline), "vkCreateComputePipelines");
+        cached = std::move(created);
         timing.Mark("pipeline_create");
-        VkCommandBufferAllocateInfo allocation{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-        allocation.commandPool = state->pool;
-        allocation.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocation.commandBufferCount = 1;
-        check(state->DeviceFunction<PFN_vkAllocateCommandBuffers>("vkAllocateCommandBuffers")(state->device, &allocation, &commands), "vkAllocateCommandBuffers");
-        VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
-        begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        check(state->DeviceFunction<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer");
-        VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-        upload.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &upload, 0, nullptr, 0, nullptr);
-        resources.RecordUploads(commands);
-        state->DeviceFunction<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
-        resources.Bind(commands, VK_PIPELINE_BIND_POINT_COMPUTE, layout);
-        if (pushStages != 0) {
-            state->DeviceFunction<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes, pushBytes.data());
-        }
-        state->DeviceFunction<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, x, y, z);
-        resources.RecordDownloads(commands);
-        VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-        download.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        download.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
-        check(state->DeviceFunction<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(commands), "vkEndCommandBuffer");
-        VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        check(state->DeviceFunction<PFN_vkCreateFence>("vkCreateFence")(state->device, &fenceInfo, nullptr, &fence), "vkCreateFence");
-        VkSubmitInfo submission{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-        submission.commandBufferCount = 1;
-        submission.pCommandBuffers = &commands;
-        timing.Mark("command_record");
-        check(submit(state->queue, 1, &submission, fence), "vkQueueSubmit");
-        timing.Mark("queue_submit");
-        const auto result = wait(state->device, 1, &fence, VK_TRUE, std::numeric_limits<std::uint64_t>::max());
-        timing.Mark("fence_wait");
-        if (result != VK_SUCCESS && result != VK_ERROR_DEVICE_LOST) {
-            const auto idle = state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(state->device);
-            check(idle, "vkDeviceWaitIdle after fence failure");
-        }
-        check(result, "vkWaitForFences");
-        resources.WriteBack();
-        timing.Mark("resources_writeback");
-    } catch (...) {
-        cleanup();
-        throw;
     }
-    cleanup();
+    auto pipeline = cached;
+    timing.Mark("pipeline_cache");
+    // Recorded into the draw queue and run asynchronously, in submission order with draws. Full
+    // barriers on both sides give it the ordering the synchronous dispatch had (earlier work done
+    // before it reads or writes; later work sees its writes and never overtakes its reads); CPU
+    // readers of its writes wait through the queue's pending-write index.
+    const auto commands = state->drawQueue->Begin(context);
+    const auto barrier = state->DeviceFunction<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+    resources->RecordUploads(commands);
+    state->DeviceFunction<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
+    resources->Bind(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout);
+    if (pushStages != 0) {
+        state->DeviceFunction<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes, pushBytes.data());
+    }
+    state->DeviceFunction<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, x, y, z);
+    resources->RecordDownloads(commands);
+    VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+    timing.Mark("command_record");
+    state->drawQueue->Enqueue(std::move(resources), std::move(pipeline));
+    timing.Mark("enqueue");
 }
 
 }
