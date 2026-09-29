@@ -3,13 +3,16 @@
 
 #include "Recompiler.hpp"
 #include <map>
+#include <memory>
 
 namespace AgcDriver {
 
 class ShaderMemory {
 public:
     explicit ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial);
-    void Capture(const ShaderRecompiler::RecompileRequest& request);
+    // Walks the request's resources, reading guest memory the snapshot lacks. The result compiles
+    // the request (Recompile(request, capture)) without walking or resolving it again.
+    std::shared_ptr<const ShaderRecompiler::ResourceCapture> Capture(const ShaderRecompiler::RecompileRequest& request);
     [[nodiscard]] std::vector<ShaderRecompiler::MemoryRegion> Regions() const;
 
 private:

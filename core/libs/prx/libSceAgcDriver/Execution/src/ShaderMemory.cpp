@@ -45,18 +45,14 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
     return true;
 }
 
-void ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request) {
-    const auto plan = ShaderRecompiler::GetResourcePlan(request);
-    constexpr ShaderRecompiler::ResourceMaterializer materializer;
+std::shared_ptr<const ShaderRecompiler::ResourceCapture> ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request) {
     ShaderRecompiler::SrtRuntime runtime;
     runtime.userData = request.context.userData;
     runtime.shaderBase = request.shader.codeAddress;
     runtime.userContext = this;
     runtime.readMemory = &read;
     runtime.readSpecializationMemory = &read;
-    ShaderRecompiler::ResourceSnapshot snapshot;
-    ShaderRecompiler::ResourceSpecialization specialization;
-    materializer.Materialize(*plan, runtime, snapshot, specialization);
+    return ShaderRecompiler::CaptureResources(request, runtime);
 }
 
 std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::Regions() const {

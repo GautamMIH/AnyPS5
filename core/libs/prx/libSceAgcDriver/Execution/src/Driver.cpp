@@ -439,14 +439,14 @@ private:
         };
         ShaderMemory shaderMemory(memory);
         timing.Mark("prepare");
-        shaderMemory.Capture(request);
+        const auto capture = shaderMemory.Capture(request);
         timing.Mark("shader_memory_capture");
         const auto captured = shaderMemory.Regions();
         request.context.memory = captured;
         timing.Mark("request_memory");
         const auto compiled = [&] {
             try {
-                return ShaderRecompiler::Recompile(request);
+                return ShaderRecompiler::Recompile(request, *capture);
             } catch (const std::exception& error) {
                 char context[160]{};
                 std::snprintf(context, sizeof(context), "compute shader 0x%llx (header 0x%llx, PGM_RSRC2 0x%08x, %u user SGPRs): ",
@@ -624,12 +624,12 @@ private:
                 ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
             };
             PerformanceTimer shaderTiming("Driver.GraphicsShader");
-            shaderMemory.Capture(request);
+            const auto capture = shaderMemory.Capture(request);
             shaderTiming.Mark("memory_capture");
             memory = shaderMemory.Regions();
             request.context.memory = memory;
             shaderTiming.Mark("request_memory");
-            results.push_back(ShaderRecompiler::Recompile(request));
+            results.push_back(ShaderRecompiler::Recompile(request, *capture));
             shaderTiming.Mark(results.back().cacheHit ? "cache_hit" : "compile");
             const auto& result = results.back();
             // Mesh draws read indices in-shader and take no indexed offsets.
