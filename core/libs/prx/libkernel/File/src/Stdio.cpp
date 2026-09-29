@@ -9,6 +9,13 @@
 #include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include <cstdarg>
+#include <filesystem>
+#include <system_error>
+#ifdef _WIN32
+#include <sys/utime.h>
+#else
+#include <sys/time.h>
+#endif
 
 #if defined(__linux__)
 #include <sys/syscall.h>
@@ -137,24 +144,39 @@ std::int64_t APS5_VABI _write_nid_postfix(int descriptor, const void* buffer, st
     return sceKernelWrite(descriptor, buffer, count);
 }
 
+// File metadata on the host file the guest path resolves to (from upstream a4e755c).
 int APS5_VABI sceKernelChmod_nid_postfix(const char* path, std::uint16_t mode) {
-    (void)path;
-    (void)mode;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (path == nullptr) return FileErrors::Sce(EFAULT);
+    std::error_code error;
+    std::filesystem::permissions(ResolvePath_nid_no_patch(path), static_cast<std::filesystem::perms>(mode & 07777u), std::filesystem::perm_options::replace, error);
+    return error ? FileErrors::Sce(error.value()) : 0;
 }
 
 int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t length) {
-    (void)path;
-    (void)length;
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    if (path == nullptr) return FileErrors::Sce(EFAULT);
+    if (length < 0) return FileErrors::Sce(EINVAL);
+    const auto native = ResolvePath_nid_no_patch(path);
+    std::error_code error;
+    if (!std::filesystem::exists(native, error)) return FileErrors::Sce(ENOENT);
+    std::filesystem::resize_file(native, static_cast<std::uintmax_t>(length), error);
+    return error ? FileErrors::Sce(error.value()) : 0;
 }
 
 int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval* times) {
-    (void)path;
-    (void)times;
-    NotImplemented_nid_no_patch(__func__);
+    if (path == nullptr) return FileErrors::Sce(EFAULT);
+    const auto native = ResolvePath_nid_no_patch(path);
+#ifdef _WIN32
+    struct _utimbuf values{};
+    if (times != nullptr) values = {static_cast<time_t>(times[0].tv_sec), static_cast<time_t>(times[1].tv_sec)};
+    if (::_wutime(native.wstring().c_str(), times != nullptr ? &values : nullptr) != 0) return FileErrors::Sce(errno);
+#else
+    struct timeval values[2]{};
+    if (times != nullptr) {
+        values[0] = {static_cast<time_t>(times[0].tv_sec), static_cast<suseconds_t>(times[0].tv_usec)};
+        values[1] = {static_cast<time_t>(times[1].tv_sec), static_cast<suseconds_t>(times[1].tv_usec)};
+    }
+    if (::utimes(native.c_str(), times != nullptr ? values : nullptr) != 0) return FileErrors::Sce(errno);
+#endif
     return 0;
 }
 

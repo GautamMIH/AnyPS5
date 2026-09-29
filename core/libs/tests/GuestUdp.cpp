@@ -16,6 +16,8 @@ int APS5_VABI ioctl_nid_postfix(int, std::uint64_t, void*);
 std::int64_t APS5_VABI sendto_nid_postfix(int, const void*, std::uint64_t, int, const void*, std::uint32_t);
 std::int64_t APS5_VABI recvfrom_nid_postfix(int, void*, std::uint64_t, int, void*, std::uint32_t*);
 int APS5_VABI close_nid_postfix(int);
+const char* APS5_VABI inet_ntop_nid_postfix(int, const void*, char*, std::uint32_t);
+int APS5_VABI inet_pton_nid_postfix(int, const char*, void*);
 int* APS5_VABI __error_nid_postfix();
 }
 static void Require(bool value) { if (!value) std::abort(); }
@@ -65,5 +67,17 @@ int main() {
     Require(close_nid_postfix(receiver) == -1 && *__error_nid_postfix() == 9);
     Require(ioctl_nid_postfix(receiver, 0x4004667f, &queued) == -1);
     Require(close_nid_postfix(sender) == 0);
+    unsigned char parsed[16]{};
+    Require(inet_pton_nid_postfix(2, "127.0.0.1", parsed) == 1);
+    Require(parsed[0] == 127 && parsed[1] == 0 && parsed[2] == 0 && parsed[3] == 1);
+    char text[64]{};
+    Require(inet_ntop_nid_postfix(2, parsed, text, sizeof(text)) == text);
+    Require(std::strcmp(text, "127.0.0.1") == 0);
+    Require(inet_pton_nid_postfix(28, "::1", parsed) == 1);
+    Require(inet_ntop_nid_postfix(28, parsed, text, sizeof(text)) == text);
+    Require(std::strcmp(text, "::1") == 0);
+    Require(inet_pton_nid_postfix(99, "127.0.0.1", parsed) == -1 && *__error_nid_postfix() == 47);
+    Require(inet_pton_nid_postfix(2, "not-an-address", parsed) == 0);
+    Require(inet_ntop_nid_postfix(2, parsed, text, 4) == nullptr && *__error_nid_postfix() == 28);
     Require(socket_nid_postfix(2, 1, 0) == -1); // unsupported TCP must not appear to work
 }
