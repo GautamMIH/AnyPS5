@@ -84,6 +84,11 @@ int APS5_VABI _sigprocmask_nid_postfix(int how, const GuestSignalSet* set, Guest
     }
     return 0;
 }
+
+int APS5_VABI sigprocmask_nid_postfix(int how, const void* set, void* previousSet) {
+    return _sigprocmask_nid_postfix(how, static_cast<const GuestSignalSet*>(set),
+                                    static_cast<GuestSignalSet*>(previousSet));
+}
 }
 
 extern "C" {

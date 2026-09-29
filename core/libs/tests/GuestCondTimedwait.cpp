@@ -13,7 +13,13 @@ int APS5_VABI scePthreadMutexUnlock(PthreadMutex* mutex);
 int APS5_VABI scePthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr, const char* name);
 int APS5_VABI scePthreadCondDestroy(PthreadCond* cond);
 int APS5_VABI scePthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, unsigned int usec);
+int APS5_VABI __cxa_atexit_nid_postfix(void (APS5_VABI *)(void*), void*, void*);
+void APS5_VABI __pthread_cxa_finalize_nid_postfix(void*);
+unsigned int APS5_VABI sceKernelSleep(unsigned int seconds);
 }
+
+static int cleanupAt = -1;
+static void APS5_VABI Cleanup(void*) { cleanupAt = 0; }
 
 static constexpr int SCE_OK = 0;
 static constexpr int SCE_KERNEL_ERROR_ETIMEDOUT = static_cast<int>(0x8002003C);
@@ -49,4 +55,10 @@ int main() {
 
     Require(scePthreadCondDestroy(&cond) == SCE_OK);
     Require(scePthreadMutexDestroy(&context.mutex) == SCE_OK);
+
+    Require(sceKernelSleep(0) == SCE_OK);
+    void* finalizeHandle = reinterpret_cast<void*>(7);
+    Require(__cxa_atexit_nid_postfix(Cleanup, nullptr, finalizeHandle) == SCE_OK);
+    __pthread_cxa_finalize_nid_postfix(finalizeHandle);
+    Require(cleanupAt == 0);
 }
