@@ -1,6 +1,11 @@
+#include <algorithm>
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <new>
+#include <stdexcept>
+#include <vector>
+#include "Decoder/Jpeg.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
@@ -37,6 +42,7 @@ constexpr std::uint8_t SAMPLING_TYPE_420 = 2;
 constexpr std::uint32_t MAX_IMAGE_DIMENSION = 0xFFFF;
 constexpr std::uint32_t MAX_IMAGE_PITCH = 0xFFFFFFF;
 constexpr std::uint64_t MAX_IMAGE_SIZE = 0x7FFFFFFF;
+constexpr int SUBSAMPLED_MAX_QUALITY = 90;
 
 struct Encoder {
     Encoder* self;
@@ -65,6 +71,7 @@ std::int32_t validateEncodeParam(const JpegEncEncodeParam* param) {
 
     if (param->image_size == 0 || param->jpeg_size == 0) return SCE_JPEG_ENC_ERROR_INVALID_SIZE;
 
+    if (param->image_width == 0 || param->image_height == 0) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
     if (param->image_width > MAX_IMAGE_DIMENSION || param->image_height > MAX_IMAGE_DIMENSION) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
     if (param->image_pitch == 0 || param->image_pitch > MAX_IMAGE_PITCH) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
     if (!grayscaleInput && param->image_pitch % 4 != 0) return SCE_JPEG_ENC_ERROR_INVALID_PARAM;
@@ -96,6 +103,57 @@ std::int32_t validateEncodeParam(const JpegEncEncodeParam* param) {
     }
 }
 
+std::uint8_t clampToByte(float value) {
+    return static_cast<std::uint8_t>(std::clamp(value + 0.5f, 0.0f, 255.0f));
+}
+
+void yuvToRgb(std::uint8_t y, std::uint8_t u, std::uint8_t v, std::uint8_t* rgb) {
+    const float cb = static_cast<float>(u) - 128.0f;
+    const float cr = static_cast<float>(v) - 128.0f;
+    rgb[0] = clampToByte(y + 1.402f * cr);
+    rgb[1] = clampToByte(y - 0.344136f * cb - 0.714136f * cr);
+    rgb[2] = clampToByte(y + 1.772f * cb);
+}
+
+std::vector<std::uint8_t> toPackedPixels(const JpegEncEncodeParam& param, std::uint32_t channels) {
+    const auto* image = static_cast<const std::uint8_t*>(param.image);
+    const std::size_t width = param.image_width;
+    std::vector<std::uint8_t> pixels(width * param.image_height * channels);
+    for (std::size_t y = 0; y < param.image_height; ++y) {
+        const std::uint8_t* row = image + y * param.image_pitch;
+        std::uint8_t* out = pixels.data() + y * width * channels;
+        for (std::size_t x = 0; x < width; ++x) {
+            switch (param.pixel_format) {
+            case PIXEL_FORMAT_R8G8B8A8:
+                out[x * 3 + 0] = row[x * 4 + 0];
+                out[x * 3 + 1] = row[x * 4 + 1];
+                out[x * 3 + 2] = row[x * 4 + 2];
+                break;
+            case PIXEL_FORMAT_B8G8R8A8:
+                out[x * 3 + 0] = row[x * 4 + 2];
+                out[x * 3 + 1] = row[x * 4 + 1];
+                out[x * 3 + 2] = row[x * 4 + 0];
+                break;
+            case PIXEL_FORMAT_Y8U8Y8V8: {
+                const std::uint8_t* pair = row + (x / 2) * 4;
+                yuvToRgb(pair[(x % 2) * 2], pair[1], pair[3], out + x * 3);
+                break;
+            }
+            default:
+                out[x] = row[x];
+                break;
+            }
+        }
+    }
+    return pixels;
+}
+
+int toQuality(const JpegEncEncodeParam& param) {
+    int quality = 100 - param.compression_ratio * 99 / 255;
+    if (param.sampling_type != SAMPLING_TYPE_FULL) quality = std::min(quality, SUBSAMPLED_MAX_QUALITY);
+    return quality;
+}
+
 }  // namespace
 
 extern "C" {
@@ -125,8 +183,19 @@ int32_t APS5_VABI sceJpegEncEncode(void* handle, const JpegEncEncodeParam* param
     if (!toEncoder(handle)) return SCE_JPEG_ENC_ERROR_INVALID_HANDLE;
     const std::int32_t result = validateEncodeParam(param);
     if (result != 0) return result;
-    (void)output_info;
-    NotImplemented_nid_no_patch(__func__);
+    if (param->encode_mode == ENCODE_MODE_MJPEG) throw std::runtime_error("sceJpegEncEncode: MJPEG encode mode is not implemented");
+    if (param->restart_interval > 0) throw std::runtime_error("sceJpegEncEncode: restart interval is not implemented");
+
+    const std::uint32_t channels = param->pixel_format == PIXEL_FORMAT_Y8 ? 1 : 3;
+    const std::vector<std::uint8_t> pixels = toPackedPixels(*param, channels);
+    const std::vector<std::uint8_t> jpeg = Decoder::Jpeg::Encode(pixels, param->image_width, param->image_height, channels, toQuality(*param));
+    if (jpeg.size() > param->jpeg_size) return SCE_JPEG_ENC_ERROR_INVALID_SIZE;
+
+    std::memcpy(param->jpeg, jpeg.data(), jpeg.size());
+    if (output_info) {
+        output_info->size = static_cast<std::uint32_t>(jpeg.size());
+        output_info->height = param->image_height;
+    }
     return 0;
 }
 

@@ -1,7 +1,11 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include "Decoder/Jpeg.hpp"
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <stdexcept>
+#include <vector>
 
 extern "C" {
 std::int32_t APS5_VABI sceJpegEncQueryMemorySize(const JpegEncCreateParam*);
@@ -14,6 +18,34 @@ static void Require(bool value) { if (!value) std::abort(); }
 
 alignas(4) static unsigned char image[16 * 16 * 4];
 static unsigned char jpeg[4096];
+
+static bool IsJpeg(const unsigned char* data, std::uint32_t size) {
+    return size > 4 && data[0] == 0xFF && data[1] == 0xD8 && data[size - 2] == 0xFF && data[size - 1] == 0xD9;
+}
+
+static int AverageError(const std::vector<std::uint8_t>& expected, const std::vector<std::uint8_t>& actual) {
+    long total = 0;
+    for (std::size_t i = 0; i < expected.size(); ++i) total += expected[i] > actual[i] ? expected[i] - actual[i] : actual[i] - expected[i];
+    return static_cast<int>(total / static_cast<long>(expected.size()));
+}
+
+static std::vector<std::uint8_t> DecodeOutput(const JpegEncOutputInfo& info) {
+    Require(IsJpeg(jpeg, info.size));
+    const auto decoded = Decoder::Jpeg::Decode({jpeg, info.size});
+    Require(decoded.has_value());
+    Require(decoded->width == 16 && decoded->height == 16 && decoded->channels == 3);
+    return decoded->pixels;
+}
+
+template<typename TFunction>
+static bool ThrowsRuntimeError(TFunction function) {
+    try {
+        function();
+    } catch (const std::runtime_error&) {
+        return true;
+    }
+    return false;
+}
 
 static JpegEncEncodeParam ValidEncodeParam() {
     JpegEncEncodeParam param{};
@@ -112,6 +144,91 @@ int main() {
     Require(encodeWith([](JpegEncEncodeParam& p) { p.pixel_format = 11; p.color_space = 2; p.sampling_type = 0; p.image_width = 65; }) == invalidParam);
     Require(encodeWith([](JpegEncEncodeParam& p) { p.pixel_format = 11; p.color_space = 2; p.sampling_type = 2; }) == invalidParam);
     Require(encodeWith([](JpegEncEncodeParam& p) { p.pixel_format = 11; p.sampling_type = 0; }) == invalidParam);
+
+    constexpr std::uint32_t pitch = 16 * 4 + 16;
+    alignas(4) static unsigned char padded[16 * pitch];
+    std::vector<std::uint8_t> expected(16 * 16 * 3);
+    for (std::uint32_t y = 0; y < 16; ++y) {
+        for (std::uint32_t x = 0; x < 16; ++x) {
+            const std::uint8_t color[3] = {static_cast<std::uint8_t>(x * 16), static_cast<std::uint8_t>(y * 16), 96};
+            unsigned char* pixel = padded + y * pitch + x * 4;
+            pixel[0] = color[0];
+            pixel[1] = color[1];
+            pixel[2] = color[2];
+            pixel[3] = 255;
+            for (int c = 0; c < 3; ++c) expected[(y * 16 + x) * 3 + c] = color[c];
+        }
+        for (std::uint32_t x = 16 * 4; x < pitch; ++x) padded[y * pitch + x] = 0xEE;
+    }
+
+    JpegEncEncodeParam rgba = ValidEncodeParam();
+    rgba.image = padded;
+    rgba.image_size = sizeof(padded);
+    rgba.image_pitch = pitch;
+    rgba.compression_ratio = 0;
+    info = {};
+    Require(sceJpegEncEncode(handle, &rgba, &info) == 0);
+    Require(info.height == 16);
+    Require(AverageError(expected, DecodeOutput(info)) < 6);
+
+    for (std::uint32_t y = 0; y < 16; ++y) {
+        for (std::uint32_t x = 0; x < 16; ++x) {
+            unsigned char* pixel = padded + y * pitch + x * 4;
+            const unsigned char red = pixel[0];
+            pixel[0] = pixel[2];
+            pixel[2] = red;
+        }
+    }
+    JpegEncEncodeParam bgra = rgba;
+    bgra.pixel_format = 1;
+    info = {};
+    Require(sceJpegEncEncode(handle, &bgra, &info) == 0);
+    Require(AverageError(expected, DecodeOutput(info)) < 6);
+
+    alignas(4) static unsigned char yuyv[16 * 16 * 2];
+    for (std::size_t i = 0; i < sizeof(yuyv); i += 4) {
+        yuyv[i + 0] = 100;
+        yuyv[i + 1] = 128;
+        yuyv[i + 2] = 100;
+        yuyv[i + 3] = 128;
+    }
+    JpegEncEncodeParam yuv = ValidEncodeParam();
+    yuv.image = yuyv;
+    yuv.image_size = sizeof(yuyv);
+    yuv.image_pitch = 16 * 2;
+    yuv.pixel_format = 10;
+    info = {};
+    Require(sceJpegEncEncode(handle, &yuv, &info) == 0);
+    Require(AverageError(std::vector<std::uint8_t>(16 * 16 * 3, 100), DecodeOutput(info)) < 3);
+
+    static unsigned char gray[16 * 16];
+    std::vector<std::uint8_t> expectedGray(16 * 16 * 3);
+    for (std::size_t i = 0; i < sizeof(gray); ++i) {
+        gray[i] = static_cast<unsigned char>(((i % 16) + (i / 16)) * 8);
+        for (int c = 0; c < 3; ++c) expectedGray[i * 3 + c] = gray[i];
+    }
+    JpegEncEncodeParam y8 = ValidEncodeParam();
+    y8.image = gray;
+    y8.image_size = sizeof(gray);
+    y8.image_pitch = 16;
+    y8.pixel_format = 11;
+    y8.color_space = 2;
+    y8.sampling_type = 0;
+    info = {};
+    Require(sceJpegEncEncode(handle, &y8, &info) == 0);
+    Require(AverageError(expectedGray, DecodeOutput(info)) < 6);
+
+    std::memset(jpeg, 0, sizeof(jpeg));
+    Require(sceJpegEncEncode(handle, &rgba, nullptr) == 0);
+    Require(jpeg[0] == 0xFF && jpeg[1] == 0xD8);
+
+    JpegEncEncodeParam tooSmall = rgba;
+    tooSmall.jpeg_size = 16;
+    Require(sceJpegEncEncode(handle, &tooSmall, &info) == invalidSize);
+
+    Require(encodeWith([](JpegEncEncodeParam& p) { p.image_width = 0; }) == invalidParam);
+    Require(ThrowsRuntimeError([&] { encodeWith([](JpegEncEncodeParam& p) { p.encode_mode = 1; }); }));
+    Require(ThrowsRuntimeError([&] { encodeWith([](JpegEncEncodeParam& p) { p.restart_interval = 1; }); }));
 
     Require(sceJpegEncDelete(handle) == 0);
 
