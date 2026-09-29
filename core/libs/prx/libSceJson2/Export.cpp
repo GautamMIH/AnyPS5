@@ -668,22 +668,30 @@ int APS5_VABI _ZN3sce4Json5Value3setERKS1_(Value* self, const Value* other) {
 }
 
 ValueType APS5_VABI _ZNK3sce4Json5Value7getTypeEv(const Value* self) { return NodeOf(*self).type; }
-bool APS5_VABI _ZNK3sce4Json5Value10getBooleanEv(const Value* self) { return Typed(self, TypeBoolean).boolean; }
-std::int64_t APS5_VABI _ZNK3sce4Json5Value10getIntegerEv(const Value* self) {
-    const Node& n = NodeOf(*self);
-    if (n.type == TypeUInteger && n.uinteger <= static_cast<std::uint64_t>(INT64_MAX)) return static_cast<std::int64_t>(n.uinteger);
-    return Typed(self, TypeInteger).integer;
+const bool* APS5_VABI _ZNK3sce4Json5Value10getBooleanEv(const Value* self) { return &Typed(self, TypeBoolean).boolean; }
+const std::int64_t* APS5_VABI _ZNK3sce4Json5Value10getIntegerEv(const Value* self) {
+    Node& n = const_cast<Node&>(NodeOf(*self));
+    if (n.type == TypeUInteger && n.uinteger <= static_cast<std::uint64_t>(INT64_MAX)) {
+        n.integer = static_cast<std::int64_t>(n.uinteger);
+        return &n.integer;
+    }
+    return &Typed(self, TypeInteger).integer;
 }
-std::uint64_t APS5_VABI _ZNK3sce4Json5Value11getUIntegerEv(const Value* self) {
-    const Node& n = NodeOf(*self);
-    if (n.type == TypeInteger && n.integer >= 0) return static_cast<std::uint64_t>(n.integer);
-    return Typed(self, TypeUInteger).uinteger;
+const std::uint64_t* APS5_VABI _ZNK3sce4Json5Value11getUIntegerEv(const Value* self) {
+    Node& n = const_cast<Node&>(NodeOf(*self));
+    if (n.type == TypeInteger && n.integer >= 0) {
+        n.uinteger = static_cast<std::uint64_t>(n.integer);
+        return &n.uinteger;
+    }
+    return &Typed(self, TypeUInteger).uinteger;
 }
-double APS5_VABI _ZNK3sce4Json5Value7getRealEv(const Value* self) {
-    const Node& n = NodeOf(*self);
-    if (n.type == TypeInteger) return static_cast<double>(n.integer);
-    if (n.type == TypeUInteger) return static_cast<double>(n.uinteger);
-    return Typed(self, TypeReal).real;
+const double* APS5_VABI _ZNK3sce4Json5Value7getRealEv(const Value* self) {
+    Node& n = const_cast<Node&>(NodeOf(*self));
+    if (n.type == TypeInteger || n.type == TypeUInteger) {
+        n.real = n.type == TypeInteger ? static_cast<double>(n.integer) : static_cast<double>(n.uinteger);
+        return &n.real;
+    }
+    return &Typed(self, TypeReal).real;
 }
 const String* APS5_VABI _ZNK3sce4Json5Value9getStringEv(const Value* self) { return &Typed(self, TypeString).string; }
 const Array* APS5_VABI _ZNK3sce4Json5Value8getArrayEv(const Value* self) { return &Typed(self, TypeArray).array; }
@@ -712,9 +720,10 @@ const Value* APS5_VABI _ZNK3sce4Json5ValueixEm(const Value* self, std::size_t in
 }
 Value* APS5_VABI _ZN3sce4Json5Value10referValueERKNS0_6StringE(Value* self, const String* key) {
     Node& n = NodeOf(*self);
-    if (n.type == TypeNull) SetType(n, TypeObject);
-    if (n.type != TypeObject) throw std::runtime_error("sce::Json::Value::referValue: value is not an object");
-    return &ObjectEntry(n.object, *key->text);
+    if (key == nullptr || n.type != TypeObject) return nullptr;
+    for (auto& pair : *n.object.items)
+        if (*pair.key.text == *key->text) return &pair.value;
+    return nullptr;
 }
 Array* APS5_VABI _ZN3sce4Json5Value10referArrayEv(Value* self) {
     Node& n = NodeOf(*self);

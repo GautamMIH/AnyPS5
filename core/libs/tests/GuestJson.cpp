@@ -59,14 +59,15 @@ void APS5_VABI _ZN3sce4Json5ValueD1Ev(Value*);
 int APS5_VABI _ZN3sce4Json5Value3setEl(Value*, std::int64_t);
 int APS5_VABI _ZN3sce4Json5Value3setEPKc(Value*, const char*);
 std::int32_t APS5_VABI _ZNK3sce4Json5Value7getTypeEv(const Value*);
-bool APS5_VABI _ZNK3sce4Json5Value10getBooleanEv(const Value*);
-std::int64_t APS5_VABI _ZNK3sce4Json5Value10getIntegerEv(const Value*);
-std::uint64_t APS5_VABI _ZNK3sce4Json5Value11getUIntegerEv(const Value*);
-double APS5_VABI _ZNK3sce4Json5Value7getRealEv(const Value*);
+const bool* APS5_VABI _ZNK3sce4Json5Value10getBooleanEv(const Value*);
+const std::int64_t* APS5_VABI _ZNK3sce4Json5Value10getIntegerEv(const Value*);
+const std::uint64_t* APS5_VABI _ZNK3sce4Json5Value11getUIntegerEv(const Value*);
+const double* APS5_VABI _ZNK3sce4Json5Value7getRealEv(const Value*);
 const String* APS5_VABI _ZNK3sce4Json5Value9getStringEv(const Value*);
 const Array* APS5_VABI _ZNK3sce4Json5Value8getArrayEv(const Value*);
 std::size_t APS5_VABI _ZNK3sce4Json5Value5countEv(const Value*);
 const Value* APS5_VABI _ZNK3sce4Json5ValueixEPKc(const Value*, const char*);
+Value* APS5_VABI _ZN3sce4Json5Value10referValueERKNS0_6StringE(Value*, const String*);
 const Value* APS5_VABI _ZNK3sce4Json5ValueixEm(const Value*, std::size_t);
 int APS5_VABI _ZN3sce4Json5Value9serializeERNS0_6StringE(Value*, String*);
 int APS5_VABI _ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(Value*, const char*, std::size_t);
@@ -120,15 +121,24 @@ static void ParseAndRoundTrip() {
     Require(_ZNK3sce4Json5Value5countEv(&root) == 8);
     Require(std::strcmp(_ZNK3sce4Json6String5c_strEv(_ZNK3sce4Json5Value9getStringEv(&Member(root, "name"))), "x\xc3\xa9\n") == 0);
     Require(_ZNK3sce4Json5Value7getTypeEv(&Member(root, "count")) == TypeInteger);
-    Require(_ZNK3sce4Json5Value10getIntegerEv(&Member(root, "count")) == 3);
-    Require(_ZNK3sce4Json5Value11getUIntegerEv(&Member(root, "count")) == 3);
-    Require(_ZNK3sce4Json5Value7getRealEv(&Member(root, "count")) == 3.0);
+    Require(*_ZNK3sce4Json5Value10getIntegerEv(&Member(root, "count")) == 3);
+    Require(*_ZNK3sce4Json5Value11getUIntegerEv(&Member(root, "count")) == 3);
+    Require(*_ZNK3sce4Json5Value7getRealEv(&Member(root, "count")) == 3.0);
     Require(_ZNK3sce4Json5Value7getTypeEv(&Member(root, "big")) == TypeUInteger);
-    Require(_ZNK3sce4Json5Value11getUIntegerEv(&Member(root, "big")) == std::numeric_limits<std::uint64_t>::max());
-    Require(_ZNK3sce4Json5Value10getIntegerEv(&Member(root, "neg")) == -5);
-    Require(_ZNK3sce4Json5Value7getRealEv(&Member(root, "pi")) == 1.5);
-    Require(_ZNK3sce4Json5Value10getBooleanEv(&Member(root, "ok")));
+    Require(*_ZNK3sce4Json5Value11getUIntegerEv(&Member(root, "big")) == std::numeric_limits<std::uint64_t>::max());
+    Require(*_ZNK3sce4Json5Value10getIntegerEv(&Member(root, "neg")) == -5);
+    Require(*_ZNK3sce4Json5Value7getRealEv(&Member(root, "pi")) == 1.5);
+    Require(*_ZNK3sce4Json5Value10getBooleanEv(&Member(root, "ok")));
     Require(_ZNK3sce4Json5Value7getTypeEv(&Member(root, "none")) == TypeNull);
+    String present{};
+    String absent{};
+    _ZN3sce4Json6StringC1EPKc(&present, "ok");
+    _ZN3sce4Json6StringC1EPKc(&absent, "applyToAll");
+    Require(_ZN3sce4Json5Value10referValueERKNS0_6StringE(&root, &present) == &Member(root, "ok"));
+    Require(_ZN3sce4Json5Value10referValueERKNS0_6StringE(&root, &absent) == nullptr);
+    Require(_ZNK3sce4Json5Value5countEv(&root) == 8);
+    _ZN3sce4Json6StringD1Ev(&present);
+    _ZN3sce4Json6StringD1Ev(&absent);
 
     const Value& list = Member(root, "list");
     const Array* array = _ZNK3sce4Json5Value8getArrayEv(&list);
@@ -142,7 +152,7 @@ static void ParseAndRoundTrip() {
     _ZN3sce4Json5Array8iteratorD1Ev(&it);
     _ZN3sce4Json5Array8iteratorD1Ev(&end);
     Require((types == std::vector<std::int32_t>{TypeInteger, TypeString, TypeArray}));
-    Require(_ZNK3sce4Json5Value10getIntegerEv(_ZNK3sce4Json5ValueixEm(_ZNK3sce4Json5ValueixEm(&list, 2), 0)) == 3);
+    Require(*_ZNK3sce4Json5Value10getIntegerEv(_ZNK3sce4Json5ValueixEm(_ZNK3sce4Json5ValueixEm(&list, 2), 0)) == 3);
 
     const std::string serialized = Serialize(root);
     Require(serialized == "{\"name\":\"x\xc3\xa9\\n\",\"count\":3,\"big\":18446744073709551615,\"neg\":-5,"
@@ -203,7 +213,7 @@ static void ObjectsAndArrays() {
     _ZN3sce4Json5ValueD1Ev(&flag);
     _ZN3sce4Json5ValueD1Ev(&real);
     Require(_ZNK3sce4Json5Array4sizeEv(&array) == 2);
-    Require(_ZNK3sce4Json5Value7getRealEv(_ZNK3sce4Json5Array4backEv(&array)) == 2.5);
+    Require(*_ZNK3sce4Json5Value7getRealEv(_ZNK3sce4Json5Array4backEv(&array)) == 2.5);
     int visited = 0;
     _ZNK3sce4Json5Array5beginEv(&it, &array);
     _ZNK3sce4Json5Array3endEv(&end, &array);
@@ -228,9 +238,9 @@ static void NullAccess() {
     Require(_ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(&root, text, sizeof(text) - 1) == 0);
     Require(&Member(root, "missing") == &fallback);
     Require(callbackCalls == 1 && lastRequested == TypeNull && lastParent == &root && lastContext == &context);
-    Require(_ZNK3sce4Json5Value10getIntegerEv(&Member(root, "present")) == 99);
+    Require(*_ZNK3sce4Json5Value10getIntegerEv(&Member(root, "present")) == 99);
     Require(callbackCalls == 2 && lastRequested == TypeInteger && lastParent == &Member(root, "present"));
-    Require(!_ZNK3sce4Json5Value10getBooleanEv(&Member(root, "present")));
+    Require(!*_ZNK3sce4Json5Value10getBooleanEv(&Member(root, "present")));
     Require(callbackCalls == 3 && lastRequested == TypeBoolean);
     Require(_ZNK3sce4Json5Value7getTypeEv(_ZNK3sce4Json5ValueixEm(&root, 0)) == TypeInteger);
 
