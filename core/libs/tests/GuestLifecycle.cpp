@@ -17,7 +17,7 @@ struct InitEnvParams {
 };
 
 extern "C" {
-int APS5_VABI cxa_atexit_nid_postfix(void (*)(void*), void*, void*);
+int APS5_VABI cxa_atexit_nid_postfix(void (APS5_VABI *)(void*), void*, void*);
 void APS5_VABI cxa_finalize_nid_postfix(void*);
 int APS5_VABI LibcInternalExtCxaThreadAtexit_nid_postfix(void (*)(void*), void*, void*);
 void APS5_VABI init_env_nid_postfix(const InitEnvParams*);
