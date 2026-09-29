@@ -2,6 +2,8 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <stdexcept>
+#include <string>
 
 namespace ShaderRecompiler {
 
@@ -37,7 +39,8 @@ void TranslationContext::writeU32Pair(const RdnaOperand& operand, const std::arr
 
 IrF32 TranslationContext::readF16LaneAsF32(const RdnaOperand& operand, bool highLane, bool packed) {
     const bool selectHigh = packed ? (highLane ? operand.opSelHi : operand.opSel) : highLane;
-    const IrU32 raw = readU16LaneRaw(operand, selectHigh);
+    const IrU32 source = readF16SourceBits(operand);
+    const IrU32 raw(ir.Emit(IrOpcode::BitFieldUExtract, IrType::U32, {&source.Value(), &ir.Constant(selectHigh ? 16u : 0u), &ir.Constant(16u)}));
     const IrU16 bits(ir.Emit(IrOpcode::ConvertU16U32, IrType::U16, {&raw.Value()}));
     const IrF16 half(ir.Emit(IrOpcode::BitCastF16U16, IrType::F16, {&bits.Value()}));
     IrF32 value(ir.Emit(IrOpcode::ConvertF32F16, IrType::F32, {&half.Value()}));
@@ -51,8 +54,29 @@ IrF32 TranslationContext::readF16LaneAsF32(const RdnaOperand& operand, bool high
     return value;
 }
 
+IrU32 TranslationContext::readF16SourceBits(const RdnaOperand& operand) {
+    if (operand.kind != RdnaOperandKind::FloatInlineConstant) {
+        return applyBitSourceModifiers(operand, readRawU32(operand));
+    }
+    std::uint32_t half = 0u;
+    switch (operand.value) {
+        case 0x3f000000u: half = 0x3800u; break;
+        case 0xbf000000u: half = 0xb800u; break;
+        case 0x3f800000u: half = 0x3c00u; break;
+        case 0xbf800000u: half = 0xbc00u; break;
+        case 0x40000000u: half = 0x4000u; break;
+        case 0xc0000000u: half = 0xc000u; break;
+        case 0x40800000u: half = 0x4400u; break;
+        case 0xc0800000u: half = 0xc400u; break;
+        case 0x3e22f983u: half = 0x3118u; break;
+        default: throw std::runtime_error("TranslationContext::readF16SourceBits unknown float inline constant bits " + std::to_string(operand.value));
+    }
+    return applyBitSourceModifiers(operand, IrU32(ir.Constant(half)));
+}
+
 IrF32 TranslationContext::readF16AsF32(const RdnaOperand& operand) {
-    const IrU32 raw = applyBitSourceModifiers(operand, readRawU32(operand));
+    const IrU32 source = readF16SourceBits(operand);
+    const IrU32 raw = operand.opSel ? IrU32(ir.Emit(IrOpcode::BitFieldUExtract, IrType::U32, {&source.Value(), &ir.Constant(16u), &ir.Constant(16u)})) : source;
     const IrU16 bits(ir.Emit(IrOpcode::ConvertU16U32, IrType::U16, {&raw.Value()}));
     const IrF16 half(ir.Emit(IrOpcode::BitCastF16U16, IrType::F16, {&bits.Value()}));
     IrF32 value(ir.Emit(IrOpcode::ConvertF32F16, IrType::F32, {&half.Value()}));
