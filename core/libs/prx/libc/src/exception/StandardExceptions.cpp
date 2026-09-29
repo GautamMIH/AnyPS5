@@ -122,6 +122,11 @@ const char* APS5_VABI _ZNKSt9exception4whatEv_nid_postfix(const LibcException::E
     if (!self) throw std::invalid_argument("exception object is null");
     LibcException::ThrowPlain(_ZTVSt9exception_nid_postfix);
 }
+
+[[noreturn]] void APS5_VABI _ZNKSt9exception6_RaiseEv_nid_postfix(const LibcException::ExceptionObject* self) {
+    if (!self) throw std::invalid_argument("exception object is null");
+    LibcException::ThrowPlain(_ZTVSt9exception_nid_postfix);
+}
 void APS5_VABI _ZNSt9exceptionC1Ev_nid_postfix(LibcException::ExceptionObject* self) { self->vtable = &_ZTVSt9exception_nid_postfix.destroy; }
 void APS5_VABI _ZNSt9exceptionC2Ev_nid_postfix(LibcException::ExceptionObject* self) { self->vtable = &_ZTVSt9exception_nid_postfix.destroy; }
 

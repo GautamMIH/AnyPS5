@@ -59,6 +59,21 @@ void* GuestHeapReallocate_nid_postfix(void* pointer, std::size_t bytes) {
     return result;
 }
 
+void* GuestHeapRealign_nid_postfix(void* pointer, std::size_t bytes, std::size_t alignment) {
+    if (pointer == nullptr) return GuestHeapAlign_nid_postfix(alignment, bytes);
+    GuestAllocations::Mutation mutation;
+    const auto range = mutation.Find(pointer);
+    mutation.RequireUnpinned(pointer, range.bytes);
+    if (bytes == 0) {
+        free(mutation, pointer);
+        return nullptr;
+    }
+    void* result = allocate(mutation, alignment, bytes);
+    std::memcpy(result, pointer, std::min(bytes, range.bytes));
+    free(mutation, pointer);
+    return result;
+}
+
 void* GuestHeapAlign_nid_postfix(std::size_t alignment, std::size_t bytes) {
     GuestAllocations::Mutation mutation;
     return allocate(mutation, alignment, bytes);

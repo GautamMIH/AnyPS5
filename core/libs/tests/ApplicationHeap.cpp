@@ -12,6 +12,7 @@ void* APS5_VABI _Znwm_nid_postfix(std::size_t);
 void* APS5_VABI _ZnamRKSt9nothrow_t_nid_postfix(std::size_t, const void*);
 void APS5_VABI _ZdlPv_nid_postfix(void*);
 void APS5_VABI _ZdaPv_nid_postfix(void*);
+void* APS5_VABI ApplicationHeapRealign_nid_no_patch(void*, std::size_t, std::size_t);
 }
 
 namespace {
@@ -63,6 +64,12 @@ void* APS5_VABI align(std::size_t alignment, std::size_t bytes) {
     return allocate(bytes);
 }
 
+void* APS5_VABI realign(void* pointer, std::size_t bytes, std::size_t alignment) {
+    require(pointer == storage.data());
+    lastAlignment = alignment;
+    return allocate(bytes);
+}
+
 int APS5_VABI posixAlign(void** pointer, std::size_t alignment, std::size_t bytes) {
     if (fail) return 12;
     *pointer = align(alignment, bytes);
@@ -97,7 +104,7 @@ int main(int argc, char** argv) {
     write(replacement, 0x30, &allocateZeroed);
     write(replacement, 0x38, &reallocate);
     write(replacement, 0x40, &align);
-    write(replacement, 0x48, &reallocate);
+    write(replacement, 0x48, &realign);
     write(replacement, 0x50, &posixAlign);
     if (argc > 1 && std::strcmp(argv[1], "default") == 0) {
         std::array<void*, 10> partial{};
@@ -165,6 +172,8 @@ int main(int argc, char** argv) {
     require(_ZnamRKSt9nothrow_t_nid_postfix(24, nullptr) == storage.data() && lastSize == 24);
     _ZdaPv_nid_postfix(storage.data());
     require(frees == 4);
+    require(ApplicationHeapRealign_nid_no_patch(storage.data(), 48, 32) == storage.data() && lastSize == 48 && lastAlignment == 32);
+    reject([] { ApplicationHeapRealign_nid_no_patch(storage.data(), 16, 4096); });
     fail = true;
 #ifdef _WIN32
     // operator new throws a guest std::bad_alloc. Only on Windows does libc.prx own the process-wide

@@ -112,6 +112,10 @@ void APS5_VABI exit_nid_postfix(int code) {
     LibcExit_nid_no_patch(code);
 }
 
+[[noreturn]] void APS5_VABI catchReturnFromMain_nid_postfix(int status) {
+    LibcExit_nid_no_patch(status);
+}
+
 [[noreturn]] void abort_nid_postfix(
     uint64_t arg0, uint64_t arg1, uint64_t arg2,
     uint64_t arg3, uint64_t arg4, uint64_t arg5

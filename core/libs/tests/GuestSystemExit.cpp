@@ -7,6 +7,7 @@
 #include <cstring>
 extern "C" int APS5_VABI sceSystemServiceLoadExec(const char*, const char* const*);
 extern "C" void APS5_VABI _Exit_nid_postfix(int);
+extern "C" void APS5_VABI catchReturnFromMain_nid_postfix(int);
 namespace {
 bool cleaned = false;
 void Cleanup() { cleaned = true; }
@@ -22,6 +23,10 @@ int main(int argc, char** argv) {
         LibcRegisterShutdown_nid_postfix(UnexpectedCleanup);
         Require(std::atexit(UnexpectedCleanup) == 0);
         _Exit_nid_postfix(0);
+        return 2;
+    }
+    if (argc > 1 && std::strcmp(argv[1], "--return-from-main") == 0) {
+        catchReturnFromMain_nid_postfix(0);
         return 2;
     }
     if (argc > 1) {

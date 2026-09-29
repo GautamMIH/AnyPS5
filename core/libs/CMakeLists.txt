@@ -215,10 +215,11 @@ if(BUILD_TESTING)
     add_test(NAME guest_system_exit_parameters COMMAND guest_system_exit_tests)
     add_test(NAME guest_system_exit COMMAND guest_system_exit_tests --exit)
     add_test(NAME guest_immediate_exit COMMAND guest_system_exit_tests --immediate)
+    add_test(NAME guest_return_from_main COMMAND guest_system_exit_tests --return-from-main)
     set_tests_properties(guest_system_exit PROPERTIES
         PASS_REGULAR_EXPRESSION "Guest shutdown and atexit completed")
     if(WIN32)
-        set_tests_properties(guest_system_exit guest_system_exit_parameters guest_immediate_exit PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_system_exit guest_system_exit_parameters guest_immediate_exit guest_return_from_main PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_executable(guest_content_export_tests tests/GuestContentExport.cpp)
@@ -318,6 +319,15 @@ if(BUILD_TESTING)
     add_test(NAME guest_lifecycle COMMAND guest_lifecycle_tests)
     if(WIN32)
         set_tests_properties(guest_lifecycle PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_executable(guest_reallocalign_tests tests/GuestReallocalign.cpp)
+    target_include_directories(guest_reallocalign_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_reallocalign_tests PRIVATE libc)
+    configure_windows_unwind(guest_reallocalign_tests)
+    add_test(NAME guest_reallocalign COMMAND guest_reallocalign_tests)
+    if(WIN32)
+        set_tests_properties(guest_reallocalign PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_executable(guest_standard_stream_tests tests/GuestStandardStreams.cpp)

@@ -8,11 +8,6 @@ uint32_t Need_sceLibc = 1;
 
 extern "C" {
 
-    void APS5_VABI catchReturnFromMain_nid_postfix(int status) {
-        (void)status;
-        NotImplemented_nid_no_patch(__func__);
-    }
-
     int APS5_VABI std_execute_once_nid_postfix(int* flag, int (*func)(void*, void*, void**), void* arg) {
         (void)flag;
         (void)func;
@@ -34,11 +29,6 @@ extern "C" {
         NotImplemented_nid_no_patch(__func__);
         return 0;
     }
-
-int APS5_VABI _ZNKSt9exception6_RaiseEv_nid_postfix() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
 
 APS5_EXPORT("Pu0Ecyk-7FU", libcUnknown_Pu0Ecyk_M7FU);
 int APS5_VABI libcUnknown_Pu0Ecyk_M7FU() {

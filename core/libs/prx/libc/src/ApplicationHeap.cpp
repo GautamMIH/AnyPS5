@@ -297,6 +297,16 @@ void* ApplicationHeapReallocateAligned_nid_no_patch(void* pointer, std::size_t b
     return result;
 }
 
+// reallocalign: a zero size frees the block (upstream b42db4b6); otherwise the allocator's aligned
+// reallocation.
+void* ApplicationHeapRealign_nid_no_patch(void* pointer, std::size_t bytes, std::size_t alignment) {
+    if (bytes == 0) {
+        ApplicationHeapFree_nid_no_patch(pointer);
+        return nullptr;
+    }
+    return ApplicationHeapReallocateAligned_nid_no_patch(pointer, bytes, alignment);
+}
+
 std::size_t ApplicationHeapUsableSize_nid_no_patch(void* pointer) {
     const auto usableSize = callback<UsableSize>(9);
     CallbackScope scope;

@@ -162,7 +162,7 @@ int APS5_VABI posix_memalign_nid_postfix(void** pointer, size_t alignment, size_
 }
 
 void* APS5_VABI reallocalign_nid_postfix(void* ptr, size_t size, size_t alignment) {
-    return ApplicationHeapReallocateAligned_nid_no_patch(ptr, size, alignment);
+    return ApplicationHeapRealign_nid_no_patch(ptr, size, alignment);
 }
 
 size_t APS5_VABI malloc_usable_size_nid_postfix(void* ptr) {
