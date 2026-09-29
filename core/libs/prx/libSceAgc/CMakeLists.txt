@@ -77,8 +77,13 @@ add_executable(agc_register_command_tests EXCLUDE_FROM_ALL
         Patch/src/IndirectRegisters.cpp
 )
 target_include_directories(agc_register_command_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(agc_register_command_tests PRIVATE libc)
 configure_windows_unwind(agc_register_command_tests)
 if(BUILD_TESTING)
     set_target_properties(agc_register_command_tests PROPERTIES EXCLUDE_FROM_ALL FALSE)
     add_test(NAME agc_register_command_tests COMMAND agc_register_command_tests)
+    if(WIN32)
+        set_tests_properties(agc_register_command_tests PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
 endif()
