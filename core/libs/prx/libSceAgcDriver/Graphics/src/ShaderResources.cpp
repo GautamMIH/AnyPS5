@@ -329,6 +329,7 @@ void ShaderResources::Bind(VkCommandBuffer commands, VkPipelineBindPoint bindPoi
 }
 
 void ShaderResources::RecordUploads(VkCommandBuffer commands) const {
+    for (const auto& texture : textures) texture->PrepareSampling(commands);
     for (const auto& image : storageImages) image->RecordUpload(commands);
 }
 

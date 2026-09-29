@@ -63,6 +63,10 @@ public:
     std::uint32_t HostDepthBytes() const;
     // Records a copy of the depth plane, row-major and unpadded, into buffer.
     void CopyDepth(VkCommandBuffer commands, VkBuffer buffer);
+    // Direct sampling: whether shaders can sample the depth image, and the transition (recorded
+    // before the render pass of work that samples it) into the layout sampled views use.
+    bool Sampleable() const { return target->Sampled(); }
+    void PrepareSampling(VkCommandBuffer commands);
 
 private:
     void transition(VkCommandBuffer commands, VkImageLayout next);

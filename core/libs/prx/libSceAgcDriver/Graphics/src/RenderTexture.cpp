@@ -90,8 +90,25 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& d
     }
 }
 
+Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& depthSource, VkComponentMapping components, DirectView) : context(context), depthSource(depthSource), direct(true) {
+    Require(depthSource != nullptr && depthSource->Sampleable(), "resident depth cannot be sampled directly");
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = depthSource->Target().Image();
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = depthSource->Description().format;
+    viewInfo.components = components;
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView direct depth");
+}
+
+void Texture::PrepareSampling(VkCommandBuffer commands) {
+    if (direct) depthSource->PrepareSampling(commands);
+}
+
 void Texture::Refresh() {
     Require(source != nullptr || depthSource != nullptr, "only resident copies can be refreshed");
+    // A direct view always shows the current image.
+    if (direct) return;
     recordCopy();
 }
 
@@ -112,7 +129,7 @@ void Texture::recordCopy() {
         timing.Mark("new_batch");
     }
     timing.Mark("batch");
-    upload->Label("texture_copy");
+    upload->Label(source ? "texture_copy_color" : "texture_copy_depth");
     const auto commands = upload->Handle();
     const auto pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     VkMemoryBarrier earlier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};

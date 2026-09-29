@@ -146,6 +146,10 @@ std::uint32_t ResidentDepth::HostDepthBytes() const {
     return hostDepthBytes(depth);
 }
 
+void ResidentDepth::PrepareSampling(VkCommandBuffer commands) {
+    if (layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) transition(commands, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+}
+
 void ResidentDepth::CopyDepth(VkCommandBuffer commands, VkBuffer buffer) {
     Require(valid && depth.depthElementBytes != 0, "resident depth has no current depth plane");
     transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);

@@ -18,6 +18,9 @@ public:
     TextureCache(const TextureCache&) = delete;
     TextureCache& operator=(const TextureCache&) = delete;
     std::shared_ptr<Texture> Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components);
+    // The depth plane the work being set up renders to (0: none): textures over it are copies,
+    // since sampling an attachment while rendering to it is a feedback loop.
+    void SetRenderedDepth(std::uint64_t address) { renderedDepth = address; }
 
 private:
     // Descriptor words plus the view dimension, which the shader's image shape may change.
@@ -61,6 +64,7 @@ private:
     // Textures whose upload buffers are freed once the GPU completes the upload.
     std::vector<std::shared_ptr<Texture>> uploading;
     std::uint64_t retainedBytes = 0;
+    std::uint64_t renderedDepth = 0;
     static constexpr std::uint64_t budget = 1024ull * 1024 * 1024;
     static constexpr std::size_t maxEntries = 8192;
 };

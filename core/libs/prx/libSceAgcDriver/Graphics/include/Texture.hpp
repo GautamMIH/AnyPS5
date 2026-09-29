@@ -21,6 +21,12 @@ public:
     Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, const GuestTextureResource& descriptor, VkComponentMapping components);
     // Samples the depth plane of a resident depth surface (the texture format reinterprets its bits).
     Texture(const Context& context, const std::shared_ptr<ResidentDepth>& depthSource, const GuestTextureResource& descriptor, VkComponentMapping components);
+    // Views the resident depth image itself (the texture format samples depth values as they are).
+    struct DirectView {};
+    Texture(const Context& context, const std::shared_ptr<ResidentDepth>& depthSource, VkComponentMapping components, DirectView);
+    bool Direct() const { return direct; }
+    // Records what sampling needs before the work's render pass (direct views: the layout).
+    void PrepareSampling(VkCommandBuffer commands);
     ~Texture();
     Texture(const Texture&) = delete;
     Texture& operator=(const Texture&) = delete;
@@ -54,6 +60,8 @@ private:
     // Copies still running on the GPU when a refresh needed a new batch.
     std::vector<std::unique_ptr<CommandBatch>> previousUploads;
     VkExtent3D extent{};
+    // A view of another object's image: only the view is owned.
+    bool direct = false;
     // Snapshot uploads: detiling input and output, and the detiler's descriptor pool.
     std::unique_ptr<Buffer> uploadStaging;
     std::unique_ptr<Buffer> uploadLinear;

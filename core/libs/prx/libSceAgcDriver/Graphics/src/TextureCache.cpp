@@ -96,13 +96,23 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
             if (resource.dimension != TextureDimension::k2D || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || IsBlockCompressed(resource.format) || resource.width != depth.extent.width || resource.height != depth.extent.height || BytesPerElement(resource.format) != depth.depthElementBytes || depthSource->HostDepthBytes() != depth.depthElementBytes) depthSource.reset();
         }
     }
+    // A depth plane sampled as it is (a float view of D32/D16) is read through a view of the
+    // resident image, unless this work renders to it.
+    // Debug aid: ANYPS5_NO_DIRECT_DEPTH=1 copies every depth texture.
+    static const bool copyDepth = std::getenv("ANYPS5_NO_DIRECT_DEPTH") != nullptr;
+    const auto directDepth = [&] {
+        if (copyDepth || !depthSource || !depthSource->Sampleable() || depthSource->Description().depthAddress == renderedDepth) return false;
+        const auto format = ResolveTextureFormat(resource.format);
+        const auto depthFormat = depthSource->Description().format;
+        return (format == VK_FORMAT_R32_SFLOAT && (depthFormat == VK_FORMAT_D32_SFLOAT || depthFormat == VK_FORMAT_D32_SFLOAT_S8_UINT)) || (format == VK_FORMAT_R16_UNORM && depthFormat == VK_FORMAT_D16_UNORM);
+    }();
     // Why a lookup misses, for the frame profile: the entry's memory changed, or no entry exists.
     const char* missReason = "miss_absent";
     if (const auto found = index.find(key); found != index.end()) {
         const auto it = found->second;
         missReason = "miss_changed";
         if (source || depthSource || it->generation != 0) {
-            const bool sameSource = (source && it->source.lock() == source) || (depthSource && it->depthSource.lock() == depthSource);
+            const bool sameSource = ((source && it->source.lock() == source) || (depthSource && it->depthSource.lock() == depthSource)) && (!depthSource || it->texture->Direct() == directDepth);
             if (sameSource) {
                 // Render targets change every frame: the copy is refreshed in place instead of
                 // recreated (allocating, destroying and a new command batch cost ~2 ms each time).
@@ -158,7 +168,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
 create:
     timing.Mark("lookup");
     if (depthSource) {
-        auto texture = std::make_shared<Texture>(context, depthSource, resource, components);
+        auto texture = directDepth ? std::make_shared<Texture>(context, depthSource, components, Texture::DirectView{}) : std::make_shared<Texture>(context, depthSource, resource, components);
         timing.Mark("depth_texture");
         Entry entry{key, {}, texture, {}, depthSource->Generation()};
         entry.depthSource = depthSource;

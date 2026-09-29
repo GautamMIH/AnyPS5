@@ -1042,12 +1042,9 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
 
 void VulkanDevice::ReportGpuTime(FrameTiming& frame) {
     if (!state->gpuTimestamps) return;
-    std::uint64_t total = 0;
-    for (const auto& [label, nanoseconds, batches] : state->gpuTimestamps->Drain()) {
-        frame.Add("GPU", label, std::chrono::nanoseconds(nanoseconds), batches);
-        total += nanoseconds;
-    }
-    frame.Add("GPU", "busy", std::chrono::nanoseconds(total));
+    std::uint64_t busy = 0;
+    for (const auto& [label, nanoseconds, batches] : state->gpuTimestamps->Drain(busy)) frame.Add("GPU", label, std::chrono::nanoseconds(nanoseconds), batches);
+    frame.Add("GPU", "busy", std::chrono::nanoseconds(busy));
 }
 
 }

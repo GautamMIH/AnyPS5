@@ -97,7 +97,9 @@ RenderTarget::RenderTarget(const Context& context, const DepthTarget& target) : 
     const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     Require((properties.optimalTilingFeatures & required) == required, "depth/stencil format does not support required operations");
     const auto aspect = target.hasStencil ? VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
-    create(target.format, target.extent, target.depthBytes + target.stencilBytes, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, aspect);
+    // Sampled directly by textures over the depth plane (no copy) where the format allows it.
+    sampled = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    create(target.format, target.extent, target.depthBytes + target.stencilBytes, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | (sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0u), aspect);
 }
 
 void RenderTarget::create(VkFormat format, VkExtent2D extent, std::size_t bytes, VkImageUsageFlags attachment, VkImageAspectFlags aspect, std::uint32_t layers) {
@@ -410,17 +412,28 @@ void GpuTimestamps::Report(std::uint32_t first, const char* label) {
     const auto result = reinterpret_cast<PFN_vkGetQueryPoolResults>(deviceProc(device, "vkGetQueryPoolResults"))(device, pool, first, 2, sizeof(values), values.data(), sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT);
     if (result != VK_SUCCESS || values[1] < values[0]) return;
     const auto nanoseconds = static_cast<std::uint64_t>(static_cast<double>(values[1] - values[0]) * period);
+    const auto start = static_cast<std::uint64_t>(static_cast<double>(values[0]) * period);
     std::lock_guard lock(mutex);
     auto& total = totals[label];
     total.first += nanoseconds;
     ++total.second;
+    if (intervals.size() < 65536) intervals.emplace_back(start, start + nanoseconds);
 }
 
-std::vector<std::tuple<const char*, std::uint64_t, std::uint64_t>> GpuTimestamps::Drain() {
+std::vector<std::tuple<const char*, std::uint64_t, std::uint64_t>> GpuTimestamps::Drain(std::uint64_t& busy) {
     std::lock_guard lock(mutex);
     std::vector<std::tuple<const char*, std::uint64_t, std::uint64_t>> result;
     for (const auto& [label, total] : totals) result.emplace_back(label, total.first, total.second);
     totals.clear();
+    std::sort(intervals.begin(), intervals.end());
+    busy = 0;
+    std::uint64_t coveredEnd = 0;
+    for (const auto& [start, end] : intervals) {
+        const auto from = std::max(start, coveredEnd);
+        if (end > from) busy += end - from;
+        coveredEnd = std::max(coveredEnd, end);
+    }
+    intervals.clear();
     return result;
 }
 

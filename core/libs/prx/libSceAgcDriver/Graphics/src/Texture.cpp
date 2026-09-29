@@ -245,6 +245,7 @@ void Texture::release() noexcept {
     previousUploads.clear();
     releaseUploadResources();
     if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
+    if (direct) return;
     if (image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
     if (imageAllocation) context.imageMemory->Free(*imageAllocation);
     else if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);

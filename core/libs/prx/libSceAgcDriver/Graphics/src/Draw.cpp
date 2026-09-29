@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/FastClear.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
@@ -139,7 +140,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         vertexBuffers.push_back(std::move(buffer));
     }
     timing.Mark("vertex_upload");
+    if (context.textureCache) context.textureCache->SetRenderedDepth(state.hasDepthTarget && state.depth.depthBytes != 0 ? state.depth.depthAddress : 0);
     auto resources = std::make_shared<ShaderResources>(context, shaders, colorTargets, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+    if (context.textureCache) context.textureCache->SetRenderedDepth(0);
     timing.Mark("shader_resources");
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         if ((state.colorTargetMask & (1u << slot)) == 0) continue;

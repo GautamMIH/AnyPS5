@@ -48,6 +48,8 @@ public:
     RenderTarget& operator=(const RenderTarget&) = delete;
     VkImage Image() const;
     VkImageView View() const;
+    // Whether shaders can sample the image (depth targets whose format supports it).
+    bool Sampled() const { return sampled; }
 
 private:
     void create(VkFormat format, VkExtent2D extent, std::size_t bytes, VkImageUsageFlags attachment, VkImageAspectFlags aspect, std::uint32_t layers = 1);
@@ -56,6 +58,7 @@ private:
     VkImage image = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    bool sampled = false;
 };
 
 // Device-local memory for images, sub-allocated from large blocks: one allocation per image cost
@@ -105,8 +108,9 @@ public:
     // The first of two consecutive queries (start, end).
     std::uint32_t Acquire();
     void Report(std::uint32_t first, const char* label);
-    // Totals since the last drain, as (label, nanoseconds, batches).
-    std::vector<std::tuple<const char*, std::uint64_t, std::uint64_t>> Drain();
+    // Totals since the last drain, as (label, nanoseconds, batches); busy is the union of the
+    // batches' GPU intervals (batches overlap, so the labels' sum can exceed it).
+    std::vector<std::tuple<const char*, std::uint64_t, std::uint64_t>> Drain(std::uint64_t& busy);
 
 private:
     static constexpr std::uint32_t Pairs = 4096;
@@ -117,6 +121,7 @@ private:
     std::atomic<std::uint32_t> next{0};
     std::mutex mutex;
     std::map<const char*, std::pair<std::uint64_t, std::uint64_t>> totals;
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> intervals;
 };
 
 // Frees the command buffers and fences recycled from destroyed command batches of the pool (before
