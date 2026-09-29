@@ -42,6 +42,54 @@ void remapIds(std::vector<std::uint32_t>& values, const std::vector<std::uint32_
     sortUnique(values);
 }
 
+std::uint32_t estimatedSpirvWords(const RdnaInstruction& instruction) {
+    switch (instruction.op) {
+    case RdnaOpcode::VReadfirstlaneB32:
+    case RdnaOpcode::VReadlaneB32:
+    case RdnaOpcode::VWritelaneB32:
+    case RdnaOpcode::VPermlane16B32:
+    case RdnaOpcode::VPermlanex16B32:
+    case RdnaOpcode::DsSwizzleB32:
+    case RdnaOpcode::DsBpermuteB32:
+        return 120u;
+    case RdnaOpcode::ImageBvhIntersectRay:
+        return 2000u;
+    default:
+        break;
+    }
+    switch (instruction.family) {
+    case RdnaInstructionFamily::SOPP:
+        return 0u;
+    case RdnaInstructionFamily::SOP1:
+    case RdnaInstructionFamily::SOP2:
+    case RdnaInstructionFamily::SOPK:
+    case RdnaInstructionFamily::SOPC:
+        return 8u;
+    case RdnaInstructionFamily::VOP1:
+    case RdnaInstructionFamily::VOP2:
+    case RdnaInstructionFamily::VOP3:
+    case RdnaInstructionFamily::VOP3P:
+    case RdnaInstructionFamily::VOPC:
+    case RdnaInstructionFamily::VINTRP:
+        return 60u;
+    case RdnaInstructionFamily::EXP:
+        return 20u;
+    case RdnaInstructionFamily::MUBUF:
+    case RdnaInstructionFamily::MTBUF:
+    case RdnaInstructionFamily::FLAT:
+        return 120u;
+    case RdnaInstructionFamily::SMEM:
+        return 180u;
+    case RdnaInstructionFamily::MIMG:
+        return 220u;
+    case RdnaInstructionFamily::DS:
+        return 400u;
+    case RdnaInstructionFamily::Unknown:
+        break;
+    }
+    return 60u;
+}
+
 bool isValidTarget(std::uint32_t target, const std::set<std::uint32_t>& instructionProgramCounters, std::uint32_t firstProgramCounter, std::uint32_t endProgramCounter) {
     return target == endProgramCounter || (target >= firstProgramCounter && instructionProgramCounters.contains(target));
 }
@@ -327,6 +375,11 @@ ControlFlowGraph GraphBuilder::Build(const RdnaProgram& program) const {
     linkBlocks(graph.blocks, program);
     graph.entryBlock = 0;
     pruneUnreachableBlocks(graph);
+    for (auto& block : graph.blocks) {
+        for (auto index = block.instructionBegin; index < block.instructionEnd; ++index) {
+            block.estimatedSpirvWords += estimatedSpirvWords(program.instructions[index]);
+        }
+    }
     return graph;
 }
 
