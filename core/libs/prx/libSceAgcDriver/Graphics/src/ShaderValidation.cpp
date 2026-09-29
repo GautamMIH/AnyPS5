@@ -201,6 +201,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     capability == spv::CapabilityImageQuery ||
                     capability == spv::CapabilityDerivativeControl ||
                     (features.imageGatherExtended && capability == spv::CapabilityImageGatherExtended) ||
+                    (features.minLod && capability == spv::CapabilityMinLod) ||
                     (features.storageImageReadWithoutFormat && capability == spv::CapabilityStorageImageReadWithoutFormat) ||
                     (features.storageImageWriteWithoutFormat && capability == spv::CapabilityStorageImageWriteWithoutFormat);
 
@@ -527,6 +528,7 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
     append(subgroup.supportedOperations);
     append(fragmentShaderBarycentric);
     append(features.imageGatherExtended);
+    append(features.minLod);
     append(features.storageImageReadWithoutFormat);
     append(features.storageImageWriteWithoutFormat);
     append(shader.bdaAbiVersion);

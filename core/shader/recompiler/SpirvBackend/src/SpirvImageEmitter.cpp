@@ -3,6 +3,7 @@
 #include "SpirvBackend/SpirvEmitterInstructions.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include "RdnaDecoder/RdnaImageOpDecoder.hpp"
+#include <algorithm>
 #include <spirv/unified1/GLSL.std.450.h>
 #include <spirv/unified1/spirv.hpp>
 #include <array>
@@ -122,6 +123,9 @@ ImageSampleLayout Layout(const MemoryInfo& mem, RdnaImageDimension dimension) {
     cursor += info.coordinateComponents;
     if (HasFlag(mem, RdnaImageSampleFlagLod)) {
         layout.lod = cursor++;
+    }
+    if (HasFlag(mem, RdnaImageSampleFlagLodClamp)) {
+        layout.clamp = cursor++;
     }
     return layout;
 }
@@ -625,6 +629,9 @@ void EmitGatherOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
     auto& state = ctx.state;
     const auto& mem = access.mem;
     const auto dimension = access.image.dimension;
+    if (setup.layout.clamp != NoImageComponent) {
+        ctx.Fail(access.inst, "is a gather with an LOD clamp, which is not implemented");
+    }
     if (dimension == RdnaImageDimension::Dim1D) {
         if (setup.dref || !HasFlag(mem, RdnaImageSampleFlagLevelZero) || HasFlag(mem, RdnaImageSampleFlagOffset) || HasFlag(mem, RdnaImageSampleFlagGatherHorizontal)) {
             ctx.Fail(access.inst, "has an unsupported 1D gather variant");
@@ -737,6 +744,19 @@ void EmitSampleOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
     } else if (setup.layout.bias != NoImageComponent) {
         operandMask |= spv::ImageOperandsBiasMask;
         operands.push_back(AddressF32(ctx, access, setup.layout.bias));
+    }
+    if (setup.layout.clamp != NoImageComponent) {
+        // The module declares MinLod (SpirvAnalysis); pipeline validation requires the device's shaderResourceMinLod.
+        const auto clamp = AddressF32(ctx, access, setup.layout.clamp);
+        if ((operandMask & spv::ImageOperandsLodMask) != 0u) {
+            // An explicit level takes no MinLod operand: the level itself is clamped.
+            const auto clamped = state.module.AllocateId();
+            state.module.AddFunction(spv::OpExtInst, TypeF32(state), clamped, GlslStd450(state), GLSLstd450FMax, operands.back(), clamp);
+            operands.back() = clamped;
+        } else {
+            operandMask |= spv::ImageOperandsMinLodMask;
+            operands.push_back(clamp);
+        }
     }
     const auto emitSample = [&](std::uint32_t resource) {
         const auto sampled = MakeSampledImage(state, resource, mem.sampler);

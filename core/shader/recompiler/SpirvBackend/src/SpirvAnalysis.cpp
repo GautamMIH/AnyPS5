@@ -1,4 +1,5 @@
 #include "SpirvBackend/SpirvAnalysis.hpp"
+#include "RdnaDecoder/RdnaInstruction.hpp"
 #include <stdexcept>
 
 namespace ShaderRecompiler {
@@ -104,6 +105,16 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
             case IrOpcode::ImageGatherRaw:
                 requirements.imageGatherExtended = true;
                 break;
+            case IrOpcode::ImageSampleRaw: {
+                const auto index = inst->Flags<MemoryFlags>().index;
+                if (index >= program.Resources().memoryInfo.size()) {
+                    throw std::runtime_error("image sample has invalid memory metadata");
+                }
+                if ((program.Resources().memoryInfo[index].imageSampleFlags & RdnaImageSampleFlagLodClamp) != 0u) {
+                    requirements.minLod = true;
+                }
+                break;
+            }
             case IrOpcode::SetAttribute: {
                 const auto index = inst->Flags<ExportFlags>().index;
                 if (index >= program.Metadata().exportInfo.size()) {

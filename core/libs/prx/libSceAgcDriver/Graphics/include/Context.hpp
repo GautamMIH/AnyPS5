@@ -78,6 +78,7 @@ struct Context {
     bool independentBlend = false;
     bool geometryShader = false;
     bool imageGatherExtended = false;
+    bool shaderResourceMinLod = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
     bool externalMemoryHost = false;

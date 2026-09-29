@@ -148,6 +148,9 @@ void DefineModule(SpirvEmitterState& state) {
     if (state.requirements.imageGatherExtended) {
         state.module.EmitCapability(spv::CapabilityImageGatherExtended);
     }
+    if (state.requirements.minLod) {
+        state.module.EmitCapability(spv::CapabilityMinLod);
+    }
     if (state.laneCount == 2 || state.requirements.subgroupBallot || state.requirements.subgroupShuffle || state.requirements.subgroupLocalInvocationId) {
         state.module.EmitCapability(spv::CapabilityGroupNonUniform);
     }

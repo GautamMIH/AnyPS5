@@ -114,6 +114,7 @@ struct VulkanDevice::State {
     bool independentBlend = false;
     bool geometryShader = false;
     bool imageGatherExtended = false;
+    bool shaderResourceMinLod = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
     bool samplerAnisotropy = false;
@@ -502,6 +503,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->independentBlend = enabled.independentBlend == VK_TRUE;
     enabled.shaderImageGatherExtended = available.shaderImageGatherExtended;
     state->imageGatherExtended = enabled.shaderImageGatherExtended == VK_TRUE;
+    enabled.shaderResourceMinLod = available.shaderResourceMinLod;
+    state->shaderResourceMinLod = enabled.shaderResourceMinLod == VK_TRUE;
     enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
     enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
     state->storageImageReadWithoutFormat = enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
@@ -915,6 +918,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.independentBlend = state->independentBlend;
     context.geometryShader = state->geometryShader;
     context.imageGatherExtended = state->imageGatherExtended;
+    context.shaderResourceMinLod = state->shaderResourceMinLod;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
     context.externalMemoryHost = state->externalMemoryHost;

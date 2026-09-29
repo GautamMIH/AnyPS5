@@ -34,9 +34,11 @@ struct ShaderDeviceFeatures {
     bool storageImageWriteWithoutFormat = false;
     // geometryShader: the Geometry capability, used by pixel shaders reading their layer.
     bool geometryShader = false;
+    // shaderResourceMinLod: the MinLod capability, used by samples with an LOD clamp.
+    bool minLod = false;
 
     static ShaderDeviceFeatures Of(const Context& context) {
-        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader};
+        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod};
     }
 };
 
