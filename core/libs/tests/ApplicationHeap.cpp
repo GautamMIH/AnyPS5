@@ -12,7 +12,7 @@ void* APS5_VABI _Znwm_nid_postfix(std::size_t);
 void* APS5_VABI _ZnamRKSt9nothrow_t_nid_postfix(std::size_t, const void*);
 void APS5_VABI _ZdlPv_nid_postfix(void*);
 void APS5_VABI _ZdaPv_nid_postfix(void*);
-void* APS5_VABI ApplicationHeapRealign_nid_no_patch(void*, std::size_t, std::size_t);
+void* ApplicationHeapRealign_nid_no_patch(void*, std::size_t, std::size_t);
 }
 
 namespace {
