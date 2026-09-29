@@ -3,6 +3,7 @@
 
 #include <sched.h>
 #include "SceTypes.hpp"
+#include "prx/libkernel/Time/include/TimedWait.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -56,6 +57,14 @@ struct PthreadRwlockPrivate {
 
 inline constexpr KernelCpumask kDefaultThreadAffinity = 0x3fff;
 inline constexpr int kDefaultThreadPriority = 700;
+
+struct PthreadSemPrivate {
+    std::mutex _mutex;
+    TimedWait::Condition _cv;
+    int _count = 0;
+
+    explicit PthreadSemPrivate(unsigned int value) : _count(static_cast<int>(value)) {}
+};
 
 struct PthreadAttrPrivate {
     void* stackAddress = nullptr;

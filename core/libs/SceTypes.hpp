@@ -158,6 +158,7 @@ struct PthreadRwlockPrivate;
 struct PthreadRwlockattrPrivate;
 struct PthreadCondattrPrivate;
 struct PthreadCondPrivate;
+struct PthreadSemPrivate;
 
 using KernelSema = KernelSemaPrivate*;
 using KernelEventFlag = KernelEventFlagPrivate*;
@@ -170,6 +171,7 @@ using PthreadRwlock = PthreadRwlockPrivate*;
 using PthreadRwlockattr = PthreadRwlockattrPrivate*;
 using PthreadCond = PthreadCondPrivate*;
 using PthreadCondattr = PthreadCondattrPrivate*;
+using PthreadSem = PthreadSemPrivate*;
 using PthreadKey = int;
 using pthread_entry_func_t = void* (*)(void*);
 using pthread_key_destructor_func_t = void (*)(void*);
