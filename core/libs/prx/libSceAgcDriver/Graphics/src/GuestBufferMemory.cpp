@@ -6,6 +6,7 @@
 #include <string>
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -15,7 +16,28 @@ namespace AgcDriver::Graphics {
 GuestBufferMemory::GuestBufferMemory(const Context& context) : context(context) {}
 
 bool GuestBufferMemory::WritesOverlap(std::uint64_t address, std::size_t bytes) const {
-    return std::any_of(writes.begin(), writes.end(), [&](const auto& range) { return address < range.second && range.first < address + bytes; });
+    const auto overlaps = [&](std::uint64_t begin, std::uint64_t end) { return address < end && begin < address + bytes; };
+    return std::any_of(writes.begin(), writes.end(), [&](const auto& range) { return overlaps(range.first, range.second); }) ||
+        std::any_of(detached.begin(), detached.end(), [&](const Region& region) { return overlaps(region.begin, region.end); });
+}
+
+void GuestBufferMemory::AppendWrites(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
+    ranges.insert(ranges.end(), writes.begin(), writes.end());
+    for (const auto& region : detached) ranges.emplace_back(region.begin, region.end);
+}
+
+void GuestBufferMemory::AddDetached(std::uint64_t address, std::size_t bytes) {
+    validate(address, bytes);
+    static std::atomic<bool> reported{false};
+    if (!reported.exchange(true)) std::fprintf(stderr, "[AnyPS5] storage buffer view at 0x%llx is misaligned by a non-dword amount; binding a detached copy\n", static_cast<unsigned long long>(address));
+    // Detached views are copied (read and written back by the CPU), not used in place.
+    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
+    for (auto& region : detached) {
+        if (region.begin != address) continue;
+        region.end = std::max<std::uint64_t>(region.end, address + bytes);
+        return;
+    }
+    detached.push_back({address, address + bytes, true, {}, nullptr});
 }
 
 void GuestBufferMemory::validate(std::uint64_t address, std::size_t bytes) const {
@@ -126,11 +148,23 @@ void GuestBufferMemory::Upload(bool addressable) {
         }
         region.snapshot.clear();
     }
+    for (auto& region : detached) {
+        const auto bytes = static_cast<std::size_t>(region.end - region.begin);
+        region.buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        GuestMemory::Read(region.begin, region.buffer->Bytes());
+        region.snapshot.assign(region.buffer->Bytes().begin(), region.buffer->Bytes().end());
+    }
 }
 
 VkDescriptorBufferInfo GuestBufferMemory::Descriptor(std::uint64_t address, std::size_t bytes) const {
     Require(uploaded && !committed, "guest GPU memory is not available");
     Require(bytes != 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - address, "invalid guest buffer view");
+    for (const auto& region : detached) {
+        if (region.begin == address && address + bytes <= region.end) {
+            Require(bytes <= context.limits.maxStorageBufferRange, "guest buffer view exceeds descriptor range limit");
+            return {region.buffer->Handle(), 0, bytes};
+        }
+    }
     const auto found = std::upper_bound(regions.begin(), regions.end(), address, [](std::uint64_t value, const Region& region) { return value < region.begin; });
     Require(found != regions.begin(), "guest buffer has no GPU owner");
     const auto& region = *std::prev(found);
@@ -181,6 +215,22 @@ void GuestBufferMemory::WriteBack() {
     }
     for (std::size_t i = 0; i < merged.size(); ++i) {
         if (!sources[i].empty()) GuestMemory::Write(merged[i].first, sources[i]);
+    }
+    // Detached views write back the byte runs the GPU changed.
+    for (auto& region : detached) {
+        region.buffer->Invalidate();
+        const auto current = region.buffer->Bytes();
+        std::size_t index = 0;
+        while (index < current.size()) {
+            if (current[index] == region.snapshot[index]) {
+                ++index;
+                continue;
+            }
+            auto end = index + 1;
+            while (end < current.size() && current[end] != region.snapshot[end]) ++end;
+            GuestMemory::Write(region.begin + index, current.subspan(index, end - index));
+            index = end;
+        }
     }
     committed = true;
     lease.clear();

@@ -25,13 +25,18 @@ public:
     // leading: bytes before address the region also covers for a view's alignment; they are
     // uploaded but never written back.
     void AddWritable(std::uint64_t address, std::size_t bytes, std::size_t leading = 0);
+    // A writable view whose base cannot meet the storage buffer offset alignment, even with the
+    // misalignment carried to the shader (BufferViewMisalignment covers dword multiples only): it
+    // gets its own buffer starting at the base. Views with the same base share it.
+    void AddDetached(std::uint64_t address, std::size_t bytes);
     void AddSnapshot(const GuestMemorySnapshot& snapshot);
     void Upload(bool addressable);
     VkDescriptorBufferInfo Descriptor(std::uint64_t address, std::size_t bytes) const;
     std::vector<ShaderRecompiler::BdaAbi::Range> AddressRanges() const;
     void WriteBack();
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;
-    const std::vector<std::pair<std::uint64_t, std::uint64_t>>& Writes() const { return writes; }
+    // Appends every range the work may write, as [begin, end).
+    void AppendWrites(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const;
 
 private:
     struct Region {
@@ -49,6 +54,9 @@ private:
     Context context;
     GuestAllocations::Lease lease;
     std::vector<Region> regions;
+    // Detached views (see AddDetached); snapshot keeps the uploaded bytes, so only the bytes the
+    // GPU changed are written back (another binding may have written the same memory).
+    std::vector<Region> detached;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
     bool uploaded = false;
     bool committed = false;

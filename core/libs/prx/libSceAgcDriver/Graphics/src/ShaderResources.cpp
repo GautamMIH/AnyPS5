@@ -224,7 +224,14 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     // The view starts BufferViewMisalignment bytes below the base to meet the descriptor offset
     // alignment; the recompiler passed the same difference to the shader. The extra bytes are
     // uploaded but never written back.
-    const auto below = ShaderRecompiler::BufferViewMisalignment(address, static_cast<std::uint32_t>(context.limits.minStorageBufferOffsetAlignment));
+    const auto alignment = static_cast<std::uint32_t>(context.limits.minStorageBufferOffsetAlignment);
+    const auto below = ShaderRecompiler::BufferViewMisalignment(address, alignment);
+    if (alignment > 1u && address % alignment != 0u && below == 0u) {
+        // The shader was given no misalignment: the view needs a buffer starting at its base.
+        guestMemory.AddDetached(address, size);
+        allocations.push_back({address, size, true, nullptr});
+        return allocations.size() - 1;
+    }
     guestMemory.AddWritable(address, size, below);
     allocations.push_back({address - below, size + below, true, nullptr});
     return allocations.size() - 1;
@@ -336,8 +343,7 @@ void ShaderResources::WriteBack() {
 }
 
 void ShaderResources::AppendWrites(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
-    const auto& writes = guestMemory.Writes();
-    ranges.insert(ranges.end(), writes.begin(), writes.end());
+    guestMemory.AppendWrites(ranges);
     for (const auto& image : storageImages) ranges.push_back(image->Range());
 }
 
