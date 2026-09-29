@@ -760,6 +760,27 @@ void EmitSampleOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
             operands.push_back(clamp);
         }
     }
+    // The _o variants pass a texel offset (6-bit signed fields, one byte per axis); SPIR-V takes it
+    // as ConstOffset, before a MinLod operand (upstream ba22c37d).
+    if (setup.layout.offset != NoImageComponent) {
+        const auto* argument = access.address.Argument(setup.layout.offset);
+        const auto* packed = argument != nullptr ? argument->Resolve() : nullptr;
+        if (packed == nullptr || !packed->HasImmediate()) {
+            ctx.Fail(access.inst, "requires a constant texel offset for image sampling");
+        }
+        const auto bits = packed->ImmediateU32();
+        std::array<std::uint32_t, 3> values{};
+        for (std::uint32_t index = 0; index < setup.dimensionInfo.spatialComponents; index++) {
+            const auto field = (bits >> (index * 8u)) & 0x3fu;
+            values[index] = ConstantI32(state, static_cast<std::int32_t>(field ^ 0x20u) - 0x20);
+        }
+        const auto count = setup.dimensionInfo.spatialComponents;
+        const auto offset = count == 1u ? values[0] : count == 2u
+            ? state.module.Constant(spv::OpConstantComposite, TypeI32Vector(state, 2), values[0], values[1])
+            : state.module.Constant(spv::OpConstantComposite, TypeI32Vector(state, 3), values[0], values[1], values[2]);
+        operandMask |= spv::ImageOperandsConstOffsetMask;
+        operands.insert(operands.end() - ((operandMask & spv::ImageOperandsMinLodMask) != 0u ? 1 : 0), offset);
+    }
     const auto emitSample = [&](std::uint32_t resource) {
         const auto sampled = MakeSampledImage(state, resource, mem.sampler);
         const auto sample = state.module.AllocateId();
