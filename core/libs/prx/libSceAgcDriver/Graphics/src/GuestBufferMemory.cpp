@@ -186,7 +186,11 @@ std::vector<ShaderRecompiler::BdaAbi::Range> GuestBufferMemory::AddressRanges() 
         Require(region.buffer != nullptr || region.view, "incomplete guest GPU upload");
         const auto address = region.view ? region.view->address : region.buffer->DeviceAddress();
         Require(region.end - region.begin <= std::numeric_limits<std::uint64_t>::max() - address, "GPU address range overflow");
-        result.push_back({region.begin, region.end, address, ShaderRecompiler::BdaAbi::Read, 0});
+        // Stores through the table (GPU-selected V#s) land in guest memory only where the range is the
+        // allocation itself: a writable one served in place by its import. Copies would drop them, so
+        // a store there faults.
+        const auto permissions = ShaderRecompiler::BdaAbi::Read | (region.view && region.writable ? ShaderRecompiler::BdaAbi::Write : 0u);
+        result.push_back({region.begin, region.end, address, permissions, 0});
     }
     return result;
 }
