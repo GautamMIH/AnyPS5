@@ -80,7 +80,6 @@ int APS5_VABI sceAgcSetAmmSemaphoreMemory() {
  return 0;
 }
 
-
 APS5_EXPORT("6nths4DHNrs", sceAgcUnknown_6nths4DHNrs);
 int APS5_VABI sceAgcUnknown_6nths4DHNrs() {
  NotImplemented_nid_no_patch(__func__);

@@ -33,16 +33,18 @@ std::uint32_t* APS5_VABI sceAgcDcbSetIndexSize(CommandBuffer* buf, std::uint8_t 
     return Agc::Command::Emit(buf, 0x7au, {0x20000243u, 0x400u | indexSize | (static_cast<std::uint32_t>(cachePolicy) << 6u)}, __func__);
 }
 
-// Newer SDKs import the index-size setter under this NID (name unknown) with a trailing argument that
-// games observed so far always pass as zero; the first three arguments match sceAgcDcbSetIndexSize.
-std::uint32_t* APS5_VABI AgcDcbSetIndexSizeExtended(CommandBuffer* buf, std::uint8_t indexSize, std::uint8_t cachePolicy, std::uint32_t reserved) {
-    Agc::Command::Require(reserved == 0, __func__, "nonzero trailing index-size argument is not implemented");
-    return sceAgcDcbSetIndexSize(buf, indexSize, cachePolicy);
-}
-APS5_EXPORT("-KRzWekV120", AgcDcbSetIndexSizeExtended);
-
 std::uint32_t APS5_VABI sceAgcDcbSetIndexSizeGetSize() {
     return 12;
+}
+
+// Unnamed: sceAgcDcbSetIndexSize with the per-instance object id flag (VGT_INDEX_TYPE bit 14), as
+// Kyty and SharpEmu build it.
+APS5_EXPORT("-KRzWekV120", sceAgcUnknown__MKRzWekV120);
+std::uint32_t* APS5_VABI sceAgcUnknown__MKRzWekV120(CommandBuffer* buf, std::uint8_t indexSize, std::uint8_t cachePolicy, std::uint8_t perInstanceObjectId) {
+    Agc::Command::CheckBits(perInstanceObjectId, 1, __func__);
+    auto* packet = sceAgcDcbSetIndexSize(buf, indexSize, cachePolicy);
+    packet[2] |= static_cast<std::uint32_t>(perInstanceObjectId) << 14u;
+    return packet;
 }
 
 std::uint32_t* APS5_VABI sceAgcDcbSetIndexIndirectArgs(CommandBuffer* buf, std::uint32_t dataOffsetInBytes) {
