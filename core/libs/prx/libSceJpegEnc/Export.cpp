@@ -7,7 +7,6 @@
 #include <vector>
 #include "Decoder/Jpeg.hpp"
 #include "SceTypes.hpp"
-#include "prx/libc/include/General.hpp"
 
 static_assert(sizeof(JpegEncCreateParam) == 0x8);
 static_assert(sizeof(JpegEncEncodeParam) == 0x30);

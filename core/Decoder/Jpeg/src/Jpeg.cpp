@@ -57,7 +57,7 @@ std::optional<Image> Decode(std::span<const std::uint8_t> jpeg) {
     if (!decoded) return std::nullopt;
 
     Image image{static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height), static_cast<std::uint32_t>(channels), {}};
-    image.pixels.assign(decoded, decoded + static_cast<std::size_t>(width) * height * channels);
+    image.pixels.assign(decoded, decoded + static_cast<std::size_t>(image.width) * image.height * image.channels);
     stbi_image_free(decoded);
     return image;
 }

@@ -3,6 +3,8 @@ target_include_directories(decoder_jpeg PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inclu
 target_include_directories(decoder_jpeg SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/3rdparty/stb)
 set_target_properties(decoder_jpeg PROPERTIES
         CXX_EXTENSIONS OFF
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN ON
         POSITION_INDEPENDENT_CODE ON
 )
 
