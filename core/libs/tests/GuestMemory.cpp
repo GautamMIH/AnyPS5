@@ -83,9 +83,25 @@ static void CheckSingleViews() {
     Require(sceKernelReleaseDirectMemory(physical, length) == 0);
 }
 
+static void CheckAccessibleRanges() {
+    constexpr std::size_t length = 0x10000;
+    void* mapping = nullptr;
+    Require(sceKernelMapFlexibleMemory(&mapping, length, 3, 0) == 0);
+    const auto address = reinterpret_cast<std::uint64_t>(mapping);
+    using GuestMemoryBacking::GuestVirtualAccessible_nid_postfix;
+    Require(GuestVirtualAccessible_nid_postfix(address, length, false) && GuestVirtualAccessible_nid_postfix(address, length, true));
+    Require(!GuestVirtualAccessible_nid_postfix(address, length + 0x4000, false));
+    Require(GuestMemoryBacking::GuestVirtualProtect_nid_postfix(mapping, 0x4000, GuestMemoryBacking::kProtCpuRead) == GuestMemoryBacking::Status::Ok);
+    Require(GuestVirtualAccessible_nid_postfix(address, length, false) && !GuestVirtualAccessible_nid_postfix(address, length, true));
+    Require(GuestVirtualAccessible_nid_postfix(address + 0x4000, length - 0x4000, true));
+    Require(sceKernelMunmap(address, length) == 0);
+    Require(!GuestVirtualAccessible_nid_postfix(address, 4, false));
+}
+
 int main() {
     CheckNamedAndHintedMappings();
     CheckSingleViews();
+    CheckAccessibleRanges();
     constexpr std::size_t page = 0x4000;
     const auto failed = reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
     const auto reject = [&](std::size_t length, int protection, int flags, int fd,

@@ -66,6 +66,10 @@ bool GuestVirtualQuery_nid_postfix(const void* address, bool findNext, Area* are
 // same segment; Translation::bytes may be less than requested. Returns false when address is not
 // committed guest memory.
 bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t bytes, Translation* translation);
+// Whether [address, address + bytes) is committed guest memory whose host mappings let the CPU read
+// it (and write it, if writable) under its guest protection. Driver watches that protect pages for
+// a while are not considered (their owners resolve them before accessing).
+bool GuestVirtualAccessible_nid_postfix(std::uint64_t address, std::uint64_t bytes, bool writable);
 // Whether a segment still exists (its memory may still be referenced by GPU imports).
 bool GuestSegmentAlive_nid_postfix(std::uint64_t segment);
 // Whether [address, address + bytes) is committed guest memory whose segment bytes no other guest

@@ -10,6 +10,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -42,6 +43,7 @@ struct MappingCache {
     std::mutex mutex;
     std::uint64_t generation = std::numeric_limits<std::uint64_t>::max();
     std::vector<MappingEntry> entries;
+    std::vector<std::tuple<std::uintptr_t, std::uintptr_t, bool>> failed;
 };
 
 MappingCache& mappingCache() {
@@ -108,14 +110,27 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
         cursor = std::min(end, base + memory.RegionSize);
     }
 #else
+    // Guest memory is answered from libc's area map. /proc/self/maps serves other memory; its
+    // snapshot goes stale whenever watches change page protection, and a reload costs ~20 ms.
+    if (GuestMemoryBacking::GuestVirtualAccessible_nid_postfix(address, bytes, writable)) return;
     auto& cache = mappingCache();
     const std::lock_guard lock(cache.mutex);
     const auto generation = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
     if (cache.generation == generation && checkMappings(cache.entries, cursor, end, writable).empty()) return;
+    // Ranges that failed against a fresh snapshot fail again without a reload while guest mappings
+    // are unchanged: games probe the same unmapped descriptors every frame (guest memory never
+    // reaches here, the area map answers it first).
+    const auto failedBefore = std::find(cache.failed.begin(), cache.failed.end(), std::make_tuple(cursor, end, writable));
+    if (cache.generation == generation && failedBefore != cache.failed.end()) {
+        const auto failure = checkMappings(cache.entries, cursor, end, writable);
+        require(false, failure.empty() ? "guest address range is not mapped" : failure.c_str());
+    }
     loadMappings(cache.entries);
     timing.Mark(cache.generation == generation ? "reload_uncovered" : "reload_changed");
+    if (cache.generation != generation) cache.failed.clear();
     cache.generation = generation;
     const auto failure = checkMappings(cache.entries, cursor, end, writable);
+    if (!failure.empty() && cache.failed.size() < 256) cache.failed.emplace_back(cursor, end, writable);
     require(failure.empty(), failure.c_str());
 #endif
 }

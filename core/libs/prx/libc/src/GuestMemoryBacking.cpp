@@ -321,6 +321,23 @@ bool GuestVirtualQuery_nid_postfix(const void* pointer, bool findNext, Area* are
     return true;
 }
 
+bool GuestVirtualAccessible_nid_postfix(std::uint64_t address, std::uint64_t bytes, bool writable) {
+    if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    auto& map = areas();
+    auto it = map.upper_bound(address);
+    if (it == map.begin()) return false;
+    --it;
+    const auto end = address + bytes;
+    for (auto cursor = address; cursor < end; ++it) {
+        if (it == map.end() || it->first > cursor || it->second.end <= cursor) return false;
+        const auto& record = it->second;
+        if (!committed(record.kind) || !hostReadable(record.protection) || (writable && !hostWritable(record.protection))) return false;
+        cursor = record.end;
+    }
+    return true;
+}
+
 bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t bytes, Translation* translation) {
     if (translation == nullptr || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
