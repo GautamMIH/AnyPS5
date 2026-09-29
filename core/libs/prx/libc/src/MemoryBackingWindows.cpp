@@ -87,6 +87,14 @@ void UnmapView(std::uint64_t address, std::size_t bytes) {
     check(UnmapViewOfFile2(GetCurrentProcess(), reinterpret_cast<void*>(address), MEM_PRESERVE_PLACEHOLDER) != FALSE, "UnmapViewOfFile2 guest view");
 }
 
+bool WriteWatchAvailable() {
+    return false;
+}
+
+bool CollectWrites(std::uint64_t, std::size_t, WrittenRangeVisitor, void*) {
+    return false;
+}
+
 void Protect(std::uint64_t address, std::size_t bytes, int protection) {
     DWORD previous = 0;
     check(VirtualProtect(reinterpret_cast<void*>(address), bytes, nativeProtection(protection), &previous) != FALSE, "VirtualProtect guest range");

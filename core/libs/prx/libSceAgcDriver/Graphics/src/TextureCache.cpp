@@ -16,17 +16,6 @@
 
 namespace AgcDriver::Graphics {
 
-namespace {
-
-// Soft-dirty bits are cleared once enough lookups had to compare pages written since the last clear,
-// and not more often than kClearInterval (a clear walks every page table of the process). A clear
-// also runs every kIdleClearInterval, so snapshots of unchanged textures are released.
-constexpr std::uint64_t kComparesBeforeClear = 64;
-constexpr auto kClearInterval = std::chrono::seconds(1);
-constexpr auto kIdleClearInterval = std::chrono::seconds(2);
-
-}
-
 std::size_t TextureCache::KeyHash::operator()(const Key& key) const noexcept {
     std::uint64_t hash = 0xcbf29ce484222325ull;
     for (const auto word : key) {
@@ -38,12 +27,9 @@ std::size_t TextureCache::KeyHash::operator()(const Key& key) const noexcept {
 
 TextureCache::TextureCache(const Context& context) : context(context) {
     Require(context.detiler != nullptr, "texture cache requires a device detiler");
-    WriteTracker::AddClearListener(this, [this] { recordWritesBeforeClear(); });
 }
 
-TextureCache::~TextureCache() {
-    WriteTracker::RemoveClearListener(this);
-}
+TextureCache::~TextureCache() = default;
 
 void TextureCache::erase(Entries::iterator it) {
     retainedBytes -= it->snapshot.size() + it->texture->AllocationBytes();
@@ -67,7 +53,7 @@ void TextureCache::trim() {
 
 // Whether the guest range of a snapshot certainly still holds the snapshot's bytes.
 bool TextureCache::unchanged(Entry& entry) {
-    if (!WriteTracker::Available() || entry.mustCompare || entry.stale) return false;
+    if (!WriteTracker::Available()) return false;
     const auto bytes = entry.bytes;
     // Writes through another mapping of the same memory would not mark these pages.
     const auto memoryGeneration = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
@@ -82,52 +68,13 @@ bool TextureCache::unchanged(Entry& entry) {
         entry.gpuGeneration = gpuGeneration;
     }
     if (entry.gpuWritten || WriteTracker::AliasWrittenSince(entry.address, bytes, entry.aliasGeneration)) return false;
-    if (WriteTracker::CpuWritten(entry.address, bytes)) {
-        ++dirtyCompares;
-        return false;
-    }
-    return true;
-}
-
-// Runs before the soft-dirty bits are cleared: entries written since the previous clear must not
-// look clean afterwards, and entries confirmed unchanged no longer need their snapshots.
-void TextureCache::recordWritesBeforeClear() {
-    for (auto& entry : entries) {
-        if (entry.bytes == 0 || entry.mustCompare || entry.stale) continue;
-        const auto before = dirtyCompares;
-        const bool clean = unchanged(entry);
-        dirtyCompares = before;
-        if (clean) {
-            if (!entry.tracked) {
-                retainedBytes -= entry.snapshot.size();
-                std::vector<std::byte>().swap(entry.snapshot);
-                entry.tracked = true;
-            }
-        } else if (entry.tracked) {
-            entry.stale = true;
-        } else if (WriteTracker::CpuWritten(entry.address, entry.bytes)) {
-            entry.mustCompare = true;
-        }
-    }
-}
-
-void TextureCache::clearWhenUseful() {
-    if (!WriteTracker::Available()) return;
-    const auto now = std::chrono::steady_clock::now();
-    const auto elapsed = now - lastClear;
-    if (elapsed < kClearInterval || (dirtyCompares < kComparesBeforeClear && elapsed < kIdleClearInterval)) return;
-    PerformanceTimer timing("Graphics.TextureCache.SoftDirtyClear");
-    WriteTracker::Clear();
-    timing.Mark("clear");
-    dirtyCompares = 0;
-    lastClear = now;
+    return !WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration);
 }
 
 std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
     Require(words.size() == 8, "texture cache descriptor must contain eight DWORDs");
     PerformanceTimer timing("Graphics.TextureCache");
     trim();
-    clearWhenUseful();
     Key key;
     std::copy(words.begin(), words.end(), key.begin());
     key[8] = static_cast<std::uint32_t>(resource.dimension) | (static_cast<std::uint32_t>(resource.viewDimension) << 8u);
@@ -167,22 +114,28 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
             timing.Mark("range_check");
             if (unchanged(*it)) {
                 timing.Mark("validate_tracked");
+                // Write tracking vouches for the entry from now on, so it keeps no snapshot.
+                if (!it->tracked) {
+                    retainedBytes -= it->snapshot.size();
+                    std::vector<std::byte>().swap(it->snapshot);
+                    it->tracked = true;
+                }
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
                 return result;
             }
             if (it->tracked) {
                 // No snapshot to compare with: a possibly written tracked texture is recreated.
-                ++dirtyCompares;
                 erase(it);
                 goto create;
             }
             const auto aliasGeneration = WriteTracker::AliasWriteGeneration();
+            const auto cpuGeneration = WriteTracker::CpuMark(resource.baseAddress, it->snapshot.size());
             const bool same = std::memcmp(reinterpret_cast<const void*>(resource.baseAddress), it->snapshot.data(), it->snapshot.size()) == 0;
             timing.Mark("validate_compare", it->snapshot.size());
             if (same) {
-                it->mustCompare = false;
                 it->aliasGeneration = aliasGeneration;
+                it->cpuGeneration = cpuGeneration;
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
                 return result;
@@ -217,6 +170,7 @@ create:
     Require(bytes != 0 && bytes <= std::numeric_limits<std::size_t>::max(), "texture cache surface size overflow");
     std::vector<std::byte> snapshot(static_cast<std::size_t>(bytes));
     const auto aliasGeneration = WriteTracker::AliasWriteGeneration();
+    const auto cpuGeneration = WriteTracker::CpuMark(resource.baseAddress, bytes);
     {
         const GuestMemory::AccessSite site("cpu_wait_texture_miss");
         GuestMemory::Read(resource.baseAddress, snapshot, 1);
@@ -245,8 +199,7 @@ create:
     entry.address = resource.baseAddress;
     entry.bytes = bytes;
     entry.aliasGeneration = aliasGeneration;
-    // Written pages already marked before this snapshot would otherwise look like later writes;
-    // they are compared once and then cleared by the next soft-dirty clear.
+    entry.cpuGeneration = cpuGeneration;
     entries.push_back(std::move(entry));
     index[key] = std::prev(entries.end());
     retainedBytes += retained;

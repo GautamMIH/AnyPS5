@@ -8,8 +8,14 @@
 #include <mutex>
 #include <stdexcept>
 #include <system_error>
+#include <array>
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <linux/userfaultfd.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 namespace GuestMemoryBacking::Platform {
@@ -224,9 +230,84 @@ void ReleaseRange(std::uint64_t address, std::size_t bytes) {
     space().Release(address, bytes);
 }
 
+namespace {
+
+// Asynchronous userfaultfd write-protection (Linux 6.7+): writes to protected pages are resolved by
+// the kernel without a fault handler, and PAGEMAP_SCAN reports and re-protects the written ones.
+// User-mode-only registration needs no privileges; kernel writes (read(2) into a page) still mark
+// pages written. Views are registered as they are mapped, and unpopulated pages start protected.
+struct WriteWatch {
+    int userfault = -1;
+    int pagemap = -1;
+    bool available = false;
+};
+
+WriteWatch& writeWatch() {
+    static WriteWatch* watch = [] {
+        auto* result = new WriteWatch;
+        if (std::getenv("ANYPS5_NO_WRITE_WATCH") != nullptr) return result;
+        result->userfault = static_cast<int>(syscall(SYS_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY));
+        if (result->userfault < 0) return result;
+        uffdio_api api{};
+        api.api = UFFD_API;
+        api.features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED | UFFD_FEATURE_WP_HUGETLBFS_SHMEM;
+        result->pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+        result->available = ioctl(result->userfault, UFFDIO_API, &api) == 0 && result->pagemap >= 0;
+        if (!result->available) std::fprintf(stderr, "[memory] userfaultfd write-protect is unavailable; guest writes are not watched\n");
+        return result;
+    }();
+    return *watch;
+}
+
+void watchView(std::uint64_t address, std::size_t bytes) {
+    auto& watch = writeWatch();
+    if (!watch.available) return;
+    uffdio_register registration{};
+    registration.range.start = address;
+    registration.range.len = bytes;
+    registration.mode = UFFDIO_REGISTER_MODE_WP;
+    if (ioctl(watch.userfault, UFFDIO_REGISTER, &registration) != 0) {
+        std::fprintf(stderr, "[memory] cannot watch guest writes at 0x%llx+0x%zx (errno %d); the write watch is off\n", static_cast<unsigned long long>(address), bytes, errno);
+        watch.available = false;
+    }
+}
+
+}
+
+bool WriteWatchAvailable() {
+    return writeWatch().available;
+}
+
+bool CollectWrites(std::uint64_t address, std::size_t bytes, WrittenRangeVisitor visit, void* context) {
+    auto& watch = writeWatch();
+    if (!watch.available || visit == nullptr) return false;
+    std::array<page_region, 64> regions{};
+    auto cursor = address;
+    const auto end = address + bytes;
+    while (cursor < end) {
+        pm_scan_arg scan{};
+        scan.size = sizeof(scan);
+        scan.flags = PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC;
+        scan.start = cursor;
+        scan.end = end;
+        scan.vec = reinterpret_cast<std::uint64_t>(regions.data());
+        scan.vec_len = regions.size();
+        scan.category_mask = PAGE_IS_WRITTEN;
+        scan.return_mask = PAGE_IS_WRITTEN;
+        const long count = ioctl(watch.pagemap, PAGEMAP_SCAN, &scan);
+        if (count < 0) return false;
+        for (long index = 0; index < count; ++index) visit(context, regions[static_cast<std::size_t>(index)].start, regions[static_cast<std::size_t>(index)].end);
+        // walk_end is where the scan stopped (the end, or where the region buffer filled up).
+        if (scan.walk_end <= cursor) return false;
+        cursor = scan.walk_end;
+    }
+    return true;
+}
+
 void MapView(std::uint64_t address, std::size_t bytes, const Segment& segment, std::uint64_t offset, int protection) {
     if (offset > segment.bytes || bytes > segment.bytes - offset) throw std::out_of_range("guest view exceeds its segment");
     checkMapping(mmap(reinterpret_cast<void*>(address), bytes, protection, MAP_SHARED | MAP_FIXED, static_cast<int>(segment.handle), static_cast<off_t>(offset)), "mmap guest view", address, bytes);
+    watchView(address, bytes);
 }
 
 void UnmapView(std::uint64_t address, std::size_t bytes) {

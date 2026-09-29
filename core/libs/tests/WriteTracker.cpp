@@ -1,8 +1,9 @@
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
-#include <sys/mman.h>
+#include <cstring>
 #include <unistd.h>
 
 namespace {
@@ -17,41 +18,48 @@ void RequireAt(bool condition, int line) {
 
 void CheckCpuWrites() {
     using namespace AgcDriver::WriteTracker;
-    Require(Available());
-    const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
-    const int memory = memfd_create("write-tracker-test", 0);
-    Require(memory >= 0 && ftruncate(memory, static_cast<off_t>(page * 16)) == 0);
-    auto* bytes = static_cast<unsigned char*>(mmap(nullptr, page * 16, PROT_READ | PROT_WRITE, MAP_SHARED, memory, 0));
-    Require(bytes != MAP_FAILED);
-    for (std::size_t index = 0; index < page * 16; ++index) bytes[index] = 1;
+    if (!Available()) {
+        std::puts("Write watch unavailable (userfaultfd write-protect); CPU write checks skipped");
+        Require(CpuWrittenSince(0x1000, 0x1000, CpuMark(0x1000, 0x1000)));
+        return;
+    }
+    constexpr std::uint64_t block = 64 * 1024;
+    constexpr std::uint64_t size = block * 8;
+    auto* bytes = static_cast<unsigned char*>(GuestMemoryBacking::GuestMemoryBackingMap_nid_postfix(nullptr, size, block, 3));
+    std::memset(bytes, 1, size);
     const auto base = reinterpret_cast<std::uint64_t>(bytes);
 
-    int listened = 0;
-    AddClearListener(&listened, [&] { ++listened; });
-    const auto clears = Clears();
-    Clear();
-    Require(listened == 1 && Clears() == clears + 1);
-    Require(!CpuWritten(base, page * 16));
+    const auto mark = CpuMark(base, size);
+    Require(!CpuWrittenSince(base, size, mark));
+    bytes[block * 3 + 7] = 2;
+    // Another user's collection does not hide the write from this mark.
+    const auto other = CpuMark(base + block * 3, block);
+    Require(CpuWrittenSince(base + block * 3, block, mark));
+    Require(CpuWrittenSince(base, size, mark));
+    Require(!CpuWrittenSince(base + block * 3, block, other));
+    Require(!CpuWrittenSince(base + block * 5, block * 2, mark));
 
-    bytes[page * 3 + 7] = 2;
-    Require(CpuWritten(base + page * 3, page));
-    Require(CpuWritten(base, page * 16));
-    Require(!CpuWritten(base + page * 5, page * 2));
-
-    // Kernel writes into the mapping (read(2) into a buffer) are tracked as well.
+    // Kernel writes into the mapping (read(2) into a buffer) are seen as well.
     int pipe_[2];
     Require(pipe(pipe_) == 0);
     const char message[32] = "kernel write";
     Require(write(pipe_[1], message, sizeof(message)) == sizeof(message));
-    Require(read(pipe_[0], bytes + page * 7, sizeof(message)) == sizeof(message));
-    Require(CpuWritten(base + page * 7, page));
+    Require(read(pipe_[0], bytes + block * 6, sizeof(message)) == sizeof(message));
+    Require(CpuWrittenSince(base + block * 6, block, mark));
 
-    RemoveClearListener(&listened);
-    Clear();
-    Require(listened == 1);
-    Require(!CpuWritten(base, page * 16));
-    munmap(bytes, page * 16);
-    close(memory);
+    // Writes through the host alias are not; the driver reports those with NoteAliasWrite.
+    const auto beforeAlias = CpuMark(base, size);
+    const unsigned char value = 9;
+    GuestMemoryBacking::GuestMemoryBackingWrite_nid_postfix(base + block, &value, 1);
+    Require(bytes[block] == 9);
+    Require(!CpuWrittenSince(base, size, beforeAlias));
+
+    // Memory outside the watched guest views is always "written".
+    unsigned char host[64] = {};
+    const auto hostAddress = reinterpret_cast<std::uint64_t>(host);
+    Require(CpuWrittenSince(hostAddress, sizeof(host), CpuMark(hostAddress, sizeof(host))));
+
+    GuestMemoryBacking::GuestMemoryBackingUnmap_nid_postfix(bytes, size);
     close(pipe_[0]);
     close(pipe_[1]);
 }

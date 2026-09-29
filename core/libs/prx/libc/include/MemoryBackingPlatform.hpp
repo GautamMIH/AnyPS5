@@ -32,6 +32,15 @@ void MapView(std::uint64_t address, std::size_t bytes, const Segment& segment, s
 void UnmapView(std::uint64_t address, std::size_t bytes);
 void Protect(std::uint64_t address, std::size_t bytes, int protection);
 
+// Write watch of views: which pages were written through the guest mappings (by guest code or by
+// the kernel on its behalf) since they were last collected. Writes through a segment's alias or
+// another view of the same bytes are not seen.
+bool WriteWatchAvailable();
+// Calls visit(context, begin, end) for each written range within [address, address + bytes) and
+// watches those pages again. Returns false when the watch is unavailable.
+using WrittenRangeVisitor = void (*)(void* context, std::uint64_t begin, std::uint64_t end);
+bool CollectWrites(std::uint64_t address, std::size_t bytes, WrittenRangeVisitor visit, void* context);
+
 }
 
 #endif

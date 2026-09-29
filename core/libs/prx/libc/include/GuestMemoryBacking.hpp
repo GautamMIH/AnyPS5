@@ -71,6 +71,11 @@ bool GuestSegmentAlive_nid_postfix(std::uint64_t segment);
 // Whether [address, address + bytes) is committed guest memory whose segment bytes no other guest
 // mapping shows, so every write to them goes through these addresses (or the host alias).
 bool GuestVirtualSingleView_nid_postfix(std::uint64_t address, std::uint64_t bytes);
+// Write watch of guest memory (see MemoryBackingPlatform.hpp): reports each range written through
+// the guest mappings within [address, address + bytes) since its last collection, then watches it
+// again. Returns false when writes are not watched.
+bool GuestWriteWatchAvailable_nid_postfix();
+bool GuestWriteWatchCollect_nid_postfix(std::uint64_t address, std::uint64_t bytes, void (*visit)(void* context, std::uint64_t begin, std::uint64_t end), void* context);
 
 // libc heap chunks.
 void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection);

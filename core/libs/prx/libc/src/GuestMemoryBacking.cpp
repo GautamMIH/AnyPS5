@@ -366,6 +366,17 @@ bool GuestVirtualSingleView_nid_postfix(std::uint64_t address, std::uint64_t byt
     return true;
 }
 
+bool GuestWriteWatchAvailable_nid_postfix() {
+    return Platform::WriteWatchAvailable();
+}
+
+bool GuestWriteWatchCollect_nid_postfix(std::uint64_t address, std::uint64_t bytes, void (*visit)(void* context, std::uint64_t begin, std::uint64_t end), void* context) {
+    if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    // No lock: the kernel orders scans with mapping changes, and a newly mapped view's pages are
+    // reported as written until they are first collected.
+    return Platform::CollectWrites(address, static_cast<std::size_t>(bytes), visit, context);
+}
+
 bool GuestSegmentAlive_nid_postfix(std::uint64_t segment) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     return liveSegments().contains(segment);
