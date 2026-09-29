@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VideoOutput.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
@@ -231,6 +232,7 @@ public:
                         replacedDevices.push_back(device);
                     }
                     device = std::make_shared<VulkanDevice>(&window);
+                    captureMemo.Clear();
                 }
                 require(device->Window() == window.context, "presentation window does not match device surface");
                 presenting = device;
@@ -308,6 +310,8 @@ private:
     std::map<std::uint32_t, std::shared_ptr<IVideoOutput>> outputs;
     std::recursive_mutex& gpuMutex = GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix();
     std::shared_ptr<VulkanDevice> device;
+    // Used and cleared under gpuMutex (cleared whenever the device, and so the target, changes).
+    CaptureMemo captureMemo;
     std::uint64_t accepted = 0;
     std::uint64_t completed = 0;
     std::set<std::uint64_t> finishedOutOfOrder;
@@ -555,6 +559,7 @@ private:
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
         if (device == nullptr) {
             device = std::make_shared<VulkanDevice>();
+            captureMemo.Clear();
         }
         const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
             static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
@@ -623,6 +628,8 @@ private:
             std::array<ShaderRecompiler::MemoryRegion, 2> memory;
             // System SGPRs merged stages receive ahead of user data (see initializeMerged).
             std::uint32_t systemSgprs = 0;
+            // The registered shader the code belongs to (identifies it for the capture memo).
+            std::shared_ptr<const ShaderSnapshot> owner;
         };
         const auto programAddress = [&](std::uint32_t base) {
             const auto high = readRegister(queue.shader, base + 1);
@@ -648,6 +655,7 @@ private:
                 {{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}}
             };
             for (std::uint32_t i = 0; i < userCount; ++i) result.userData.push_back(readRegister(queue.shader, userDataBase + i));
+            result.owner = it->second;
             return result;
         };
         using Stage = ShaderRecompiler::ShaderStage;
@@ -713,7 +721,10 @@ private:
         timing.Mark("prepare");
         std::lock_guard gpuLock(gpuMutex);
         timing.Mark("gpu_mutex_wait");
-        if (device == nullptr) device = std::make_shared<VulkanDevice>();
+        if (device == nullptr) {
+            device = std::make_shared<VulkanDevice>();
+            captureMemo.Clear();
+        }
         timing.Mark("device_setup");
         const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
             static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
@@ -753,7 +764,9 @@ private:
                 ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
             };
             PerformanceTimer shaderTiming("Driver.GraphicsShader");
-            const auto capture = shaderMemory.Capture(request);
+            // Spliced geometry code belongs to no single registered shader.
+            const bool spliced = roles[i] == Role::Main && !splicedGeometry.empty();
+            const auto capture = spliced ? shaderMemory.Capture(request) : captureMemo.Capture(program.owner, request, shaderMemory);
             shaderTiming.Mark("memory_capture");
             memory = shaderMemory.Regions();
             request.context.memory = memory;
@@ -823,6 +836,8 @@ private:
         if (!resumed) {
             submission.started = true;
             includeSubmission(submission, true);
+            // Guest CPU writes made before the submission are ordered before its work.
+            WriteTracker::NextEpoch();
         }
         if (submission.suspend) {
             PerformanceContext timingContext(frameTiming.get());
@@ -910,6 +925,8 @@ private:
                         return false;
                     }
                     timing.Mark("memory_wait");
+                    // Whatever the guest wrote before releasing the wait is ordered before what follows.
+                    WriteTracker::NextEpoch();
                     cursor += count;
                     continue;
                 }
@@ -1003,6 +1020,7 @@ private:
             }
             publishCompletions();
             if (header == FlipPacketHeader) {
+                WriteTracker::NextEpoch();
                 frameTiming->SetFlip(submission.serial, cursor, submission.received, FrameTiming::Clock::now());
                 const auto completedFrame = std::exchange(frameTiming, nullptr);
                 submission.flips.at(cursor)->GpuReady(completedFrame);

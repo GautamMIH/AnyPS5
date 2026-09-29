@@ -54,6 +54,14 @@ void CheckCpuWrites() {
     Require(bytes[block] == 9);
     Require(!CpuWrittenSince(base, size, beforeAlias));
 
+    // A range is collected once per epoch: a write racing with the epoch shows at the next one.
+    NextEpoch();
+    const auto epochMark = CpuMark(base + block * 4, block);
+    bytes[block * 4 + 8] = 3;
+    Require(!CpuWrittenSince(base + block * 4, block, epochMark));
+    NextEpoch();
+    Require(CpuWrittenSince(base + block * 4, block, epochMark));
+
     // Memory outside the watched guest views is always "written".
     unsigned char host[64] = {};
     const auto hostAddress = reinterpret_cast<std::uint64_t>(host);

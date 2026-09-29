@@ -467,6 +467,15 @@ std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& 
     return capture;
 }
 
+std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime, const ResourceCapture& sameProgram) {
+    if (sameProgram.plan == nullptr) return CaptureResources(request, runtime);
+    auto capture = std::make_shared<ResourceCapture>();
+    capture->source = sameProgram.source;
+    capture->plan = sameProgram.plan;
+    ResourceMaterializer{}.Materialize(*capture->plan, runtime, capture->snapshot, capture->specialization);
+    return capture;
+}
+
 RecompileResult Recompile(const RecompileRequest& request) {
     return recompileReporting(request, [&] { return RecompileImpl(request); });
 }

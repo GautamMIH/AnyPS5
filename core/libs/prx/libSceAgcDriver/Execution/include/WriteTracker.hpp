@@ -20,6 +20,11 @@ bool Available();
 // lands after this call (and, conservatively, some that landed shortly before).
 std::uint64_t CpuMark(std::uint64_t address, std::uint64_t bytes);
 bool CpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t generation);
+// Begins a new epoch. Within one epoch a range's CPU writes are collected once (a texture sampled by
+// many draws of a submission is scanned once): CPU writes racing with the epoch's GPU work are
+// unordered on the console too. Ordering points begin epochs: a submission starting, a satisfied
+// memory wait, a flip, and every CPU write the driver itself makes to guest memory.
+void NextEpoch();
 
 // The GPU may write the range (imported guest memory bound writable); such ranges stay "written".
 void NoteGpuWrite(std::uint64_t address, std::uint64_t bytes);

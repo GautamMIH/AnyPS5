@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
 #include "ControlFlow/RequestSerializer.hpp"
 #include "Optimization/RequestMemoryView.hpp"
@@ -157,7 +158,16 @@ int main() {
         AgcDriver::ShaderMemory memory({});
         memory.Capture(request);
         auto regions = memory.Regions();
-        require(regions.size() == 3, "nested pointer reads were not captured");
+        // The table's two dwords and the payload it points to are captured (reads take whole lines).
+        const auto holds = [&](std::uint64_t dword, std::uint32_t expected) {
+            return std::any_of(regions.begin(), regions.end(), [&](const MemoryRegion& region) {
+                if (dword < region.guestAddress || dword + 4 > region.guestAddress + region.bytes.size()) return false;
+                std::uint32_t value = 0;
+                std::memcpy(&value, region.bytes.data() + (dword - region.guestAddress), sizeof(value));
+                return value == expected;
+            });
+        };
+        require(holds(address, static_cast<std::uint32_t>(table)) && holds(address + 4, static_cast<std::uint32_t>(table >> 32u)) && holds(reinterpret_cast<std::uintptr_t>(&payload), payload), "nested pointer reads were not captured");
         request.context.memory = regions;
         const auto first = Recompile(request);
         require(!first.spirv.empty(), "empty compiled shader");

@@ -32,6 +32,14 @@ struct State {
     // latest write. Generations only grow, so older marks see newer writes.
     std::unordered_map<std::uint64_t, std::uint64_t> blocks;
     std::uint64_t cpuGeneration = 1;
+    // Ranges collected in the current epoch, keyed by address and size (see NextEpoch).
+    std::atomic<std::uint64_t> epoch{1};
+    struct RangeHash {
+        std::size_t operator()(const std::pair<std::uint64_t, std::uint64_t>& range) const noexcept {
+            return static_cast<std::size_t>((range.first * 0x9e3779b97f4a7c15ull) ^ range.second);
+        }
+    };
+    std::unordered_map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t, RangeHash> collected;
 
     std::mutex mutex;
     std::map<std::uint64_t, std::uint64_t> gpuRanges;  // begin -> end, merged
@@ -77,6 +85,17 @@ bool collect(State& tracker, std::uint64_t address, std::uint64_t bytes) {
     return collected;
 }
 
+// collect, at most once per epoch for a range (cpuMutex held).
+bool collectInEpoch(State& tracker, std::uint64_t address, std::uint64_t bytes) {
+    const auto epoch = tracker.epoch.load(std::memory_order_acquire);
+    const auto range = std::make_pair(address, bytes);
+    if (const auto found = tracker.collected.find(range); found != tracker.collected.end() && found->second == epoch) return true;
+    if (!collect(tracker, address, bytes)) return false;
+    if (tracker.collected.size() >= 65536) tracker.collected.clear();
+    tracker.collected[range] = epoch;
+    return true;
+}
+
 bool overlaps(const std::map<std::uint64_t, std::uint64_t>& ranges, std::uint64_t begin, std::uint64_t end) {
     auto it = ranges.upper_bound(begin);
     if (it != ranges.begin() && std::prev(it)->second > begin) return true;
@@ -93,7 +112,7 @@ std::uint64_t CpuMark(std::uint64_t address, std::uint64_t bytes) {
     auto& tracker = state();
     if (!tracker.available || !validRange(address, bytes)) return 0;
     std::lock_guard lock(tracker.cpuMutex);
-    collect(tracker, address, bytes);
+    collectInEpoch(tracker, address, bytes);
     return tracker.cpuGeneration;
 }
 
@@ -101,13 +120,17 @@ bool CpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t g
     auto& tracker = state();
     if (!tracker.available || !validRange(address, bytes) || generation == 0) return true;
     std::lock_guard lock(tracker.cpuMutex);
-    if (!collect(tracker, address, bytes)) return true;
+    if (!collectInEpoch(tracker, address, bytes)) return true;
     if (tracker.cpuGeneration == generation) return false;
     for (auto block = address >> kBlockShift; block <= (address + bytes - 1) >> kBlockShift; ++block) {
         const auto found = tracker.blocks.find(block);
         if (found != tracker.blocks.end() && found->second > generation) return true;
     }
     return false;
+}
+
+void NextEpoch() {
+    state().epoch.fetch_add(1, std::memory_order_acq_rel);
 }
 
 void NoteGpuWrite(std::uint64_t address, std::uint64_t bytes) {

@@ -22,6 +22,9 @@ struct ResourceCapture {
     std::shared_ptr<SourceEntry> source;
 };
 [[nodiscard]] std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime);
+// Captures a request whose code, stage inputs and target are those of an earlier capture (only user
+// data and memory differ): the earlier one's validated inputs, source entry and plan are reused.
+[[nodiscard]] std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime, const ResourceCapture& sameProgram);
 
 }
 
