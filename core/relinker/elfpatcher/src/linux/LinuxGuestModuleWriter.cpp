@@ -1,4 +1,5 @@
 #include <elfpatcher/general/GuestModuleWriter.hpp>
+#include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <io/BufferUtils.hpp>
 #include <algorithm>
 #include <limits>
@@ -100,6 +101,63 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
     tag(30, 8);
     tag(0, 0);
     const auto dynamicSize = bytes.size() - dynamicOffset;
+    using namespace Codegen::Amd64OnlySubstitutionTable;
+    const auto checkedAdd = [](const std::uint64_t left, const std::uint64_t right, const std::uint64_t offset) {
+        if (right > std::numeric_limits<std::uint64_t>::max() - left)
+            throw Domain::RelinkerException("AMD-only guest stub address overflow", offset);
+        return left + right;
+    };
+    const auto displacement = [](const std::uint64_t target, const std::uint64_t next, const std::uint64_t offset) {
+        if (target >= next) {
+            const auto distance = target - next;
+            if (distance > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()))
+                throw Domain::RelinkerException("AMD-only guest stub exceeds rel32 range", offset);
+            return static_cast<std::int32_t>(distance);
+        }
+        const auto distance = next - target;
+        if (distance > static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()) + 1)
+            throw Domain::RelinkerException("AMD-only guest stub exceeds rel32 range", offset);
+        return static_cast<std::int32_t>(-static_cast<std::int64_t>(distance));
+    };
+    for (const auto& site : image.Trampolines) {
+        if (site.Length < kJmpRel32.Size || site.OriginalBytes.size() != site.Length ||
+            site.Body.size() < kJmpRel32.Size ||
+            site.ReturnBranchOffset > site.Body.size() - kJmpRel32.Size ||
+            site.Body[site.ReturnBranchOffset] != kJmpRel32.Bytes[0])
+            throw Domain::RelinkerException("Invalid AMD-only guest trampoline site", site.Offset);
+        if (site.Offset > image.Bytes.size() || site.Length > image.Bytes.size() - site.Offset)
+            throw Domain::RelinkerException("AMD-only guest instruction is outside the original image", site.Offset);
+        const auto mapped = std::any_of(image.Headers.begin(), image.Headers.end(), [&](const auto& header) {
+            if (header.Type != 1 || (header.Flags & 1) == 0 ||
+                site.Address < header.MappedAddress || site.Offset < header.Offset)
+                return false;
+            const auto addressDelta = site.Address - header.MappedAddress;
+            const auto offsetDelta = site.Offset - header.Offset;
+            return addressDelta == offsetDelta && addressDelta <= header.FileSize &&
+                   site.Length <= header.FileSize - addressDelta;
+        });
+        if (!mapped)
+            throw Domain::RelinkerException("AMD-only guest instruction is outside an executable segment", site.Offset);
+        if (!std::equal(site.OriginalBytes.begin(), site.OriginalBytes.end(),
+                        bytes.begin() + static_cast<std::ptrdiff_t>(site.Offset)))
+            throw Domain::RelinkerException("AMD-only guest site bytes changed before patching", site.Offset);
+        bytes.resize(Io::AlignUp(bytes.size(), kStubAlignment), kTrapFill);
+        const auto stubOffset = bytes.size();
+        const auto stubAddress = checkedAdd(extraAddress, stubOffset - extraOffset, site.Offset);
+        checkedAdd(stubAddress, site.Body.size(), site.Offset);
+        const auto returnAddress = checkedAdd(site.Address, site.Length, site.Offset);
+        const auto stubReturn = checkedAdd(stubAddress, site.ReturnBranchOffset + kJmpRel32.Size, site.Offset);
+        const auto siteNext = checkedAdd(site.Address, kJmpRel32.Size, site.Offset);
+        const auto returnDisplacement = displacement(returnAddress, stubReturn, site.Offset);
+        const auto siteDisplacement = displacement(stubAddress, siteNext, site.Offset);
+        bytes.insert(bytes.end(), site.Body.begin(), site.Body.end());
+        Io::WriteU32(bytes, stubOffset + site.ReturnBranchOffset + 1,
+                     static_cast<std::uint32_t>(returnDisplacement));
+        std::fill_n(bytes.begin() + static_cast<std::ptrdiff_t>(site.Offset), site.Length, kNop1.Bytes[0]);
+        bytes[static_cast<std::size_t>(site.Offset)] = kJmpRel32.Bytes[0];
+        Io::WriteU32(bytes, static_cast<std::size_t>(site.Offset + 1),
+                     static_cast<std::uint32_t>(siteDisplacement));
+    }
     const auto phOffset = bytes.size();
     const auto phCount = headers.size() + 2;
     if (phCount > std::numeric_limits<std::uint16_t>::max()) throw Domain::RelinkerException("Too many guest program headers");
