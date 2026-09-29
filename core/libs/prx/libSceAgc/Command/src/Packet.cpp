@@ -169,4 +169,11 @@ void PatchIndirectCount(std::uint32_t* packet, std::uint32_t opcode, std::uint32
     packet[4] += count;
 }
 
+void SetIndirectCount(std::uint32_t* packet, std::uint32_t opcode, std::uint32_t count, const char* function) {
+    ValidatePacket(packet, opcode, 5, function);
+    Require(packet[3] == 0x80000000u && packet[4] <= 0x3fffu, function, "invalid indirect register packet");
+    CheckBits(count, 0x3fffu, function);
+    packet[4] = count;
+}
+
 }
