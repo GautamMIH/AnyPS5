@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_DRAWQUEUE_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include <deque>
 #include <map>
 
 namespace AgcDriver::Graphics {
@@ -17,6 +18,13 @@ public:
     void WaitGpu();
     void Collect();
     void RecordMemoryBarrier(const Context& context);
+    // Completion markers: SubmitMarker submits everything queued, then an empty batch whose fence
+    // signals once all earlier GPU work on the queue finished (one queue, in order). Marker serials
+    // increase; MarkerReached and WaitMarker retire the draws completed by then (their writes reach
+    // guest memory) before reporting the marker done.
+    std::uint64_t SubmitMarker(const Context& context);
+    bool MarkerReached(std::uint64_t serial);
+    void WaitMarker(std::uint64_t serial);
 
 private:
     struct Entry {
@@ -48,6 +56,14 @@ private:
     std::vector<Batch> pending;
     std::vector<std::unique_ptr<CommandBatch>> available;
     std::size_t drawCount = 0;
+    struct Marker {
+        std::uint64_t serial;
+        std::unique_ptr<CommandBatch> commands;
+    };
+    std::deque<Marker> markers;
+    std::uint64_t nextMarker = 1;
+    std::uint64_t reachedMarker = 0;
+    void collectMarkers(bool wait, std::uint64_t serial);
     WriteIndex writes;
     // A GPU access overlaps writes of queued draws: the next recording starts with a memory barrier.
     bool barrierRequested = false;

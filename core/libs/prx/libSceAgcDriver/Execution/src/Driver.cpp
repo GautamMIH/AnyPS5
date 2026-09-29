@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <shared_mutex>
 #include <cstring>
@@ -106,6 +107,9 @@ private:
         }
         changed.notify_all();
         if (worker.joinable()) worker.join();
+        completerStop = true;
+        wakeCompleter();
+        if (completer.joinable()) completer.join();
     }
 
 public:
@@ -220,6 +224,7 @@ public:
                 timing.Mark("gpu_mutex_wait");
                 if (device == nullptr || device->Window() == nullptr) {
                     if (device) {
+                        stashCompletions(pollCompletions(true));
                         device->WaitIdle();
                         // Cached textures and pipelines may still reference the old device's handles.
                         static std::vector<std::shared_ptr<VulkanDevice>> replacedDevices;
@@ -248,6 +253,7 @@ public:
                     }
                 }
             }
+            publishCompletions();
             gpuReady(context);
             timing.Mark("release_and_callback");
             CheckFailure();
@@ -258,8 +264,14 @@ public:
     }
 
     void ReleaseWindow(void* window) {
-        std::lock_guard lock(gpuMutex);
-        if (device && device->Window() == window) device.reset();
+        {
+            std::lock_guard lock(gpuMutex);
+            if (device && device->Window() == window) {
+                stashCompletions(pollCompletions(true));
+                device.reset();
+            }
+        }
+        publishCompletions();
     }
 
     void RegisterShader(const Shader* shader) {
@@ -308,12 +320,129 @@ private:
     std::uint64_t frameSerial = 0;
     std::thread worker;
 
-    Driver() : worker([this] { run(); }) {
+    // GPU work completes asynchronously, as on the console: a RELEASE_MEM's label and interrupt, and
+    // a submission's completion, wait in order on a GPU marker (under gpuMutex) instead of the
+    // worker idling the GPU. The worker drains them where later packets could observe them; the
+    // completer thread finishes them while the worker has nothing to run.
+    struct Completion {
+        std::uint64_t marker = 0;
+        std::vector<std::uint32_t> release;
+        std::uint64_t serial = 0;
+        int eventQueue = 0;
+        std::optional<std::uint32_t> interrupt;
+    };
+    struct Completed {
+        std::vector<std::pair<int, std::uint32_t>> interrupts;
+        std::vector<std::uint64_t> serials;
+    };
+    std::deque<Completion> completions;
+    // Finished under gpuMutex, not yet published (see publishCompletions).
+    Completed unpublished;
+    std::atomic<bool> unpublishedPending{false};
+    std::atomic<bool> completionsPending{false};
+    std::atomic<bool> completerStop{false};
+    std::mutex completerMutex;
+    std::condition_variable completerWake;
+    std::thread completer;
+
+    Driver() : worker([this] { run(); }), completer([this] { complete(); }) {
         try {
             LibcRegisterShutdown_nid_postfix([] { Driver::Get().Shutdown(); });
         } catch (...) {
             stop();
             throw;
+        }
+    }
+
+    void wakeCompleter() {
+        { std::lock_guard lock(completerMutex); }
+        completerWake.notify_all();
+    }
+
+    // Caller holds gpuMutex. The marker orders the completion after all GPU work submitted so far.
+    void queueCompletion(Completion completion) {
+        if (device != nullptr) completion.marker = device->SubmitMarker();
+        completions.push_back(std::move(completion));
+        completionsPending = true;
+        wakeCompleter();
+    }
+
+    // Caller holds gpuMutex. Finishes the completions whose GPU work is done (all of them if wait),
+    // in order: labels are written here; interrupts and completed serials go to finishCompletions.
+    Completed pollCompletions(bool wait) {
+        Completed done;
+        while (!completions.empty()) {
+            auto& next = completions.front();
+            if (next.marker != 0 && device != nullptr && !device->MarkerReached(next.marker)) {
+                if (!wait) break;
+                device->WaitMarker(next.marker);
+            }
+            if (!next.release.empty()) {
+                const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+                    if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+                });
+                QueueState unused;
+                Pm4::Execute(next.release, unused);
+            }
+            if (next.interrupt) done.interrupts.emplace_back(next.eventQueue, *next.interrupt);
+            if (next.serial != 0) done.serials.push_back(next.serial);
+            completions.pop_front();
+        }
+        completionsPending = !completions.empty();
+        return done;
+    }
+
+    // Caller holds gpuMutex: the completions are published later, without it.
+    void stashCompletions(Completed done) {
+        if (done.interrupts.empty() && done.serials.empty()) return;
+        unpublished.interrupts.insert(unpublished.interrupts.end(), done.interrupts.begin(), done.interrupts.end());
+        unpublished.serials.insert(unpublished.serials.end(), done.serials.begin(), done.serials.end());
+        unpublishedPending = true;
+    }
+
+    // Caller does not hold gpuMutex.
+    void publishCompletions() {
+        if (!unpublishedPending) return;
+        Completed done;
+        {
+            std::lock_guard gpuLock(gpuMutex);
+            std::swap(done, unpublished);
+            unpublishedPending = false;
+        }
+        finishCompletions(done);
+    }
+
+    // Caller does not hold gpuMutex: raising an interrupt may wake guest threads that fault on
+    // tracked memory, and serials take the queue mutex.
+    void finishCompletions(const Completed& done) {
+        for (const auto& [queue, data] : done.interrupts) AgcDriverTriggerEqEvent_nid_postfix(queue, data);
+        if (done.serials.empty()) return;
+        {
+            std::lock_guard lock(mutex);
+            for (const auto serial : done.serials) markCompleted(serial);
+        }
+        changed.notify_all();
+    }
+
+    // The completer: finishes completions while nothing else does (the worker may be idle or
+    // blocked), polling every 200 us while some are pending.
+    void complete() noexcept {
+        try {
+            while (!completerStop) {
+                if (!completionsPending) {
+                    std::unique_lock lock(completerMutex);
+                    completerWake.wait_for(lock, std::chrono::milliseconds(50), [&] { return completerStop.load() || completionsPending.load(); });
+                    continue;
+                }
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+                {
+                    std::lock_guard gpuLock(gpuMutex);
+                    stashCompletions(pollCompletions(false));
+                }
+                publishCompletions();
+            }
+        } catch (...) {
+            ReportFailure(std::current_exception());
         }
     }
 
@@ -702,6 +831,7 @@ private:
             timing.Mark("gpu_mutex_wait");
             if (device != nullptr) device->WaitIdle();
             timing.Mark("device_idle_wait");
+            stashCompletions(pollCompletions(true));
             resetGraphics = true;
             return true;
         }
@@ -734,6 +864,7 @@ private:
                 {
                     std::lock_guard gpuLock(gpuMutex);
                     if (device != nullptr) device->WaitIdle();
+                    stashCompletions(pollCompletions(true));
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                     });
@@ -765,6 +896,11 @@ private:
                     // does (labels are usually written by then), the GPU need not go idle first.
                     bool satisfied = Pm4::WaitSatisfied(packet);
                     timing.Mark("memory_check");
+                    if (!satisfied && !completions.empty()) {
+                        stashCompletions(pollCompletions(true));
+                        satisfied = Pm4::WaitSatisfied(packet);
+                        timing.Mark("completion_wait");
+                    }
                     if (!satisfied && device != nullptr) {
                         device->WaitIdle();
                         satisfied = Pm4::WaitSatisfied(packet);
@@ -777,23 +913,38 @@ private:
                     cursor += count;
                     continue;
                 }
-                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x49 || opcode == 0x58 || header == FlipPacketHeader) {
+                if (opcode == 0x49) {
+                    // RELEASE_MEM writes its label (and raises its interrupt) once the GPU work
+                    // before it completed; the worker goes on meanwhile.
+                    std::lock_guard gpuLock(gpuMutex);
+                    Completion completion;
+                    completion.release.assign(packet.begin(), packet.end());
+                    completion.eventQueue = static_cast<int>(submission.queue);
+                    if (((packet[2] >> 24u) & 7u) != 0) completion.interrupt = packet[7];
+                    queueCompletion(std::move(completion));
+                    timing.Mark("release_deferred");
+                    cursor += count;
+                    continue;
+                }
+                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x58 || header == FlipPacketHeader) {
                     std::lock_guard gpuLock(gpuMutex);
                     timing.Mark("gpu_mutex_wait");
-                    const auto eventType = opcode == 0x46 ? packet[1] & 0x3fu : 0u;
-                    const auto memoryTransfer = opcode == 0x37 || opcode == 0x40 || opcode == 0x50;
-                    const auto waitDraws = memoryTransfer || opcode == 0x42 || (opcode == 0x46 && (eventType == 0x07 || eventType == 0x0f || eventType == 0x10));
-                    const auto gpuCacheBarrier = opcode == 0x58 && Pm4::UsesGpuCacheBarrier(packet);
+                    // Cache and partial-flush events and ACQUIRE_MEM order GPU work against GPU work:
+                    // a barrier. Later CPU accesses are ordered by the packets that make them (they
+                    // wait for draws and pending labels below) and by guest range checks.
+                    const auto gpuBarrier = opcode == 0x46 || opcode == 0x58;
+                    const auto waitDraws = opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42;
                     if (device != nullptr) {
-                        if (gpuCacheBarrier) device->AcquireGpuMemory();
+                        if (gpuBarrier) device->AcquireGpuMemory();
                         else if (waitDraws) device->WaitDraws();
                         else {
-                            const auto scope = header == FlipPacketHeader ? "Driver.FlipWait" : opcode == 0x58 ? "Driver.AcquireMemoryWait" : opcode == 0x49 ? "Driver.ReleaseMemoryWait" : "Driver.CacheEventWait";
-                            PerformanceTimer waitTiming(scope);
+                            PerformanceTimer waitTiming("Driver.FlipWait");
                             device->WaitIdle();
                         }
                     }
-                    timing.Mark(gpuCacheBarrier ? "gpu_cache_barrier" : waitDraws ? "draw_wait" : "device_idle_wait");
+                    // The CPU executes these packets (or presents): labels released before them land first.
+                    if (!gpuBarrier) stashCompletions(pollCompletions(true));
+                    timing.Mark(gpuBarrier ? "gpu_barrier" : waitDraws ? "draw_wait" : "device_idle_wait");
                 }
                 // Errors name the packet that raised them: the worker's failure is reported on
                 // another thread, far from the throw.
@@ -849,11 +1000,8 @@ private:
                     withContext([&] { Pm4::Execute(packet, queue); });
                     timing.Mark("pm4_execute");
                 }
-                if (opcode == 0x49 && ((packet[2] >> 24u) & 7u) != 0) {
-                    AgcDriverTriggerEqEvent_nid_postfix(static_cast<int>(submission.queue), packet[7]);
-                    timing.Mark("release_interrupt");
-                }
             }
+            publishCompletions();
             if (header == FlipPacketHeader) {
                 frameTiming->SetFlip(submission.serial, cursor, submission.received, FrameTiming::Clock::now());
                 const auto completedFrame = std::exchange(frameTiming, nullptr);
@@ -916,7 +1064,9 @@ private:
                     }
                     const auto startCursor = active[index].cursor;
                     const auto wasStarted = active[index].started;
-                    if (!execute(active[index])) {
+                    const auto finished = execute(active[index]);
+                    publishCompletions();
+                    if (!finished) {
                         if (active[index].cursor != startCursor || !wasStarted) progressed = true;
                         ++index;
                         continue;
@@ -924,16 +1074,18 @@ private:
                     {
                         PerformanceContext timingContext(frameTiming.get());
                         PerformanceTimer timing("Driver.SubmissionCompletion");
-                        std::lock_guard gpuLock(gpuMutex);
-                        if (device) device->WaitIdle();
+                        {
+                            std::lock_guard gpuLock(gpuMutex);
+                            Completion completion;
+                            completion.serial = active[index].serial;
+                            queueCompletion(std::move(completion));
+                            stashCompletions(pollCompletions(false));
+                        }
+                        publishCompletions();
                     }
                     {
-                        PerformanceContext timingContext(frameTiming.get());
-                        PerformanceTimer timing("Driver.Completion");
                         std::lock_guard lock(mutex);
-                        timing.Mark("mutex_wait");
                         rethrowFailure();
-                        markCompleted(active[index].serial);
                     }
                     active.erase(active.begin() + static_cast<std::ptrdiff_t>(index));
                     progressed = true;

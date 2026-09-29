@@ -56,4 +56,45 @@ void DrawQueue::RecordMemoryBarrier(const Context& context) {
     recording.hasBarrier = true;
 }
 
+std::uint64_t DrawQueue::SubmitMarker(const Context& context) {
+    Flush();
+    std::unique_ptr<CommandBatch> commands;
+    if (available.empty()) {
+        commands = std::make_unique<CommandBatch>(context);
+    } else {
+        commands = std::move(available.back());
+        available.pop_back();
+        commands->Reset();
+    }
+    commands->Submit();
+    const auto serial = nextMarker++;
+    markers.push_back({serial, std::move(commands)});
+    return serial;
+}
+
+void DrawQueue::collectMarkers(bool wait, std::uint64_t serial) {
+    while (!markers.empty() && markers.front().serial <= serial) {
+        auto& front = markers.front();
+        if (!front.commands->IsComplete()) {
+            if (!wait) break;
+            front.commands->Wait();
+        }
+        reachedMarker = front.serial;
+        available.push_back(std::move(front.commands));
+        markers.pop_front();
+    }
+    // Draw batches submitted before a reached marker completed before it.
+    Collect();
+}
+
+bool DrawQueue::MarkerReached(std::uint64_t serial) {
+    collectMarkers(false, serial);
+    return reachedMarker >= serial;
+}
+
+void DrawQueue::WaitMarker(std::uint64_t serial) {
+    collectMarkers(true, serial);
+    Require(reachedMarker >= serial, "draw queue marker was never submitted");
+}
+
 }

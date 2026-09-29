@@ -21,6 +21,10 @@ public:
     void WaitIdle();
     void WaitDraws();
     void AcquireGpuMemory();
+    // GPU completion markers (see Graphics::DrawQueue::SubmitMarker).
+    std::uint64_t SubmitMarker();
+    bool MarkerReached(std::uint64_t marker);
+    void WaitMarker(std::uint64_t marker);
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
     void ResolveFastClears(const Graphics::State& graphics);
     void* Window() const;

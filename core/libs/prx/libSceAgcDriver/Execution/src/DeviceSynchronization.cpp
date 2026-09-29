@@ -14,4 +14,22 @@ void VulkanDevice::AcquireGpuMemory() {
     timing.Mark("barrier_record");
 }
 
+std::uint64_t VulkanDevice::SubmitMarker() {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const auto context = graphicsContext();
+    Graphics::Require(context.drawQueue != nullptr, "GPU marker requires a draw queue");
+    return context.drawQueue->SubmitMarker(context);
+}
+
+bool VulkanDevice::MarkerReached(std::uint64_t marker) {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    return graphicsContext().drawQueue->MarkerReached(marker);
+}
+
+void VulkanDevice::WaitMarker(std::uint64_t marker) {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    PerformanceTimer timing("Vulkan.WaitMarker");
+    graphicsContext().drawQueue->WaitMarker(marker);
+}
+
 }

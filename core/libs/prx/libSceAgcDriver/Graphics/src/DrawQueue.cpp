@@ -8,6 +8,7 @@ namespace AgcDriver::Graphics {
 DrawQueue::~DrawQueue() {
     recording.commands.reset();
     for (auto& batch : pending) batch.commands.reset();
+    markers.clear();
 }
 
 VkCommandBuffer DrawQueue::Begin(const Context& context) {
