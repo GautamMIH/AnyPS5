@@ -1512,6 +1512,32 @@ struct PngDecImageInfo {
     std::uint32_t image_flag;
 };
 
+struct JpegEncCreateParam {
+    std::uint32_t size;
+    std::uint32_t attr;
+};
+
+struct JpegEncEncodeParam {
+    const void* image;
+    void* jpeg;
+    std::uint32_t image_size;
+    std::uint32_t jpeg_size;
+    std::uint32_t image_width;
+    std::uint32_t image_height;
+    std::uint32_t image_pitch;
+    std::uint16_t pixel_format;
+    std::uint16_t encode_mode;
+    std::uint16_t color_space;
+    std::uint8_t sampling_type;
+    std::uint8_t compression_ratio;
+    std::int32_t restart_interval;
+};
+
+struct JpegEncOutputInfo {
+    std::uint32_t size;
+    std::uint32_t height;
+};
+
 struct PlayGoInitParams {
     const void* buf_addr;
     std::uint32_t buf_size;
