@@ -2,6 +2,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <exception>
+#include <optional>
+#include <algorithm>
 #include <mutex>
 #include <vector>
 
@@ -286,6 +288,99 @@ void CommandBatch::Wait() {
     timing.Mark("fence_wait");
     if (result == VK_SUCCESS || result == VK_ERROR_DEVICE_LOST) pending = false;
     Check(result, "vkWaitForFences graphics");
+}
+
+ImageMemory::ImageMemory(VkDevice device, PFN_vkGetDeviceProcAddr deviceProc, const VkPhysicalDeviceMemoryProperties& properties) : device(device), deviceProc(deviceProc), properties(properties) {}
+
+ImageMemory::~ImageMemory() {
+    const auto freeMemory = reinterpret_cast<PFN_vkFreeMemory>(deviceProc(device, "vkFreeMemory"));
+    for (const auto& block : blocks)
+        if (block.memory != VK_NULL_HANDLE) freeMemory(device, block.memory, nullptr);
+}
+
+VkDeviceMemory ImageMemory::allocate(std::uint32_t type, VkDeviceSize size) {
+    VkMemoryAllocateInfo info{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    info.allocationSize = size;
+    info.memoryTypeIndex = type;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    Check(reinterpret_cast<PFN_vkAllocateMemory>(deviceProc(device, "vkAllocateMemory"))(device, &info, nullptr, &memory), "vkAllocateMemory image block");
+    return memory;
+}
+
+ImageMemory::Allocation ImageMemory::Allocate(const VkMemoryRequirements& requirements, VkMemoryPropertyFlags flags) {
+    std::uint32_t type = UINT32_MAX;
+    for (std::uint32_t i = 0; i < properties.memoryTypeCount && type == UINT32_MAX; ++i)
+        if ((requirements.memoryTypeBits & (1u << i)) != 0 && (properties.memoryTypes[i].propertyFlags & flags) == flags) type = i;
+    Require(type != UINT32_MAX, "required Vulkan memory type is unavailable");
+    const auto size = requirements.size;
+    const auto alignment = std::max<VkDeviceSize>(requirements.alignment, 1);
+    if (size > BlockBytes / 4) return {allocate(type, size), 0, size, SIZE_MAX};
+    std::lock_guard lock(mutex);
+    const auto carve = [&](std::size_t index) -> std::optional<Allocation> {
+        auto& block = blocks[index];
+        for (auto it = block.free.begin(); it != block.free.end(); ++it) {
+            const auto [begin, bytes] = *it;
+            const auto aligned = (begin + alignment - 1) / alignment * alignment;
+            if (aligned + size > begin + bytes) continue;
+            const auto end = begin + bytes;
+            block.free.erase(it);
+            if (aligned > begin) block.free.emplace(begin, aligned - begin);
+            if (aligned + size < end) block.free.emplace(aligned + size, end - aligned - size);
+            block.used += size;
+            return Allocation{block.memory, aligned, size, index};
+        }
+        return std::nullopt;
+    };
+    for (std::size_t index = 0; index < blocks.size(); ++index) {
+        if (blocks[index].memory == VK_NULL_HANDLE || blocks[index].type != type) continue;
+        if (auto found = carve(index)) return *found;
+    }
+    // A new block, in a released slot when there is one.
+    std::size_t index = blocks.size();
+    for (std::size_t i = 0; i < blocks.size(); ++i)
+        if (blocks[i].memory == VK_NULL_HANDLE) index = i;
+    if (index == blocks.size()) blocks.emplace_back();
+    auto& block = blocks[index];
+    block.memory = allocate(type, BlockBytes);
+    block.type = type;
+    block.used = 0;
+    block.free.clear();
+    block.free.emplace(0, BlockBytes);
+    return *carve(index);
+}
+
+void ImageMemory::Free(const Allocation& allocation) noexcept {
+    if (allocation.memory == VK_NULL_HANDLE) return;
+    const auto freeMemory = reinterpret_cast<PFN_vkFreeMemory>(deviceProc(device, "vkFreeMemory"));
+    if (allocation.block == SIZE_MAX) {
+        freeMemory(device, allocation.memory, nullptr);
+        return;
+    }
+    std::lock_guard lock(mutex);
+    auto& block = blocks[allocation.block];
+    auto begin = allocation.offset;
+    auto end = allocation.offset + allocation.size;
+    auto next = block.free.lower_bound(begin);
+    if (next != block.free.end() && next->first == end) {
+        end += next->second;
+        next = block.free.erase(next);
+    }
+    if (next != block.free.begin()) {
+        const auto previous = std::prev(next);
+        if (previous->first + previous->second == begin) {
+            begin = previous->first;
+            block.free.erase(previous);
+        }
+    }
+    block.free.emplace(begin, end - begin);
+    block.used -= allocation.size;
+    if (block.used != 0) return;
+    // An empty block is released unless it is the only one of its type (kept for the next level).
+    const auto others = std::count_if(blocks.begin(), blocks.end(), [&](const Block& other) { return &other != &block && other.memory != VK_NULL_HANDLE && other.type == block.type; });
+    if (others == 0) return;
+    freeMemory(device, block.memory, nullptr);
+    block.memory = VK_NULL_HANDLE;
+    block.free.clear();
 }
 
 }

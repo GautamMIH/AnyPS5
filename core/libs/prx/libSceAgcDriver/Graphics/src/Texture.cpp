@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -51,6 +52,7 @@ std::uint64_t SliceLinearBytes(const std::vector<TileMipLayout>& mips) {
 }
 
 Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot) : context(context) {
+    PerformanceTimer timing("Graphics.TextureCreate");
     try {
         const auto vkFormat = ResolveTextureFormat(descriptor.format);
         if (IsBlockCompressed(descriptor.format)) {
@@ -86,15 +88,10 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &imageInfo, nullptr, &image), "vkCreateImage");
+        timing.Mark("create_image");
 
-        VkMemoryRequirements requirements{};
-        context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
-        VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-        allocation.allocationSize = requirements.size;
-        allocationBytes = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory texture");
-        Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory");
+        bindImageMemory("texture");
+        timing.Mark("image_memory");
 
         {
             // The upload runs asynchronously: it is submitted ahead of the draws that sample the
@@ -102,17 +99,22 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             // completes (ReleaseUpload). Waiting here stalled every miss on all queued GPU work.
             uploadStaging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
             auto& staging = *uploadStaging;
+            timing.Mark("staging_buffer");
             std::memcpy(staging.Bytes().data(), snapshot.data(), snapshot.size());
+            timing.Mark("staging_copy", snapshot.size());
             uploadLinear = std::make_unique<Buffer>(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
             auto& linear = *uploadLinear;
+            timing.Mark("linear_buffer");
             if (!thick) {
                 uploadDetiler = &detiler;
                 uploadPool = detiler.CreatePool(static_cast<std::uint32_t>(arrayLayers * mips.size()));
             }
 
+            timing.Mark("detiler_pool");
             if (context.drawQueue) context.drawQueue->Flush();
             upload = std::make_unique<CommandBatch>(context);
             const auto commands = upload->Handle();
+            timing.Mark("batch");
 
             VkBufferMemoryBarrier stagingReadBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
             stagingReadBarrier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
@@ -207,7 +209,9 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             toShaderRead.subresourceRange = toTransferDst.subresourceRange;
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &toShaderRead);
 
+            timing.Mark("record");
             upload->Submit();
+            timing.Mark("submit");
         }
 
         const auto viewLevelCount = descriptor.lastLevel - descriptor.baseLevel + 1u;
@@ -241,7 +245,25 @@ void Texture::release() noexcept {
     releaseUploadResources();
     if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
     if (image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
-    if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
+    if (imageAllocation) context.imageMemory->Free(*imageAllocation);
+    else if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
+    imageAllocation.reset();
+}
+
+void Texture::bindImageMemory(const char* operation) {
+    VkMemoryRequirements requirements{};
+    context.Function<PFN_vkGetImageMemoryRequirements>("vkGetImageMemoryRequirements")(context.device, image, &requirements);
+    allocationBytes = requirements.size;
+    if (context.imageMemory) {
+        imageAllocation = context.imageMemory->Allocate(requirements, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, imageAllocation->memory, imageAllocation->offset), operation);
+        return;
+    }
+    VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    allocation.allocationSize = requirements.size;
+    allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), operation);
+    Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), operation);
 }
 
 VkImageView Texture::View() const {

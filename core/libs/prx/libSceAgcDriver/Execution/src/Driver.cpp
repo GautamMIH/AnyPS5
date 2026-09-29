@@ -242,6 +242,7 @@ public:
                 window.getDrawableSize(window.context, &drawableWidth, &drawableHeight);
                 presenting->Resize(drawableWidth, drawableHeight);
                 timing.Mark("resize");
+                if (buffer != nullptr) presenting->DumpFrame(*buffer);
                 if (presenting->Presentable()) {
                     if (buffer != nullptr) {
                         require(buffer->width == window.width && buffer->height == window.height, "display buffer extent differs from output");

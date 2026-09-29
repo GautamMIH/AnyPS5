@@ -4,6 +4,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include <optional>
 #include <vector>
 
 namespace AgcDriver::Graphics {
@@ -36,10 +38,13 @@ private:
     void release() noexcept;
     void recordCopy();
     void releaseUploadResources() noexcept;
+    // Allocates and binds the image's memory (from the device's ImageMemory when it has one).
+    void bindImageMemory(const char* operation);
 
     Context context;
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    std::optional<ImageMemory::Allocation> imageAllocation;
     VkImageView view = VK_NULL_HANDLE;
     VkDeviceSize allocationBytes = 0;
     std::shared_ptr<ResidentColor> source;

@@ -100,6 +100,7 @@ struct VulkanDevice::State {
     std::unique_ptr<Graphics::TextureDetiler> detiler;
     std::unique_ptr<Graphics::GpuColorTransfer> colorTransfer;
     std::shared_ptr<Graphics::BufferPool> bufferPool;
+    std::shared_ptr<Graphics::ImageMemory> imageMemory;
     std::shared_ptr<Graphics::DescriptorCache> descriptorCache;
     std::shared_ptr<Graphics::SamplerCache> samplerCache;
     std::unique_ptr<Graphics::TextureCache> textureCache;
@@ -198,6 +199,7 @@ struct VulkanDevice::State {
             packedScalers.clear();
             pipelineCache.reset();
             bufferPool.reset();
+            imageMemory.reset();
             descriptorCache.reset();
             samplerCache.reset();
             const auto destroyFence = reinterpret_cast<PFN_vkDestroyFence>(deviceProc(device, "vkDestroyFence"));
@@ -504,6 +506,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = family;
     check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &poolInfo, nullptr, &state->pool), "vkCreateCommandPool");
+    state->imageMemory = std::make_shared<Graphics::ImageMemory>(state->device, state->deviceProc, state->memoryProperties);
     state->bufferPool = std::make_shared<Graphics::BufferPool>(graphicsContext());
     state->descriptorCache = std::make_shared<Graphics::DescriptorCache>();
     state->samplerCache = std::make_shared<Graphics::SamplerCache>();
@@ -697,14 +700,19 @@ void VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
         present(buffer.width, buffer.height, true, ReadDisplayBuffer(buffer));
         return;
     }
-    if (const auto interval = frameDumpInterval(); interval != 0) {
-        static std::uint64_t presented = 0;
-        if (presented++ % interval == 0) {
-            ResolveMemory(buffer.address, DisplayBufferSize(buffer), false);
-            writeFrame(buffer, ReadDisplayBuffer(buffer), presented - 1);
-        }
-    }
     present(buffer.width, buffer.height, true, {}, &buffer);
+}
+
+// ANYPS5_DUMP_FRAMES: every Nth flipped display buffer, whether or not the window can show it (a
+// minimized window presents nothing).
+void VulkanDevice::DumpFrame(const DisplayBuffer& buffer) {
+    const auto interval = frameDumpInterval();
+    if (interval == 0) return;
+    static std::uint64_t flipped = 0;
+    if (flipped++ % interval != 0) return;
+    WaitDraws();
+    ResolveMemory(buffer.address, DisplayBufferSize(buffer), false);
+    writeFrame(buffer, ReadDisplayBuffer(buffer), flipped - 1);
 }
 
 void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaque, std::span<const std::byte> pixels, const DisplayBuffer* display) {
@@ -881,6 +889,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
     context.externalMemoryHost = state->externalMemoryHost;
     context.guestGpuMemory = state->guestGpuMemory.get();
+    context.imageMemory = state->imageMemory;
     return context;
 }
 

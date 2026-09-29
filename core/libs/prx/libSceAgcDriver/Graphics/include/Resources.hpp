@@ -2,7 +2,11 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_GRAPHICS_INCLUDE_RESOURCES_HPP
 
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
+#include <cstdint>
+#include <map>
+#include <mutex>
 #include <span>
+#include <vector>
 
 namespace AgcDriver::Graphics {
 
@@ -50,6 +54,41 @@ private:
     VkImage image = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+};
+
+// Device-local memory for images, sub-allocated from large blocks: one allocation per image cost
+// ~1 ms on some drivers, and entering a level creates thousands of textures. Images larger than a
+// quarter block get their own allocation. Blocks hold optimal-tiling images only (no linear
+// resources share them, so bufferImageGranularity does not apply).
+class ImageMemory {
+public:
+    struct Allocation {
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkDeviceSize offset = 0;
+        VkDeviceSize size = 0;
+        std::size_t block = SIZE_MAX;
+    };
+    ImageMemory(VkDevice device, PFN_vkGetDeviceProcAddr deviceProc, const VkPhysicalDeviceMemoryProperties& properties);
+    ~ImageMemory();
+    ImageMemory(const ImageMemory&) = delete;
+    ImageMemory& operator=(const ImageMemory&) = delete;
+    Allocation Allocate(const VkMemoryRequirements& requirements, VkMemoryPropertyFlags flags);
+    void Free(const Allocation& allocation) noexcept;
+
+private:
+    struct Block {
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        std::uint32_t type = 0;
+        VkDeviceSize used = 0;
+        std::map<VkDeviceSize, VkDeviceSize> free;  // offset -> size
+    };
+    static constexpr VkDeviceSize BlockBytes = 64ull * 1024 * 1024;
+    VkDeviceMemory allocate(std::uint32_t type, VkDeviceSize size);
+    VkDevice device;
+    PFN_vkGetDeviceProcAddr deviceProc;
+    VkPhysicalDeviceMemoryProperties properties;
+    std::mutex mutex;
+    std::vector<Block> blocks;
 };
 
 // Frees the command buffers and fences recycled from destroyed command batches of the pool (before
