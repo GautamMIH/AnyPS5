@@ -49,6 +49,23 @@ int APS5_VABI fprintf_nid_postfix(FileStream* stream, const char* format, ...) {
     return result;
 }
 
+int APS5_VABI fscanf_nid_postfix(FileStream* stream, const char* format, ...) {
+    auto* native = GetNativeStream(stream);
+#ifdef _WIN32
+    __builtin_sysv_va_list args;
+    __builtin_sysv_va_start(args, format);
+    const int result = std::vfscanf(native, format, args);
+    __builtin_sysv_va_end(args);
+#else
+    std::va_list args;
+    va_start(args, format);
+    const int result = std::vfscanf(native, format, args);
+    va_end(args);
+#endif
+    stream->SyncStatus();
+    return result;
+}
+
 #ifdef _WIN32
 
 int APS5_VABI printf_nid_postfix(const char* format, ...) {

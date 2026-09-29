@@ -10,6 +10,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/VarArgsAbi.hpp"
+#include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/WindowsFormatting.hpp"
 
 #ifdef _WIN32
@@ -200,6 +201,35 @@ int APS5_VABI wprintf_nid_postfix(const char16_t* format, ...) {
     }
     APS5_VA_END();
     return result;
+}
+
+int APS5_VABI fputwc_nid_postfix(char16_t value, FileStream* stream) {
+    if (stream == nullptr) { errno = 22; return -1; }
+    try {
+        const std::string bytes = ToUtf8(std::u16string(1, value));
+        auto* native = GetNativeStream(stream);
+        if (std::fwrite(bytes.data(), 1, bytes.size(), native) != bytes.size()) throw std::runtime_error("stream write failed");
+        stream->SyncStatus();
+        return value;
+    } catch (const std::exception&) {
+        errno = 22;
+        return -1;
+    }
+}
+
+int APS5_VABI fputws_nid_postfix(const char16_t* str, FileStream* stream) {
+    if (str == nullptr || stream == nullptr) { errno = 22; return -1; }
+    try {
+        const std::u16string text(str);
+        const std::string bytes = ToUtf8(text);
+        auto* native = GetNativeStream(stream);
+        if (std::fwrite(bytes.data(), 1, bytes.size(), native) != bytes.size()) throw std::runtime_error("stream write failed");
+        stream->SyncStatus();
+        return static_cast<int>(text.size());
+    } catch (const std::exception&) {
+        errno = 22;
+        return -1;
+    }
 }
 
 }

@@ -23,6 +23,9 @@ int APS5_VABI vfprintf_nid_postfix(FileStream*, const char*, void*);
 int APS5_VABI vsprintf_nid_postfix(char*, const char*, void*);
 int APS5_VABI fgetc_nid_postfix(FileStream*);
 int APS5_VABI fputc_nid_postfix(int, FileStream*);
+int APS5_VABI fputwc_nid_postfix(char16_t, FileStream*);
+int APS5_VABI fputws_nid_postfix(const char16_t*, FileStream*);
+int APS5_VABI fscanf_nid_postfix(FileStream*, const char*, ...);
 int APS5_VABI __srget_nid_postfix(FileStream*);
 int APS5_VABI __swbuf_nid_postfix(int, FileStream*);
 int APS5_VABI ungetc_nid_postfix(int, FileStream*);
@@ -105,6 +108,15 @@ int main() {
     stream.Close();
     Require(guest.flags == 0 && guest.descriptor == -1);
 
+    FileStream wide(std::tmpfile());
+    Require(fputwc_nid_postfix(u'A', &wide) == u'A');
+    Require(fputws_nid_postfix(u"B\x00E9", &wide) == 2);
+    std::rewind(wide.GetHandle());
+    char wideBytes[8]{};
+    Require(std::fread(wideBytes, 1, 4, wide.GetHandle()) == 4);
+    Require(std::memcmp(wideBytes, "AB\xC3\xA9", 4) == 0);
+    wide.Close();
+
     FileStream formatted(std::tmpfile());
     const char expected[] = "guest 4294967297 1.25 1 2 3 4 5 6 7 8\n";
     Require(fprintf_nid_postfix(&formatted, "%s %ld %.2f %d %d %d %d %d %d %d %d\n",
@@ -117,6 +129,16 @@ int main() {
     Require(fgets_nid_postfix(output, sizeof(output), &formatted) == output);
     Require(std::strcmp(output, "  3.50:end") == 0);
     formatted.Close();
+
+    FileStream scanned(std::tmpfile());
+    Require(fprintf_nid_postfix(&scanned, "%d %s", 42, "answer") == 9);
+    std::rewind(scanned.GetHandle());
+    int scannedNumber = 0;
+    char scannedWord[16]{};
+    Require(fscanf_nid_postfix(&scanned, "%d %15s", &scannedNumber, scannedWord) == 2);
+    Require(scannedNumber == 42 && std::strcmp(scannedWord, "answer") == 0);
+    Require(fscanf_nid_postfix(&scanned, "%d", &scannedNumber) == EOF);
+    scanned.Close();
 
     FileStream positioned(std::tmpfile());
     constexpr std::int64_t largeOffset = INT64_C(4294967313);
