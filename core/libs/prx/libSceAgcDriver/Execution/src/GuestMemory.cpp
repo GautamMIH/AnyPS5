@@ -92,9 +92,7 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "address range overflow");
     PerformanceTimer timing("GuestMemory.CheckRange");
     MemoryAccessScope::Resolve(address, bytes, writable);
-    timing.Mark("resolve_scope");
     GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
-    timing.Mark("resolve_watches");
     auto cursor = address;
     const auto end = address + bytes;
 #ifdef _WIN32
@@ -113,10 +111,7 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     auto& cache = mappingCache();
     const std::lock_guard lock(cache.mutex);
     const auto generation = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
-    if (cache.generation == generation && checkMappings(cache.entries, cursor, end, writable).empty()) {
-        timing.Mark("cached");
-        return;
-    }
+    if (cache.generation == generation && checkMappings(cache.entries, cursor, end, writable).empty()) return;
     loadMappings(cache.entries);
     timing.Mark(cache.generation == generation ? "reload_uncovered" : "reload_changed");
     cache.generation = generation;

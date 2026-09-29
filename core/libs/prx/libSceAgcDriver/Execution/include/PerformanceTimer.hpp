@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_map>
 #include <utility>
 
 namespace AgcDriver {
@@ -31,6 +32,9 @@ public:
 
     explicit FrameTiming(std::uint64_t id) : id(id) {}
 
+    // Scope and stage names are static strings, looked up by address: timers run on hot paths
+    // (hundreds of thousands of times a frame), so a lookup must not compare names. The same name
+    // at two addresses (string literals of different modules) is merged when the frame is printed.
     Metric* Get(const char* scope, const char* stage) {
         std::lock_guard lock(mutex);
         return &metrics[{scope, stage}];
@@ -38,10 +42,12 @@ public:
 
     void Add(Metric* metric, Clock::duration elapsed, std::uint64_t bytes = 0) {
         std::lock_guard lock(mutex);
-        metric->total += elapsed;
-        metric->maximum = std::max(metric->maximum, elapsed);
-        ++metric->count;
-        metric->bytes += bytes;
+        add(*metric, elapsed, bytes);
+    }
+
+    void Add(const char* scope, const char* stage, Clock::duration elapsed, std::uint64_t bytes = 0) {
+        std::lock_guard lock(mutex);
+        add(metrics[{scope, stage}], elapsed, bytes);
     }
 
     void IncludeSubmission(std::uint64_t serial, Clock::time_point received, Clock::time_point enqueued, Clock::time_point dequeued, bool firstSegment) {
@@ -69,6 +75,14 @@ public:
 
     void Print(std::uint32_t outputHandle, std::int32_t buffer, std::int64_t argument, Clock::time_point finished, Clock::duration interval) {
         std::lock_guard lock(mutex);
+        std::map<std::pair<std::string_view, std::string_view>, Metric> merged;
+        for (const auto& [key, metric] : metrics) {
+            auto& target = merged[{key.first, key.second}];
+            target.total += metric.total;
+            target.maximum = std::max(target.maximum, metric.maximum);
+            target.count += metric.count;
+            target.bytes += metric.bytes;
+        }
         if (firstSerial == 0 || flipSerial == 0) throw std::runtime_error("Frame timing: incomplete submission lineage");
         std::ostringstream output;
         output.imbue(std::locale::classic());
@@ -84,13 +98,13 @@ public:
         output << " flip_packet_to_complete_ms=" << milliseconds(finished - flipReached);
         auto accounted = Clock::duration::zero();
         for (const auto scope : {"Driver.Packet", "Driver.Suspend", "Driver.Worker", "Driver.Completion"}) {
-            const auto it = metrics.find({scope, "total"});
-            if (it != metrics.end()) accounted += it->second.total;
+            const auto it = merged.find({scope, "total"});
+            if (it != merged.end()) accounted += it->second.total;
         }
         output << " worker_unattributed_ms=" << milliseconds(flipReached - executionStart - accounted);
         if (interval != Clock::duration::zero()) output << " flip_interval_ms=" << milliseconds(interval);
         output << " metrics=inclusive(count,sum_ms,max_ms[,bytes])";
-        for (const auto& [key, metric] : metrics) {
+        for (const auto& [key, metric] : merged) {
             if (metric.count == 0) continue;
             output << ' ' << key.first << '.' << key.second << "=(" << metric.count << ',' << milliseconds(metric.total) << ',' << milliseconds(metric.maximum);
             if (metric.bytes != 0) output << ',' << metric.bytes;
@@ -102,12 +116,28 @@ public:
     }
 
 private:
+    static void add(Metric& metric, Clock::duration elapsed, std::uint64_t bytes) {
+        metric.total += elapsed;
+        metric.maximum = std::max(metric.maximum, elapsed);
+        ++metric.count;
+        metric.bytes += bytes;
+    }
+
+    struct KeyHash {
+        std::size_t operator()(const std::pair<const char*, const char*>& key) const noexcept {
+            const auto scope = reinterpret_cast<std::uintptr_t>(key.first);
+            const auto stage = reinterpret_cast<std::uintptr_t>(key.second);
+            return static_cast<std::size_t>((scope * 0x9e3779b97f4a7c15ull) ^ (stage + 0x7f4a7c15u + (scope >> 6u)));
+        }
+    };
+
     static double milliseconds(Clock::duration elapsed) {
         return std::chrono::duration<double, std::milli>(elapsed).count();
     }
 
     std::mutex mutex;
-    std::map<std::pair<std::string_view, std::string_view>, Metric> metrics;
+    // Node-based: Metric pointers handed out by Get stay valid as the map grows.
+    std::unordered_map<std::pair<const char*, const char*>, Metric, KeyHash> metrics;
     std::uint64_t id;
     std::uint64_t firstSerial = 0;
     std::uint64_t lastSerial = 0;
@@ -157,15 +187,15 @@ public:
     ~PerformanceTimer() {
         if (frame == nullptr) return;
         const auto end = Clock::now();
-        if (tail != nullptr) frame->Add(tail, end - previous);
+        if (marked) frame->Add(scope, "tail", end - previous);
         frame->Add(total, end - start);
     }
 
     void Mark(const char* stage, std::uint64_t bytes = 0) {
         if (frame == nullptr) return;
         const auto now = Clock::now();
-        if (tail == nullptr) tail = frame->Get(scope, "tail");
-        frame->Add(frame->Get(scope, stage), now - previous, bytes);
+        frame->Add(scope, stage, now - previous, bytes);
+        marked = true;
         previous = now;
     }
 
@@ -175,7 +205,7 @@ private:
     FrameTiming* frame;
     const char* scope;
     FrameTiming::Metric* total = nullptr;
-    FrameTiming::Metric* tail = nullptr;
+    bool marked = false;
     Clock::time_point start;
     Clock::time_point previous;
 };

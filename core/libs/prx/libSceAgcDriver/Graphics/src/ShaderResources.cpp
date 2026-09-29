@@ -335,6 +335,12 @@ void ShaderResources::WriteBack() {
     for (const auto& image : storageImages) image->WriteBack();
 }
 
+void ShaderResources::AppendWrites(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
+    const auto& writes = guestMemory.Writes();
+    ranges.insert(ranges.end(), writes.begin(), writes.end());
+    for (const auto& image : storageImages) ranges.push_back(image->Range());
+}
+
 bool ShaderResources::WritesOverlap(std::uint64_t address, std::size_t bytes) const {
     if (guestMemory.WritesOverlap(address, bytes)) return true;
     for (const auto& image : storageImages) {

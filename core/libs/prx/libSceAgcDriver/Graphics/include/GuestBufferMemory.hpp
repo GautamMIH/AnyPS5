@@ -31,6 +31,7 @@ public:
     std::vector<ShaderRecompiler::BdaAbi::Range> AddressRanges() const;
     void WriteBack();
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;
+    const std::vector<std::pair<std::uint64_t, std::uint64_t>>& Writes() const { return writes; }
 
 private:
     struct Region {

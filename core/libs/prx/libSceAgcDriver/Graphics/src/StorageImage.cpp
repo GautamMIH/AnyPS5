@@ -331,8 +331,13 @@ void StorageImage::WriteBack() {
 }
 
 bool StorageImage::Overlaps(std::uint64_t address, std::size_t bytes) const {
+    const auto [begin, end] = Range();
+    return address < end && begin < address + bytes;
+}
+
+std::pair<std::uint64_t, std::uint64_t> StorageImage::Range() const {
     const auto size = thick ? sliceBytes : sliceBytes * layers;
-    return address < guestBase + size && guestBase < address + bytes;
+    return {guestBase, guestBase + size};
 }
 
 }

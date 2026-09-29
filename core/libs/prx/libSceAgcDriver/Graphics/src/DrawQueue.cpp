@@ -31,9 +31,39 @@ VkCommandBuffer DrawQueue::Begin(const Context& context) {
     return recording.commands->Handle();
 }
 
+void DrawQueue::WriteIndex::Add(std::uint64_t begin, std::uint64_t end) {
+    if (begin >= end) return;
+    ranges.emplace(begin, end);
+    longest = std::max(longest, end - begin);
+}
+
+void DrawQueue::WriteIndex::Remove(std::uint64_t begin, std::uint64_t end) {
+    if (begin >= end) return;
+    auto [first, last] = ranges.equal_range(begin);
+    const auto found = std::find_if(first, last, [&](const auto& range) { return range.second == end; });
+    Require(found != last, "draw queue write index is missing a range");
+    ranges.erase(found);
+    if (ranges.empty()) longest = 0;
+}
+
+bool DrawQueue::WriteIndex::Overlaps(std::uint64_t address, std::size_t bytes) const {
+    if (ranges.empty() || bytes == 0) return false;
+    // Ranges beginning before the end of the query, walking back while one could still reach it.
+    auto it = ranges.lower_bound(address + bytes);
+    while (it != ranges.begin()) {
+        --it;
+        if (it->second > address) return true;
+        if (address - it->first >= longest) return false;
+    }
+    return false;
+}
+
 void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage) {
     Require(recording.commands != nullptr && resources != nullptr && storage != nullptr, "draw batch is incomplete");
-    recording.entries.push_back({std::move(storage), std::move(resources)});
+    Entry entry{std::move(storage), std::move(resources), {}};
+    entry.resources->AppendWrites(entry.writes);
+    for (const auto& [begin, end] : entry.writes) writes.Add(begin, end);
+    recording.entries.push_back(std::move(entry));
     ++drawCount;
     if (recording.entries.size() >= 8) Flush();
 }
@@ -47,8 +77,7 @@ void DrawQueue::Flush() {
 }
 
 void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes) {
-    const auto overlaps = [&](const auto& entry) { return entry.resources->WritesOverlap(address, bytes); };
-    if (!std::any_of(recording.entries.begin(), recording.entries.end(), overlaps) && !std::any_of(pending.begin(), pending.end(), [&](const auto& batch) { return std::any_of(batch.entries.begin(), batch.entries.end(), overlaps); })) return;
+    if (!writes.Overlaps(address, bytes)) return;
     PerformanceTimer timing("Graphics.DrawQueue.Resolve");
     // Queued draws run in submission order on one queue, so a barrier before the accessing draw
     // makes their writes visible to it; only CPU accesses have to wait for them.

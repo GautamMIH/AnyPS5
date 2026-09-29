@@ -100,6 +100,8 @@ public:
 private:
     Context context;
     std::map<std::uint64_t, std::shared_ptr<ResidentColor>> entries;
+    // No color entry is larger (an upper bound), so lookups by address visit nearby entries only.
+    std::uint64_t largestColor = 0;
     std::vector<std::shared_ptr<ResidentDepth>> depthEntries;
 };
 

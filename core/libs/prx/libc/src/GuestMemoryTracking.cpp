@@ -139,7 +139,19 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
 
 void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable) {
     if (bytes == 0) return;
+    const auto end = checkedEnd(address, bytes);
     std::lock_guard lock(registry().mutex);
+    // Checked thousands of times a frame: find whether a watch needs resolving before copying the
+    // overlapping entries (resolving may change the registry).
+    const auto& entries = registry().entries;
+    auto first = entries.upper_bound(address);
+    if (first != entries.begin()) --first;
+    bool needed = false;
+    for (auto it = first; it != entries.end() && it->first < end && !needed; ++it) {
+        const auto& entry = *it->second;
+        needed = it->first + entry.bytes > address && (entry.protection == Protection::None || (writable && entry.protection == Protection::Read));
+    }
+    if (!needed) return;
     for (const auto& entry : overlapping(address, bytes)) {
         if (entry->protection == Protection::None || (writable && entry->protection == Protection::Read)) resolve(entry, writable ? Access::Write : Access::Read);
     }

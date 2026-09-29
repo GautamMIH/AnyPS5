@@ -11,6 +11,9 @@ void DrawQueue::retire(Batch batch) {
     drawCount -= batch.entries.size();
     for (auto& entry : batch.entries) entry.resources->WriteBack();
     timing.Mark("resources_writeback");
+    // Written back: later accesses no longer depend on this batch.
+    for (const auto& entry : batch.entries)
+        for (const auto& [begin, end] : entry.writes) writes.Remove(begin, end);
     batch.entries.clear();
     available.push_back(std::move(batch.commands));
     timing.Mark("resources_release");

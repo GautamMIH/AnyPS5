@@ -116,6 +116,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
     }
     auto entry = std::make_shared<ResidentColor>(context, color);
     entries.emplace(color.address, entry);
+    largestColor = std::max<std::uint64_t>(largestColor, color.bytes);
     return entry;
 }
 
@@ -133,7 +134,12 @@ std::shared_ptr<ResidentDepth> RenderCache::FindDepth(std::uint64_t address) con
 
 void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writable) {
     std::vector<std::shared_ptr<ResidentColor>> affected;
-    for (const auto& [base, entry] : entries) {
+    // Entries beginning before the end of the range and at most largestColor bytes before it.
+    const auto end = entries.lower_bound(address + bytes);
+    auto first = address > largestColor ? entries.lower_bound(address - largestColor) : entries.begin();
+    for (auto it = first; it != end; ++it) {
+        const auto base = it->first;
+        const auto& entry = it->second;
         const auto& color = entry->Description();
         if (address >= base + color.bytes || base >= address + bytes) continue;
         if (entry->Dirty()) affected.push_back(entry);

@@ -31,6 +31,8 @@ public:
     void RecordDownloads(VkCommandBuffer commands) const;
     void WriteBack();
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;
+    // Appends every guest range the work may write, as [begin, end).
+    void AppendWrites(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const;
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
 
 private:

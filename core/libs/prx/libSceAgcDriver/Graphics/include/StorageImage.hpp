@@ -26,6 +26,8 @@ public:
     void RecordDownload(VkCommandBuffer commands);
     void WriteBack();
     bool Overlaps(std::uint64_t address, std::size_t bytes) const;
+    // The guest range the image is written back to: [first, second).
+    std::pair<std::uint64_t, std::uint64_t> Range() const;
 
 private:
     void release() noexcept;
