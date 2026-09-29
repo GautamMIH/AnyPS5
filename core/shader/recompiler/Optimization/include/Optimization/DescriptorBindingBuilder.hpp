@@ -9,10 +9,11 @@ namespace ShaderRecompiler {
 
 class DescriptorBindingBuilder {
 public:
+    // `partialThreads`: ShaderComputeStageInfo::partialThreads (zero outside compute).
     // bufferOffsetAlignment: SpirvTarget::storageBufferOffsetAlignment; each guest buffer's
     // BufferViewMisalignment is written into its shader-data byte offset.
-    void Populate(BindingAllocationResult& allocation, const IrProgram& program, const ResourceSnapshot& snapshot, std::uint32_t bufferOffsetAlignment = 0) const;
-    void Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, std::uint32_t bufferOffsetAlignment = 0) const;
+    void Populate(BindingAllocationResult& allocation, const IrProgram& program, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::uint32_t bufferOffsetAlignment = 0) const;
+    void Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::uint32_t bufferOffsetAlignment = 0) const;
 };
 
 }

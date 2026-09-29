@@ -28,6 +28,8 @@ struct ShaderInfo {
     std::int32_t instanceOffsetSgpr = -1;
     bool hasBitwiseXor = false;
     bool usesDma = false;
+    // The entry reads the partial-group dispatch size (StageInputKind::DispatchThreadLimit).
+    bool dispatchThreadLimit = false;
 
     bool operator==(const ShaderInfo& other) const = default;
 };

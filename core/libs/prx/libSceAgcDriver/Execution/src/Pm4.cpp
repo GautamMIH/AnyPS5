@@ -260,8 +260,9 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             break;
         }
         // Initiator bits accepted besides COMPUTE_SHADER_EN | ORDER_MODE: CS_W32_EN (0x8000) and
-        // TUNNEL_ENABLE (0x2000, a wave launch priority hint with no effect on results).
-        case 0x15: size(5); require((packet[4] & ~0xa000u) == 0x41u, "dispatch modifiers are not implemented"); break;
+        // TUNNEL_ENABLE (0x2000, a wave launch priority hint with no effect on results); direct
+        // dispatches also USE_THREAD_DIMENSIONS (0x20: the packet counts threads, Driver::dispatch).
+        case 0x15: size(5); require((packet[4] & ~0xa020u) == 0x41u, "dispatch modifiers are not implemented"); break;
         case 0x16:
             require(packet.size() == 3 || packet.size() == 4, "invalid indirect dispatch size");
             require((packet.back() & ~0xa000u) == 0x41u, "indirect dispatch modifiers are not implemented");

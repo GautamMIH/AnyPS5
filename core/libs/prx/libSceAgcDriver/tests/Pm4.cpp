@@ -123,6 +123,8 @@ void testContextAndBases() {
     check(AgcDriver::Pm4::ResolveDispatch(packet, state)[3] == 9, "absolute indirect dispatch arguments changed");
     AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x2041}), 0);
     AgcDriver::Pm4::Validate(makePacket(0x16, {0, 0xa041}), 0);
+    AgcDriver::Pm4::Validate(makePacket(0x15, {100, 1, 1, 0x8061}), 0);
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x16, {0, 0x0061}), 0); }, "indirect dispatch modifiers");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x4041}), 0); }, "dispatch modifiers");
     execute(state, makePacket(0x13, {32}));
     execute(state, makePacket(0x26, {0x1000, 1}));

@@ -556,7 +556,19 @@ private:
         for (std::uint32_t i = 0; i < userCount; ++i) {
             userData.push_back(readRegister(queue.shader, 0x240 + i));
         }
-        const auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
+        auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
+        // USE_THREAD_DIMENSIONS (direct dispatches only, Pm4::Validate): the packet counts threads.
+        // The host launches whole groups; a size that is no whole number of groups compiles the
+        // partial-group variant, which retires the threads past it.
+        std::array<std::uint32_t, 3> groups{packet[1], packet[2], packet[3]};
+        if ((packet[4] & 0x20u) != 0) {
+            const std::array<std::uint32_t, 3> threads{packet[1], packet[2], packet[3]};
+            for (std::uint32_t axis = 0; axis < 3; ++axis) {
+                const auto size = std::max(compute.numThreads[axis], 1u);
+                if (threads[axis] % size != 0) compute.partialThreads = threads;
+                groups[axis] = (threads[axis] + size - 1) / size;
+            }
+        }
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
         if (device == nullptr) {
             device = std::make_shared<VulkanDevice>();
@@ -593,7 +605,7 @@ private:
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
         timing.Mark("snapshots");
-        device->Dispatch(compiled, packet[1], packet[2], packet[3], snapshots);
+        device->Dispatch(compiled, groups[0], groups[1], groups[2], snapshots);
         timing.Mark("dispatch_and_resource_release");
         // A shader that stores to a buffer starting at a registered CMASK without XOR address
         // math is taken to clear it (shadPS4). The dispatch itself still runs.

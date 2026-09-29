@@ -1,6 +1,7 @@
 #include "Optimization/DescriptorBindingBuilder.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include <spirv/unified1/spirv.hpp>
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -178,7 +179,7 @@ std::vector<std::uint32_t> GuestSamplersDescriptor(const std::vector<std::uint32
     return result;
 }
 
-std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, std::uint32_t userDataBase, const ResourceSnapshot& snapshot) {
+std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads) {
     std::vector<std::uint32_t> result(layout.ShaderDataDwords(), 0u);
     for (std::size_t i = 0; i < layout.userDataRegisters.size(); i++) {
         const std::uint32_t reg = layout.userDataRegisters[i];
@@ -187,18 +188,24 @@ std::vector<std::uint32_t> ShaderDataDwordsFor(const IrBindingLayout& layout, st
         }
         result[i] = snapshot.userData[reg - userDataBase];
     }
+    if (layout.dispatchThreadLimit) {
+        if (partialThreads == std::array<std::uint32_t, 3>{}) {
+            fail("DescriptorBindingBuilder::Populate partial-group shader has no dispatch size");
+        }
+        std::copy(partialThreads.begin(), partialThreads.end(), result.begin() + layout.DispatchThreadLimitDword());
+    }
     return result;
 }
 
 }
 
-void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const IrProgram& program, const ResourceSnapshot& snapshot, std::uint32_t bufferOffsetAlignment) const {
-    Populate(allocation, program.Info(), program.Resources().stage, program.Resources().userDataBase, snapshot, bufferOffsetAlignment);
+void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const IrProgram& program, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::uint32_t bufferOffsetAlignment) const {
+    Populate(allocation, program.Info(), program.Resources().stage, program.Resources().userDataBase, snapshot, partialThreads, bufferOffsetAlignment);
 }
 
-void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, std::uint32_t bufferOffsetAlignment) const {
+void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::uint32_t bufferOffsetAlignment) const {
     const IrBindingLayout& layout = allocation.layout;
-    std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, userDataBase, snapshot);
+    std::vector<std::uint32_t> shaderData = ShaderDataDwordsFor(layout, userDataBase, snapshot, partialThreads);
     // Byte offsets of guest buffers bound below their base (the backend reads one byte per buffer,
     // in resource order, from shader data dword memoryOffsetDword on).
     for (const IrDescriptorBinding& logical : layout.descriptors) {
