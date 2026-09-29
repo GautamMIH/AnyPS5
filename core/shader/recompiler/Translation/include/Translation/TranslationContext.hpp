@@ -185,6 +185,7 @@ private:
     bool vBfeU32(const RdnaInstruction& inst, bool sign);
     bool vBfiB32(const RdnaInstruction& inst);
     bool sBitcmpB32(const RdnaInstruction& inst, bool expected);
+    bool sBitcmpB64(const RdnaInstruction& inst, bool expected);
     bool vAlignbitB32(const RdnaInstruction& inst);
     bool vAlignbyteB32(const RdnaInstruction& inst);
     bool vLshlAddU32(const RdnaInstruction& inst);

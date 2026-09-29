@@ -484,6 +484,15 @@ bool TranslationContext::sBitcmpB32(const RdnaInstruction& inst, bool expected) 
     return true;
 }
 
+bool TranslationContext::sBitcmpB64(const RdnaInstruction& inst, bool expected) {
+    const IrU64 value = readU64(sourceAt(inst, 0u));
+    const IrU32 offset(ir.BitwiseAnd(readU32(sourceAt(inst, 1u)).Value(), ir.Constant(63u)));
+    const IrU64 shifted(ir.Emit(IrOpcode::ShiftRightLogical64, IrType::U64, {&value.Value(), &offset.Value()}));
+    const IrU64 bit(ir.Emit(IrOpcode::BitwiseAnd64, IrType::U64, {&shifted.Value(), &ir.ConstantU64(1u)}));
+    writeCompareResult(inst.destination, IrU1(ir.Emit(IrOpcode::IEqual64, IrType::U1, {&bit.Value(), &ir.ConstantU64(expected ? 1u : 0u)})));
+    return true;
+}
+
 bool TranslationContext::vAlignbitB32(const RdnaInstruction& inst) {
     const IrU32 hi = readU32(sourceAt(inst, 0u));
     const IrU32 lo = readU32(sourceAt(inst, 1u));

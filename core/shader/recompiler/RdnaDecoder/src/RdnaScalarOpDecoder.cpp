@@ -123,6 +123,8 @@ RdnaOpcode decodeSopcOpcode(std::uint32_t opcode) {
         case 0x0bu: return RdnaOpcode::SCmpLeU32;
         case 0x0cu: return RdnaOpcode::SBitcmp0B32;
         case 0x0du: return RdnaOpcode::SBitcmp1B32;
+        case 0x0eu: return RdnaOpcode::SBitcmp0B64;
+        case 0x0fu: return RdnaOpcode::SBitcmp1B64;
         case 0x12u: return RdnaOpcode::SCmpEqU64;
         case 0x13u: return RdnaOpcode::SCmpLgU64;
         default: throw std::invalid_argument("unsupported SOPC opcode " + std::to_string(opcode));

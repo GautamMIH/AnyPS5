@@ -153,6 +153,8 @@ enum class RdnaOpcode : std::uint16_t {
     SSubbU32,
     SBitcmp0B32,
     SBitcmp1B32,
+    SBitcmp0B64,
+    SBitcmp1B64,
     SBitset0B32,
     SBitset1B32,
     SBitset0B64,

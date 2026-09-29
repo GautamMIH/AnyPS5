@@ -72,6 +72,8 @@ bool IsScalarAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::SSubbU32:
         case RdnaOpcode::SBitcmp0B32:
         case RdnaOpcode::SBitcmp1B32:
+        case RdnaOpcode::SBitcmp0B64:
+        case RdnaOpcode::SBitcmp1B64:
         case RdnaOpcode::SBitset0B32:
         case RdnaOpcode::SBitset1B32:
         case RdnaOpcode::SBitset0B64:

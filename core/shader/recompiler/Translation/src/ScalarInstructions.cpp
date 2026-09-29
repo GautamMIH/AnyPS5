@@ -290,6 +290,10 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         return sBitcmpB32(inst, false);
     case RdnaOpcode::SBitcmp1B32:
         return sBitcmpB32(inst, true);
+    case RdnaOpcode::SBitcmp0B64:
+        return sBitcmpB64(inst, false);
+    case RdnaOpcode::SBitcmp1B64:
+        return sBitcmpB64(inst, true);
     case RdnaOpcode::SPackLlB32B16:
         return packB16(inst, false, false);
     case RdnaOpcode::SPackLhB32B16:
