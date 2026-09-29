@@ -57,6 +57,7 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
     const auto handles = reserve(libraries.size() * 8);
     const auto guestFinished = reserve(4);
     const WindowsGuestStartup guestStartup;
+    Io::AlignBuffer(data, 4);
     const auto functionTable = reserve(12 * 32);
     const auto unwindRva = CheckedRva(dataRva + data.size());
     data.insert(data.end(), {1, 10, 6, 0, 10, 0xb2, 6, 0xc0, 4, 0x70, 3, 0x60, 2, 0x50, 1, 0x30});
