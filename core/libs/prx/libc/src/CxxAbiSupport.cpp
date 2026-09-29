@@ -29,6 +29,10 @@ int APS5_VABI __cxa_thread_atexit_impl_nid_postfix(void (*func)(void*), void* ar
     return __cxxabiv1::__cxa_thread_atexit(func, arg, dso);
 }
 
+int APS5_VABI LibcInternalExtCxaThreadAtexit_nid_postfix(void (*destructor)(void*), void* object, void* module_id) {
+    return __cxa_thread_atexit_impl_nid_postfix(destructor, object, module_id);
+}
+
 const std::error_category* _ZSt17iostream_categoryv_nid_postfix() { return &std::iostream_category(); }
 
 }

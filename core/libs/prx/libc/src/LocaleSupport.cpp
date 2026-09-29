@@ -17,6 +17,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/GuestLocale.hpp"
+#include "SceTypes.hpp"
 
 namespace {
 
@@ -284,6 +285,11 @@ void APS5_VABI _ZNSt6locale7_Locimp7_AddfacEPNS_5facetEm_nid_postfix(GuestLocale
 
 void APS5_VABI _init_env_nid_postfix() {
     ApplicationHeapInitialize_nid_no_patch(ApplicationProcessParameters_nid_no_patch());
+}
+
+void APS5_VABI init_env_nid_postfix(const InitEnvParams* params) {
+    (void)params;
+    _init_env_nid_postfix();
 }
 
 }
