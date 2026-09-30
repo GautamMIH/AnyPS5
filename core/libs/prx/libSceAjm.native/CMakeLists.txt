@@ -27,5 +27,8 @@ target_include_directories(libSceAjm.native PRIVATE
         ${LIBS_INCLUDE_DIR}
         ${LIBATRAC9_DIR}
 )
-target_link_libraries(libSceAjm.native PRIVATE atrac9 libc libkernel)
+# MP3 decodes with the system's FFmpeg (libavcodec); upstream builds Kyty's prebuilt ffmpeg-core.
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(AJM_FFMPEG REQUIRED IMPORTED_TARGET libavcodec libavutil)
+target_link_libraries(libSceAjm.native PRIVATE atrac9 PkgConfig::AJM_FFMPEG libc libkernel)
 configure_windows_unwind(libSceAjm.native)
