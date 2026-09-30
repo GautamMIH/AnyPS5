@@ -119,12 +119,11 @@ int APS5_VABI sceKernelMemoryPoolGetBlockStats(KernelMemoryPoolBlockStats* outpu
 }
 
 int APS5_VABI sceKernelMemoryPoolReserve(void* addr_in, size_t len, size_t alignment, int flags, void** addr_out) {
- (void)addr_in;
- (void)flags;
  if (!addr_out || len == 0 || !PageAligned(len) || (alignment != 0 && !PageAligned(alignment))) {
   return SCE_KERNEL_ERROR_EINVAL;
  }
- return Guarded([&] { return DoReserveVirtual(addr_out, len, 0, alignment); });
+ *addr_out = addr_in;
+ return Guarded([&] { return DoReserveVirtual(addr_out, len, flags, alignment); });
 }
 
 }

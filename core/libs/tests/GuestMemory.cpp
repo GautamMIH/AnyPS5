@@ -24,6 +24,7 @@ int APS5_VABI sceKernelReleaseDirectMemory(std::int64_t, std::size_t);
 int APS5_VABI sceKernelMunmap(std::uint64_t, std::size_t);
 int APS5_VABI sceKernelMprotect(const void*, std::size_t, int);
 int APS5_VABI sceKernelVirtualQuery(const void*, int, VirtualQueryInfo*, std::uint64_t);
+int APS5_VABI sceKernelMemoryPoolReserve(void*, std::size_t, std::size_t, int, void**);
 }
 
 static void RequireAt(bool condition, int line) {
@@ -83,6 +84,22 @@ static void CheckSingleViews() {
     Require(sceKernelReleaseDirectMemory(physical, length) == 0);
 }
 
+static void CheckFixedVirtualReservation() {
+    constexpr std::size_t page = 0x4000;
+    void* probe = nullptr;
+    Require(sceKernelReserveVirtualRange(&probe, page * 4, 0, 0) == 0);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(probe), page * 4) == 0);
+    void* const requested = static_cast<unsigned char*>(probe) + page;
+    void* fixed = requested;
+    Require(sceKernelReserveVirtualRange(&fixed, page * 2, 0x400010, 0) == 0);
+    Require(fixed == requested);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(fixed), page * 2) == 0);
+    void* pooled = nullptr;
+    Require(sceKernelMemoryPoolReserve(requested, page * 2, 0, 0x10, &pooled) == 0);
+    Require(pooled == requested);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(pooled), page * 2) == 0);
+}
+
 static void CheckAccessibleRanges() {
     constexpr std::size_t length = 0x10000;
     void* mapping = nullptr;
@@ -102,6 +119,7 @@ int main() {
     CheckNamedAndHintedMappings();
     CheckSingleViews();
     CheckAccessibleRanges();
+    CheckFixedVirtualReservation();
     constexpr std::size_t page = 0x4000;
     const auto failed = reinterpret_cast<void*>(static_cast<std::uintptr_t>(-1));
     const auto reject = [&](std::size_t length, int protection, int flags, int fd,
