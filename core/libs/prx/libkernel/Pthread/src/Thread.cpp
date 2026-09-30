@@ -352,3 +352,12 @@ int APS5_VABI scePthreadSetprio(Pthread thread, int prio) {
 }
 
 }
+
+extern "C" {
+
+// Runs the C++ destructors registered for the module (upstream c6d098d).
+void APS5_VABI __pthread_cxa_finalize_nid_postfix(void* argument) {
+    CxaFinalize_nid_no_patch(argument);
+}
+
+}
