@@ -54,8 +54,6 @@ Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchMovnts(const DecodedInstructio
 
 Amd64OnlyMatch Amd64OnlyInstructionMatcher::_matchSse4a(const DecodedInstruction& instr, const Entry& entry, const Entry& registerFormEntry, std::span<const std::uint8_t> trailing) const {
     const auto operands = DecodeSse4a(instr.Data, instr.Length);
-    if (operands.RegisterForm && operands.Insertq)
-        return _unsupported(registerFormEntry, instr.Length);
     if (!operands.RegisterForm && trailing.empty()) {
         if (auto inPlace = _lowering.LowerInPlace(operands, instr.Length))
             return Amd64OnlyMatch{entry.Name, instr.Length, Amd64OnlyLowering::InPlace, std::move(*inPlace), {}, 0};
@@ -76,10 +74,7 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::MatchSequence(
         const DecodedInstruction instr{instruction.data(), instruction.size()};
         if (!instr.IsExtrq() && !instr.IsInsertq())
             return std::nullopt;
-        const auto operands = DecodeSse4a(instr.Data, instr.Length);
-        if (operands.RegisterForm && operands.Insertq)
-            return std::nullopt;
-        sequence.push_back(operands);
+        sequence.push_back(DecodeSse4a(instr.Data, instr.Length));
     }
     const auto& first = sequence.front();
     const auto& name = first.RegisterForm ? (first.Insertq ? kInsertqRegisterForm.Name : kExtrqRegisterForm.Name) : (first.Insertq ? kInsertq.Name : kExtrq.Name);

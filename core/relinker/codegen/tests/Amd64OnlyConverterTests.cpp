@@ -145,7 +145,7 @@ void matcherSubstitutions() {
     const auto registerForm = match({0x66, 0x0F, 0x79, 0xCA});
     require(registerForm && registerForm->Lowering == Codegen::Amd64OnlyLowering::Trampoline && registerForm->InstructionName == "EXTRQ register form", "EXTRQ register form was not lowered through a stub");
     const auto insertqRegisterForm = match({0xF2, 0x0F, 0x79, 0xCA});
-    require(insertqRegisterForm && insertqRegisterForm->Lowering == Codegen::Amd64OnlyLowering::Unsupported, "INSERTQ register form was not reported as unsupported");
+    require(insertqRegisterForm && insertqRegisterForm->Lowering == Codegen::Amd64OnlyLowering::Trampoline && insertqRegisterForm->InstructionName == "INSERTQ register form", "INSERTQ register form was not lowered through a stub");
     require(!match({0x66, 0x0F, 0x2B, 0x07}) && !match({0x0F, 0x2B, 0x07}) && !match({0x48, 0x8B, 0x05, 0, 0, 0, 0}), "Ordinary instruction was matched");
     const auto stub = match(kInsertqHighSite);
     require(stub && stub->Lowering == Codegen::Amd64OnlyLowering::Trampoline && stub->StubBody == kInsertqHighBody && stub->ReturnBranchOffset == 15 && stub->InstructionName == "INSERTQ", "INSERTQ was not lowered through a stub");
@@ -182,7 +182,8 @@ void goldenBodies() {
     const auto generic = lowering.LowerOutOfLine(Codegen::Sse4aOperands{true, false, 9, 4, 5, 3});
     require(generic.Bytes[0] == 0x48 && generic.Bytes.size() % 16 == 0 && generic.ReturnBranchOffset < generic.Bytes.size(), "Generic INSERTQ body does not start with the red-zone skip");
     (void)highRegisters;
-    requireFailure([&] { (void)lowering.LowerOutOfLine(Codegen::Sse4aOperands{true, true, 1, 2, 0, 0}); }, "Register form was lowered out of line");
+    const auto insertqRegisterForm = lowering.LowerOutOfLine(Codegen::Sse4aOperands{true, true, 1, 2, 0, 0});
+    require(insertqRegisterForm.Bytes[0] == 0x48 && insertqRegisterForm.Bytes.size() % 16 == 0 && insertqRegisterForm.ReturnBranchOffset < insertqRegisterForm.Bytes.size(), "INSERTQ register form body does not start with the red-zone skip");
 }
 
 Bytes segmentFixture() {
@@ -347,10 +348,17 @@ std::uint64_t extrqReference(std::uint64_t value, std::uint64_t control) {
     return length == 0 ? shifted : shifted & ((std::uint64_t{1} << length) - 1);
 }
 
-std::uint64_t runExtrqStub(const Bytes& site, std::uint64_t destination, std::uint64_t control) {
+std::uint64_t insertqReference(std::uint64_t destination, std::uint64_t value, std::uint64_t control) {
+    const auto length = static_cast<unsigned>(control & 0x3f);
+    const auto index = static_cast<unsigned>((control >> 8) & 0x3f);
+    const auto mask = length == 0 ? ~std::uint64_t{0} : ((std::uint64_t{1} << length) - 1);
+    return (destination & ~(mask << index)) | ((value & mask) << index);
+}
+
+std::uint64_t runRegisterFormStub(const Bytes& site, const std::uint64_t (&destination)[2], const std::uint64_t (&source)[2]) {
     const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
     const auto match = matcher->Match(site.data(), site.size());
-    require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "EXTRQ register form stub was not produced");
+    require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "Register form stub was not produced");
     auto body = match->StubBody;
     const auto ret = body.size();
     body.push_back(0xC3);
@@ -359,12 +367,11 @@ std::uint64_t runExtrqStub(const Bytes& site, std::uint64_t destination, std::ui
     void* code = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     require(code != MAP_FAILED, "cannot map executable memory for the stub");
     std::memcpy(code, body.data(), body.size());
-    alignas(16) std::uint64_t destinationIn[2] = {destination, 0x1122334455667788ull};
-    alignas(16) std::uint64_t controlIn[2] = {control, 0};
+    alignas(16) std::uint64_t destinationIn[2] = {destination[0], destination[1]};
+    alignas(16) std::uint64_t sourceIn[2] = {source[0], source[1]};
     alignas(16) std::uint64_t out[2] = {};
     alignas(16) std::uint64_t scratchIn[2] = {0x0123456789abcdefull, 0xfedcba9876543210ull};
     alignas(16) std::uint64_t scratchOut[2] = {};
-    const bool same = site[3] == 0xD2;
     asm volatile(
         "movdqu (%[scratch]), %%xmm0\n\t"
         "movdqu (%[dst]), %%xmm2\n\t"
@@ -375,21 +382,27 @@ std::uint64_t runExtrqStub(const Bytes& site, std::uint64_t destination, std::ui
         "movdqu %%xmm2, (%[out])\n\t"
         "movdqu %%xmm0, (%[scratchOut])\n\t"
         :
-        : [scratch] "r"(scratchIn), [dst] "r"(same ? controlIn : destinationIn), [ctl] "r"(controlIn), [code] "r"(code), [out] "r"(out), [scratchOut] "r"(scratchOut)
+        : [scratch] "r"(scratchIn), [dst] "r"(destinationIn), [ctl] "r"(sourceIn), [code] "r"(code), [out] "r"(out), [scratchOut] "r"(scratchOut)
         : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc");
     munmap(code, 4096);
-    require(scratchOut[0] == scratchIn[0] && scratchOut[1] == scratchIn[1], "EXTRQ stub clobbered a scratch register");
+    require(scratchOut[0] == scratchIn[0] && scratchOut[1] == scratchIn[1], "Register form stub clobbered a scratch register");
     return out[0];
 }
 
 void registerFormExecution() {
-    const Bytes distinct = {0x66, 0x0F, 0x79, 0xD5};
-    const Bytes same = {0x66, 0x0F, 0x79, 0xD2};
+    const Bytes extrqDistinct = {0x66, 0x0F, 0x79, 0xD5};
+    const Bytes extrqSame = {0x66, 0x0F, 0x79, 0xD2};
+    const Bytes insertqDistinct = {0xF2, 0x0F, 0x79, 0xD5};
+    const Bytes insertqSame = {0xF2, 0x0F, 0x79, 0xD2};
     const std::uint64_t value = 0x9e3779b97f4a7c15ull;
-    for (const auto [length, index] : {std::pair{8u, 4u}, {0u, 0u}, {40u, 20u}, {63u, 1u}, {1u, 63u}, {16u, 48u}}) {
+    const std::uint64_t destination = 0x0f1e2d3c4b5a6978ull;
+    for (const auto [length, index] : {std::pair{8u, 4u}, {0u, 0u}, {40u, 20u}, {63u, 1u}, {1u, 63u}, {16u, 48u}, {1u, 0u}, {32u, 32u}}) {
         const auto control = static_cast<std::uint64_t>(length) | (static_cast<std::uint64_t>(index) << 8) | 0xffffc000ull;
-        require(runExtrqStub(distinct, value, control) == extrqReference(value, control), "EXTRQ register form stub computed the wrong field");
-        require(runExtrqStub(same, control, control) == extrqReference(control, control), "EXTRQ register form stub with equal operands computed the wrong field");
+        require(runRegisterFormStub(extrqDistinct, {value, 0x1122334455667788ull}, {control, 0}) == extrqReference(value, control), "EXTRQ register form stub computed the wrong field");
+        require(runRegisterFormStub(extrqSame, {control, 0}, {control, 0}) == extrqReference(control, control), "EXTRQ register form stub with equal operands computed the wrong field");
+        const auto insertqControl = control | 0xC0ull;
+        require(runRegisterFormStub(insertqDistinct, {destination, 0x1122334455667788ull}, {value, insertqControl}) == insertqReference(destination, value, insertqControl), "INSERTQ register form stub computed the wrong field");
+        require(runRegisterFormStub(insertqSame, {value, insertqControl}, {value, insertqControl}) == insertqReference(value, value, insertqControl), "INSERTQ register form stub with equal operands computed the wrong field");
     }
 }
 #else

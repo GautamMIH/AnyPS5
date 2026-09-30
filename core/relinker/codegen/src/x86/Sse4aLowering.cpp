@@ -24,6 +24,7 @@ constexpr std::uint8_t kModRmRip = 0x05;
 constexpr std::uint8_t kModRmRspBase = 0x04;
 constexpr std::uint8_t kSibRsp = 0x24;
 constexpr std::uint8_t kShiftRight = 2;
+constexpr std::uint8_t kShiftRightBytes = 3;
 constexpr std::uint8_t kShiftLeft = 6;
 constexpr std::uint8_t kFieldBits = 64;
 
@@ -125,10 +126,52 @@ private:
     std::vector<Constant> _constants;
 };
 
+void _emitInsertqRegisterForm(BodyBuilder& body, const Sse4aOperands& operands) {
+    const auto dst = operands.Destination;
+    const auto src = operands.Source;
+    std::array<std::uint8_t, 3> scratch{};
+    for (std::uint8_t reg = 0, found = 0; found < scratch.size(); ++reg)
+        if (reg != dst && reg != src) scratch[found++] = reg;
+    const auto control = scratch[0];
+    const auto index = scratch[1];
+    const auto hole = scratch[2];
+    Constant fieldMask{};
+    fieldMask[0] = kFieldBits - 1;
+    Constant one{};
+    one[0] = 1;
+    body.Spill(control);
+    body.Spill(index);
+    body.Spill(hole);
+    body.Sse(kPrefixPacked, {0x0F, 0x6F}, control, src);
+    body.ShiftImm(kShiftRightBytes, control, 8);
+    body.Sse(kPrefixPacked, {0x0F, 0x6F}, index, control);
+    body.ShiftImm(kShiftRight, index, 8);
+    body.RipOperand({0x0F, 0xDB}, index, fieldMask);
+    body.RipOperand({0x0F, 0xDB}, control, fieldMask);
+    body.RipOperand({0x0F, 0xEF}, control, fieldMask);
+    body.RipOperand({0x0F, 0xD4}, control, one);
+    body.RipOperand({0x0F, 0xDB}, control, fieldMask);
+    body.Sse(kPrefixPacked, {0x0F, 0x76}, hole, hole);
+    body.Sse(kPrefixScalar, {0x0F, 0x7E}, hole, hole);
+    body.Sse(kPrefixPacked, {0x0F, 0xD3}, hole, control);
+    body.Sse(kPrefixPacked, {0x0F, 0xF3}, hole, index);
+    body.Sse(kPrefixPacked, {0x0F, 0x6F}, control, src);
+    body.Sse(kPrefixPacked, {0x0F, 0xF3}, control, index);
+    body.Sse(kPrefixPacked, {0x0F, 0xEF}, control, dst);
+    body.Sse(kPrefixPacked, {0x0F, 0xDB}, control, hole);
+    body.Sse(kPrefixPacked, {0x0F, 0xEF}, dst, control);
+    body.Sse(kPrefixScalar, {0x0F, 0x7E}, dst, dst);
+    body.Restore(hole);
+    body.Restore(index);
+    body.Restore(control);
+}
+
 void _emitOutOfLine(BodyBuilder& body, const Sse4aOperands& operands) {
     if (operands.RegisterForm) {
-        if (operands.Insertq)
-            throw CodegenException("INSERTQ register form has no Intel lowering");
+        if (operands.Insertq) {
+            _emitInsertqRegisterForm(body, operands);
+            return;
+        }
         const auto dst = operands.Destination;
         const auto src = operands.Source;
         std::array<std::uint8_t, 2> scratch{};

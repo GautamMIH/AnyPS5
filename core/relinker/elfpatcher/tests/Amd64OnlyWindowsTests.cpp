@@ -166,6 +166,7 @@ std::uint64_t libcReferenceLow(const Codegen::Sse4aOperands& operands, const Sta
     }
     sse4a::Instruction instruction;
     instruction.op = operands.Insertq ? sse4a::Op::Insertq : sse4a::Op::Extrq;
+    instruction.registerForm = operands.RegisterForm;
     instruction.destination = operands.Destination;
     instruction.source = operands.Source;
     instruction.length = static_cast<std::uint8_t>(operands.Length == 64 ? 0 : operands.Length);
@@ -174,34 +175,37 @@ std::uint64_t libcReferenceLow(const Codegen::Sse4aOperands& operands, const Sta
     return static_cast<std::uint64_t>(context.FltSave.XmmRegisters[operands.Destination].Low);
 }
 
-Bytes encode(const bool insertq, const std::uint8_t dst, const std::uint8_t src, const std::uint8_t length, const std::uint8_t index) {
-    Bytes bytes = {static_cast<std::uint8_t>(insertq ? 0xF2 : 0x66)};
-    const std::uint8_t reg = insertq ? dst : 0;
-    const std::uint8_t rm = insertq ? src : dst;
-    const auto rex = static_cast<std::uint8_t>(0x40 | (reg >= 8 ? 4 : 0) | (rm >= 8 ? 1 : 0));
-    if (rex != 0x40) bytes.push_back(rex);
-    bytes.insert(bytes.end(), {0x0F, 0x78, static_cast<std::uint8_t>(0xC0 | ((reg & 7) << 3) | (rm & 7)), static_cast<std::uint8_t>(length == 64 ? 0 : length), index});
-    return bytes;
-}
-
 struct Case {
     bool Insertq;
     std::uint8_t Destination;
     std::uint8_t Source;
     std::uint8_t Length;
     std::uint8_t Index;
+    bool RegisterForm = false;
 };
 
+Bytes encode(const Case& item) {
+    Bytes bytes = {static_cast<std::uint8_t>(item.Insertq ? 0xF2 : 0x66)};
+    const std::uint8_t reg = item.Insertq || item.RegisterForm ? item.Destination : 0;
+    const std::uint8_t rm = item.Insertq || item.RegisterForm ? item.Source : item.Destination;
+    const auto rex = static_cast<std::uint8_t>(0x40 | (reg >= 8 ? 4 : 0) | (rm >= 8 ? 1 : 0));
+    if (rex != 0x40) bytes.push_back(rex);
+    bytes.insert(bytes.end(), {0x0F, static_cast<std::uint8_t>(item.RegisterForm ? 0x79 : 0x78), static_cast<std::uint8_t>(0xC0 | ((reg & 7) << 3) | (rm & 7))});
+    if (!item.RegisterForm) bytes.insert(bytes.end(), {static_cast<std::uint8_t>(item.Length == 64 ? 0 : item.Length), item.Index});
+    return bytes;
+}
+
 std::string describe(const Case& item) {
-    return std::string(item.Insertq ? "insertq xmm" : "extrq xmm") + std::to_string(item.Destination) + (item.Insertq ? ", xmm" + std::to_string(item.Source) : "") + ", " + std::to_string(item.Length) + ", " + std::to_string(item.Index);
+    const bool source = item.Insertq || item.RegisterForm;
+    return std::string(item.Insertq ? "insertq xmm" : "extrq xmm") + std::to_string(item.Destination) + (source ? ", xmm" + std::to_string(item.Source) : "") + (item.RegisterForm ? " (register form)" : "") + ", " + std::to_string(item.Length) + ", " + std::to_string(item.Index);
 }
 
 std::size_t g_executions = 0;
 
 void executeCase(const Harness& harness, const Codegen::IAmd64OnlyInstructionMatcher& matcher, const Case& item, std::mt19937_64& random, const int images) {
-    const auto site = encode(item.Insertq, item.Destination, item.Source, item.Length, item.Index);
+    const auto site = encode(item);
     const auto match = matcher.Match(site.data(), site.size());
-    require(match.has_value() && match->Lowering != Codegen::Amd64OnlyLowering::Unsupported, "Immediate-form SSE4a instruction was not lowered: " + describe(item));
+    require(match.has_value() && match->Lowering != Codegen::Amd64OnlyLowering::Unsupported, "SSE4a instruction was not lowered: " + describe(item));
     Bytes body;
     std::size_t returnBranchOffset = 0;
     if (match->Lowering == Codegen::Amd64OnlyLowering::InPlace) {
@@ -215,15 +219,26 @@ void executeCase(const Harness& harness, const Codegen::IAmd64OnlyInstructionMat
         require(body.size() % 16 == 0 || body.size() == returnBranchOffset + 5, "Stub body with constants is not padded to 16 bytes: " + describe(item));
     }
     const auto operands = Codegen::DecodeSse4a(site.data(), site.size());
+    auto field = operands;
+    if (operands.RegisterForm) {
+        field.Length = item.Length;
+        field.Index = item.Index;
+    }
+    const std::size_t controlOffset = operands.Insertq ? 8 : 0;
     const std::array<std::uint64_t, 4> flags = {0x202, 0x203, 0x246, 0xAC7};
     for (int image = 0; image < images; ++image) {
         State input{};
         for (auto& lane : input.Xmm) for (auto& byte : lane) byte = static_cast<std::uint8_t>(random());
+        if (operands.RegisterForm) {
+            auto& control = input.Xmm[operands.Source];
+            control[controlOffset] = static_cast<std::uint8_t>((control[controlOffset] & 0xC0) | (item.Length == 64 ? 0 : item.Length));
+            control[controlOffset + 1] = static_cast<std::uint8_t>((control[controlOffset + 1] & 0xC0) | item.Index);
+        }
         input.FlagsIn = flags[static_cast<std::size_t>(image) % flags.size()];
         State state = input;
         harness.Run(body, returnBranchOffset, state);
         ++g_executions;
-        const auto expected = referenceLow(operands, input);
+        const auto expected = referenceLow(field, input);
         require(expected == libcReferenceLow(operands, input), "Transcribed reference disagrees with the libc emulation: " + describe(item));
         require(low(state.Xmm[operands.Destination]) == expected, "Lowered sequence computed the wrong field: " + describe(item));
         for (unsigned reg = 0; reg < 16; ++reg) {
@@ -251,6 +266,8 @@ void cpuExecution() {
         for (std::uint8_t index = 0; index + length <= 64; ++index) {
             for (const auto& [dst, src] : pairs) executeCase(harness, *matcher, {true, dst, src, length, index}, random, 2);
             for (const std::uint8_t dst : std::array<std::uint8_t, 4>{0, 3, 9, 15}) executeCase(harness, *matcher, {false, dst, dst, length, index}, random, 2);
+            const auto& [dst, src] = pairs[(length * 65u + index) % pairs.size()];
+            executeCase(harness, *matcher, {true, dst, src, length, index, true}, random, 2);
         }
     }
 }
