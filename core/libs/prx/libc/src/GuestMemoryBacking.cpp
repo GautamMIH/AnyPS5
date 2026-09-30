@@ -170,6 +170,55 @@ Status unmapRange(std::uint64_t address, std::size_t bytes, bool heap) {
     return Status::Ok;
 }
 
+// A direct view: physical bytes [first, last) shown at guest address `address`.
+struct DirectView {
+    std::uint64_t first;
+    std::uint64_t last;
+    std::uint64_t address;
+};
+
+// Every direct view, sorted by physical address; rebuilt when mappings change (tracking mutex held).
+const std::vector<DirectView>& directViews() {
+    static auto* views = new std::vector<DirectView>;
+    static std::uint64_t built = std::numeric_limits<std::uint64_t>::max();
+    const auto generation = mappingGeneration.load(std::memory_order_acquire);
+    if (built != generation) {
+        views->clear();
+        for (const auto& [begin, record] : areas()) {
+            if (record.kind == Kind::Direct) views->push_back({record.offset, record.offset + (record.end - begin), begin});
+        }
+        std::sort(views->begin(), views->end(), [](const DirectView& left, const DirectView& right) { return left.first < right.first; });
+        built = generation;
+    }
+    return *views;
+}
+
+// The direct views that show physical bytes of [address, last) (the range's own pieces included),
+// each cut to those bytes; empty when no other guest address shows any of them (tracking mutex held).
+std::vector<DirectView> aliasGroup(std::uint64_t address, std::uint64_t last) {
+    const auto& views = directViews();
+    std::vector<DirectView> group;
+    if (views.size() < 2) return group;
+    bool aliased = false;
+    for (const auto begin : overlapping(address, last)) {
+        const auto& record = areas().at(begin);
+        if (record.kind != Kind::Direct) continue;
+        const auto first = record.offset + (std::max(address, begin) - begin);
+        const auto end = record.offset + (std::min(last, record.end) - begin);
+        for (const auto& view : views) {
+            if (view.first >= end) break;
+            if (view.last <= first) continue;
+            const auto overlapFirst = std::max(first, view.first);
+            const auto overlapLast = std::min(end, view.last);
+            const auto viewAddress = view.address + (overlapFirst - view.first);
+            group.push_back({overlapFirst, overlapLast, viewAddress});
+            if (viewAddress != begin + (overlapFirst - record.offset)) aliased = true;
+        }
+    }
+    if (!aliased) group.clear();
+    return group;
+}
+
 // Visits the committed pieces covering [address, address + bytes) as (area start, record, begin,
 // end); contiguous guest memory may span several areas.
 template<typename TVisit>
@@ -389,9 +438,46 @@ bool GuestWriteWatchAvailable_nid_postfix() {
 
 bool GuestWriteWatchCollect_nid_postfix(std::uint64_t address, std::uint64_t bytes, void (*visit)(void* context, std::uint64_t begin, std::uint64_t end), void* context) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
-    // No lock: the kernel orders scans with mapping changes, and a newly mapped view's pages are
-    // reported as written until they are first collected.
-    return Platform::CollectWrites(address, static_cast<std::size_t>(bytes), visit, context);
+    // Direct memory shown at other guest addresses too: a write through any view changes every
+    // view, but the watch sees it only in the view written through. The other views are scanned as
+    // well and every write is reported at each view of its bytes, so it also stays visible to
+    // whoever collects another view later.
+    std::vector<DirectView> group;
+    {
+        std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+        group = aliasGroup(address, address + bytes);
+    }
+    // No lock while scanning: the kernel orders scans with mapping changes, and a newly mapped
+    // view's pages are reported as written until they are first collected.
+    if (group.empty()) return Platform::CollectWrites(address, static_cast<std::size_t>(bytes), visit, context);
+    struct Fanout {
+        const std::vector<DirectView>* group;
+        void (*visit)(void*, std::uint64_t, std::uint64_t);
+        void* context;
+    } fanout{&group, visit, context};
+    const auto report = [](void* opaque, std::uint64_t begin, std::uint64_t end) {
+        auto& fan = *static_cast<Fanout*>(opaque);
+        fan.visit(fan.context, begin, end);
+        for (const auto& written : *fan.group) {
+            const auto writtenEnd = written.address + (written.last - written.first);
+            if (end <= written.address || writtenEnd <= begin) continue;
+            const auto physicalFirst = written.first + (std::max(begin, written.address) - written.address);
+            const auto physicalLast = written.first + (std::min(end, writtenEnd) - written.address);
+            for (const auto& view : *fan.group) {
+                const auto first = std::max(physicalFirst, view.first);
+                const auto last = std::min(physicalLast, view.last);
+                if (first < last) fan.visit(fan.context, view.address + (first - view.first), view.address + (last - view.first));
+            }
+        }
+    };
+    if (!Platform::CollectWrites(address, static_cast<std::size_t>(bytes), report, &fanout)) return false;
+    const auto last = address + bytes;
+    for (const auto& view : group) {
+        const auto viewEnd = view.address + (view.last - view.first);
+        if (view.address >= address && viewEnd <= last) continue;
+        if (!Platform::CollectWrites(view.address, static_cast<std::size_t>(viewEnd - view.address), report, &fanout)) return false;
+    }
+    return true;
 }
 
 bool GuestSegmentAlive_nid_postfix(std::uint64_t segment) {

@@ -72,6 +72,52 @@ void CheckCpuWrites() {
     close(pipe_[1]);
 }
 
+// Direct memory mapped at two guest addresses: a write through either view shows in both.
+void CheckAliasedViews() {
+    using namespace AgcDriver::WriteTracker;
+    if (!Available()) return;
+    using GuestMemoryBacking::Kind;
+    using GuestMemoryBacking::Status;
+    constexpr std::uint64_t block = 64 * 1024;
+    constexpr std::uint64_t size = block * 4;
+    constexpr std::int64_t physical = 0x300000000ll;
+    void* first = nullptr;
+    void* second = nullptr;
+    Require(GuestMemoryBacking::GuestVirtualMap_nid_postfix(&first, size, block, Kind::Direct, 3, 0, physical) == Status::Ok);
+    // The second view shows the last three blocks of the first one's.
+    Require(GuestMemoryBacking::GuestVirtualMap_nid_postfix(&second, size - block, block, Kind::Direct, 3, 0, physical + block) == Status::Ok);
+    auto* a = static_cast<unsigned char*>(first);
+    auto* b = static_cast<unsigned char*>(second);
+    const auto aBase = reinterpret_cast<std::uint64_t>(a);
+    const auto bBase = reinterpret_cast<std::uint64_t>(b);
+
+    NextEpoch();
+    const auto aMark = CpuMark(aBase, size);
+    const auto bMark = CpuMark(bBase, size - block);
+    Require(!CpuWrittenSince(bBase, size - block, bMark));
+    // Written through the first view, seen through the second (and still through the first).
+    a[block * 2 + 5] = 7;
+    Require(b[block + 5] == 7);
+    NextEpoch();
+    Require(CpuWrittenSince(bBase + block, block, bMark));
+    Require(!CpuWrittenSince(bBase, block, bMark));
+    Require(CpuWrittenSince(aBase + block * 2, block, aMark));
+    // Written through the second view, seen through the first after the second was collected.
+    NextEpoch();
+    const auto aMark2 = CpuMark(aBase, size);
+    b[block * 2 + 9] = 4;
+    NextEpoch();
+    Require(CpuWrittenSince(bBase + block * 2, block, bMark));
+    NextEpoch();
+    Require(CpuWrittenSince(aBase + block * 3, block, aMark2));
+    Require(!CpuWrittenSince(aBase, block * 3, aMark2));
+    // Memory no other view shows is unaffected.
+    Require(!CpuWrittenSince(aBase, block, aMark));
+
+    Require(GuestMemoryBacking::GuestVirtualUnmap_nid_postfix(second, size - block) == Status::Ok);
+    Require(GuestMemoryBacking::GuestVirtualUnmap_nid_postfix(first, size) == Status::Ok);
+}
+
 void CheckReportedWrites() {
     using namespace AgcDriver::WriteTracker;
     const auto gpu = GpuWriteGeneration();
@@ -98,6 +144,7 @@ void CheckReportedWrites() {
 
 int main() {
     CheckCpuWrites();
+    CheckAliasedViews();
     CheckReportedWrites();
     std::puts("Write tracker tests passed");
 }
