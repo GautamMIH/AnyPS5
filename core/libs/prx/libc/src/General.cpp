@@ -19,7 +19,7 @@
 
 namespace {
 // Guest prefixes (without leading slashes) mapped to host directories, e.g. save-data mount points:
-// the PS5 hands the title a short mount point ("/_sm/0") whose files live under _sd/<dir name>.
+// the PS5 hands the title a short mount point ("/savedata0") whose files live under _sd/<dir name>.
 struct PathAliases {
     std::mutex mutex;
     std::vector<std::pair<std::string, std::string>> entries;
