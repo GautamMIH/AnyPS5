@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <vector>
 #include "SceTypes.hpp"
@@ -40,6 +41,8 @@ static constexpr std::uint16_t DEVICE_SAMPLES = 512;
 static constexpr float MASTER_GAIN = 0.5f;
 static constexpr std::size_t OUTPUT_FRAME_BYTES = AUDIO_OUT2_OUTPUT_CHANNELS * sizeof(float);
 static constexpr std::uint32_t OUTPUT_BYTES_PER_MS = AUDIO_OUT2_SAMPLE_RATE * OUTPUT_FRAME_BYTES / 1000;
+static constexpr std::chrono::seconds PAD_PROBE_INTERVAL{2};
+static constexpr std::uint32_t PAD_SLACK_GRAINS = 2;
 
 bool AudioOut2TraceEnabled() {
     static const bool enabled = std::getenv("APS5_TRACE_AUDIOOUT2") != nullptr;
@@ -120,13 +123,87 @@ static void CloseDevice(AudioOut2Context& context) {
     context.device = 0;
 }
 
-// Mixes the ports' current grain and queues it on the SDL device. The caller holds the lock.
-static std::uint32_t Render(AudioOut2Context& context) {
+static void OpenPadDevice(AudioOut2Context& context) {
+    if (SDL_WasInit(SDL_INIT_AUDIO) == 0 && SDL_InitSubSystem(SDL_INIT_AUDIO) < 0) return;
+    const int count = SDL_GetNumAudioDevices(0);
+    for (int index = 0; index < count; index++) {
+        const char* listed = SDL_GetAudioDeviceName(index, 0);
+        if (!AudioOut2IsPadAudioDevice(listed)) continue;
+        const std::string name(listed);
+        SDL_AudioSpec native{};
+        if (SDL_GetAudioDeviceSpec(index, 0, &native) == 0 && native.channels != 0 && native.channels != AUDIO_OUT2_PAD_CHANNELS) continue;
+        const auto layout = AudioOut2PadLayoutForDriver(SDL_GetCurrentAudioDriver());
+        SDL_AudioSpec desired{};
+        desired.freq = static_cast<int>(AUDIO_OUT2_SAMPLE_RATE);
+        desired.format = AUDIO_F32SYS;
+        desired.channels = static_cast<Uint8>(layout.channels);
+        desired.samples = DEVICE_SAMPLES;
+        desired.callback = nullptr;
+        SDL_AudioSpec obtained{};
+        context.padDevice = SDL_OpenAudioDevice(name.c_str(), 0, &desired, &obtained, 0);
+        if (context.padDevice == 0) {
+            APS5_LOG_ERR("AudioOut2: could not open the controller sound card '%s': %s", name.c_str(), SDL_GetError());
+            return;
+        }
+        context.padLayout = layout;
+        context.padMix.assign(static_cast<std::size_t>(context.grain) * AUDIO_OUT2_PAD_CHANNELS, 0.0f);
+        context.padFrames.assign(static_cast<std::size_t>(context.grain) * layout.channels, 0.0f);
+        SDL_PauseAudioDevice(context.padDevice, 0);
+        APS5_LOG_OUT("AudioOut2: controller speaker and vibration ports play on '%s'", name.c_str());
+        return;
+    }
+}
+
+static void ClosePadDevice(AudioOut2Context& context) {
+    if (context.padDevice != 0 && SDL_WasInit(SDL_INIT_AUDIO) != 0) {
+        SDL_ClearQueuedAudio(context.padDevice);
+        SDL_CloseAudioDevice(context.padDevice);
+    }
+    context.padDevice = 0;
+}
+
+static void UpdatePadDevice(AudioOut2Context& context, Clock::time_point now) {
+    if (context.padDevice != 0 && SDL_GetAudioDeviceStatus(context.padDevice) == SDL_AUDIO_STOPPED) {
+        APS5_LOG_CHARS_OUT("AudioOut2: the controller sound card went away; its ports play in the main mix");
+        ClosePadDevice(context);
+        context.nextPadProbe = now + PAD_PROBE_INTERVAL;
+    }
+    if (context.padDevice != 0 || now < context.nextPadProbe) return;
+    context.nextPadProbe = now + PAD_PROBE_INTERVAL;
+    if (AudioOut2HasPadPorts(context)) OpenPadDevice(context);
+}
+
+static void QueuePadGrain(AudioOut2Context& context) {
+    AudioOut2WritePadFrames(context.padMix.data(), context.padLayout, context.padFrames.data(), context.grain);
+    const auto frameBytes = static_cast<std::uint32_t>(context.padLayout.channels * sizeof(float));
+    const auto grainBytes = context.grain * frameBytes;
+    const auto cushionBytes = CUSHION_MS * (AUDIO_OUT2_SAMPLE_RATE / 1000) * frameBytes;
+    const auto mainQueuedBytes = context.device != 0 ? SDL_GetQueuedAudioSize(context.device) / OUTPUT_FRAME_BYTES * frameBytes : cushionBytes + context.queueDepth * grainBytes;
+    const auto queuedBytes = SDL_GetQueuedAudioSize(context.padDevice);
+    if (queuedBytes > mainQueuedBytes + PAD_SLACK_GRAINS * grainBytes) return;
+    if (queuedBytes == 0) {
+        static const std::vector<float> silence(static_cast<std::size_t>(CUSHION_MS) * AUDIO_OUT2_SAMPLE_RATE / 1000 * AUDIO_OUT2_PAD_DEVICE_CHANNELS_MAX, 0.0f);
+        SDL_QueueAudio(context.padDevice, silence.data(), cushionBytes);
+    }
+    SDL_QueueAudio(context.padDevice, context.padFrames.data(), grainBytes);
+}
+
+static std::uint32_t Render(AudioOut2Context& context, Clock::time_point now) {
+    UpdatePadDevice(context, now);
+    float* pad = nullptr;
+    if (context.padDevice != 0) {
+        std::fill(context.padMix.begin(), context.padMix.end(), 0.0f);
+        pad = context.padMix.data();
+    }
     std::fill(context.mix.begin(), context.mix.end(), 0.0f);
-    const auto mixed = AudioOut2MixPorts(context, context.mix.data(), context.grain);
+    const auto mixed = AudioOut2MixPorts(context, context.mix.data(), pad, context.grain);
     for (float& sample : context.mix) {
         sample = std::clamp(sample * MASTER_GAIN, -1.0f, 1.0f);
         if (AudioOut2TraceEnabled()) context.summaryPeak = std::max(context.summaryPeak, std::abs(sample));
+    }
+    if (pad != nullptr) {
+        AudioOut2FinishPadMix(pad, context.grain);
+        QueuePadGrain(context);
     }
     if (context.device == 0) return mixed;
     const auto queuedBytes = SDL_GetQueuedAudioSize(context.device);
@@ -199,6 +276,7 @@ int APS5_VABI sceAudioOut2ContextDestroy(AudioOut2ContextHandle ctx) {
     {
         std::lock_guard lock(context->lock);
         CloseDevice(*context);
+        ClosePadDevice(*context);
     }
     AudioOut2ReleasePorts(*context);
     delete context;
@@ -238,7 +316,7 @@ int APS5_VABI sceAudioOut2ContextPush(AudioOut2ContextHandle ctx, uint32_t block
     }
     context->queued++;
     context->playHead += GrainDuration(*context);
-    const auto mixed = Render(*context);
+    const auto mixed = Render(*context, now);
     context->pushes++;
     context->summaryPushes++;
     if (blocking) context->blockingPushes++;

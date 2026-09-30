@@ -10,6 +10,7 @@
 
 #include "SDL.h"
 #include "SceTypes.hpp"
+#include "AudioOut2PadMix.hpp"
 
 // Shared by the AudioOut2 context and port files.
 //
@@ -70,6 +71,11 @@ struct AudioOut2Context {
     SDL_AudioDeviceID device = 0;
     // Stereo float mix of the ports for one push.
     std::vector<float> mix;
+    SDL_AudioDeviceID padDevice = 0;
+    std::chrono::steady_clock::time_point nextPadProbe;
+    AudioOut2PadLayout padLayout;
+    std::vector<float> padMix;
+    std::vector<float> padFrames;
     // Trace counters.
     std::uint64_t pushes = 0;
     std::uint64_t blockingPushes = 0;
@@ -88,7 +94,8 @@ struct AudioOut2Context {
 
 // Mixes every port of the context that carries PCM data into out (stereo float, frames frames), summing
 // onto the zeroed buffer. Returns the number of ports mixed.
-std::uint32_t AudioOut2MixPorts(const AudioOut2Context& context, float* out, std::uint32_t frames);
+std::uint32_t AudioOut2MixPorts(const AudioOut2Context& context, float* out, float* padOut, std::uint32_t frames);
+bool AudioOut2HasPadPorts(const AudioOut2Context& context);
 // Forgets the ports of a context being destroyed.
 void AudioOut2ReleasePorts(const AudioOut2Context& context);
 
