@@ -46,5 +46,6 @@ set_target_properties(freetype PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(core/shader/recompiler)
 add_subdirectory(core/Decoder/Jpeg)
+add_subdirectory(core/Decoder/Png)
 add_subdirectory(core/libs)
 add_subdirectory(core/relinker)
