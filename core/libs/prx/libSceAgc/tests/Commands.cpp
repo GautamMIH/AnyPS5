@@ -68,6 +68,16 @@ bool APS5_VABI grow(CommandBuffer* buffer, std::uint32_t count, void* userData) 
     return true;
 }
 
+bool APS5_VABI growReserved(CommandBuffer* buffer, std::uint32_t count, void* userData) {
+    auto& storage = *static_cast<Storage*>(userData);
+    check(count == 5 + 4, "incorrect callback allocation including reserved words");
+    buffer->bottom = storage.words.data();
+    buffer->top = storage.words.data() + storage.words.size();
+    buffer->cursor_up = buffer->bottom;
+    buffer->cursor_down = buffer->top;
+    return true;
+}
+
 void testPackets() {
     Storage storage;
     sceAgcDcbResetQueue(&storage.buffer, 0, 3);
@@ -82,6 +92,10 @@ void testPackets() {
     CommandBuffer empty{nullptr, nullptr, nullptr, nullptr, grow, &destination, 0};
     Agc::Command::Emit(&empty, 0x15u, {1, 1, 1, 0x41u}, __func__);
     check(empty.cursor_up == destination.words.data() + 5, "guest ABI allocation callback failed");
+    Storage reservedDestination;
+    CommandBuffer reserved{nullptr, nullptr, nullptr, nullptr, growReserved, &reservedDestination, 4};
+    Agc::Command::Emit(&reserved, 0x15u, {1, 1, 1, 0x41u}, __func__);
+    check(reserved.cursor_up == reservedDestination.words.data() + 5, "buffer with less room than its reserved words did not grow");
     Storage exhausted;
     exhausted.buffer.cursor_down = exhausted.words.data() + 2;
     expectFailure([&] { Agc::Command::WriteNop(&exhausted.buffer, 3, __func__); });

@@ -55,7 +55,7 @@ std::uint32_t available(const CommandBuffer& buffer, const char* function) {
     Require(bottom <= up && up <= down && down <= top, function, "invalid command buffer cursors");
     Require(bottom != 0 || top == 0, function, "null command buffer storage");
     const auto count = (down - up) / sizeof(std::uint32_t);
-    Require(count >= buffer.reserved_dw, function, "reserved space exceeds command buffer capacity");
+    if (count <= buffer.reserved_dw) return 0;
     Require(count - buffer.reserved_dw <= std::numeric_limits<std::uint32_t>::max(), function, "command buffer capacity overflow");
     return static_cast<std::uint32_t>(count - buffer.reserved_dw);
 }
