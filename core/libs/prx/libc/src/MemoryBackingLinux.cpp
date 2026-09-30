@@ -242,6 +242,61 @@ struct WriteWatch {
     bool available = false;
 };
 
+// Pages of [start, end) written since the last scan (they are protected again), or -1.
+long scanWritten(int pagemap, std::uint64_t start, std::uint64_t end) {
+    std::array<page_region, 8> regions{};
+    pm_scan_arg scan{};
+    scan.size = sizeof(scan);
+    scan.flags = PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC;
+    scan.start = start;
+    scan.end = end;
+    scan.vec = reinterpret_cast<std::uint64_t>(regions.data());
+    scan.vec_len = regions.size();
+    scan.category_mask = PAGE_IS_WRITTEN;
+    scan.return_mask = PAGE_IS_WRITTEN;
+    const long count = ioctl(pagemap, PAGEMAP_SCAN, &scan);
+    if (count < 0) return -1;
+    long pages = 0;
+    for (long index = 0; index < count; ++index) pages += static_cast<long>((regions[static_cast<std::size_t>(index)].end - regions[static_cast<std::size_t>(index)].start) / static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE)));
+    return pages;
+}
+
+// Checks the watch on a shared memory view like the guest's: a scan leaves it clean, a CPU write
+// shows in the next scan (only the page written), and that scan protects it again. A kernel that
+// accepts the API but does not report writes would otherwise leave stale guest copies everywhere.
+bool selfTest(const WriteWatch& watch) {
+    const auto page = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+    const int descriptor = memfd_create("AnyPS5 write watch test", MFD_CLOEXEC);
+    if (descriptor < 0) return false;
+    bool passed = false;
+    void* mapping = MAP_FAILED;
+    if (ftruncate(descriptor, static_cast<off_t>(page * 2)) == 0) mapping = mmap(nullptr, page * 2, PROT_READ | PROT_WRITE, MAP_SHARED, descriptor, 0);
+    if (mapping != MAP_FAILED) {
+        auto* bytes = static_cast<volatile unsigned char*>(mapping);
+        const auto start = reinterpret_cast<std::uint64_t>(mapping);
+        const auto end = start + page * 2;
+        uffdio_register registration{};
+        registration.range.start = start;
+        registration.range.len = page * 2;
+        registration.mode = UFFDIO_REGISTER_MODE_WP;
+        if (ioctl(watch.userfault, UFFDIO_REGISTER, &registration) == 0) {
+            bytes[0] = 1;
+            bytes[page] = 1;
+            const bool reset = scanWritten(watch.pagemap, start, end) >= 0;
+            const bool clean = scanWritten(watch.pagemap, start, end) == 0;
+            bytes[page + 3] = 2;
+            const bool seen = scanWritten(watch.pagemap, start, end) == 1;
+            const bool protectedAgain = scanWritten(watch.pagemap, start, end) == 0;
+            passed = reset && clean && seen && protectedAgain;
+            uffdio_range range{start, page * 2};
+            ioctl(watch.userfault, UFFDIO_UNREGISTER, &range);
+        }
+        munmap(mapping, page * 2);
+    }
+    close(descriptor);
+    return passed;
+}
+
 WriteWatch& writeWatch() {
     static WriteWatch* watch = [] {
         auto* result = new WriteWatch;
@@ -253,7 +308,12 @@ WriteWatch& writeWatch() {
         api.features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED | UFFD_FEATURE_WP_HUGETLBFS_SHMEM;
         result->pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
         result->available = ioctl(result->userfault, UFFDIO_API, &api) == 0 && result->pagemap >= 0;
-        if (!result->available) std::fprintf(stderr, "[memory] userfaultfd write-protect is unavailable; guest writes are not watched\n");
+        if (!result->available) {
+            std::fprintf(stderr, "[memory] userfaultfd write-protect is unavailable; guest writes are not watched\n");
+        } else if (!selfTest(*result)) {
+            std::fprintf(stderr, "[memory] the write watch failed its self-test; guest writes are not watched\n");
+            result->available = false;
+        }
         return result;
     }();
     return *watch;
