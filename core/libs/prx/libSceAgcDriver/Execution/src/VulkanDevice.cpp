@@ -106,6 +106,7 @@ struct VulkanDevice::State {
     bool meshShader = false;
     bool fragmentShaderBarycentric = false;
     bool depthClipControl = false;
+    bool primitiveListRestart = false;
     bool depthRangeUnrestricted = false;
     bool externalMemoryHost = false;
     std::unique_ptr<Graphics::GuestGpuMemory> guestGpuMemory;
@@ -465,6 +466,15 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->depthClipControl = depthClipFeatures.depthClipControl == VK_TRUE;
         if (state->depthClipControl) deviceExtensions.push_back(VK_EXT_DEPTH_CLIP_CONTROL_EXTENSION_NAME);
     }
+    VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT listRestartFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT};
+    if (hasExtension(VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &listRestartFeatures};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        state->primitiveListRestart = listRestartFeatures.primitiveTopologyListRestart == VK_TRUE;
+        if (state->primitiveListRestart) deviceExtensions.push_back(VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);
+    }
+    listRestartFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT};
+    listRestartFeatures.primitiveTopologyListRestart = state->primitiveListRestart ? VK_TRUE : VK_FALSE;
     if (state->meshShader) {
         deviceExtensions.insert(deviceExtensions.end(), meshExtensions.begin(), meshExtensions.end());
         state->capabilities.push_back(5283);
@@ -521,6 +531,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     if (state->depthClipControl) {
         depthClipFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &depthClipFeatures;
+    }
+    if (state->primitiveListRestart) {
+        listRestartFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
+        deviceInfo.pNext = &listRestartFeatures;
     }
     byteFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
     if (state->fragmentShaderBarycentric) {
@@ -681,6 +695,10 @@ void VulkanDevice::Resize(std::uint32_t width, std::uint32_t height) {
 
 bool VulkanDevice::Presentable() const {
     return state->extent.width != 0 && state->extent.height != 0;
+}
+
+bool VulkanDevice::PrimitiveListRestart() const {
+    return state->primitiveListRestart;
 }
 
 void VulkanDevice::PresentClear(std::uint32_t width, std::uint32_t height, bool opaque) {
@@ -918,6 +936,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.independentBlend = state->independentBlend;
     context.geometryShader = state->geometryShader;
     context.imageGatherExtended = state->imageGatherExtended;
+    context.primitiveListRestart = state->primitiveListRestart;
     context.shaderResourceMinLod = state->shaderResourceMinLod;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;

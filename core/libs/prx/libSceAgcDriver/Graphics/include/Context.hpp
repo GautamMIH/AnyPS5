@@ -79,6 +79,8 @@ struct Context {
     bool geometryShader = false;
     bool imageGatherExtended = false;
     bool shaderResourceMinLod = false;
+    // VK_EXT_primitive_topology_list_restart enabled (primitive restart on list topologies).
+    bool primitiveListRestart = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
     bool externalMemoryHost = false;

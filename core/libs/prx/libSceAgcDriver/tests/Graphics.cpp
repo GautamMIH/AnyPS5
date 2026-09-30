@@ -84,8 +84,11 @@ void stateTests() {
     Require(state.viewport.y == 4 && state.viewport.height == -4, "negative viewport height was lost");
     Require(state.colors[0].format == VK_FORMAT_R8G8B8A8_UNORM, "RGBA format changed");
     queue.userConfig[0x24b] = 1;
-    // Primitive restart is rejected per draw (indexed draws only), not when decoding state.
-    (void)AgcDriver::Graphics::DecodeState(queue);
+    // Primitive restart is decoded for the pipeline; Driver::draw rejects what it cannot model.
+    queue.userConfig[0x242] = 6;
+    Require(AgcDriver::Graphics::DecodeState(queue).primitiveRestart, "primitive restart was not decoded for a strip");
+    queue.userConfig[0x242] = 9;
+    Require(!AgcDriver::Graphics::DecodeState(queue).primitiveRestart, "primitive restart was decoded for patches");
     queue = makeState();
     queue.userConfig.erase(0x24b);
     queue.context[0x2a5] = 0;

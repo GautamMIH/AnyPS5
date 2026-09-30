@@ -32,6 +32,8 @@ public:
     void* Window() const;
     void Resize(std::uint32_t width, std::uint32_t height);
     bool Presentable() const;
+    // VK_EXT_primitive_topology_list_restart: primitive restart also applies to list topologies.
+    bool PrimitiveListRestart() const;
     void PresentClear(std::uint32_t width, std::uint32_t height, bool opaque);
     void PresentPixels(std::uint32_t width, std::uint32_t height, std::span<const std::byte> pixels);
     void PresentDisplayBuffer(const DisplayBuffer& buffer);

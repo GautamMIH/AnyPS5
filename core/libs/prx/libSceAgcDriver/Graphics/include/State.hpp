@@ -107,6 +107,9 @@ struct State {
     bool eliminateFastClear = false;
     VkExtent2D renderExtent;
     VkPrimitiveTopology topology;
+    // GE_MULTI_PRIM_IB_RESET_EN: an all-ones index restarts the primitive (indexed draws only;
+    // Driver::draw rejects the draws Vulkan cannot restart).
+    bool primitiveRestart = false;
     VkViewport viewport;
     bool negativeOneToOne;
     VkRect2D scissor;

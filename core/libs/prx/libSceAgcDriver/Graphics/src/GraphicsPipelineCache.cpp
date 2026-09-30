@@ -53,6 +53,7 @@ std::string makeKey(const Context& context, const State& state, const std::array
     append(key, state.renderExtent.width);
     append(key, state.renderExtent.height);
     append(key, state.topology);
+    append(key, state.primitiveRestart);
     append(key, state.viewport.x);
     append(key, state.viewport.y);
     append(key, state.viewport.width);

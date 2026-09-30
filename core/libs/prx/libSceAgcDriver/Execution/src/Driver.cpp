@@ -626,8 +626,18 @@ private:
         // Empty draws (common with GPU-generated indirect arguments) do nothing on hardware.
         if (drawParameters.indexCount == 0 || drawParameters.instanceCount == 0) return;
         const auto graphics = Graphics::DecodeState(queue);
-        if (drawParameters.indexed && queue.userConfig.at(0x24b) != 0)
-            throw std::runtime_error("AGC graphics: primitive restart (GE_MULTI_PRIM_IB_RESET_EN) is unsupported for indexed draws");
+        if (drawParameters.indexed && queue.userConfig.at(0x24b) != 0) {
+            // Vulkan restarts on the all-ones index of the index type, for strips and fans always and
+            // for lists with VK_EXT_primitive_topology_list_restart. The mesh path fetches indices in
+            // the shader and does not restart.
+            const bool list = graphics.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || graphics.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || graphics.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+            if (!graphics.primitiveRestart || graphics.stages.mesh || (list && (device == nullptr || !device->PrimitiveListRestart())))
+                throw std::runtime_error("AGC graphics: primitive restart is only supported for vertex-path strips and fans, and for lists with VK_EXT_primitive_topology_list_restart");
+            const std::uint32_t allOnes = drawParameters.indexSize == 2 ? 0xffffu : 0xffffffffu;
+            const auto resetIndex = queue.context.find(0x103);
+            if (resetIndex == queue.context.end() || (resetIndex->second & allOnes) != allOnes)
+                throw std::runtime_error("AGC graphics: primitive restart index other than all ones (VGT_MULTI_PRIM_IB_RESET_INDX) is unsupported");
+        }
         if (graphics.eliminateFastClear) {
             std::lock_guard gpuLock(gpuMutex);
             device->ResolveFastClears(graphics);
