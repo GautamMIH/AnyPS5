@@ -438,6 +438,16 @@ int APS5_VABI sceNetEpollDestroy(int eid) {
     return 0;
 }
 
+int APS5_VABI sceNetEpollAbort(int eid, int flags) {
+    (void)flags;
+    std::lock_guard<std::mutex> lk(g_mutex);
+    if (g_epolls.count(eid) == 0) {
+        return fail(NET_EBADF);
+    }
+    g_cv.notify_all();
+    return 0;
+}
+
 int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* event) {
     (void)event;
     std::lock_guard<std::mutex> lk(g_mutex);

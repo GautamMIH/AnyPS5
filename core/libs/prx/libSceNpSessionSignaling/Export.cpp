@@ -27,6 +27,10 @@ int APS5_VABI sceNpSessionSignalingCreateContext2(const void* param, uint32_t* c
     return 0;
 }
 
+int APS5_VABI sceNpSessionSignalingCreateContext(const void* param, uint32_t* context_id) {
+    return sceNpSessionSignalingCreateContext2(param, context_id);
+}
+
 int APS5_VABI sceNpSessionSignalingDeactivate(uint32_t context_id) {
     (void)context_id;
     return 0;
