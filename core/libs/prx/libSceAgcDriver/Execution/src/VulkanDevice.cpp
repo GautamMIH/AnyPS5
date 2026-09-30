@@ -557,7 +557,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->bufferPool = std::make_shared<Graphics::BufferPool>(graphicsContext());
     state->descriptorCache = std::make_shared<Graphics::DescriptorCache>();
     state->samplerCache = std::make_shared<Graphics::SamplerCache>();
-    state->pipelineCache = std::make_unique<Graphics::PipelineCache>(graphicsContext());
+    state->pipelineCache = std::make_unique<Graphics::PipelineCache>(graphicsContext(), state->properties);
     state->detiler = std::make_unique<Graphics::TextureDetiler>(graphicsContext());
     state->drawQueue = std::make_unique<Graphics::DrawQueue>();
     state->renderCache = std::make_unique<Graphics::RenderCache>(graphicsContext());
