@@ -107,6 +107,7 @@ struct VulkanDevice::State {
     bool fragmentShaderBarycentric = false;
     bool depthClipControl = false;
     bool primitiveListRestart = false;
+    bool occlusionQueryPrecise = false;
     bool depthRangeUnrestricted = false;
     bool externalMemoryHost = false;
     std::unique_ptr<Graphics::GuestGpuMemory> guestGpuMemory;
@@ -514,6 +515,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.shaderImageGatherExtended = available.shaderImageGatherExtended;
     state->imageGatherExtended = enabled.shaderImageGatherExtended == VK_TRUE;
     enabled.shaderResourceMinLod = available.shaderResourceMinLod;
+    enabled.occlusionQueryPrecise = available.occlusionQueryPrecise;
+    state->occlusionQueryPrecise = enabled.occlusionQueryPrecise == VK_TRUE;
     state->shaderResourceMinLod = enabled.shaderResourceMinLod == VK_TRUE;
     enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
     enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
@@ -637,6 +640,14 @@ void VulkanDevice::WaitDraws() {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.WaitDraws");
     state->drawQueue->Wait();
+}
+
+std::uint64_t VulkanDevice::CountSamples() {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    PerformanceTimer timing("Vulkan.CountSamples");
+    state->drawQueue->EnableSampleCounting(graphicsContext(), state->occlusionQueryPrecise);
+    state->drawQueue->Wait();
+    return state->drawQueue->SamplesPassed();
 }
 
 void* VulkanDevice::Window() const {

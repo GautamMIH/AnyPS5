@@ -540,6 +540,21 @@ private:
         }
     }
 
+    // EVENT_WRITE PIXEL_PIPE_STAT_DUMP (upstream 19521c2): the DB sample counters in the PS5 layout,
+    // a begin and an end counter per DB (16 of them, 16 bytes apart; a query's begin dump writes the
+    // first of each pair, its end dump the second). The count goes to the first DB, the others stay
+    // zero, all with bit 63 marking the result ready. Counting starts at the first dump; the device
+    // waits for the queued draws first. Kyty and SharpEmu write a fixed "visible" result instead.
+    static void dumpSampleCounters(std::span<const std::uint32_t> packet, VulkanDevice* device) {
+        const auto address = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
+        const std::uint64_t samples = device != nullptr ? device->CountSamples() : 0u;
+        constexpr std::uint64_t ready = 1ull << 63u;
+        for (std::uint64_t db = 0; db < 16; ++db) {
+            const std::uint64_t value = ready | (db == 0 ? samples : 0u);
+            GuestMemory::Write(address + db * 16u, std::as_bytes(std::span(&value, 1)), 8);
+        }
+    }
+
     void dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
         PerformanceTimer timing("Driver.Dispatch");
         std::lock_guard gpuLock(gpuMutex);
@@ -972,9 +987,14 @@ private:
                     // Cache and partial-flush events and ACQUIRE_MEM order GPU work against GPU work:
                     // a barrier. Later CPU accesses are ordered by the packets that make them (they
                     // wait for draws and pending labels below) and by guest range checks.
-                    const auto gpuBarrier = opcode == 0x46 || opcode == 0x58;
-                    const auto waitDraws = opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42;
-                    if (device != nullptr) {
+                    // PIXEL_PIPE_STAT_DUMP: drained like a label (every draw before it completed), then
+                    // the sample count is written as the DB counters.
+                    const auto sampleDump = opcode == 0x46 && (packet[1] & 0x3fu) == 0x39u;
+                    const auto gpuBarrier = (opcode == 0x46 && !sampleDump) || opcode == 0x58;
+                    const auto waitDraws = opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || sampleDump;
+                    if (sampleDump) {
+                        dumpSampleCounters(packet, device.get());
+                    } else if (device != nullptr) {
                         if (gpuBarrier) device->AcquireGpuMemory();
                         else if (waitDraws) device->WaitDraws();
                         else {

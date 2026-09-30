@@ -11,6 +11,15 @@ void DrawQueue::retire(Batch batch) {
     drawCount -= batch.entries.size();
     for (auto& entry : batch.entries) entry.resources->WriteBack();
     timing.Mark("resources_writeback");
+    if (batch.query >= 0) {
+        // The batch completed, so its query result is available.
+        std::uint64_t passed = 0;
+        const auto query = static_cast<std::uint32_t>(batch.query);
+        Check(samples->context.Function<PFN_vkGetQueryPoolResults>("vkGetQueryPoolResults")(samples->context.device, samples->pool, query, 1, sizeof(passed), &passed, sizeof(passed), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT), "vkGetQueryPoolResults");
+        samplesPassed += passed;
+        samples->free.push_back(query);
+        timing.Mark("sample_count");
+    }
     // Written back: later accesses no longer depend on this batch.
     for (const auto& entry : batch.entries)
         for (const auto& [begin, end] : entry.writes) writes.Remove(begin, end);

@@ -25,6 +25,11 @@ public:
     std::uint64_t SubmitMarker(const Context& context);
     bool MarkerReached(std::uint64_t serial);
     void WaitMarker(std::uint64_t serial);
+    // Occlusion counting (PIXEL_PIPE_STAT_DUMP): once enabled, every batch recorded afterwards runs
+    // inside an occlusion query (precise when the device allows) whose result is added to a running
+    // sample count when the batch is retired. SamplesPassed covers the retired batches.
+    void EnableSampleCounting(const Context& context, bool precise);
+    std::uint64_t SamplesPassed() const { return samplesPassed; }
 
 private:
     struct Entry {
@@ -50,7 +55,19 @@ private:
         std::vector<Entry> entries;
         std::unique_ptr<CommandBatch> commands;
         bool hasBarrier = false;
+        // The occlusion query around the batch, or -1.
+        std::int32_t query = -1;
     };
+    struct SampleCounter {
+        explicit SampleCounter(const Context& context, bool precise);
+        ~SampleCounter();
+        Context context;
+        bool precise;
+        VkQueryPool pool = VK_NULL_HANDLE;
+        std::vector<std::uint32_t> free;
+    };
+    std::unique_ptr<SampleCounter> samples;
+    std::uint64_t samplesPassed = 0;
     void retire(Batch batch);
     Batch recording;
     std::vector<Batch> pending;

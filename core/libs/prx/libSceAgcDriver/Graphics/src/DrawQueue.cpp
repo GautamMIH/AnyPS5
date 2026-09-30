@@ -15,6 +15,8 @@ VkCommandBuffer DrawQueue::Begin(const Context& context) {
     Collect();
     if (drawCount >= 64) Wait();
     if (!recording.commands) {
+        // Every query is in flight with a pending batch: retire them first.
+        if (samples && samples->free.empty()) Wait();
         if (available.empty()) recording.commands = std::make_unique<CommandBatch>(context);
         else {
             recording.commands = std::move(available.back());
@@ -22,6 +24,14 @@ VkCommandBuffer DrawQueue::Begin(const Context& context) {
             recording.commands->Reset();
         }
         recording.commands->Label("draws_and_dispatches");
+        if (samples) {
+            // Draws open and close their render passes, so the query spans the batch outside them.
+            recording.query = static_cast<std::int32_t>(samples->free.back());
+            samples->free.pop_back();
+            const auto commands = recording.commands->Handle();
+            context.Function<PFN_vkCmdResetQueryPool>("vkCmdResetQueryPool")(commands, samples->pool, static_cast<std::uint32_t>(recording.query), 1);
+            context.Function<PFN_vkCmdBeginQuery>("vkCmdBeginQuery")(commands, samples->pool, static_cast<std::uint32_t>(recording.query), samples->precise ? VK_QUERY_CONTROL_PRECISE_BIT : 0u);
+        }
     }
     if (barrierRequested) {
         barrierRequested = false;
@@ -73,6 +83,7 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
 void DrawQueue::Flush() {
     if (!recording.commands) return;
     Require(!recording.entries.empty() || recording.hasBarrier, "cannot submit an incomplete draw batch");
+    if (recording.query >= 0) samples->context.Function<PFN_vkCmdEndQuery>("vkCmdEndQuery")(recording.commands->Handle(), samples->pool, static_cast<std::uint32_t>(recording.query));
     pending.push_back(std::move(recording));
     recording = Batch{};
     pending.back().commands->Submit();
@@ -90,6 +101,27 @@ void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes) {
     }
     Wait();
     timing.Mark(GuestMemory::AccessSite::Current());
+}
+
+DrawQueue::SampleCounter::SampleCounter(const Context& context, bool precise) : context(context), precise(precise) {
+    // Enough for every batch the queue keeps in flight (Begin waits when none is free).
+    constexpr std::uint32_t Queries = 128;
+    VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    info.queryType = VK_QUERY_TYPE_OCCLUSION;
+    info.queryCount = Queries;
+    Check(context.Function<PFN_vkCreateQueryPool>("vkCreateQueryPool")(context.device, &info, nullptr, &pool), "vkCreateQueryPool");
+    for (std::uint32_t query = Queries; query-- > 0;) free.push_back(query);
+}
+
+DrawQueue::SampleCounter::~SampleCounter() {
+    context.Function<PFN_vkDestroyQueryPool>("vkDestroyQueryPool")(context.device, pool, nullptr);
+}
+
+void DrawQueue::EnableSampleCounting(const Context& context, bool precise) {
+    if (samples) return;
+    // The batch being recorded has no query: it is submitted uncounted, as it began before counting.
+    Flush();
+    samples = std::make_unique<SampleCounter>(context, precise);
 }
 
 
