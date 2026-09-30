@@ -43,6 +43,9 @@ inline constexpr Entry kExtrqRegisterForm = {"EXTRQ register form", nullptr, 0};
 inline constexpr Entry kInsertqRegisterForm = {"INSERTQ register form", nullptr, 0};
 inline constexpr Entry kMovntss = {"MOVNTSS", nullptr, 0};
 inline constexpr Entry kMovntsd = {"MOVNTSD", nullptr, 0};
+inline constexpr Entry kSha256rnds2 = {"SHA256RNDS2", nullptr, 0};
+inline constexpr Entry kSha256msg1 = {"SHA256MSG1", nullptr, 0};
+inline constexpr Entry kSha256msg2 = {"SHA256MSG2", nullptr, 0};
 
 inline constexpr std::uint8_t kMovsStoreOpcode = 0x11;
 inline constexpr std::uint8_t kPshufbZero = 0x80;

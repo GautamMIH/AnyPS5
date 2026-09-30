@@ -12,6 +12,7 @@ struct DecodedInstruction {
 
     [[nodiscard]] std::size_t OpcodeOffset() const;
     [[nodiscard]] bool IsShaNi() const;
+    [[nodiscard]] bool IsSha256() const;
     [[nodiscard]] bool IsExtrq() const;
     [[nodiscard]] bool IsInsertq() const;
     [[nodiscard]] bool IsMonitorx() const;

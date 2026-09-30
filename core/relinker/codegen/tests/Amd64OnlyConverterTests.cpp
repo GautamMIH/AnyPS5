@@ -3,6 +3,8 @@
 #include <codegen/x86/IAmd64OnlyInstructionMatcher.hpp>
 #include <codegen/x86/Sse4aLowering.hpp>
 #include <codegen/x86/Sse4aOperands.hpp>
+#include <codegen/x86/Sha256Operands.hpp>
+#include <codegen/x86/DecodedInstruction.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
 #include <codegen/IInstructionScanner.hpp>
 #include <elfpatcher/general/EntryStubBuilder.hpp>
@@ -11,6 +13,7 @@
 #include <elfpatcher/general/SegmentFilter.hpp>
 #include <elfpatcher/linux/LinuxElfPatcher.hpp>
 #include <io/ByteWriter.hpp>
+#include <array>
 #include <cstring>
 #include <cstdint>
 #ifdef __linux__
@@ -102,7 +105,8 @@ void decoderLengths() {
         {0xF3, 0x0F, 0xB8, 0xC0}, {0xCD, 0x41}, {0x0F, 0x0D, 0x08}, {0x0F, 0xC0, 0xC1}, {0x0F, 0xC3, 0x07},
         {0x66, 0x0F, 0xC4, 0xC0, 0x01}, {0xC2, 0x08, 0x00}, {0xC8, 0x10, 0x00, 0x00}, {0xF3, 0x0F, 0x2B, 0x07},
         {0xF2, 0x44, 0x0F, 0x2B, 0x4C, 0x24, 0x10}, {0x0F, 0x01, 0xFA}, {0x0F, 0xB9, 0x00},
-        {0x41, 0x0F, 0xBB, 0xF7}, {0x0F, 0xBB, 0x47, 0x08}};
+        {0x41, 0x0F, 0xBB, 0xF7}, {0x0F, 0xBB, 0x47, 0x08},
+        {0x0F, 0x38, 0xCB, 0xCA}, {0x45, 0x0F, 0x38, 0xCC, 0xE1}, {0x0F, 0x38, 0xCD, 0x08}, {0x0F, 0x38, 0xCB, 0x0D, 0x10, 0x00, 0x00, 0x00}};
     Bytes padded;
     for (const auto& instruction : instructions) {
         padded = instruction;
@@ -132,6 +136,21 @@ void sse4aOperands() {
     requireFailure([] { const Bytes bytes = {0xF2, 0x0F, 0x78, 0xC8, 0x20, 0x30}; (void)Codegen::DecodeSse4a(bytes.data(), bytes.size()); }, "Field beyond bit 64 was accepted");
 }
 
+void sha256Operands() {
+    const auto check = [](const Bytes& site, const Codegen::Sha256Operation operation, const int dst, const int src) {
+        const auto operands = Codegen::DecodeSha256(site.data(), site.size());
+        require(operands.Operation == operation && operands.Destination == dst && operands.Source == src, "SHA-256 operands were decoded incorrectly");
+    };
+    check({0x0F, 0x38, 0xCB, 0xCA}, Codegen::Sha256Operation::Rnds2, 1, 2);
+    check({0x45, 0x0F, 0x38, 0xCC, 0xE1}, Codegen::Sha256Operation::Msg1, 12, 9);
+    check({0x44, 0x0F, 0x38, 0xCD, 0xC0}, Codegen::Sha256Operation::Msg2, 8, 0);
+    requireFailure([] { const Bytes bytes = {0x0F, 0x38, 0xCC, 0x08}; (void)Codegen::DecodeSha256(bytes.data(), bytes.size()); }, "SHA-256 memory operand was accepted");
+    requireFailure([] { const Bytes bytes = {0x66, 0x0F, 0x38, 0xCB, 0xCA}; (void)Codegen::DecodeSha256(bytes.data(), bytes.size()); }, "Prefixed 0F 38 CB was decoded as SHA-256");
+    requireFailure([] { const Bytes bytes = {0x0F, 0x38, 0xC9, 0xCA}; (void)Codegen::DecodeSha256(bytes.data(), bytes.size()); }, "SHA-1 was decoded as SHA-256");
+    const Bytes rounds = {0x0F, 0x38, 0xCB, 0xCA};
+    require(Codegen::DecodedInstruction{rounds.data(), rounds.size()}.IsShaNi(), "SHA256RNDS2 is not recognised as SHA-NI");
+}
+
 void matcherSubstitutions() {
     const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
     const auto match = [&](const Bytes& bytes) { return matcher->Match(bytes.data(), bytes.size()); };
@@ -147,6 +166,11 @@ void matcherSubstitutions() {
     const auto insertqRegisterForm = match({0xF2, 0x0F, 0x79, 0xCA});
     require(insertqRegisterForm && insertqRegisterForm->Lowering == Codegen::Amd64OnlyLowering::Trampoline && insertqRegisterForm->InstructionName == "INSERTQ register form", "INSERTQ register form was not lowered through a stub");
     require(!match({0x66, 0x0F, 0x2B, 0x07}) && !match({0x0F, 0x2B, 0x07}) && !match({0x48, 0x8B, 0x05, 0, 0, 0, 0}), "Ordinary instruction was matched");
+    for (const auto& [bytes, name] : {std::pair{Bytes{0x0F, 0x38, 0xCB, 0xCA}, "SHA256RNDS2"}, {Bytes{0x0F, 0x38, 0xCC, 0xCA}, "SHA256MSG1"}, {Bytes{0x45, 0x0F, 0x38, 0xCD, 0xE1}, "SHA256MSG2"}}) {
+        const auto sha256 = match(bytes);
+        require(sha256 && sha256->Lowering == Codegen::Amd64OnlyLowering::Trampoline && sha256->InstructionName == name, "SHA-256 instruction was not lowered through a stub");
+    }
+    require(!match({0x0F, 0x38, 0xC9, 0xCA}), "SHA-1 instruction was matched");
     const auto stub = match(kInsertqHighSite);
     require(stub && stub->Lowering == Codegen::Amd64OnlyLowering::Trampoline && stub->StubBody == kInsertqHighBody && stub->ReturnBranchOffset == 15 && stub->InstructionName == "INSERTQ", "INSERTQ was not lowered through a stub");
     const auto shiftInPlace = match({0x66, 0x0F, 0x78, 0xC3, 0x18, 0x28});
@@ -238,6 +262,32 @@ void converterSegment() {
     require(shortSite.Offset == 0x20F && shortSite.Length == 5 && shortSite.OriginalBytes == shortOriginal, "Short EXTRQ site did not absorb the following instruction");
     require(shortSite.Body[shortSite.ReturnBranchOffset - 1] == 0x90 && shortSite.Body[shortSite.ReturnBranchOffset] == 0xE9, "Absorbed instruction does not run before the return jump");
     requireFailure([&] { (void)converter->Convert(file, {segmentHeader(0x200)}); }, "Segment exceeding the file was accepted");
+}
+
+void converterSha256() {
+    const auto converter = Codegen::MakeAmd64OnlyConverter();
+    Bytes file(0x300, 0xCC);
+    const Bytes text = {
+        0x0F, 0x38, 0xCB, 0xCA,
+        0x0F, 0x38, 0xCC, 0xD3,
+        0x66, 0x0F, 0xFE, 0xC1,
+        0x0F, 0x38, 0xCD, 0xE5,
+        0x90,
+        0xC3};
+    std::copy(text.begin(), text.end(), file.begin() + 0x200);
+    const auto result = converter->Convert(file, {segmentHeader(text.size())});
+    require(result.Trampolines.size() == 2 && result.Reports.size() == 2 && result.Bytes == file, "SHA-256 sites were not lowered through stubs");
+    const auto& rounds = result.Trampolines[0];
+    require(rounds.Offset == 0x200 && rounds.Length == 8 && result.Reports[0].InstructionName == "SHA256RNDS2", "SHA256RNDS2 did not absorb the following SHA256MSG1");
+    const auto& message = result.Trampolines[1];
+    require(message.Offset == 0x20C && message.Length == 5 && result.Reports[1].InstructionName == "SHA256MSG2", "SHA256MSG2 did not absorb the following instruction");
+    require(message.Body[message.ReturnBranchOffset - 1] == 0x90 && message.Body[message.ReturnBranchOffset] == 0xE9, "Absorbed instruction does not run before the return jump");
+    auto beforeReturn = file;
+    beforeReturn[0x210] = 0xC3;
+    requireFailure([&] { (void)converter->Convert(beforeReturn, {segmentHeader(text.size())}); }, "Short SHA-256 instruction followed by a return was relocated");
+    auto memoryForm = file;
+    memoryForm[0x20F] = 0x28;
+    require(failureOffset([&] { (void)converter->Convert(memoryForm, {segmentHeader(text.size())}); }, "SHA-256 memory form was accepted") == 0x20C, "SHA-256 operand failure does not carry the file offset");
 }
 
 void converterFailureOffsets() {
@@ -355,7 +405,48 @@ std::uint64_t insertqReference(std::uint64_t destination, std::uint64_t value, s
     return (destination & ~(mask << index)) | ((value & mask) << index);
 }
 
-std::uint64_t runRegisterFormStub(const Bytes& site, const std::uint64_t (&destination)[2], const std::uint64_t (&source)[2]) {
+constexpr std::uint64_t kStubScratch[2] = {0x0123456789abcdefull, 0xfedcba9876543210ull};
+
+std::uint32_t rotr(const std::uint32_t value, const unsigned count) {
+    return (value >> count) | (value << (32 - count));
+}
+
+std::array<std::uint64_t, 2> sha256Reference(const std::uint8_t opcode, const std::uint64_t (&first)[2], const std::uint64_t (&second)[2], const std::uint64_t (&keys)[2]) {
+    std::uint32_t a[4];
+    std::uint32_t b[4];
+    std::uint32_t k[4];
+    std::uint32_t r[4];
+    std::memcpy(a, first, sizeof(a));
+    std::memcpy(b, second, sizeof(b));
+    std::memcpy(k, keys, sizeof(k));
+    const auto sigma0 = [](const std::uint32_t w) { return rotr(w, 7) ^ rotr(w, 18) ^ (w >> 3); };
+    const auto sigma1 = [](const std::uint32_t w) { return rotr(w, 17) ^ rotr(w, 19) ^ (w >> 10); };
+    if (opcode == 0xCC) {
+        for (int lane = 0; lane < 3; ++lane) r[lane] = a[lane] + sigma0(a[lane + 1]);
+        r[3] = a[3] + sigma0(b[0]);
+    } else if (opcode == 0xCD) {
+        r[0] = a[0] + sigma1(b[2]);
+        r[1] = a[1] + sigma1(b[3]);
+        r[2] = a[2] + sigma1(r[0]);
+        r[3] = a[3] + sigma1(r[1]);
+    } else {
+        std::uint32_t sa = b[3], sb = b[2], sc = a[3], sd = a[2], se = b[1], sf = b[0], sg = a[1], sh = a[0];
+        for (int round = 0; round < 2; ++round) {
+            const auto t1 = sh + (rotr(se, 6) ^ rotr(se, 11) ^ rotr(se, 25)) + ((se & sf) ^ (~se & sg)) + k[round];
+            const auto t2 = (rotr(sa, 2) ^ rotr(sa, 13) ^ rotr(sa, 22)) + ((sa & sb) ^ (sa & sc) ^ (sb & sc));
+            sh = sg; sg = sf; sf = se; se = sd + t1; sd = sc; sc = sb; sb = sa; sa = t1 + t2;
+        }
+        r[0] = sf;
+        r[1] = se;
+        r[2] = sb;
+        r[3] = sa;
+    }
+    std::array<std::uint64_t, 2> result{};
+    std::memcpy(result.data(), r, sizeof(r));
+    return result;
+}
+
+std::array<std::uint64_t, 2> runRegisterFormStub(const Bytes& site, const std::uint64_t (&destination)[2], const std::uint64_t (&source)[2]) {
     const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
     const auto match = matcher->Match(site.data(), site.size());
     require(match && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "Register form stub was not produced");
@@ -370,7 +461,7 @@ std::uint64_t runRegisterFormStub(const Bytes& site, const std::uint64_t (&desti
     alignas(16) std::uint64_t destinationIn[2] = {destination[0], destination[1]};
     alignas(16) std::uint64_t sourceIn[2] = {source[0], source[1]};
     alignas(16) std::uint64_t out[2] = {};
-    alignas(16) std::uint64_t scratchIn[2] = {0x0123456789abcdefull, 0xfedcba9876543210ull};
+    alignas(16) std::uint64_t scratchIn[2] = {kStubScratch[0], kStubScratch[1]};
     alignas(16) std::uint64_t scratchOut[2] = {};
     asm volatile(
         "movdqu (%[scratch]), %%xmm0\n\t"
@@ -386,7 +477,7 @@ std::uint64_t runRegisterFormStub(const Bytes& site, const std::uint64_t (&desti
         : "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "memory", "cc");
     munmap(code, 4096);
     require(scratchOut[0] == scratchIn[0] && scratchOut[1] == scratchIn[1], "Register form stub clobbered a scratch register");
-    return out[0];
+    return {out[0], out[1]};
 }
 
 void registerFormExecution() {
@@ -398,15 +489,27 @@ void registerFormExecution() {
     const std::uint64_t destination = 0x0f1e2d3c4b5a6978ull;
     for (const auto [length, index] : {std::pair{8u, 4u}, {0u, 0u}, {40u, 20u}, {63u, 1u}, {1u, 63u}, {16u, 48u}, {1u, 0u}, {32u, 32u}}) {
         const auto control = static_cast<std::uint64_t>(length) | (static_cast<std::uint64_t>(index) << 8) | 0xffffc000ull;
-        require(runRegisterFormStub(extrqDistinct, {value, 0x1122334455667788ull}, {control, 0}) == extrqReference(value, control), "EXTRQ register form stub computed the wrong field");
-        require(runRegisterFormStub(extrqSame, {control, 0}, {control, 0}) == extrqReference(control, control), "EXTRQ register form stub with equal operands computed the wrong field");
+        require(runRegisterFormStub(extrqDistinct, {value, 0x1122334455667788ull}, {control, 0})[0] == extrqReference(value, control), "EXTRQ register form stub computed the wrong field");
+        require(runRegisterFormStub(extrqSame, {control, 0}, {control, 0})[0] == extrqReference(control, control), "EXTRQ register form stub with equal operands computed the wrong field");
         const auto insertqControl = control | 0xC0ull;
-        require(runRegisterFormStub(insertqDistinct, {destination, 0x1122334455667788ull}, {value, insertqControl}) == insertqReference(destination, value, insertqControl), "INSERTQ register form stub computed the wrong field");
-        require(runRegisterFormStub(insertqSame, {value, insertqControl}, {value, insertqControl}) == insertqReference(value, value, insertqControl), "INSERTQ register form stub with equal operands computed the wrong field");
+        require(runRegisterFormStub(insertqDistinct, {destination, 0x1122334455667788ull}, {value, insertqControl})[0] == insertqReference(destination, value, insertqControl), "INSERTQ register form stub computed the wrong field");
+        require(runRegisterFormStub(insertqSame, {value, insertqControl}, {value, insertqControl})[0] == insertqReference(value, value, insertqControl), "INSERTQ register form stub with equal operands computed the wrong field");
+    }
+}
+
+void sha256Execution() {
+    const std::uint64_t state[2] = {0x6a09e667bb67ae85ull, 0x3c6ef372a54ff53aull};
+    const std::uint64_t words[2] = {0x510e527f9b05688cull, 0x1f83d9ab5be0cd19ull};
+    for (const std::uint8_t opcode : {std::uint8_t{0xCB}, std::uint8_t{0xCC}, std::uint8_t{0xCD}}) {
+        const Bytes distinct = {0x0F, 0x38, opcode, 0xD5};
+        const Bytes same = {0x0F, 0x38, opcode, 0xD2};
+        require(runRegisterFormStub(distinct, state, words) == sha256Reference(opcode, state, words, kStubScratch), "SHA-256 stub computed the wrong result");
+        require(runRegisterFormStub(same, state, state) == sha256Reference(opcode, state, state, kStubScratch), "SHA-256 stub with equal operands computed the wrong result");
     }
 }
 #else
 void registerFormExecution() {}
+void sha256Execution() {}
 #endif
 
 void scannerZeroTail() {
@@ -421,10 +524,13 @@ int main() {
     try {
         decoderLengths();
         sse4aOperands();
+        sha256Operands();
         matcherSubstitutions();
         goldenBodies();
         registerFormExecution();
+        sha256Execution();
         converterSegment();
+        converterSha256();
         converterFailureOffsets();
         linuxPlacement();
         scannerZeroTail();

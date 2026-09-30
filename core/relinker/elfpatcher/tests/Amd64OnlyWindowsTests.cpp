@@ -14,8 +14,10 @@
 #include <functional>
 #include <iostream>
 #include <random>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -202,6 +204,20 @@ std::string describe(const Case& item) {
 
 std::size_t g_executions = 0;
 
+void requireEnvironment(const State& input, const State& state, const std::uint16_t written, const std::string& description) {
+    for (unsigned reg = 0; reg < 16; ++reg) {
+        if (((written >> reg) & 1) != 0) continue;
+        require(std::memcmp(state.Xmm[reg], input.Xmm[reg], 16) == 0, "Lowered sequence clobbered xmm" + std::to_string(reg) + ": " + description);
+    }
+    require(((state.FlagsOut ^ input.FlagsIn) & kStatusFlags) == 0, "Lowered sequence changed RFLAGS: " + description);
+    require(state.RspAfter == state.RspBefore, "Lowered sequence did not restore rsp: " + description);
+    for (int slot = 0; slot < 16; ++slot) {
+        std::uint64_t value;
+        std::memcpy(&value, state.RedZone + slot * 8, 8);
+        require(value == kCanary, "Lowered sequence wrote into the red zone: " + description);
+    }
+}
+
 void executeCase(const Harness& harness, const Codegen::IAmd64OnlyInstructionMatcher& matcher, const Case& item, std::mt19937_64& random, const int images) {
     const auto site = encode(item);
     const auto match = matcher.Match(site.data(), site.size());
@@ -241,17 +257,89 @@ void executeCase(const Harness& harness, const Codegen::IAmd64OnlyInstructionMat
         const auto expected = referenceLow(field, input);
         require(expected == libcReferenceLow(operands, input), "Transcribed reference disagrees with the libc emulation: " + describe(item));
         require(low(state.Xmm[operands.Destination]) == expected, "Lowered sequence computed the wrong field: " + describe(item));
-        for (unsigned reg = 0; reg < 16; ++reg) {
-            if (reg == operands.Destination) continue;
-            require(std::memcmp(state.Xmm[reg], input.Xmm[reg], 16) == 0, "Lowered sequence clobbered xmm" + std::to_string(reg) + ": " + describe(item));
+        requireEnvironment(input, state, static_cast<std::uint16_t>(1u << operands.Destination), describe(item));
+    }
+}
+
+struct Sha256Step {
+    std::uint8_t Opcode;
+    std::uint8_t Destination;
+    std::uint8_t Source;
+};
+
+Bytes encodeSha256(const Sha256Step& step) {
+    Bytes bytes;
+    const auto rex = static_cast<std::uint8_t>(0x40 | (step.Destination >= 8 ? 4 : 0) | (step.Source >= 8 ? 1 : 0));
+    if (rex != 0x40) bytes.push_back(rex);
+    bytes.insert(bytes.end(), {0x0F, 0x38, step.Opcode, static_cast<std::uint8_t>(0xC0 | ((step.Destination & 7) << 3) | (step.Source & 7))});
+    return bytes;
+}
+
+std::uint32_t rotr(const std::uint32_t value, const unsigned count) {
+    return (value >> count) | (value << (32 - count));
+}
+
+void sha256Reference(const Sha256Step& step, std::uint8_t (&xmm)[16][16]) {
+    std::uint32_t a[4];
+    std::uint32_t b[4];
+    std::uint32_t k[4];
+    std::uint32_t r[4];
+    std::memcpy(a, xmm[step.Destination], sizeof(a));
+    std::memcpy(b, xmm[step.Source], sizeof(b));
+    std::memcpy(k, xmm[0], sizeof(k));
+    const auto sigma0 = [](const std::uint32_t w) { return rotr(w, 7) ^ rotr(w, 18) ^ (w >> 3); };
+    const auto sigma1 = [](const std::uint32_t w) { return rotr(w, 17) ^ rotr(w, 19) ^ (w >> 10); };
+    if (step.Opcode == 0xCC) {
+        for (int lane = 0; lane < 3; ++lane) r[lane] = a[lane] + sigma0(a[lane + 1]);
+        r[3] = a[3] + sigma0(b[0]);
+    } else if (step.Opcode == 0xCD) {
+        r[0] = a[0] + sigma1(b[2]);
+        r[1] = a[1] + sigma1(b[3]);
+        r[2] = a[2] + sigma1(r[0]);
+        r[3] = a[3] + sigma1(r[1]);
+    } else {
+        std::uint32_t sa = b[3], sb = b[2], sc = a[3], sd = a[2], se = b[1], sf = b[0], sg = a[1], sh = a[0];
+        for (int round = 0; round < 2; ++round) {
+            const auto t1 = sh + (rotr(se, 6) ^ rotr(se, 11) ^ rotr(se, 25)) + ((se & sf) ^ (~se & sg)) + k[round];
+            const auto t2 = (rotr(sa, 2) ^ rotr(sa, 13) ^ rotr(sa, 22)) + ((sa & sb) ^ (sa & sc) ^ (sb & sc));
+            sh = sg; sg = sf; sf = se; se = sd + t1; sd = sc; sc = sb; sb = sa; sa = t1 + t2;
         }
-        require(((state.FlagsOut ^ input.FlagsIn) & kStatusFlags) == 0, "Lowered sequence changed RFLAGS: " + describe(item));
-        require(state.RspAfter == state.RspBefore, "Lowered sequence did not restore rsp: " + describe(item));
-        for (int slot = 0; slot < 16; ++slot) {
-            std::uint64_t value;
-            std::memcpy(&value, state.RedZone + slot * 8, 8);
-            require(value == kCanary, "Lowered sequence wrote into the red zone: " + describe(item));
-        }
+        r[0] = sf;
+        r[1] = se;
+        r[2] = sb;
+        r[3] = sa;
+    }
+    std::memcpy(xmm[step.Destination], r, sizeof(r));
+}
+
+std::string describeSha256(const std::vector<Sha256Step>& steps) {
+    std::string text;
+    for (const auto& step : steps)
+        text += std::string(step.Opcode == 0xCB ? "sha256rnds2" : step.Opcode == 0xCC ? "sha256msg1" : "sha256msg2") + " xmm" + std::to_string(step.Destination) + ", xmm" + std::to_string(step.Source) + "; ";
+    return text;
+}
+
+void executeSha256(const Harness& harness, const Codegen::IAmd64OnlyInstructionMatcher& matcher, const std::vector<Sha256Step>& steps, std::mt19937_64& random, const int images) {
+    std::vector<Bytes> sites;
+    for (const auto& step : steps) sites.push_back(encodeSha256(step));
+    const std::vector<std::span<const std::uint8_t>> spans(sites.begin(), sites.end());
+    const auto match = steps.size() == 1 ? matcher.Match(sites[0].data(), sites[0].size()) : matcher.MatchSequence(spans, {});
+    require(match.has_value() && match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "SHA-256 was not lowered through a stub: " + describeSha256(steps));
+    std::uint16_t written = 0;
+    for (const auto& step : steps) written = static_cast<std::uint16_t>(written | (1u << step.Destination));
+    const std::array<std::uint64_t, 4> flags = {0x202, 0x203, 0x246, 0xAC7};
+    for (int image = 0; image < images; ++image) {
+        State input{};
+        for (auto& lane : input.Xmm) for (auto& byte : lane) byte = static_cast<std::uint8_t>(random());
+        input.FlagsIn = flags[static_cast<std::size_t>(image) % flags.size()];
+        State state = input;
+        harness.Run(match->StubBody, match->ReturnBranchOffset, state);
+        ++g_executions;
+        State expected = input;
+        for (const auto& step : steps) sha256Reference(step, expected.Xmm);
+        for (unsigned reg = 0; reg < 16; ++reg)
+            if (((written >> reg) & 1) != 0) require(std::memcmp(state.Xmm[reg], expected.Xmm[reg], 16) == 0, "Lowered SHA-256 computed the wrong xmm" + std::to_string(reg) + ": " + describeSha256(steps));
+        requireEnvironment(input, state, written, describeSha256(steps));
     }
 }
 
@@ -269,6 +357,15 @@ void cpuExecution() {
             const auto& [dst, src] = pairs[(length * 65u + index) % pairs.size()];
             executeCase(harness, *matcher, {true, dst, src, length, index, true}, random, 2);
         }
+    }
+    for (const std::uint8_t opcode : {std::uint8_t{0xCB}, std::uint8_t{0xCC}, std::uint8_t{0xCD}})
+        for (std::uint8_t dst = 0; dst < 16; ++dst)
+            for (std::uint8_t src = 0; src < 16; ++src)
+                executeSha256(harness, *matcher, {{opcode, dst, src}}, random, 2);
+    for (int sequence = 0; sequence < 256; ++sequence) {
+        std::vector<Sha256Step> steps(2 + random() % 2);
+        for (auto& step : steps) step = {static_cast<std::uint8_t>(0xCB + random() % 3), static_cast<std::uint8_t>(random() % 16), static_cast<std::uint8_t>(random() % 16)};
+        executeSha256(harness, *matcher, steps, random, 2);
     }
 }
 
