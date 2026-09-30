@@ -113,12 +113,24 @@ std::string param_path(const std::string& real_path) {
     return real_path + ".param";
 }
 
+bool read_param_file(const std::string& path, SaveDataParam* param) {
+    if (!std::filesystem::exists(path)) {
+        return false;
+    }
+    std::vector<char> bytes;
+    if (!read_file_all(path, bytes)) {
+        throw std::runtime_error("SaveData: cannot read param file " + path);
+    }
+    if (bytes.size() != sizeof(SaveDataParam)) {
+        throw std::runtime_error("SaveData: param file " + path + " is " + std::to_string(bytes.size()) + " bytes, expected " + std::to_string(sizeof(SaveDataParam)) + " (outdated format)");
+    }
+    std::memcpy(param, bytes.data(), sizeof(SaveDataParam));
+    return true;
+}
+
 SaveDataParam load_param(const std::string& real_path) {
     SaveDataParam param{};
-    std::vector<char> bytes;
-    if (read_file_all(param_path(real_path), bytes) && bytes.size() == sizeof(param)) {
-        std::memcpy(&param, bytes.data(), sizeof(param));
-    }
+    read_param_file(param_path(real_path), &param);
     if (param.mtime == 0) {
         std::error_code ec;
         const auto written = std::filesystem::last_write_time(real_path, ec);
@@ -391,10 +403,7 @@ static int getSaveDataMemory2(SaveDataMemoryGet2* get_param) {
     }
     if (get_param->param != nullptr) {
         std::memset(get_param->param, 0, sizeof(SaveDataParam));
-        std::vector<char> pd;
-        if (read_file_all(mem_path(get_param->user_id, get_param->slot_id, "param"), pd)) {
-            std::memcpy(get_param->param, pd.data(), std::min(pd.size(), sizeof(SaveDataParam)));
-        }
+        read_param_file(mem_path(get_param->user_id, get_param->slot_id, "param"), get_param->param);
     }
     if (get_param->icon != nullptr) {
         get_param->icon->data_size = 0;
