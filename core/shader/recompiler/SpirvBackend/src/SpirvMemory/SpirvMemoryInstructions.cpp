@@ -172,33 +172,31 @@ std::uint32_t DeviceAddressFromWords(SpirvEmitterState& state, std::uint32_t low
     return Binary(state, spv::OpBitwiseOr, TypeScalarU64(state), low64, high64);
 }
 
-std::uint32_t GuestAddress(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
+std::uint32_t GuestAddressBase(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
     auto& state = ctx.state;
     auto low = ctx.Arg(inst, 1);
     if (mem.kind == ResourceKind::ScalarAddress) {
         low = Binary(state, spv::OpBitwiseAnd, TypeU32(state), low, ConstantU32(state, ~3u));
     }
-    std::uint32_t address = 0;
     if (mem.addressIsFull) {
-        address = DeviceAddressFromWords(state, low, ctx.Arg(inst, 2));
-    } else {
-        const IrValue* argument = inst.Argument(0);
-        const IrValue* handle = argument != nullptr ? argument->Resolve() : nullptr;
-        if (handle == nullptr || handle->Opcode() != IrOpcode::GetAddressResource || handle->ArgumentCount() != 2u) {
-            ctx.Fail(inst, "has no address base pair");
-        }
-        const auto base = DeviceAddressFromWords(state, ctx.Arg(*handle, 0), ctx.Arg(*handle, 1));
-        address = AddBdaAddress(ctx, inst, base, Unary(state, spv::OpUConvert, TypeScalarU64(state), low), false);
+        return DeviceAddressFromWords(state, low, ctx.Arg(inst, 2));
     }
+    const IrValue* argument = inst.Argument(0);
+    const IrValue* handle = argument != nullptr ? argument->Resolve() : nullptr;
+    if (handle == nullptr || handle->Opcode() != IrOpcode::GetAddressResource || handle->ArgumentCount() != 2u) {
+        ctx.Fail(inst, "has no address base pair");
+    }
+    const auto base = DeviceAddressFromWords(state, ctx.Arg(*handle, 0), ctx.Arg(*handle, 1));
+    return AddBdaAddress(ctx, inst, base, Unary(state, spv::OpUConvert, TypeScalarU64(state), low), false);
+}
+
+std::uint32_t GuestAddress(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
+    const auto address = GuestAddressBase(ctx, inst, mem);
     auto immediate = static_cast<std::int32_t>(mem.offset);
     if (mem.kind == ResourceKind::ScalarAddress) {
         immediate = static_cast<std::int32_t>(static_cast<std::uint32_t>(immediate) & ~3u);
     }
-    if (immediate == 0) {
-        return address;
-    }
-    const auto magnitude = immediate < 0 ? -static_cast<std::int64_t>(immediate) : static_cast<std::int64_t>(immediate);
-    return AddBdaAddress(ctx, inst, address, ConstantDeviceAddress(state, static_cast<std::uint64_t>(magnitude)), immediate < 0);
+    return AddBdaImmediate(ctx, inst, address, immediate);
 }
 
 std::uint32_t LoadBda(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t bits) {
@@ -595,6 +593,28 @@ void LoadAddress(SpirvValueEmitContext& ctx, const IrValue& inst, std::uint32_t 
     }
 }
 
+std::uint32_t LoadBdaWide(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem, std::uint32_t components) {
+    auto& state = ctx.state;
+    return EmitValueOrDefaultIfCondition(state, ActiveArgument(ctx, inst), TypeU32Composite(state, components), ConstantU32CompositeZero(state, components), [&]() {
+        return ConstructU32Composite(state, components, EmitBdaDwordReads(ctx, inst, GuestAddressBase(ctx, inst, mem), mem.offset, components));
+    });
+}
+
+void LoadAddressWide(SpirvValueEmitContext& ctx, const IrValue& inst, std::uint32_t components) {
+    const auto& mem = ctx.Memory(inst);
+    if (mem.planningOnly) {
+        return;
+    }
+    switch (mem.kind) {
+    case ResourceKind::Flat:
+    case ResourceKind::Global:
+        ctx.Define(inst, LoadBdaWide(ctx, inst, mem, components));
+        return;
+    default:
+        ctx.Fail(inst, "must read a physical address resource");
+    }
+}
+
 void StoreAddress(SpirvValueEmitContext& ctx, const IrValue& inst, std::uint32_t bits) {
     const auto& mem = ctx.Memory(inst);
     if (mem.kind != ResourceKind::Scratch) {
@@ -945,6 +965,18 @@ void EmitLoadAddressU16(SpirvValueEmitContext& ctx, const IrValue& inst) {
 
 void EmitLoadAddressU32(SpirvValueEmitContext& ctx, const IrValue& inst) {
     LoadAddress(ctx, inst, 32u);
+}
+
+void EmitLoadAddressU32x2(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    LoadAddressWide(ctx, inst, 2u);
+}
+
+void EmitLoadAddressU32x3(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    LoadAddressWide(ctx, inst, 3u);
+}
+
+void EmitLoadAddressU32x4(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    LoadAddressWide(ctx, inst, 4u);
 }
 
 void EmitStoreAddressU8(SpirvValueEmitContext& ctx, const IrValue& inst) {

@@ -431,6 +431,9 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::LoadAddressU8: return Invoke(EmitLoadAddressU8, ctx, inst);
         case IrOpcode::LoadAddressU16: return Invoke(EmitLoadAddressU16, ctx, inst);
         case IrOpcode::LoadAddressU32: return Invoke(EmitLoadAddressU32, ctx, inst);
+        case IrOpcode::LoadAddressU32x2: return Invoke(EmitLoadAddressU32x2, ctx, inst);
+        case IrOpcode::LoadAddressU32x3: return Invoke(EmitLoadAddressU32x3, ctx, inst);
+        case IrOpcode::LoadAddressU32x4: return Invoke(EmitLoadAddressU32x4, ctx, inst);
         case IrOpcode::StoreAddressU8: return Invoke(EmitStoreAddressU8, ctx, inst);
         case IrOpcode::StoreAddressU16: return Invoke(EmitStoreAddressU16, ctx, inst);
         case IrOpcode::StoreAddressU32: return Invoke(EmitStoreAddressU32, ctx, inst);
