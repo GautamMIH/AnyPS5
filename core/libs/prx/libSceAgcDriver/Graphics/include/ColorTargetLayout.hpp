@@ -33,6 +33,8 @@ public:
     std::uint32_t BlockWidth() const { return blockWidth; }
     std::uint32_t BlockHeight() const { return blockHeight; }
     std::uint32_t BlocksPerRow() const { return pitch / blockWidth; }
+    // Elements per row (linear rows are padded to 256 bytes).
+    std::uint32_t Pitch() const { return pitch; }
     const ColorTail& Tail() const { return tail; }
     std::size_t Offset(std::uint32_t x, std::uint32_t y) const;
     void Detile(std::span<const std::byte> source, std::span<std::byte> destination) const;

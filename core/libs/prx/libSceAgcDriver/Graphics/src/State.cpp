@@ -75,13 +75,15 @@ VkBlendOp blendOp(std::uint32_t value) {
 struct DecodedColorFormat {
     VkFormat format;
     std::uint32_t elementBytes;
+    // The exported component each attachment component stores, two bits each (0xe4 is identity).
+    std::uint8_t componentMapping = 0xe4u;
 };
 
 // CB_COLOR_INFO FORMAT / NUMBER_TYPE / COMP_SWAP to a Vulkan attachment format (table from the
 // upstream PR #5 port). AMD formats list components from the least significant bits, as Vulkan's
 // non-packed formats do. Integer targets are rejected: fragment outputs are recompiled as floats.
 DecodedColorFormat decodeColorFormat(std::uint32_t info) {
-    constexpr std::uint32_t unorm = 0, srgb = 6, floating = 7;
+    constexpr std::uint32_t unorm = 0, snorm = 1, srgb = 6, floating = 7;
     const auto format = (info >> 2u) & 0x1fu;
     const auto number = (info >> 8u) & 7u;
     const auto swap = (info >> 11u) & 3u;
@@ -90,19 +92,31 @@ DecodedColorFormat decodeColorFormat(std::uint32_t info) {
         message << "AGC graphics: CB_COLOR0_INFO=0x" << std::hex << info << ": unsupported color format " << std::dec << format << ", number type " << number << " or component swap " << swap;
         throw std::runtime_error(message.str());
     };
-    if (swap > 1 || (swap == 1 && format != 9 && format != 10)) return fail();
+    // A one-component format stores the exported component COMP_SWAP names: R, G, B or A (an A8
+    // target is COLOR_8 with SWAP_ALT_REV), as in upstream 2476bfd.
+    const bool single = format == 1 || format == 2 || format == 4;
+    if (!single && (swap > 1 || (swap == 1 && format != 9 && format != 10))) return fail();
     const bool alternate = swap == 1;
+    const auto one = [&](VkFormat vkFormat, std::uint32_t bytes) { return DecodedColorFormat{vkFormat, bytes, static_cast<std::uint8_t>((0xe4u & ~3u) | swap)}; };
     switch (format) {
-        case 1: if (number == unorm) return {VK_FORMAT_R8_UNORM, 1}; break;
-        case 2:
-            if (number == unorm) return {VK_FORMAT_R16_UNORM, 2};
-            if (number == floating) return {VK_FORMAT_R16_SFLOAT, 2};
+        case 1:
+            if (number == unorm) return one(VK_FORMAT_R8_UNORM, 1);
+            if (number == snorm) return one(VK_FORMAT_R8_SNORM, 1);
             break;
-        case 3: if (number == unorm) return {VK_FORMAT_R8G8_UNORM, 2}; break;
-        case 4: if (number == floating) return {VK_FORMAT_R32_SFLOAT, 4}; break;
+        case 2:
+            if (number == unorm) return one(VK_FORMAT_R16_UNORM, 2);
+            if (number == snorm) return one(VK_FORMAT_R16_SNORM, 2);
+            if (number == floating) return one(VK_FORMAT_R16_SFLOAT, 2);
+            break;
+        case 3:
+            if (number == unorm) return {VK_FORMAT_R8G8_UNORM, 2};
+            if (number == snorm) return {VK_FORMAT_R8G8_SNORM, 2};
+            break;
+        case 4: if (number == floating) return one(VK_FORMAT_R32_SFLOAT, 4); break;
         case 5:
             if (number == floating) return {VK_FORMAT_R16G16_SFLOAT, 4};
             if (number == unorm) return {VK_FORMAT_R16G16_UNORM, 4};
+            if (number == snorm) return {VK_FORMAT_R16G16_SNORM, 4};
             break;
         // COLOR_10_11_11: red in the low 11 bits, the Vulkan B10G11R11 packing.
         case 6: if (number == floating) return {VK_FORMAT_B10G11R11_UFLOAT_PACK32, 4}; break;
@@ -110,12 +124,14 @@ DecodedColorFormat decodeColorFormat(std::uint32_t info) {
         case 9: if (number == unorm) return {alternate ? VK_FORMAT_A2R10G10B10_UNORM_PACK32 : VK_FORMAT_A2B10G10R10_UNORM_PACK32, 4}; break;
         case 10:
             if (number == unorm) return {alternate ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM, 4};
+            if (number == snorm) return {alternate ? VK_FORMAT_B8G8R8A8_SNORM : VK_FORMAT_R8G8B8A8_SNORM, 4};
             if (number == srgb) return {alternate ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_R8G8B8A8_SRGB, 4};
             break;
         case 11: if (number == floating) return {VK_FORMAT_R32G32_SFLOAT, 8}; break;
         case 12:
             if (number == floating) return {VK_FORMAT_R16G16B16A16_SFLOAT, 8};
             if (number == unorm) return {VK_FORMAT_R16G16B16A16_UNORM, 8};
+            if (number == snorm) return {VK_FORMAT_R16G16B16A16_SNORM, 8};
             break;
         case 14: if (number == floating) return {VK_FORMAT_R32G32B32A32_SFLOAT, 16}; break;
         default: break;
@@ -455,13 +471,15 @@ State DecodeState(const QueueState& queue) {
     zero(cx, 0x1c4, depthExport ? ~1u : ~0u, "stencil or sample-mask export, or a depth export format other than 32_R");
     Require(!depthExport || read(cx, 0x1c4) == 1u, "depth export without the 32_R export format");
     const auto exportFormat = read(cx, 0x1c5);
-    // Each written target needs FP16_ABGR or 32_ABGR exports; exports to unwritten targets reach
-    // no attachment. Fast-clear elimination is done by the colour block and exports nothing.
+    // Each written target needs a float export: FP16, UNORM16 or SNORM16 (unpacked by the shader), or
+    // 32_R, 32_GR, 32_AR or 32_ABGR (the components a format leaves out read as 0, alpha 1). Exports
+    // to unwritten targets reach no attachment. Fast-clear elimination is done by the colour block
+    // and exports nothing.
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         const auto format = (exportFormat >> (4u * slot)) & 0xfu;
-        if ((result.colorTargetMask & (1u << slot)) == 0 || format == 4 || format == 9 || result.eliminateFastClear) continue;
+        if ((result.colorTargetMask & (1u << slot)) == 0 || (format >= 1 && format <= 6) || format == 9 || result.eliminateFastClear) continue;
         std::ostringstream message;
-        message << "AGC graphics: SPI_SHADER_COL_FORMAT=0x" << std::hex << exportFormat << ": color target " << std::dec << slot << " needs FP16_ABGR or 32_ABGR export";
+        message << "AGC graphics: SPI_SHADER_COL_FORMAT=0x" << std::hex << exportFormat << ": color target " << std::dec << slot << " needs a float export";
         throw std::runtime_error(message.str());
     }
     // SPI_SHADER_POS_FORMAT: POS0, plus POS1 when the misc vector is exported.
@@ -480,7 +498,8 @@ State DecodeState(const QueueState& queue) {
         // FastClear.hpp. Surfaces are always stored uncompressed, as in shadPS4, so the CMASK
         // layout (CMASK_IS_LINEAR bit 19, CMASK_ADDR_TYPE bits 29-30), the BLEND_OPT hints
         // (bits 20-25) and DCC_ENABLE (bit 28) change nothing (layout as in shadPS4 regs_color.h).
-        if ((info & ~0x73febf7cu) != 0) {
+        // BLEND_BYPASS (bit 16) is checked against enabled blending below.
+        if ((info & ~0x73ffbf7cu) != 0) {
             std::ostringstream message;
             message << "AGC graphics: CB_COLOR" << slot << "_INFO=0x" << std::hex << info << ": FMASK compression or endian conversion is unsupported";
             throw std::runtime_error(message.str());
@@ -542,7 +561,7 @@ State DecodeState(const QueueState& queue) {
         GuestMemory::CheckGpuRange(reinterpret_cast<const void*>(color.address), color.bytes, colorLayout.Alignment(), true);
         color.format = decoded.format;
         static_cast<void>(swap);
-        color.componentMapping = 0xe4u;
+        color.componentMapping = decoded.componentMapping;
         color.fastClear = (info & 0x2000u) != 0;
         if (color.fastClear) {
             const auto cmaskHigh = read(cx, 0x398 + slot);
@@ -598,7 +617,14 @@ State DecodeState(const QueueState& queue) {
         const auto blend = read(cx, 0x1e0 + slot);
         Require((blend & 0x0000e000u) == 0, "reserved blend control bits");
         auto& state = result.blends[slot];
-        state.colorWriteMask = (writeMask >> (4u * slot)) & 0xfu;
+        // CB_TARGET_MASK names exported components; attachment component c stores exported component
+        // mapping[c], so its write bit comes from that component.
+        const auto mapping = result.colors[slot].componentMapping;
+        const auto exportedMask = (writeMask >> (4u * slot)) & 0xfu;
+        state.colorWriteMask = 0;
+        for (std::uint32_t component = 0; component < 4; ++component) {
+            if (((exportedMask >> ((mapping >> (2u * component)) & 3u)) & 1u) != 0) state.colorWriteMask |= 1u << component;
+        }
         state.blendEnable = (blend >> 30u) & 1u;
         if (state.blendEnable) {
             Require((read(cx, 0x31c + 0xfu * slot) & 0x10000u) == 0, "blend bypass conflicts with enabled blending");

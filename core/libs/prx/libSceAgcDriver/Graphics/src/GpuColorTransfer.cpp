@@ -116,7 +116,7 @@ void GpuColorTransfer::convert(VkCommandBuffer commands, bool toTiled, bool swap
     barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
     Require(!swapRedBlue || elementBytes == 4, "red/blue swap requires 32-bit pixels");
     const ColorTargetLayout layout(width, height, mode, elementBytes, tail);
-    const std::array<std::uint32_t, 7> push{width, height, mode == ColorTileMode::RenderTarget ? layout.BlocksPerRow() : 0u, (toTiled ? 1u : 0u) | (swapRedBlue ? 2u : 0u) | (mode == ColorTileMode::RenderTarget ? 4u : 0u) | (tail.present ? 8u : 0u), elementBytes, tail.x, tail.y};
+    const std::array<std::uint32_t, 7> push{width, height, mode == ColorTileMode::RenderTarget ? layout.BlocksPerRow() : layout.Pitch(), (toTiled ? 1u : 0u) | (swapRedBlue ? 2u : 0u) | (mode == ColorTileMode::RenderTarget ? 4u : 0u) | (tail.present ? 8u : 0u), elementBytes, tail.x, tail.y};
     context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     context.Function<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &descriptorSet, 0, nullptr);
     context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), push.data());

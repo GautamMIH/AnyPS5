@@ -6,6 +6,7 @@ layout(set = 0, binding = 1, std430) buffer LinearPixels { uint linear[]; };
 layout(push_constant) uniform Parameters {
     uint width;
     uint height;
+    // 64 KiB blocks per row of a render target; elements per row of a linear surface.
     uint blocksPerRow;
     uint mode;
     uint elementBytes;
@@ -61,7 +62,8 @@ void main() {
     if (x >= parameters.width || y >= parameters.height) return;
     uint elementBytes = parameters.elementBytes;
     uint linearByte = (y * parameters.width + x) * elementBytes;
-    uint tiledByte = linearByte;
+    // A linear surface's rows are padded to 256 bytes (ColorTargetLayout).
+    uint tiledByte = (y * parameters.blocksPerRow + x) * elementBytes;
     if ((parameters.mode & 8u) != 0u) {
         // A mip-tail level: one 64 KiB block, addressed from the level's origin inside it.
         tiledByte = renderTargetOffset(x + parameters.tailX, y + parameters.tailY, elementBytes) & 0xffffu;
