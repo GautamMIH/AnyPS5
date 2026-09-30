@@ -30,3 +30,9 @@ target_include_directories(video_out_flip_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CM
 target_link_libraries(video_out_flip_tests PRIVATE libSceVideoOut libSceAgcDriver libkernel libc)
 set_target_properties(video_out_flip_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(video_out_flip_tests)
+
+if(BUILD_TESTING)
+    add_executable(pad_sdl_tests tests/PadSdl.cpp)
+    target_link_libraries(pad_sdl_tests PRIVATE SDL2-static)
+    add_test(NAME pad_sdl COMMAND pad_sdl_tests)
+endif()
