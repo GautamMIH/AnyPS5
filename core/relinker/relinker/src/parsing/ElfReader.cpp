@@ -21,6 +21,17 @@ const std::vector<std::uint8_t>& ElfReader::GetRawBytes() const {
     return _fileBuffer;
 }
 
+std::string ElfReader::formatMagic() const {
+    static constexpr char digits[] = "0123456789abcdef";
+    std::string text;
+    for (std::size_t index = 0; index < 4; ++index) {
+        if (index != 0) text += ' ';
+        text += digits[_fileBuffer[index] >> 4];
+        text += digits[_fileBuffer[index] & 0x0f];
+    }
+    return text;
+}
+
 std::uint8_t ElfReader::_readU8At(FileByteOffset fileByteOffset) const {
     if (fileByteOffset >= _fileBuffer.size()) {
         throw RelinkerException("FileByteOffset out of bounds", fileByteOffset);
@@ -60,9 +71,13 @@ ElfHeader ElfReader::ReadHeader() const {
         throw RelinkerException("File too small for ELF header");
     }
 
+    if (_fileBuffer[0] == 0x4f && _fileBuffer[1] == 0x15 && _fileBuffer[2] == 0x3d && _fileBuffer[3] == 0x1d) {
+        throw RelinkerException("The input is a SELF container, not an ELF");
+    }
+
     if (_fileBuffer[0] != 0x7f || _fileBuffer[1] != 'E' ||
         _fileBuffer[2] != 'L' || _fileBuffer[3] != 'F') {
-        throw RelinkerException("Invalid ELF magic number");
+        throw RelinkerException("Invalid ELF magic number: " + formatMagic());
     }
 
     ElfHeader header{};
