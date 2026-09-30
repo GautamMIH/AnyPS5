@@ -542,7 +542,10 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
     const auto bytes = static_cast<std::uint64_t>(indexCount) * indexSize;
     require(bytes <= std::numeric_limits<std::size_t>::max(), "index range size overflow");
     GuestMemory::CheckRange(reinterpret_cast<const void*>(indexAddress), static_cast<std::size_t>(bytes), indexSize);
-    return {indexAddress, indexCount, indexSize, queue.instanceCount, initiator};
+    // The GE adds GE_INDX_OFFSET to every index it fetches: the base vertex (upstream f4143d61).
+    const auto indexOffset = queue.userConfig.find(0x24a);
+    require(indexOffset != queue.userConfig.end(), "missing GE_INDX_OFFSET register");
+    return {indexAddress, indexCount, indexSize, queue.instanceCount, initiator, true, indexOffset->second, 0};
 }
 
 std::vector<IndirectDraw> ResolveIndirectDraws(std::span<const std::uint32_t> packet, const QueueState& queue) {
