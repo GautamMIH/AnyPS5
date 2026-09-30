@@ -1,4 +1,5 @@
 #include <elfpatcher/general/GuestModuleWriter.hpp>
+#include <elfpatcher/windows/WindowsImportBuilder.hpp>
 #include <elfpatcher/windows/WindowsLoadImage.hpp>
 #include <elfpatcher/windows/WindowsTlsBuilder.hpp>
 #include <elfpatcher/windows/WindowsPeWriter.hpp>
@@ -148,6 +149,13 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     directories[0] = {nextRva, CheckedRva(data.size())};
     nextRva = AlignRva(nextRva + data.size());
     sections.push_back(std::move(exportSection));
+    if (tlsIndex != 0) {
+        auto imports = WindowsImportBuilder().Build(nextRva);
+        directories[1] = imports.Directory;
+        directories[12] = imports.AddressTable;
+        nextRva = AlignRva(nextRva + imports.Section.Data.size());
+        sections.push_back(std::move(imports.Section));
+    }
     auto relocationData = WindowsRelocationBuilder().BuildBaseRelocations(relocations);
     if (!relocationData.empty()) {
         directories[5] = {nextRva, CheckedRva(relocationData.size())};
