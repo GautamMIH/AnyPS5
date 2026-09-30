@@ -4,6 +4,14 @@
 
 namespace Relinker {
 
+namespace {
+
+bool _rangeFits(const std::uint64_t offset, const std::uint64_t length, const std::size_t size) {
+    return offset <= size && length <= size - offset;
+}
+
+}
+
 ElfReader::ElfReader(std::vector<std::uint8_t> fileBuffer)
     : _fileBuffer(std::move(fileBuffer))
 {
@@ -21,7 +29,7 @@ std::uint8_t ElfReader::_readU8At(FileByteOffset fileByteOffset) const {
 }
 
 std::uint16_t ElfReader::_readU16At(FileByteOffset fileByteOffset) const {
-    if (fileByteOffset + 2 > _fileBuffer.size()) {
+    if (!_rangeFits(fileByteOffset, 2, _fileBuffer.size())) {
         throw RelinkerException("FileByteOffset out of bounds", fileByteOffset);
     }
     std::uint16_t value;
@@ -30,7 +38,7 @@ std::uint16_t ElfReader::_readU16At(FileByteOffset fileByteOffset) const {
 }
 
 std::uint32_t ElfReader::_readU32At(FileByteOffset fileByteOffset) const {
-    if (fileByteOffset + 4 > _fileBuffer.size()) {
+    if (!_rangeFits(fileByteOffset, 4, _fileBuffer.size())) {
         throw RelinkerException("FileByteOffset out of bounds", fileByteOffset);
     }
     std::uint32_t value;
@@ -39,7 +47,7 @@ std::uint32_t ElfReader::_readU32At(FileByteOffset fileByteOffset) const {
 }
 
 std::uint64_t ElfReader::_readU64At(FileByteOffset fileByteOffset) const {
-    if (fileByteOffset + 8 > _fileBuffer.size()) {
+    if (!_rangeFits(fileByteOffset, 8, _fileBuffer.size())) {
         throw RelinkerException("FileByteOffset out of bounds", fileByteOffset);
     }
     std::uint64_t value;
@@ -191,7 +199,7 @@ FileByteOffset ElfReader::TranslateVirtualAddress(VirtualAddress address) const 
 }
 
 std::vector<std::uint8_t> ElfReader::ReadSection(const SectionHeader& header) const {
-    if (header.Offset + header.SectionSize > _fileBuffer.size()) {
+    if (!_rangeFits(header.Offset, header.SectionSize, _fileBuffer.size())) {
         throw RelinkerException("Section offset out of bounds", header.Offset);
     }
 
@@ -201,7 +209,7 @@ std::vector<std::uint8_t> ElfReader::ReadSection(const SectionHeader& header) co
 }
 
 std::vector<std::uint8_t> ElfReader::ReadSegment(const ProgramHeader& header) const {
-    if (header.Offset + header.FileSize > _fileBuffer.size()) {
+    if (!_rangeFits(header.Offset, header.FileSize, _fileBuffer.size())) {
         throw RelinkerException("Segment offset out of bounds", header.Offset);
     }
 
