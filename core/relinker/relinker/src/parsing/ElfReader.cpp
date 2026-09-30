@@ -48,7 +48,7 @@ std::uint64_t ElfReader::_readU64At(FileByteOffset fileByteOffset) const {
 }
 
 ElfHeader ElfReader::ReadHeader() const {
-    if (_fileBuffer.size() < 20) {
+    if (_fileBuffer.size() < 0x40) {
         throw RelinkerException("File too small for ELF header");
     }
 
