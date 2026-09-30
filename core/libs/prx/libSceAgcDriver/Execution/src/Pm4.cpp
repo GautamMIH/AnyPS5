@@ -259,10 +259,12 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             }
             break;
         }
-        case 0x15: size(5); require((packet[4] & ~0x8000u) == 0x41u, "dispatch modifiers are not implemented"); break;
+        // Initiator bits accepted besides COMPUTE_SHADER_EN | ORDER_MODE: CS_W32_EN (0x8000) and
+        // TUNNEL_ENABLE (0x2000, a wave launch priority hint with no effect on results).
+        case 0x15: size(5); require((packet[4] & ~0xa000u) == 0x41u, "dispatch modifiers are not implemented"); break;
         case 0x16:
             require(packet.size() == 3 || packet.size() == 4, "invalid indirect dispatch size");
-            require((packet.back() & ~0x8000u) == 0x41u, "indirect dispatch modifiers are not implemented");
+            require((packet.back() & ~0xa000u) == 0x41u, "indirect dispatch modifiers are not implemented");
             break;
         case 0x42: size(2); require(packet[1] == 0, "unsupported PFP_SYNC_ME payload"); break;
         case 0x20: {
