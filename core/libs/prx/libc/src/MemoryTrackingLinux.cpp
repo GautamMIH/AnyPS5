@@ -28,9 +28,11 @@ bool readSafely(std::uintptr_t address, void* destination, std::size_t bytes) {
     return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(bytes);
 }
 
-// Return addresses on the faulting thread's stack: words pointing into a loaded module just after
-// a call instruction (frame pointers are unreliable in guest code, so the stack is scanned).
-void reportCallers(std::uintptr_t stack) {
+}
+
+// Return addresses on the thread's stack: words pointing into a loaded module just after a call
+// instruction (frame pointers are unreliable in guest code, so the stack is scanned).
+void ReportCallers(std::uintptr_t stack) {
     constexpr std::size_t words = 2048;
     constexpr int maximum = 24;
     int reported = 0;
@@ -55,6 +57,8 @@ void reportCallers(std::uintptr_t stack) {
     }
 }
 
+namespace {
+
 void reportUnhandledFault(const siginfo_t* info, const ucontext_t* native) {
     const auto instruction = static_cast<std::uintptr_t>(native->uc_mcontext.gregs[REG_RIP]);
     Dl_info module{};
@@ -78,7 +82,7 @@ void reportUnhandledFault(const siginfo_t* info, const ucontext_t* native) {
         static_cast<unsigned long long>(g[REG_R8]), static_cast<unsigned long long>(g[REG_R9]), static_cast<unsigned long long>(g[REG_R10]), static_cast<unsigned long long>(g[REG_R11]),
         static_cast<unsigned long long>(g[REG_R12]), static_cast<unsigned long long>(g[REG_R13]), static_cast<unsigned long long>(g[REG_R14]), static_cast<unsigned long long>(g[REG_R15]));
     if (registerLength > 0) static_cast<void>(write(STDERR_FILENO, registers, static_cast<std::size_t>(std::min<int>(registerLength, sizeof(registers) - 1))));
-    reportCallers(static_cast<std::uintptr_t>(native->uc_mcontext.gregs[REG_RSP]));
+    ReportCallers(static_cast<std::uintptr_t>(native->uc_mcontext.gregs[REG_RSP]));
 }
 
 void handleFault(int signal, siginfo_t* info, void* context) {

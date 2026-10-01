@@ -490,7 +490,16 @@ std::size_t APS5_VABI wcsrtombs_nid_postfix(char* destination, const GuestWchar*
 }
 
 int APS5_VABI vswprintf_nid_postfix(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list* arguments) {
-    return formatWide(destination, count, format, *arguments);
+    const int result = formatWide(destination, count, format, *arguments);
+    // Debug aid: APS5_TRACE_FORMAT=1 echoes every formatted wide string (engines format their log
+    // and fatal-error text this way even when they print nothing).
+    static const bool trace = std::getenv("APS5_TRACE_FORMAT") != nullptr;
+    if (trace && destination != nullptr && result > 0) {
+        std::string text;
+        for (std::size_t i = 0; i < count && destination[i] != 0; ++i) text.push_back(destination[i] < 0x80 ? static_cast<char>(destination[i]) : '?');
+        std::fprintf(stderr, "[format] %s\n", text.c_str());
+    }
+    return result;
 }
 
 int APS5_VABI swprintf_nid_postfix(GuestWchar* destination, std::size_t count, const GuestWchar* format, ...) {

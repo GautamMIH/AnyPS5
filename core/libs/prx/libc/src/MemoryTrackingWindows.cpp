@@ -31,6 +31,8 @@ void protect(std::uint64_t address, std::size_t bytes, DWORD protection) {
 
 }
 
+void ReportCallers(std::uintptr_t) {}
+
 std::size_t PageSize() {
     static const auto size = [] {
         SYSTEM_INFO info{};

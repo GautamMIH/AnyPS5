@@ -14,6 +14,8 @@ struct Region {
 
 using FaultHandler = bool (*)(std::uint64_t, bool);
 std::size_t PageSize();
+// Writes the return addresses found on the stack above stack (module+address) to stderr.
+void ReportCallers(std::uintptr_t stack);
 void Install(FaultHandler handler);
 std::vector<Region> Query(std::uint64_t address, std::size_t bytes);
 void Protect(std::uint64_t address, std::size_t bytes, Protection protection);

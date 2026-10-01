@@ -1,3 +1,4 @@
+#include "prx/libc/include/MemoryTrackingPlatform.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -137,6 +138,7 @@ void APS5_VABI exit_nid_postfix(int code) {
     (void)arg3; (void)arg4; (void)arg5;
     std::fprintf(stderr, "[libc] abort() called from %p\n", __builtin_return_address(0));
     std::fflush(nullptr);
+    GuestMemoryTracking::Platform::ReportCallers(reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0)));
     std::abort();
 }
 
