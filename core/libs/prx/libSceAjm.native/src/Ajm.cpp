@@ -881,6 +881,14 @@ int APS5_VABI sceAjmBatchJobSetResampleParameters(AjmBatchInfo* info, uint32_t i
     return sceAjmBatchJobSetResampleParametersEx(info, instance, ratio, 0.0f, flags, result);
 }
 
+// Batches run to completion when started, so by the time a batch can be cancelled it has finished:
+// there is nothing left to cancel and its results stand.
+int APS5_VABI sceAjmBatchCancel(uint32_t context, uint32_t batch) {
+    (void)context;
+    AJM_TRACE("[ajm] batch %u cancel (already complete)\n", batch);
+    return 0;
+}
+
 int APS5_VABI sceAjmBatchJobGetStatistics(AjmBatchInfo* info, float interval, void* result) {
     (void)interval;
     return Append(info, MakeHeader(JobKind::GetStatistics, 0, result, 24), nullptr, nullptr);
