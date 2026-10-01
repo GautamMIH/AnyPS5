@@ -1,3 +1,4 @@
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include <cstdint>
 #include <cstddef>
 #include "SceTypes.hpp"
@@ -63,6 +64,7 @@ int APS5_VABI sem_destroy_nid_postfix(void* sem) {
 }
 
 int APS5_VABI sem_wait_nid_postfix(void* sem) {
+    APS5_STALL_WATCH("sem", reinterpret_cast<const void*>(sem));
     auto* semaphore = Get(sem);
     if (!semaphore) return Fail(PosixThread::GUEST_EINVAL);
     return WaitFor(semaphore, nullptr);

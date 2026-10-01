@@ -1,3 +1,4 @@
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include "Equeue.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 
@@ -296,6 +297,7 @@ int APS5_VABI sceKernelDeleteEqueue(KernelEqueue eq) {
 }
 
 int APS5_VABI sceKernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int* out, const KernelUseconds* timo) {
+    APS5_STALL_WATCH("equeue", reinterpret_cast<const void*>(eq));
     auto owner = EqueuePin_nid_postfix(eq);
     if (!owner) {
         return SCE_KERNEL_ERROR_EBADF;

@@ -1,3 +1,4 @@
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
 #include "prx/libc/include/General.hpp"
@@ -44,10 +45,12 @@ int APS5_VABI scePthreadCondSignalto(PthreadCond* cond, Pthread) {
 }
 
 int APS5_VABI scePthreadCondWait(PthreadCond* cond, PthreadMutex* mutex) {
+    APS5_STALL_WATCH("cond", reinterpret_cast<const void*>(cond));
     return PthreadSync::SceError(PthreadSync::CondWait(cond, mutex, std::nullopt));
 }
 
 int APS5_VABI scePthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, unsigned int usec) {
+    APS5_STALL_WATCH("cond-timed", reinterpret_cast<const void*>(cond));
     return PthreadSync::SceError(PthreadSync::CondWait(cond, mutex, PthreadSync::DeadlineAfterMicroseconds(usec)));
 }
 

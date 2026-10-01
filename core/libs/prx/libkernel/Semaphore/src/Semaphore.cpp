@@ -1,3 +1,4 @@
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include "prx/libkernel/Semaphore/include/Semaphore.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include <chrono>
@@ -50,6 +51,7 @@ int APS5_VABI sceKernelSignalSema(KernelSema sem, int count) {
 }
 
 int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) {
+ APS5_STALL_WATCH("sema", reinterpret_cast<const void*>(sem));
  if (sem == nullptr || need <= 0) {
   APS5_INVALID_ARG_EX;
  }

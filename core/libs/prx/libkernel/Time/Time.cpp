@@ -1,5 +1,6 @@
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 
 #include "prx/libc/include/General.hpp"
 #include <algorithm>
@@ -19,6 +20,10 @@
 #include <stdexcept>
 #include <string>
 #include <x86intrin.h>
+#ifndef _WIN32
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 #ifdef _WIN32
 #include <windows.h>
@@ -141,6 +146,96 @@ static const bool g_timerSelfTest = [] {
     return true;
 }();
 #endif
+
+namespace KernelStallWatch {
+namespace {
+
+struct Entry {
+    const char* kind;
+    const void* object;
+    std::array<std::uintptr_t, 3> chain;
+    std::chrono::steady_clock::time_point start;
+    long thread;
+    bool reported = false;
+};
+
+double thresholdSeconds() {
+    static const double seconds = [] {
+        const char* value = std::getenv("APS5_TRACE_STALLS");
+        return value != nullptr ? std::max(std::atof(value), 0.5) : 0.0;
+    }();
+    return seconds;
+}
+
+std::mutex& watchMutex() {
+    static auto* value = new std::mutex;
+    return *value;
+}
+
+std::map<long, Entry>& entries() {
+    static auto* value = new std::map<long, Entry>;
+    return *value;
+}
+
+thread_local int depth = 0;
+
+void watchdog() {
+    const auto threshold = std::chrono::duration<double>(thresholdSeconds());
+    for (;;) {
+        std::this_thread::sleep_for(threshold / 2);
+        std::lock_guard lock(watchMutex());
+        const auto now = std::chrono::steady_clock::now();
+        for (auto& [thread, entry] : entries()) {
+            if (entry.reported || now - entry.start < threshold) continue;
+            entry.reported = true;
+            std::fprintf(stderr, "[stall] thread %ld in %s %p for %.1f s, guest 0x%llx < 0x%llx < 0x%llx\n", thread, entry.kind, entry.object,
+                std::chrono::duration<double>(now - entry.start).count(), static_cast<unsigned long long>(entry.chain[0]),
+                static_cast<unsigned long long>(entry.chain[1]), static_cast<unsigned long long>(entry.chain[2]));
+        }
+    }
+}
+
+long currentThread() {
+#ifdef _WIN32
+    return static_cast<long>(GetCurrentThreadId());
+#else
+    return static_cast<long>(syscall(SYS_gettid));
+#endif
+}
+
+}
+
+void Begin(const char* kind, const void* object, const void* caller, const void* guestFrame) {
+    if (thresholdSeconds() <= 0.0 || depth++ > 0) return;
+    static std::once_flag started;
+    std::call_once(started, [] { std::thread(watchdog).detach(); });
+    Entry entry{kind, object, {reinterpret_cast<std::uintptr_t>(caller), 0, 0}, std::chrono::steady_clock::now(), currentThread()};
+    const auto stack = reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
+    auto frame = reinterpret_cast<std::uintptr_t>(guestFrame);
+    for (std::size_t level = 1; level < entry.chain.size(); ++level) {
+        if (frame <= stack || frame >= stack + (8u << 20u) || (frame & 7u) != 0) break;
+        const auto* words = reinterpret_cast<const std::uintptr_t*>(frame);
+        entry.chain[level] = words[1];
+        frame = words[0];
+    }
+    std::lock_guard lock(watchMutex());
+    entries()[entry.thread] = entry;
+}
+
+void End() {
+    if (thresholdSeconds() <= 0.0 || --depth > 0) return;
+    const auto thread = currentThread();
+    std::lock_guard lock(watchMutex());
+    const auto found = entries().find(thread);
+    if (found == entries().end()) return;
+    if (found->second.reported) {
+        std::fprintf(stderr, "[stall] thread %ld left %s %p after %.1f s\n", thread, found->second.kind, found->second.object, std::chrono::duration<double>(std::chrono::steady_clock::now() - found->second.start).count());
+    }
+    entries().erase(found);
+}
+
+}
+
 
 extern "C" {
 

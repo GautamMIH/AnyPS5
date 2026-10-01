@@ -1,3 +1,4 @@
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <new>
@@ -25,11 +26,13 @@ int APS5_VABI pthread_cond_signal_nid_postfix(PthreadCond* cond) {
 }
 
 int APS5_VABI pthread_cond_timedwait_nid_postfix(PthreadCond* cond, PthreadMutex* mutex, const KernelTimespec* abstime) {
+    APS5_STALL_WATCH("cond-timed", reinterpret_cast<const void*>(cond));
     if (!abstime) return PthreadSync::kErrorInvalid;
     return PthreadSync::CondWait(cond, mutex, PthreadSync::DeadlineAt(PthreadSync::CondClock(cond), abstime->tv_sec, abstime->tv_nsec));
 }
 
 int APS5_VABI pthread_cond_wait_nid_postfix(PthreadCond* cond, PthreadMutex* mutex) {
+    APS5_STALL_WATCH("cond", reinterpret_cast<const void*>(cond));
     return PthreadSync::CondWait(cond, mutex, std::nullopt);
 }
 

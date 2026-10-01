@@ -1,3 +1,4 @@
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
 #include "../include/PthreadStacks.hpp"
@@ -196,7 +197,9 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     if (detached)
         ReleaseThread(published);
 #else
-    p->_thr = std::thread([args = std::move(args), ready = start.get_future()]() mutable {
+    // The host thread carries the guest name (15 characters on Linux), for debuggers and /proc.
+    p->_thr = std::thread([args = std::move(args), ready = start.get_future(), hostName = p->name.substr(0, 15)]() mutable {
+        if (!hostName.empty()) pthread_setname_np(pthread_self(), hostName.c_str());
         if (ready.get()) RunThread(std::move(args));
     });
     try {
@@ -213,6 +216,7 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
 }
 
 int APS5_VABI scePthreadJoin(Pthread thread, void** retval) {
+    APS5_STALL_WATCH("join", reinterpret_cast<const void*>(thread));
     if (!thread) throw std::runtime_error("scePthreadJoin: null thread");
     if (thread->_detached) return SCE_KERNEL_ERROR_EINVAL;
 #ifdef _WIN32

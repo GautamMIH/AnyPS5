@@ -1,3 +1,4 @@
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
 #include "prx/libc/include/General.hpp"
@@ -53,6 +54,7 @@ int APS5_VABI scePthreadMutexDestroy(PthreadMutex* mutex) {
 }
 
 int APS5_VABI scePthreadMutexLock(PthreadMutex* mutex) {
+    APS5_STALL_WATCH("mutex", reinterpret_cast<const void*>(mutex));
     return PthreadSync::SceError(PthreadSync::MutexLock(mutex, std::nullopt));
 }
 

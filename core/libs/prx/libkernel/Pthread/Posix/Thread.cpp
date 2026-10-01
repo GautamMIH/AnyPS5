@@ -1,3 +1,4 @@
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -83,6 +84,7 @@ void APS5_VABI pthread_exit_nid_postfix(void* value) {
 }
 
 int APS5_VABI pthread_join_nid_postfix(Pthread thread, void** value) {
+    APS5_STALL_WATCH("join", reinterpret_cast<const void*>(thread));
     return posixFromSce(scePthreadJoin(thread, value));
 }
 

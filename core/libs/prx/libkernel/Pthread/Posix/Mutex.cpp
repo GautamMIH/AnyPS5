@@ -1,3 +1,4 @@
+#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include <cstdint>
 #include <cstddef>
 #include <new>
@@ -17,6 +18,7 @@ int APS5_VABI pthread_mutex_init_nid_postfix(PthreadMutex* mutex, const PthreadM
 }
 
 int APS5_VABI pthread_mutex_lock_nid_postfix(PthreadMutex* mutex) {
+    APS5_STALL_WATCH("mutex", reinterpret_cast<const void*>(mutex));
     return PthreadSync::MutexLock(mutex, std::nullopt);
 }
 
