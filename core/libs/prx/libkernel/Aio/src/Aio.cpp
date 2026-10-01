@@ -9,6 +9,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/File/include/FileErrors.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 
 #ifdef _WIN32
 #include <io.h>
@@ -68,6 +69,8 @@ std::int64_t atOffset(const std::int32_t fd, const std::size_t nbyte, const std:
 #endif
 
 std::int64_t transfer(const KernelAioRwRequest& request, const bool write) {
+    // As for any system call on guest memory: tracked pages are resolved first (see Open.cpp).
+    if (request.buf != nullptr && request.nbyte != 0) GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(reinterpret_cast<std::uint64_t>(request.buf), request.nbyte, !write);
 #ifdef _WIN32
     const auto result = atOffset(request.fd, request.nbyte, static_cast<std::int64_t>(request.offset), [&](const int fd, const unsigned int count) {
         return write ? ::_write(fd, request.buf, count) : ::_read(fd, request.buf, count);

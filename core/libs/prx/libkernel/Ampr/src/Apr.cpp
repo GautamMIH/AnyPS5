@@ -14,6 +14,7 @@
 #include "prx/libkernel/Ampr/include/AmprPackets.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/File/include/FileErrors.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 
 #if defined(__linux__)
 #include <fcntl.h>
@@ -129,6 +130,8 @@ std::uint32_t readFile(const AmprPackets::ReadFile& packet) {
         descriptor = file->second.Descriptor;
     }
     auto* destination = reinterpret_cast<std::uint8_t*>(packet.Destination);
+    // pread cannot fault into the page-tracking handler: tracked pages are resolved first (see Open.cpp).
+    if (destination != nullptr && packet.Size != 0) GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(reinterpret_cast<std::uint64_t>(destination), packet.Size, true);
     std::uint64_t done = 0;
     while (done < packet.Size) {
         const auto result = ::pread(descriptor, destination + done, packet.Size - done, static_cast<off_t>(packet.FileOffset + done));

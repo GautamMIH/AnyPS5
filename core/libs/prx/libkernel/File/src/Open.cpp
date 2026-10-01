@@ -17,6 +17,14 @@
 #include <string>
 #include <system_error>
 
+#include "prx/libc/include/GuestMemoryTracking.hpp"
+// A system call reading or writing guest memory cannot fault into the page-tracking handler (the
+// kernel returns EFAULT on a protected page), so tracked ranges are resolved first, as a CPU
+// access would resolve them: GPU-resident surfaces are written back (and invalidated on writes).
+static void resolveGuestAccess(const void* buffer, std::size_t bytes, bool writable) {
+    if (buffer != nullptr && bytes != 0) GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(reinterpret_cast<std::uint64_t>(buffer), bytes, writable);
+}
+
 #ifdef _WIN32
 #include <fcntl.h>
 #include <io.h>
@@ -42,6 +50,7 @@ static std::int64_t NativeRead(int fd, void* buf, std::size_t n) {
         errno = EINVAL;
         return -1;
     }
+    resolveGuestAccess(buf, n, true);
     return ::_read(fd, buf, static_cast<unsigned int>(n));
 }
 static std::int64_t NativeWrite(int fd, const void* buf, std::size_t n) {
@@ -49,6 +58,7 @@ static std::int64_t NativeWrite(int fd, const void* buf, std::size_t n) {
         errno = EINVAL;
         return -1;
     }
+    resolveGuestAccess(buf, n, false);
     return ::_write(fd, buf, static_cast<unsigned int>(n));
 }
 static std::int64_t NativePread(int fd, void* buf, std::size_t n, std::int64_t offset) {
@@ -118,10 +128,10 @@ static int NativeOpen(const std::filesystem::path& p, int nativeFlags, int mode)
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
     return ::lseek(fd, static_cast<off_t>(offset), whence);
 }
-static std::int64_t NativeRead(int fd, void* buf, std::size_t n) { return ::read(fd, buf, n); }
-static std::int64_t NativeWrite(int fd, const void* buf, std::size_t n) { return ::write(fd, buf, n); }
-static std::int64_t NativePread(int fd, void* buf, std::size_t n, std::int64_t offset) { return ::pread(fd, buf, n, static_cast<off_t>(offset)); }
-static std::int64_t NativePwrite(int fd, const void* buf, std::size_t n, std::int64_t offset) { return ::pwrite(fd, buf, n, static_cast<off_t>(offset)); }
+static std::int64_t NativeRead(int fd, void* buf, std::size_t n) { resolveGuestAccess(buf, n, true); return ::read(fd, buf, n); }
+static std::int64_t NativeWrite(int fd, const void* buf, std::size_t n) { resolveGuestAccess(buf, n, false); return ::write(fd, buf, n); }
+static std::int64_t NativePread(int fd, void* buf, std::size_t n, std::int64_t offset) { resolveGuestAccess(buf, n, true); return ::pread(fd, buf, n, static_cast<off_t>(offset)); }
+static std::int64_t NativePwrite(int fd, const void* buf, std::size_t n, std::int64_t offset) { resolveGuestAccess(buf, n, false); return ::pwrite(fd, buf, n, static_cast<off_t>(offset)); }
 // Closing 0-2 leaves the host's standard streams open (guest files never use them).
 static int NativeClose(int fd) { return fd >= 0 && fd < 3 ? 0 : ::close(fd); }
 static int NativeUnlink(const std::filesystem::path& p) { return ::unlink(p.c_str()); }
