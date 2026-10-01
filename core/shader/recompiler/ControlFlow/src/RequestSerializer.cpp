@@ -660,7 +660,7 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     std::string buffer;
     Writer writer(buffer);
     writer.WriteU32(0x41505335u);
-    writer.WriteU32(3u);
+    writer.WriteU32(4u);
     writeShaderBinary(writer, request.shader);
     writeGuestContext(writer, request.context);
     writeSpirvTarget(writer, request.target);
@@ -676,6 +676,11 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
             writer.WriteU32(value);
         }
     }
+    // Version 4: a pixel request's input layout (SPI_PS_INPUT_ADDR and the loaded inputs).
+    if (request.context.pixel.has_value()) {
+        writer.WriteU32(request.context.pixel->inputAddr);
+        writer.WriteU32(request.context.pixel->inputLoaded);
+    }
     return base64Encode(buffer);
 }
 
@@ -684,7 +689,7 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     Reader reader(decoded);
     if (reader.ReadU32() != 0x41505335u) throw std::runtime_error("invalid recompile request signature");
     const auto version = reader.ReadU32();
-    if (version < 1u || version > 3u) throw std::runtime_error("unsupported recompile request serialization version");
+    if (version < 1u || version > 4u) throw std::runtime_error("unsupported recompile request serialization version");
     DeserializedRequest result{};
     result.request.shader = readShaderBinary(reader, result.shaderCode, result.shaderHeader);
     result.request.context = readGuestContext(reader, result);
@@ -699,6 +704,10 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
         for (std::uint32_t& value : result.request.context.compute->partialThreads) {
             value = reader.ReadU32();
         }
+    }
+    if (version >= 4u && result.request.context.pixel.has_value()) {
+        result.request.context.pixel->inputAddr = reader.ReadU32();
+        result.request.context.pixel->inputLoaded = reader.ReadU32();
     }
     return result;
 }

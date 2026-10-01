@@ -86,9 +86,13 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     const auto ena = read(context, spiPsInputEna);
     const auto addr = read(context, spiPsInputAddr);
     const auto activeInputs = ena & addr;
-    constexpr std::uint32_t knownMask = 0x1u | 0x2u | 0x10u | 0x20u | 0x100u | 0x200u | 0x400u | 0x800u | 0x1000u | 0x2000u;
+    // Perspective and linear sample, center and centroid pairs (rendering is single-sampled, so a
+    // centroid is the center), POS_X..W, FRONT_FACE, ANCILLARY.
+    constexpr std::uint32_t knownMask = 0x1u | 0x2u | 0x4u | 0x10u | 0x20u | 0x40u | 0x100u | 0x200u | 0x400u | 0x800u | 0x1000u | 0x2000u;
     if ((activeInputs & ~knownMask) != 0) {
-        throw std::runtime_error("AGC graphics: unsupported SPI_PS_INPUT_ENA/ADDR bit combination");
+        char message[128];
+        std::snprintf(message, sizeof(message), "AGC graphics: unsupported SPI_PS_INPUT_ENA 0x%x / ADDR 0x%x", ena, addr);
+        throw std::runtime_error(message);
     }
     std::array<std::uint32_t, 32> interpolatorSettings{};
     for (std::uint32_t i = 0; i < inputNum; ++i) {
@@ -110,6 +114,8 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         targetOutputMode[i] = static_cast<std::uint8_t>((colFormat >> (4u * i)) & 0xFu);
     }
     const bool hasPerspectiveCenterVgpr = (activeInputs & 0x2u) != 0;
+    // SPI_PS_INPUT_ADDR places every input it names, loaded or not: the center pair follows the
+    // sample pair when ADDR names it.
     const bool pixelKillEnable = ((shaderControl >> 6u) & 0x1u) != 0;
     const bool depthExportEnable = (shaderControl & 0x1u) != 0;
     const bool sampleMaskExportEnable = ((shaderControl >> 8u) & 0x1u) != 0;
@@ -119,7 +125,7 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         inputNum,
         interpolatorSettings,
         (inControl & 0x8000u) != 0,
-        hasPerspectiveCenterVgpr ? ((activeInputs & 0x1u) ? 2u : 0u) : 0u,
+        hasPerspectiveCenterVgpr ? ((addr & 0x1u) ? 2u : 0u) : 0u,
         hasPerspectiveCenterVgpr,
         (activeInputs & 0x100u) != 0,
         (activeInputs & 0x200u) != 0,
@@ -128,14 +134,16 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         (activeInputs & 0x1000u) != 0,
         (activeInputs & 0x2000u) != 0,
         (activeInputs & 0x11u) == 0x11u,
-        (activeInputs & 0x20u) != 0,
+        (activeInputs & 0x60u) != 0,
         pixelKillEnable,
         depthExportEnable,
         sampleMaskExportEnable,
         zOrder == 1u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable,
         ((shaderControl >> 10u) & 0x1u) != 0,
         targetOutputMode,
-        targetExportMapping
+        targetExportMapping,
+        addr,
+        activeInputs
     };
 }
 

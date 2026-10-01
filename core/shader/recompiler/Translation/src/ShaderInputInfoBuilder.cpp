@@ -106,6 +106,23 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         if (pixel.hasPerspectiveCenterVgpr) {
             pixelStorage.psPerspectiveCenterVgpr = pixel.perspectiveCenterVgpr;
         }
+        if (pixel.inputAddr != 0u) {
+            pixelStorage.psInputAddr = pixel.inputAddr;
+            pixelStorage.psInputLoaded = pixel.inputLoaded & pixel.inputAddr;
+        } else {
+            // Requests without the layout: the loaded inputs make it.
+            std::uint32_t loaded = 0;
+            if (pixel.hasPerspectiveCenterVgpr) loaded |= 0x2u | (pixel.perspectiveCenterVgpr == 2u ? 0x1u : 0u);
+            if (pixel.noPerspective) loaded |= 0x20u;
+            if (pixel.posX) loaded |= 0x100u;
+            if (pixel.posY) loaded |= 0x200u;
+            if (pixel.posZ) loaded |= 0x400u;
+            if (pixel.posW) loaded |= 0x800u;
+            if (pixel.frontFace) loaded |= 0x1000u;
+            if (pixel.ancillary) loaded |= 0x2000u;
+            pixelStorage.psInputAddr = loaded;
+            pixelStorage.psInputLoaded = loaded;
+        }
         for (std::uint32_t i = 0; i < 8; ++i) {
             pixelStorage.targetOutputMode[i] = pixel.targetOutputMode[i];
             pixelStorage.targetExportMapping[i].packed = pixel.targetExportMapping[i];

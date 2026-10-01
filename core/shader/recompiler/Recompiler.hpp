@@ -74,6 +74,11 @@ struct ShaderPixelStageInfo {
     bool executeOnNoop;
     std::array<std::uint8_t, 8> targetOutputMode;
     std::array<std::uint8_t, 8> targetExportMapping;
+    // SPI_PS_INPUT_ADDR: every input it names takes its VGPRs in SPI order (two per I/J pair, three
+    // for the pull model, one otherwise), loaded or not; inputLoaded (ENA & ADDR) are the ones the
+    // hardware writes. 0 when unknown: the loaded inputs above then make the layout.
+    std::uint32_t inputAddr = 0;
+    std::uint32_t inputLoaded = 0;
 };
 
 struct ShaderVertexBufferResource {

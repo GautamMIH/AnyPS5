@@ -304,29 +304,45 @@ void emitEntryPrologue(IrProgram& program, IrBlock& entryBlock, const TranslateO
         entryIr.SetVectorReg(static_cast<VectorReg>(8), builtin(StageInputKind::PrimitiveId));
     } else if (options.stage == ShaderStageKind::Pixel) {
         const auto* ps = options.inputInfo.pixel;
-        if (options.fragmentShaderBarycentricEnabled && ps->psPerspectiveCenterVgpr != std::numeric_limits<std::uint32_t>::max()) {
-            entryIr.SetVectorReg(static_cast<VectorReg>(ps->psPerspectiveCenterVgpr), builtin(StageInputKind::BaryCoordSmooth, 0u));
-            entryIr.SetVectorReg(static_cast<VectorReg>(ps->psPerspectiveCenterVgpr + 1u), builtin(StageInputKind::BaryCoordSmooth, 1u));
+        // SPI_PS_INPUT_ADDR places every input it names in SPI order, loaded or not (two VGPRs per
+        // I/J pair, three for the pull model, one otherwise); the hardware writes the loaded ones
+        // (upstream cb66ec20). Rendering is single-sampled, so a centroid pair is the center.
+        constexpr std::array<std::uint32_t, 16> inputVgprs{2, 2, 2, 3, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+        const auto vgpr = [&](std::uint32_t input) {
+            std::uint32_t result = 0;
+            for (std::uint32_t index = 0; index < input; ++index) {
+                if ((ps->psInputAddr & (1u << index)) != 0u) result += inputVgprs[index];
+            }
+            return static_cast<VectorReg>(result);
+        };
+        const auto loaded = [&](std::uint32_t input) { return (ps->psInputLoaded & (1u << input)) != 0u; };
+        if (options.fragmentShaderBarycentricEnabled) {
+            for (const std::uint32_t pair : {1u, 2u, 5u, 6u}) {
+                if (!loaded(pair)) continue;
+                const auto kind = pair < 4u ? StageInputKind::BaryCoordSmooth : StageInputKind::BaryCoordNoPerspective;
+                entryIr.SetVectorReg(vgpr(pair), builtin(kind, 0u));
+                entryIr.SetVectorReg(static_cast<VectorReg>(static_cast<std::uint32_t>(vgpr(pair)) + 1u), builtin(kind, 1u));
+            }
         }
-        std::uint32_t reg = ps->psSystemInputBase;
-        if (ps->psPosX) {
-            entryIr.SetVectorReg(static_cast<VectorReg>(reg++), builtin(StageInputKind::FragCoord, 0u));
+        if (ps->psPosX && loaded(8)) {
+            entryIr.SetVectorReg(vgpr(8), builtin(StageInputKind::FragCoord, 0u));
         }
-        if (ps->psPosY) {
-            entryIr.SetVectorReg(static_cast<VectorReg>(reg++), builtin(StageInputKind::FragCoord, 1u));
+        if (ps->psPosY && loaded(9)) {
+            entryIr.SetVectorReg(vgpr(9), builtin(StageInputKind::FragCoord, 1u));
         }
-        if (ps->psPosZ) {
-            entryIr.SetVectorReg(static_cast<VectorReg>(reg++), builtin(StageInputKind::FragCoord, 2u));
+        if (ps->psPosZ && loaded(10)) {
+            entryIr.SetVectorReg(vgpr(10), builtin(StageInputKind::FragCoord, 2u));
         }
-        if (ps->psPosW) {
+        if (ps->psPosW && loaded(11)) {
             IrValue& reciprocalW = entryIr.BitCastF32(builtin(StageInputKind::FragCoord, 3u));
             IrValue& w = entryIr.Emit(IrOpcode::FPRecip32, IrOpcodeType(IrOpcode::FPRecip32), {&reciprocalW});
-            entryIr.SetVectorReg(static_cast<VectorReg>(reg++), entryIr.BitCastU32(w));
+            entryIr.SetVectorReg(vgpr(11), entryIr.BitCastU32(w));
         }
-        if (ps->psFrontFace) {
-            entryIr.SetVectorReg(static_cast<VectorReg>(reg++), builtin(StageInputKind::FrontFacing));
+        if (ps->psFrontFace && loaded(12)) {
+            entryIr.SetVectorReg(vgpr(12), builtin(StageInputKind::FrontFacing));
         }
-        if (ps->psAncillary) {
+        const auto reg = static_cast<std::uint32_t>(vgpr(13));
+        if (ps->psAncillary && loaded(13)) {
             // The ancillary VGPR packs the render-target array index in bits 16-28 and the sample
             // index in bits 8-11 (gfx10 layout, as Mesa unpacks it). Rendering is single-sample,
             // so the sample index is zero.

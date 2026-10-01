@@ -161,7 +161,9 @@ struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {
 struct ShaderPixelInputInfo {
     std::uint32_t interpolatorSettings[32] = {0};
     std::uint32_t inputNum = 0;
-    std::uint32_t psSystemInputBase = 0;
+    // SPI_PS_INPUT_ADDR and the loaded inputs (see ShaderPixelStageInfo::inputAddr).
+    std::uint32_t psInputAddr = 0;
+    std::uint32_t psInputLoaded = 0;
     std::uint32_t customInterpolationMask = 0;
     std::uint32_t psPerspectiveCenterVgpr = std::numeric_limits<std::uint32_t>::max();
     std::uint8_t targetOutputMode[8] = {};
