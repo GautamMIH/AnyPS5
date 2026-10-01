@@ -32,6 +32,16 @@ bool GpuWritten(std::uint64_t address, std::uint64_t bytes);
 // Changes whenever a GPU-written range is added.
 std::uint64_t GpuWriteGeneration();
 
+// A listener told of every write the tracker learns of, as it learns of it: CPU writes when a
+// collection finds them, GPU and alias writes when they are noted. Copies of guest memory that must
+// follow every change (the device-local mirror) invalidate themselves from it. Called with the
+// tracker's locks held: the listener must not call back into the tracker.
+using WriteListener = void (*)(void* context, std::uint64_t address, std::uint64_t bytes);
+// Reports the range's CPU writes to the listener (at most once per epoch). False when the range
+// cannot be watched: copies of it cannot learn of CPU writes.
+bool CpuCollect(std::uint64_t address, std::uint64_t bytes);
+void SetWriteListener(WriteListener listener, void* context);
+
 // The driver wrote the range through the host alias of guest memory (not seen by the write watch).
 void NoteAliasWrite(std::uint64_t address, std::uint64_t bytes);
 // Changes whenever an alias write is noted; AliasWrittenSince reports whether one overlaps the range.

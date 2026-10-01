@@ -53,7 +53,15 @@ struct State {
     std::deque<AliasWrite> aliasWrites;
     std::uint64_t aliasFloor = 0;
     std::atomic<std::uint64_t> aliasGeneration{0};
+
+    std::atomic<WriteListener> listener{nullptr};
+    std::atomic<void*> listenerContext{nullptr};
 };
+
+void notify(State& tracker, std::uint64_t address, std::uint64_t bytes) {
+    const auto listener = tracker.listener.load(std::memory_order_acquire);
+    if (listener != nullptr && bytes != 0) listener(tracker.listenerContext.load(std::memory_order_acquire), address, bytes);
+}
 
 State& state() {
     static State* value = [] {
@@ -79,6 +87,7 @@ bool collect(State& tracker, std::uint64_t address, std::uint64_t bytes) {
     const bool collected = GuestMemoryBacking::GuestWriteWatchCollect_nid_postfix(address, bytes, [](void* context, std::uint64_t begin, std::uint64_t end) {
         auto& visit = *static_cast<Visit*>(context);
         visit.written = true;
+        notify(*visit.tracker, begin, end - begin);
         for (auto block = begin >> kBlockShift; block <= (end - 1) >> kBlockShift; ++block) visit.tracker->blocks[block] = visit.generation;
     }, &visit);
     if (visit.written) tracker.cpuGeneration = visit.generation;
@@ -129,13 +138,27 @@ bool CpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t g
     return false;
 }
 
+bool CpuCollect(std::uint64_t address, std::uint64_t bytes) {
+    auto& tracker = state();
+    if (!tracker.available || !validRange(address, bytes)) return false;
+    std::lock_guard lock(tracker.cpuMutex);
+    return collectInEpoch(tracker, address, bytes);
+}
+
 void NextEpoch() {
     state().epoch.fetch_add(1, std::memory_order_acq_rel);
+}
+
+void SetWriteListener(WriteListener listener, void* context) {
+    auto& tracker = state();
+    tracker.listenerContext.store(context, std::memory_order_release);
+    tracker.listener.store(listener, std::memory_order_release);
 }
 
 void NoteGpuWrite(std::uint64_t address, std::uint64_t bytes) {
     if (bytes == 0) return;
     auto& tracker = state();
+    notify(tracker, address, bytes);
     const auto size = pageSize();
     auto begin = address / size * size;
     auto end = (address + bytes + size - 1) / size * size;
@@ -166,6 +189,7 @@ std::uint64_t GpuWriteGeneration() {
 void NoteAliasWrite(std::uint64_t address, std::uint64_t bytes) {
     if (bytes == 0) return;
     auto& tracker = state();
+    notify(tracker, address, bytes);
     std::lock_guard lock(tracker.mutex);
     const auto generation = tracker.aliasGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
     tracker.aliasWrites.push_back({generation, address, address + bytes});

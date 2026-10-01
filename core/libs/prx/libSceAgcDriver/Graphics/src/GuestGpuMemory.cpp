@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +12,10 @@ namespace {
 // Imports cover whole chunks of a segment so neighbouring ranges share them; a range crossing chunk
 // boundaries gets one import spanning them (imports may overlap).
 constexpr std::uint64_t kChunkBytes = 32ull << 20;
+// Mirror pages: the write tracker's block size.
+constexpr std::uint64_t kMirrorPageShift = 16;
+// Ranges up to this size are read through the mirror.
+constexpr std::uint64_t kMirrorMaxRange = 8ull << 20;
 
 }
 
@@ -21,9 +27,112 @@ std::unique_ptr<GuestGpuMemory> GuestGpuMemory::Create(const Context& context) {
     return std::unique_ptr<GuestGpuMemory>(new GuestGpuMemory(context, 0));
 }
 
-GuestGpuMemory::GuestGpuMemory(const Context& context, std::uint32_t memoryTypeMask) : context(context), memoryTypeMask(memoryTypeMask) {}
+GuestGpuMemory::GuestGpuMemory(const Context& context, std::uint32_t memoryTypeMask) : context(context), memoryTypeMask(memoryTypeMask) {
+    // ANYPS5_GPU_MIRROR=1: GPU reads use a device-local mirror refreshed from the write tracker
+    // instead of reading guest memory over PCIe. Off by default: on an RTX 3050 laptop the copies
+    // cost more than the in-place reads they replace (see docs/research-notes.md).
+    mirrorEnabled = WriteTracker::Available() && std::getenv("ANYPS5_GPU_MIRROR") != nullptr;
+    if (mirrorEnabled) {
+        // A quarter of the largest device-local heap, at most 1 GiB: the rest is the game's.
+        const auto& memory = context.memory;
+        for (std::uint32_t heap = 0; heap < memory.memoryHeapCount; ++heap)
+            if ((memory.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) mirrorBudget = std::max<std::uint64_t>(mirrorBudget, memory.memoryHeaps[heap].size / 4);
+        mirrorBudget = std::min<std::uint64_t>(mirrorBudget, 1ull << 30);
+        WriteTracker::SetWriteListener(&GuestGpuMemory::invalidateWrites, this);
+        std::fprintf(stderr, "[AnyPS5] GPU reads of guest memory use a device-local mirror (up to %llu MiB)\n", static_cast<unsigned long long>(mirrorBudget >> 20));
+    }
+}
+
+void GuestGpuMemory::invalidateWrites(void* self, std::uint64_t address, std::uint64_t bytes) {
+    static_cast<GuestGpuMemory*>(self)->invalidate(address, bytes);
+}
+
+void GuestGpuMemory::invalidate(std::uint64_t address, std::uint64_t bytes) {
+    // Every view of the written bytes: a range may span segments, and imports of a chunk may overlap.
+    auto cursor = address;
+    const auto end = address + bytes;
+    while (cursor < end) {
+        GuestMemoryBacking::Translation translation{};
+        if (!GuestMemoryBacking::GuestVirtualTranslate_nid_postfix(cursor, end - cursor, &translation) || translation.bytes == 0) {
+            cursor = (cursor | ((std::uint64_t{1} << kMirrorPageShift) - 1)) + 1;
+            continue;
+        }
+        const auto begin = translation.offset;
+        const auto last = translation.offset + translation.bytes;
+        std::lock_guard lock(mutex);
+        const auto clear = [&](Import& import, std::uint64_t first) {
+            if (import.current.empty() || last <= first || begin >= import.end) return;
+            const auto from = (std::max(begin, first) - first) >> kMirrorPageShift;
+            const auto to = (std::min(last, import.end) - first - 1) >> kMirrorPageShift;
+            for (auto page = from; page <= to && page < import.current.size(); ++page) import.current[page] = false;
+        };
+        for (auto& [key, import] : imports)
+            if (key.first == translation.segment) clear(import, key.second);
+        cursor += translation.bytes;
+    }
+}
+
+std::optional<GuestGpuMemory::View> GuestGpuMemory::ResolveRead(std::uint64_t address, std::uint64_t bytes, VkCommandBuffer commands) {
+    // Large ranges (heaps bound whole, of which a draw reads little) are read in place: copying
+    // every stale page would move far more than the shader reads.
+    if (!mirrorEnabled || commands == VK_NULL_HANDLE || bytes > kMirrorMaxRange) return Resolve(address, bytes);
+    // Collected before the lock: collecting reports CPU writes to invalidate (which locks).
+    if (!WriteTracker::CpuCollect(address, bytes)) {
+        static const bool traceMirror = std::getenv("APS5_TRACE_MIRROR") != nullptr;
+        if (traceMirror) std::fprintf(stderr, "[mirror] unwatched 0x%llx+0x%llx\n", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes));
+        return Resolve(address, bytes);
+    }
+    GuestMemoryBacking::Translation translation{};
+    if (!GuestMemoryBacking::GuestVirtualTranslate_nid_postfix(address, bytes, &translation)) return std::nullopt;
+    const auto begin = translation.offset;
+    const auto end = translation.offset + translation.bytes;
+    std::lock_guard lock(mutex);
+    const auto first = begin & ~(kChunkBytes - 1u);
+    const auto last = std::min((end + kChunkBytes - 1u) & ~(kChunkBytes - 1u), translation.segmentBytes);
+    auto& import = const_cast<Import&>(importRange(translation.segment, translation.segmentAlias, translation.segmentBytes, first, last));
+    const auto size = import.end - first;
+    if (!import.mirror) {
+        if (mirrorBytes + size > mirrorBudget) return View{import.buffer, begin - first, import.address + (begin - first), translation.bytes};
+        try {
+            import.mirror = std::make_shared<Buffer>(context, static_cast<std::size_t>(size), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        } catch (const std::exception&) {
+            // Device memory is exhausted: stop mirroring, read in place.
+            mirrorBudget = mirrorBytes;
+            return View{import.buffer, begin - first, import.address + (begin - first), translation.bytes};
+        }
+        mirrorBytes += size;
+        import.current.assign(static_cast<std::size_t>((size + (std::uint64_t{1} << kMirrorPageShift) - 1) >> kMirrorPageShift), false);
+    }
+    // Copies the stale pages of the range, as runs.
+    std::vector<VkBufferCopy> copies;
+    const auto pageBytes = std::uint64_t{1} << kMirrorPageShift;
+    for (auto page = (begin - first) >> kMirrorPageShift; page <= (end - first - 1) >> kMirrorPageShift; ++page) {
+        if (import.current[page]) continue;
+        import.current[page] = true;
+        const auto offset = page << kMirrorPageShift;
+        const auto length = std::min(pageBytes, size - offset);
+        if (!copies.empty() && copies.back().srcOffset + copies.back().size == offset) copies.back().size += length;
+        else copies.push_back({offset, offset, length});
+    }
+    if (!copies.empty()) {
+        const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+        // CPU writes before submission and earlier GPU writes reach the copy; earlier reads of the
+        // mirror finish before it is overwritten.
+        VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+        context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, import.buffer, import.mirror->Handle(), static_cast<std::uint32_t>(copies.size()), copies.data());
+        VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+    }
+    return View{import.mirror->Handle(), begin - first, import.mirror->DeviceAddress() + (begin - first), translation.bytes};
+}
 
 GuestGpuMemory::~GuestGpuMemory() {
+    if (mirrorEnabled) WriteTracker::SetWriteListener(nullptr, nullptr);
     for (auto& [key, import] : imports) release(import);
     for (auto& [segment, import] : retired) release(import);
 }

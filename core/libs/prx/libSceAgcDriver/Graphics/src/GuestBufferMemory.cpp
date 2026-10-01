@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include <stdexcept>
 #include <string>
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -137,7 +138,8 @@ void GuestBufferMemory::Upload(bool addressable) {
                 const GuestMemory::GpuAccessScope gpuAccess;
                 GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(bytes), 1, region.writable);
             }
-            region.view = context.guestGpuMemory->Resolve(region.begin, bytes);
+            // Read-only regions read the device-local mirror (stale pages copied first, in queue order).
+            region.view = region.writable || context.drawQueue == nullptr || !context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->Resolve(region.begin, bytes) : context.guestGpuMemory->ResolveRead(region.begin, bytes, context.drawQueue->Begin(context));
             if (region.view && region.view->bytes == bytes) {
                 // Shaders write writable regions straight into guest memory.
                 if (region.writable) WriteTracker::NoteGpuWrite(region.begin, bytes);

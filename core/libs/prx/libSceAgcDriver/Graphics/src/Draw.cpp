@@ -126,7 +126,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                 const GuestMemory::GpuAccessScope gpuAccess;
                 GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
             }
-            if (const auto view = context.guestGpuMemory->Resolve(address, bytes); view && view->bytes >= bytes) {
+            const auto view = context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->ResolveRead(address, bytes, context.drawQueue->Begin(context)) : context.guestGpuMemory->Resolve(address, bytes);
+            if (view && view->bytes >= bytes) {
                 vertexHandles.push_back(view->buffer);
                 vertexOffsets[index] = view->offset;
                 continue;

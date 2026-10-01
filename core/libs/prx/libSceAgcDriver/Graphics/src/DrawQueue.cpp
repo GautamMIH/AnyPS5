@@ -89,8 +89,9 @@ void DrawQueue::NoteGuestWrite(std::uint64_t begin, std::uint64_t end, std::shar
 }
 
 void DrawQueue::Flush() {
+    // A batch may hold only commands recorded ahead of draws that did not follow (mirror copies,
+    // write-backs): it is submitted all the same.
     if (!recording.commands) return;
-    Require(!recording.entries.empty() || recording.hasBarrier, "cannot submit an incomplete draw batch");
     if (recording.query >= 0) samples->context.Function<PFN_vkCmdEndQuery>("vkCmdEndQuery")(recording.commands->Handle(), samples->pool, static_cast<std::uint32_t>(recording.query));
     pending.push_back(std::move(recording));
     recording = Batch{};
