@@ -25,6 +25,8 @@ int APS5_VABI sceKernelMunmap(std::uint64_t, std::size_t);
 int APS5_VABI sceKernelMprotect(const void*, std::size_t, int);
 int APS5_VABI sceKernelVirtualQuery(const void*, int, VirtualQueryInfo*, std::uint64_t);
 int APS5_VABI sceKernelMemoryPoolReserve(void*, std::size_t, std::size_t, int, void**);
+int APS5_VABI sceKernelMemoryPoolCommit(void*, std::size_t, int, int, int);
+int APS5_VABI sceKernelMemoryPoolDecommit(void*, std::size_t, int);
 }
 
 static void RequireAt(bool condition, int line) {
@@ -97,6 +99,14 @@ static void CheckFixedVirtualReservation() {
     void* pooled = nullptr;
     Require(sceKernelMemoryPoolReserve(requested, page * 2, 0, 0x10, &pooled) == 0);
     Require(pooled == requested);
+    // Committed pool memory is backed and zeroed; decommitting discards it.
+    auto* bytes = static_cast<volatile unsigned char*>(pooled);
+    Require(sceKernelMemoryPoolCommit(pooled, page, 0, 3, 0) == 0);
+    Require(bytes[0] == 0 && bytes[page - 1] == 0);
+    bytes[0] = 0x5a;
+    Require(sceKernelMemoryPoolDecommit(pooled, page, 0) == 0);
+    Require(sceKernelMemoryPoolCommit(pooled, page, 0, 3, 0) == 0);
+    Require(bytes[0] == 0);
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(pooled), page * 2) == 0);
 }
 

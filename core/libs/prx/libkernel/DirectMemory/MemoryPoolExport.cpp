@@ -23,9 +23,15 @@ PoolState& Pool() {
 
 bool PageAligned(uint64_t v) { return (v & (PS5_PAGE_SIZE - 1)) == 0; }
 
+constexpr int kMapFixed = 0x10;
+
+// Committing backs the reserved range with zeroed memory (as flexible memory); decommitting returns
+// it to a reservation, discarding the contents. Changing only the protection left the range unbacked.
 int PoolCommit(void* addr, uint64_t len, int prot) {
     if (!addr || len == 0 || !PageAligned(reinterpret_cast<uintptr_t>(addr)) || !PageAligned(len)) return SCE_KERNEL_ERROR_EINVAL;
-    const int ret = DoMprotect(addr, static_cast<size_t>(len), prot);
+    void* target = addr;
+    const int ret = DoMapAnon(&target, static_cast<size_t>(len), prot, kMapFixed);
+    if (ret == 0 && target != addr) return SCE_KERNEL_ERROR_EINVAL;
     if (ret == 0) {
         PoolState& pool = Pool();
         std::lock_guard<std::mutex> lock(pool.mutex);
@@ -36,7 +42,8 @@ int PoolCommit(void* addr, uint64_t len, int prot) {
 
 int PoolDecommit(void* addr, uint64_t len) {
     if (!addr || len == 0 || !PageAligned(reinterpret_cast<uintptr_t>(addr)) || !PageAligned(len)) return SCE_KERNEL_ERROR_EINVAL;
-    const int ret = DoMprotect(addr, static_cast<size_t>(len), 0);
+    void* target = addr;
+    const int ret = DoReserveVirtual(&target, static_cast<size_t>(len), kMapFixed, 0);
     if (ret == 0) {
         PoolState& pool = Pool();
         std::lock_guard<std::mutex> lock(pool.mutex);
