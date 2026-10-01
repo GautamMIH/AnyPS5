@@ -221,6 +221,63 @@ void DisabledColorTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "missing register");
 }
 
+void ClipDistanceTests() {
+    auto queue = makeState();
+    // CLIP_DIST_ENA_0 with the CCDIST0 vector, and CULL_DIST_ENA_4 with CCDIST1.
+    // Each enabled vector is one more 4-component position export.
+    queue.context[0x207] = 0x400001;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "additional position exports");
+    queue.context[0x1c3] = 0x44;
+    AgcDriver::Graphics::DecodeState(queue);
+    queue.context[0x207] = 0xc01001;
+    queue.context[0x1c3] = 0x444;
+    AgcDriver::Graphics::DecodeState(queue);
+    queue.context[0x207] = 0x1;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "without their CCDIST export vector");
+    queue.context[0x207] = 0x401000;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "without their CCDIST export vector");
+    queue.context[0x207] = 0x280000;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "PA_CL_VS_OUT_CNTL=0x280000");
+}
+
+void ZeroExportTests() {
+    auto queue = makeState();
+    // SPI_SHADER_COL_FORMAT ZERO: the shader exports nothing there, so the target is not written.
+    queue.context[0x1c5] = 0;
+    Require(!AgcDriver::Graphics::DecodeState(queue).HasColorTarget(), "a target without an export was written");
+    queue.context[0x1c5] = 7;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "needs a float export");
+    // SPI_SHADER_Z_FORMAT matters only with DB_SHADER_CONTROL.Z_EXPORT_ENABLE.
+    queue = makeState();
+    queue.context[0x1c4] = 1;
+    AgcDriver::Graphics::DecodeState(queue);
+    queue.context[0x203] |= 1u;
+    AgcDriver::Graphics::DecodeState(queue);
+    queue.context[0x1c4] = 2;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "depth export format other than 32_R");
+}
+
+void ColorMetadataPassTests() {
+    auto queue = makeState();
+    Require(!AgcDriver::Graphics::DecodeState(queue).eliminateFastClear, "normal colour rendering decoded as a metadata pass");
+    // ELIMINATE_FAST_CLEAR and DCC_DECOMPRESS only resolve fast clears: surfaces stay uncompressed.
+    for (const auto control : {0xcc0020u, 0xcc0060u}) {
+        queue.context[0x202] = control;
+        Require(AgcDriver::Graphics::DecodeState(queue).eliminateFastClear, "colour metadata pass not decoded");
+    }
+    // The colour block does the pass: no pixel shader or shader mask is needed.
+    queue.context[0x8f] = 0;
+    queue.shader.erase(0x8);
+    queue.shader.erase(0x9);
+    const auto shaderless = AgcDriver::Graphics::DecodeState(queue);
+    Require(shaderless.eliminateFastClear && shaderless.colorTargetMask == 1, "shaderless colour metadata pass lost its target");
+    queue.context[0x8e] = 0;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "CB_COLOR_CONTROL=0xcc0060");
+    queue = makeState();
+    queue.context[0x202] = 0xcc0030;
+    expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "CB_COLOR_CONTROL=0xcc0030");
+}
+
 void DepthClipTests() {
     auto queue = makeState();
     const auto direct = AgcDriver::Graphics::DecodeState(queue);
@@ -1013,6 +1070,11 @@ void validationTests() {
         Require(AgcDriver::Graphics::VertexBufferReadSize(attribute, 100, 2) == 16, "zero stride must repeat one value");
         attribute.resource.fields[2] = 8;
         expectFailure([&] { AgcDriver::Graphics::VertexBufferReadSize(attribute, 0, 1); }, "byte range");
+        // OOB_SELECT DISABLED: only a descriptor without records is out of range.
+        attribute.resource.fields[3] |= 2u << 28u;
+        Require(AgcDriver::Graphics::VertexBufferReadSize(attribute, 0, 1) == 16, "unchecked descriptor range was checked");
+        attribute.resource.fields[2] = 0;
+        expectFailure([&] { AgcDriver::Graphics::VertexBufferReadSize(attribute, 0, 1); }, "without records");
         attribute.resource.fields[3] = 113u << 12u;
         expectFailure([&] { AgcDriver::Graphics::DecodeVertexFormat(attribute); }, "unsupported vertex format");
         attribute.resource.fields[3] = 50u << 12u;
@@ -1186,6 +1248,9 @@ int main() {
         hardwareScreenOffsetTests();
         DepthClipTests();
         DisabledColorTests();
+        ColorMetadataPassTests();
+        ClipDistanceTests();
+        ZeroExportTests();
         ShaderStageTests();
         InitialContextTests();
         pushConstantTests();

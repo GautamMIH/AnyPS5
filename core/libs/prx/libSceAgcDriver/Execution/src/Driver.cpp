@@ -39,6 +39,14 @@
 #include <vector>
 
 namespace AgcDriver {
+
+// Debug aid: APS5_TRACE_AGC_RELEASE=1 logs submissions, RELEASE_MEM labels and interrupts as they
+// are queued and finished, and each interrupt's delivery: a guest waiting forever on a GPU label or
+// interrupt shows whether the driver never got the work, never finished it, or finished it unseen.
+bool TraceRelease() {
+    static const bool enabled = std::getenv("APS5_TRACE_AGC_RELEASE") != nullptr;
+    return enabled;
+}
 namespace {
 
 void require(bool condition, const char* reason) {
@@ -142,6 +150,7 @@ public:
             submission.shaders = shaders;
             submission.serial = accepted + 1;
             submission.enqueued = FrameTiming::Clock::now();
+            if (TraceRelease()) std::fprintf(stderr, "[agc-release] submit serial=%llu queue=0x%x dwords=%zu\n", static_cast<unsigned long long>(submission.serial), queue, submission.commands.size());
             pending.push_back(std::move(submission));
             ++accepted;
         }
@@ -201,7 +210,18 @@ public:
         require(error != nullptr, "null asynchronous failure");
         {
             std::lock_guard lock(mutex);
-            if (!failure) failure = error;
+            if (!failure) {
+                failure = error;
+                // The guest sees the failure only at its next submission or flip; one waiting on the
+                // failed work's labels never makes one, so the failure is reported here too.
+                try {
+                    std::rethrow_exception(error);
+                } catch (const std::exception& reported) {
+                    std::fprintf(stderr, "[AgcDriver] GPU work failed: %s\n", reported.what());
+                } catch (...) {
+                    std::fprintf(stderr, "[AgcDriver] GPU work failed with an unknown exception\n");
+                }
+            }
             for (const auto& [handle, output] : outputs) output->Fail(failure);
             for (const auto& item : pending) {
                 for (const auto& [offset, flip] : item.flips) flip->Fail(failure);
@@ -388,6 +408,7 @@ private:
                 });
                 QueueState unused;
                 Pm4::Execute(next.release, unused);
+                if (TraceRelease()) std::fprintf(stderr, "[agc-release] written label=0x%llx marker=%llu\n", static_cast<unsigned long long>(next.release[3] | (static_cast<std::uint64_t>(next.release[4]) << 32u)), static_cast<unsigned long long>(next.marker));
             }
             if (next.interrupt) done.interrupts.emplace_back(next.eventQueue, *next.interrupt);
             if (next.serial != 0) done.serials.push_back(next.serial);
@@ -420,7 +441,10 @@ private:
     // Caller does not hold gpuMutex: raising an interrupt may wake guest threads that fault on
     // tracked memory, and serials take the queue mutex.
     void finishCompletions(const Completed& done) {
-        for (const auto& [queue, data] : done.interrupts) AgcDriverTriggerEqEvent_nid_postfix(queue, data);
+        for (const auto& [queue, data] : done.interrupts) {
+            if (TraceRelease()) std::fprintf(stderr, "[agc-release] interrupt queue=0x%x context=0x%x\n", static_cast<unsigned>(queue), data);
+            AgcDriverTriggerEqEvent_nid_postfix(queue, data);
+        }
         if (done.serials.empty()) return;
         {
             std::lock_guard lock(mutex);
@@ -909,6 +933,11 @@ private:
             if (tracePm4) {
                 if (opcode == 0x15 && queue.shader.contains(0x20c) && queue.shader.contains(0x20d)) std::fprintf(stderr, "[pm4] q%u op=0x15 dispatch %ux%ux%u program=0x%llx\n", static_cast<unsigned>(submission.queue), packet[1], packet[2], packet[3], static_cast<unsigned long long>((static_cast<std::uint64_t>(queue.shader.at(0x20c)) << 8u) | (static_cast<std::uint64_t>(queue.shader.at(0x20d) & 0xffu) << 40u)));
                 else if (opcode == 0x50 && count >= 7) std::fprintf(stderr, "[pm4] q%u op=0x%02x dst=0x%llx bytes=0x%x control=0x%08x src=0x%08x%08x\n", static_cast<unsigned>(submission.queue), static_cast<unsigned>(opcode), static_cast<unsigned long long>(packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u)), packet[6] & 0x3ffffffu, packet[1], packet[3], packet[2]);
+                else if (opcode == 0x10 || opcode == 0x46) {
+                    std::string words;
+                    for (std::size_t i = 0; i < std::min<std::size_t>(count, 12); ++i) words += " " + std::to_string(packet[i]);
+                    std::fprintf(stderr, "[pm4] q%u op=0x%02x dwords=%zu:%s\n", static_cast<unsigned>(submission.queue), static_cast<unsigned>(opcode), count, words.c_str());
+                }
                 else std::fprintf(stderr, "[pm4] q%u op=0x%02x dwords=%zu\n", static_cast<unsigned>(submission.queue), static_cast<unsigned>(opcode), count);
             }
             if (opcode == 0x3f && count == 14) {
@@ -976,6 +1005,7 @@ private:
                     completion.release.assign(packet.begin(), packet.end());
                     completion.eventQueue = static_cast<int>(submission.queue);
                     if (((packet[2] >> 24u) & 7u) != 0) completion.interrupt = packet[7];
+                    if (TraceRelease()) std::fprintf(stderr, "[agc-release] queued serial=%llu queue=0x%x label=0x%llx data=0x%08x%08x select=%u interrupt=%u context=0x%x\n", static_cast<unsigned long long>(submission.serial), static_cast<unsigned>(submission.queue), static_cast<unsigned long long>(packet[3] | (static_cast<std::uint64_t>(packet[4]) << 32u)), packet[6], packet[5], packet[2] >> 29u, (packet[2] >> 24u) & 7u, packet[7]);
                     queueCompletion(std::move(completion));
                     timing.Mark("release_deferred");
                     cursor += count;

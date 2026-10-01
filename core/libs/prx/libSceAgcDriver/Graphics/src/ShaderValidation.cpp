@@ -116,6 +116,14 @@ struct Module {
             Require((input && ((value == spv::BuiltInWorkgroupId || value == spv::BuiltInLocalInvocationId || value == spv::BuiltInGlobalInvocationId || value == spv::BuiltInNumWorkgroups) && signature == "u32x3")) || (input && value == spv::BuiltInLocalInvocationIndex && signature == "u32") || (!input && value == spv::BuiltInPrimitiveTriangleIndicesEXT && signature == "u32x3") || (!input && value == spv::BuiltInCullPrimitiveEXT && signature == "bool") || (!input && value == spv::BuiltInLayer && (signature == "u32" || signature == "i32")), "unsupported mesh built-in");
             return;
         }
+        if (vertex && !input && (value == spv::BuiltInClipDistance || value == spv::BuiltInCullDistance)) {
+            // The distances a vertex shader exports on the CCDIST vectors (the capability is checked
+            // against the device's features).
+            Require(raw.size() == 4 && (raw[0] & 0xffffu) == spv::OpTypeArray && Signature(raw[2]) == "f32", "invalid clip or cull distance type");
+            const auto count = constants.find(raw[3]);
+            Require(count != constants.end() && count->second >= 1 && count->second <= 8, "invalid clip or cull distance count");
+            return;
+        }
         const auto signature = Signature(type);
         if (vertex && storage == spv::StorageClassInput) {
             Require((value == spv::BuiltInVertexIndex || value == spv::BuiltInInstanceIndex) && signature == "i32", "unsupported vertex built-in input");
@@ -203,7 +211,9 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     (features.imageGatherExtended && capability == spv::CapabilityImageGatherExtended) ||
                     (features.minLod && capability == spv::CapabilityMinLod) ||
                     (features.storageImageReadWithoutFormat && capability == spv::CapabilityStorageImageReadWithoutFormat) ||
-                    (features.storageImageWriteWithoutFormat && capability == spv::CapabilityStorageImageWriteWithoutFormat);
+                    (features.storageImageWriteWithoutFormat && capability == spv::CapabilityStorageImageWriteWithoutFormat) ||
+                    (features.clipDistance && capability == spv::CapabilityClipDistance) ||
+                    (features.cullDistance && capability == spv::CapabilityCullDistance);
 
                 const bool isBdaCapability =
                     shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version &&
@@ -532,6 +542,8 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
     append(features.minLod);
     append(features.storageImageReadWithoutFormat);
     append(features.storageImageWriteWithoutFormat);
+    append(features.clipDistance);
+    append(features.cullDistance);
     append(shader.bdaAbiVersion);
     append(shader.pushConstants.empty());
     append(shader.bindings.size());

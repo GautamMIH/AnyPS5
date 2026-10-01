@@ -125,10 +125,17 @@ inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute&
     Require(attribute.fetchIndex <= 1, "unsupported vertex fetch index");
     const auto index = attribute.fetchIndex == 0 ? maxIndex : firstInstance + instances - 1u;
     const auto bytes = DecodeVertexFormat(attribute).bytes;
-    Require(stride == 0 || index < records, "vertex fetch exceeds descriptor record count");
-    const auto available = stride == 0 ? static_cast<std::uint64_t>(records) : static_cast<std::uint64_t>(records) * stride;
+    // OOB_SELECT (word 3, bits 28-29) DISABLED (2): only a descriptor without records is out of range;
+    // every other fetch reads memory. The other modes check the index and bytes against the records.
     const auto required = static_cast<std::uint64_t>(stride) * index + bytes;
-    Require(required <= available && required <= std::numeric_limits<std::size_t>::max(), "vertex fetch exceeds descriptor byte range");
+    if (((attribute.resource.fields[3] >> 28u) & 3u) == 2u) {
+        Require(records != 0, "vertex fetch from a descriptor without records");
+    } else {
+        Require(stride == 0 || index < records, "vertex fetch exceeds descriptor record count");
+        const auto available = stride == 0 ? static_cast<std::uint64_t>(records) : static_cast<std::uint64_t>(records) * stride;
+        Require(required <= available, "vertex fetch exceeds descriptor byte range (stride " + std::to_string(stride) + ", records " + std::to_string(records) + ", element bytes " + std::to_string(bytes) + ", index " + std::to_string(index) + ")");
+    }
+    Require(required <= std::numeric_limits<std::size_t>::max(), "vertex fetch exceeds the host address range");
     const auto address = attribute.resource.fields[0] | (static_cast<std::uint64_t>(attribute.resource.fields[1] & 0xffffu) << 32u);
     Require(address != 0 && required <= std::numeric_limits<std::uint64_t>::max() - address, "invalid vertex buffer address range");
     return static_cast<std::size_t>(required);

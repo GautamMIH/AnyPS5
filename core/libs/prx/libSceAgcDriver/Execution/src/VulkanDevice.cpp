@@ -120,6 +120,8 @@ struct VulkanDevice::State {
     bool shaderResourceMinLod = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
+    bool clipDistance = false;
+    bool cullDistance = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
     std::unique_ptr<Graphics::TextureDetiler> detiler;
@@ -516,6 +518,14 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     require(available.samplerAnisotropy && available.textureCompressionBC, "device lacks sampler anisotropy or BC texture compression support required for texture sampling");
     enabled.samplerAnisotropy = VK_TRUE;
     enabled.textureCompressionBC = VK_TRUE;
+    // Vertex shaders export clip and cull distances on the CCDIST vectors (PA_CL_VS_OUT_CNTL);
+    // a shader using them fails validation on a device without these capabilities.
+    enabled.shaderClipDistance = available.shaderClipDistance;
+    state->clipDistance = enabled.shaderClipDistance == VK_TRUE;
+    if (state->clipDistance) state->capabilities.push_back(spv::CapabilityClipDistance);
+    enabled.shaderCullDistance = available.shaderCullDistance;
+    state->cullDistance = enabled.shaderCullDistance == VK_TRUE;
+    if (state->cullDistance) state->capabilities.push_back(spv::CapabilityCullDistance);
     enabled.depthBounds = available.depthBounds;
     state->depthBounds = enabled.depthBounds == VK_TRUE;
     enabled.depthBiasClamp = available.depthBiasClamp;
@@ -966,6 +976,8 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.imageViewMinLod = state->imageViewMinLod;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
+    context.clipDistance = state->clipDistance;
+    context.cullDistance = state->cullDistance;
     context.externalMemoryHost = state->externalMemoryHost;
     context.guestGpuMemory = state->guestGpuMemory.get();
     context.imageMemory = state->imageMemory;

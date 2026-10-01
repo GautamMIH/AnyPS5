@@ -110,7 +110,8 @@ struct State {
     bool rectList = false;
     // The geometry stage selects each primitive's render-target layer.
     bool layeredOutput = false;
-    // CB_COLOR_CONTROL.MODE ELIMINATE_FAST_CLEAR: the draw only resolves fast-cleared tiles.
+    // CB_COLOR_CONTROL.MODE ELIMINATE_FAST_CLEAR or DCC_DECOMPRESS: the draw only resolves
+    // fast-cleared tiles.
     bool eliminateFastClear = false;
     VkExtent2D renderExtent;
     VkPrimitiveTopology topology;

@@ -85,6 +85,9 @@ struct Context {
     bool primitiveListRestart = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
+    // shaderClipDistance / shaderCullDistance: vertex-stage clip and cull distance outputs.
+    bool clipDistance = false;
+    bool cullDistance = false;
     bool externalMemoryHost = false;
     GuestGpuMemory* guestGpuMemory = nullptr;
 

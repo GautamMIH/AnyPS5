@@ -401,13 +401,17 @@ State DecodeState(const QueueState& queue) {
     result.primitiveRestart = read(queue.userConfig, 0x24b, "user-config") != 0 && result.topology != VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
     // PA_CL_VS_OUT_CNTL: USE_VTX_RENDER_TARGET_INDX (bit 18) takes the layer from the misc vector
     // (VS_OUT_MISC_VEC_ENA, bit 21), which may travel on the side bus (bit 24); the recompiler
-    // writes it to Layer. Other auxiliary outputs are not modelled.
+    // writes it to Layer. CLIP_DIST_ENA_0-7 and CULL_DIST_ENA_0-7 (bits 0-15) clip and cull with the
+    // distances exported on the CCDIST0/1 vectors (bits 22-23; distances 0-3 and 4-7), which the
+    // recompiler writes to ClipDistance and CullDistance. Other auxiliary outputs are not modelled.
     const auto vsOut = read(cx, 0x207);
     result.layeredOutput = (vsOut & (1u << 18u)) != 0;
     Require(!result.layeredOutput || (vsOut & (1u << 21u)) != 0, "a vertex render-target index without the misc export vector");
-    if ((vsOut & ~0x01240000u) != 0) {
+    const auto distances = (vsOut | (vsOut >> 8u)) & 0xffu;
+    Require(((distances & 0x0fu) == 0 || (vsOut & (1u << 22u)) != 0) && ((distances & 0xf0u) == 0 || (vsOut & (1u << 23u)) != 0), "clip or cull distances without their CCDIST export vector");
+    if ((vsOut & ~0x01e4ffffu) != 0) {
         std::ostringstream message;
-        message << "AGC graphics: PA_CL_VS_OUT_CNTL=0x" << std::hex << vsOut << ": clip distances, layer, viewport or auxiliary vertex exports are unsupported (CB_COLOR0_VIEW=0x" << read(cx, 0x31b) << " DB_DEPTH_VIEW=0x" << read(cx, 0x002) << " DB_Z_INFO=0x" << read(cx, 0x010) << " CB_TARGET_MASK=0x" << read(cx, 0x8e) << " SPI_SHADER_POS_FORMAT=0x" << read(cx, 0x1c3) << " VGT_SHADER_STAGES_EN=0x" << read(cx, 0x2d5) << ")";
+        message << "AGC graphics: PA_CL_VS_OUT_CNTL=0x" << std::hex << vsOut << ": viewport, point size, edge flag, kill flag or other auxiliary vertex exports are unsupported (CB_COLOR0_VIEW=0x" << read(cx, 0x31b) << " DB_DEPTH_VIEW=0x" << read(cx, 0x002) << " DB_Z_INFO=0x" << read(cx, 0x010) << " CB_TARGET_MASK=0x" << read(cx, 0x8e) << " SPI_SHADER_POS_FORMAT=0x" << read(cx, 0x1c3) << " VGT_SHADER_STAGES_EN=0x" << read(cx, 0x2d5) << ")";
         throw std::runtime_error(message.str());
     }
     // Z_EXPORT_ENABLE (bit 0): the pixel shader writes depth (recompiled to gl_FragDepth).
@@ -452,39 +456,53 @@ State DecodeState(const QueueState& queue) {
     const auto psLow = queue.shader.find(0x8);
     const auto psHigh = queue.shader.find(0x9);
     result.hasFragmentShader = (psLow != queue.shader.end() && psLow->second != 0) || (psHigh != queue.shader.end() && psHigh->second != 0);
+    // CB_COLOR_CONTROL: MODE (bits 4-6) is NORMAL, or DISABLE for draws without color targets; copy ROP.
+    // ELIMINATE_FAST_CLEAR (2) and DCC_DECOMPRESS (6) passes only rewrite the target's compression
+    // metadata: fast-cleared pixels get the clear value and no shader output lands, so they need no
+    // pixel shader. With surfaces kept uncompressed (DCC is not modelled), both resolve the fast
+    // clear and nothing else.
+    const auto colorControl = read(cx, 0x202);
+    const bool metadataPass = colorControl == 0xcc0020u || colorControl == 0xcc0060u;
     // The colour block writes a component only when both CB_TARGET_MASK and CB_SHADER_MASK enable it,
-    // and only a pixel shader produces colour.
-    const auto writeMask = result.hasFragmentShader ? targetMask & shaderMask : 0u;
+    // and only a pixel shader produces colour; a metadata pass works on the targets CB_TARGET_MASK enables.
+    const auto writeMask = metadataPass ? targetMask : result.hasFragmentShader ? targetMask & shaderMask : 0u;
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         if (((writeMask >> (4u * slot)) & 0xfu) != 0) result.colorTargetMask |= 1u << slot;
     }
-    // CB_COLOR_CONTROL: MODE (bits 4-6) is NORMAL, or DISABLE for draws without color targets; copy ROP.
-    const auto colorControl = read(cx, 0x202);
-    result.eliminateFastClear = colorControl == 0xcc0020u && result.HasColorTarget();
+    result.eliminateFastClear = metadataPass && result.HasColorTarget();
     if (!(colorControl == 0xcc0010u || result.eliminateFastClear || (colorControl == 0xcc0000u && !result.HasColorTarget()))) {
         std::ostringstream message;
-        message << "AGC graphics: CB_COLOR_CONTROL=0x" << std::hex << colorControl << ": only normal color rendering, fast-clear elimination, or disabled color without targets, with copy ROP, is supported";
+        message << "AGC graphics: CB_COLOR_CONTROL=0x" << std::hex << colorControl << ": only normal color rendering, fast-clear elimination, DCC decompression, or disabled color without targets, with copy ROP, is supported";
         throw std::runtime_error(message.str());
     }
-    // SPI_SHADER_Z_FORMAT: 32_R (depth only) with Z export, otherwise nothing.
+    // SPI_SHADER_Z_FORMAT: 32_R (depth only) with Z export. Without it (DB_SHADER_CONTROL enables no
+    // depth, stencil or mask export; the latter two are rejected above) the DB uses no shader export,
+    // so the format does not matter.
     const auto depthExport = (read(cx, 0x203) & 1u) != 0;
-    zero(cx, 0x1c4, depthExport ? ~1u : ~0u, "stencil or sample-mask export, or a depth export format other than 32_R");
-    Require(!depthExport || read(cx, 0x1c4) == 1u, "depth export without the 32_R export format");
+    const auto depthFormat = read(cx, 0x1c4);
+    Require(!depthExport || depthFormat == 1u, "stencil or sample-mask export, or a depth export format other than 32_R (SPI_SHADER_Z_FORMAT=" + std::to_string(depthFormat) + ")");
     const auto exportFormat = read(cx, 0x1c5);
     // Each written target needs a float export: FP16, UNORM16 or SNORM16 (unpacked by the shader), or
     // 32_R, 32_GR, 32_AR or 32_ABGR (the components a format leaves out read as 0, alpha 1). Exports
     // to unwritten targets reach no attachment. Fast-clear elimination is done by the colour block
-    // and exports nothing.
+    // and exports nothing. A target whose export format is ZERO receives no export, so the colour
+    // block leaves it unwritten whatever the masks enable.
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         const auto format = (exportFormat >> (4u * slot)) & 0xfu;
         if ((result.colorTargetMask & (1u << slot)) == 0 || (format >= 1 && format <= 6) || format == 9 || result.eliminateFastClear) continue;
+        if (format == 0) {
+            result.colorTargetMask &= ~(1u << slot);
+            continue;
+        }
         std::ostringstream message;
         message << "AGC graphics: SPI_SHADER_COL_FORMAT=0x" << std::hex << exportFormat << ": color target " << std::dec << slot << " needs a float export";
         throw std::runtime_error(message.str());
     }
-    // SPI_SHADER_POS_FORMAT: POS0, plus POS1 when the misc vector is exported.
+    // SPI_SHADER_POS_FORMAT: POS0, then one 4-component export for each auxiliary vector enabled in
+    // PA_CL_VS_OUT_CNTL (misc, CCDIST0, CCDIST1; in that order).
     const auto positionFormat = read(cx, 0x1c3);
-    Require(positionFormat == 4u || (positionFormat == 0x44u && (vsOut & (1u << 21u)) != 0), "additional position exports are unsupported");
+    const auto positionExports = 1u + static_cast<std::uint32_t>(std::popcount(vsOut & 0x00e00000u));
+    Require(positionFormat == (0x4444u >> (4u * (4u - positionExports))), "additional position exports are unsupported");
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         if ((result.colorTargetMask & (1u << slot)) == 0) continue;
         // CB_COLOR<n> registers repeat every 15 dwords; BASE_EXT, ATTRIB2 and ATTRIB3 are arrays.

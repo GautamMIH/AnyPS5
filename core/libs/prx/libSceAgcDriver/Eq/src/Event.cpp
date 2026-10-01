@@ -1,6 +1,8 @@
 #include "prx/libSceAgcDriver/Eq/include/Event.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cstddef>
 #include <mutex>
@@ -32,6 +34,8 @@ extern "C" {
 
 int APS5_VABI sceAgcDriverAddEqEvent(KernelEqueue eq, int id, void* udata) {
     if (eq == 0 || id < 0) return EQUEUE_ERROR_EINVAL;
+    static const bool trace = std::getenv("APS5_TRACE_AGC_RELEASE") != nullptr;
+    if (trace) std::fprintf(stderr, "[agc-release] register eq=%p id=0x%x\n", reinterpret_cast<void*>(eq), static_cast<unsigned>(id));
     KernelEqueueEvent event{};
     event.event.ident = static_cast<uintptr_t>(id);
     event.event.filter = EVFILT_GRAPHICS_CORE;
@@ -70,6 +74,8 @@ void AgcDriverTriggerEqEvent_nid_postfix(int id, std::uint32_t context) {
         std::lock_guard lock(registrationMutex());
         for (const auto& item : registrations()) if (item.id == id) targets.push_back(item);
     }
+    static const bool trace = std::getenv("APS5_TRACE_AGC_RELEASE") != nullptr;
+    if (trace) std::fprintf(stderr, "[agc-release] deliver id=0x%x context=0x%x targets=%zu\n", static_cast<unsigned>(id), context, targets.size());
     for (const auto& item : targets) EqueueTriggerEvent_nid_postfix(item.eq, static_cast<uintptr_t>(id), EVFILT_GRAPHICS_CORE, reinterpret_cast<void*>(static_cast<uintptr_t>(context)));
 }
 

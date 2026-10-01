@@ -36,9 +36,12 @@ struct ShaderDeviceFeatures {
     bool geometryShader = false;
     // shaderResourceMinLod: the MinLod capability, used by samples with an LOD clamp.
     bool minLod = false;
+    // shaderClipDistance / shaderCullDistance: the ClipDistance and CullDistance capabilities.
+    bool clipDistance = false;
+    bool cullDistance = false;
 
     static ShaderDeviceFeatures Of(const Context& context) {
-        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod};
+        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance};
     }
 };
 
