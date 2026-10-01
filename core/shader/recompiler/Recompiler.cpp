@@ -436,8 +436,10 @@ RecompileResult RecompileImpl(const RecompileRequest& request, const ResourceCap
     return materializeVariant(*capture.source, request, capture.snapshot, capture.specialization);
 }
 
+// Failures name the request (serialized), wherever in the pipeline they happen: structurization
+// runs while planning resources, before the compile proper.
 template <typename Impl>
-RecompileResult recompileReporting(const RecompileRequest& request, Impl&& impl) {
+auto recompileReporting(const RecompileRequest& request, Impl&& impl) -> decltype(impl()) {
     try {
         return impl();
     } catch (const std::exception& e) {
@@ -452,23 +454,27 @@ RecompileResult recompileReporting(const RecompileRequest& request, Impl&& impl)
 }
 
 std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& request) {
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), MeshOf(request)));
-    if (request.useCache) return getSource(request)->plan;
-    return makeResourcePlan(request);
+    return recompileReporting(request, [&]() -> std::shared_ptr<const IrResourcePlan> {
+        static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), MeshOf(request)));
+        if (request.useCache) return getSource(request)->plan;
+        return makeResourcePlan(request);
+    });
 }
 
 std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime) {
-    // Validates the stage inputs once per request, as GetResourcePlan and Recompile(request) do.
-    static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), MeshOf(request)));
-    auto capture = std::make_shared<ResourceCapture>();
-    if (request.useCache) {
-        capture->source = getSource(request);
-        capture->plan = capture->source->plan;
-    } else {
-        capture->plan = makeResourcePlan(request);
-    }
-    ResourceMaterializer{}.Materialize(*capture->plan, runtime, capture->snapshot, capture->specialization);
-    return capture;
+    return recompileReporting(request, [&]() -> std::shared_ptr<const ResourceCapture> {
+        // Validates the stage inputs once per request, as GetResourcePlan and Recompile(request) do.
+        static_cast<void>(BuildShaderStageInputInfo(toShaderStageKind(request.shader.stage), request.context, HostSubgroupSize(request), MeshOf(request)));
+        auto capture = std::make_shared<ResourceCapture>();
+        if (request.useCache) {
+            capture->source = getSource(request);
+            capture->plan = capture->source->plan;
+        } else {
+            capture->plan = makeResourcePlan(request);
+        }
+        ResourceMaterializer{}.Materialize(*capture->plan, runtime, capture->snapshot, capture->specialization);
+        return capture;
+    });
 }
 
 std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime, const ResourceCapture& sameProgram) {
