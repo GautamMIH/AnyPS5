@@ -342,8 +342,11 @@ bool CollectWrites(std::uint64_t address, std::size_t bytes, WrittenRangeVisitor
     auto& watch = writeWatch();
     if (!watch.available || visit == nullptr) return false;
     std::array<page_region, 64> regions{};
-    auto cursor = address;
-    const auto end = address + bytes;
+    // PAGEMAP_SCAN takes whole pages (an unaligned start fails with EINVAL): the range's pages are
+    // scanned, and writes anywhere in them reported.
+    static const auto page = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+    auto cursor = address & ~(page - 1u);
+    const auto end = (address + bytes + page - 1u) & ~(page - 1u);
     while (cursor < end) {
         pm_scan_arg scan{};
         scan.size = sizeof(scan);
