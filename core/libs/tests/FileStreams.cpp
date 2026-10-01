@@ -1,5 +1,6 @@
 #include "prx/libc/include/FileStream.hpp"
 #include <array>
+#include <cerrno>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -57,11 +58,14 @@ int main(int argc, char** argv) {
     ExpectException([&] { fwrite_nid_postfix(payload, 1, sizeof(payload), stream); });
     Require(fclose_nid_postfix(stream) == 0);
     ExpectException([] { fputs_nid_postfix("invalid stream", nullptr); });
-    ExpectException([] { fopen_nid_postfix(nullptr, "r"); });
+    errno = 0;
+    Require(fopen_nid_postfix(nullptr, "r") == nullptr && errno == EINVAL);
     FileStream closed(std::tmpfile());
     closed.Close();
     ExpectException([&] { fflush_nid_postfix(&closed); });
     Require(std::remove(argv[1]) == 0);
-    ExpectException([&] { fopen_nid_postfix(argv[1], "rb"); });
+    // A missing file is NULL with errno, as in any libc (games probe optional files).
+    errno = 0;
+    Require(fopen_nid_postfix(argv[1], "rb") == nullptr && errno == ENOENT);
     std::cout << "PASS: stream objects, file operations, EOF and error handling\n";
 }

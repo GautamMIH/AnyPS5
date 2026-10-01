@@ -36,31 +36,18 @@ FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode
 }
 
 FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) {
-    if (!filename || !mode) throw std::runtime_error(std::string(__func__) + ": " + FOPEN_MSG_NULL_ARG);
-    const std::filesystem::path fpath = ResolvePath_nid_no_patch(filename);
-    const auto abs_path = fpath.string();
-    std::unique_ptr<std::FILE, decltype(&std::fclose)> handle(std::fopen(abs_path.c_str(), mode), std::fclose);
-    if (!handle) {
-        const auto reason = std::strerror(errno);
-        std::error_code ec;
-        std::filesystem::path sibling;
-        for (const auto& entry : std::filesystem::directory_iterator(fpath.parent_path(), ec)) {
-            if (ec) break;
-            if (entry.path().stem() == fpath.stem() && entry.path().extension() != fpath.extension()) {
-                sibling = std::filesystem::absolute(entry.path());
-                break;
-            }
-        }
-        if (!sibling.empty()) {
-            // APS5_LOG_OUT("%s: \"%s\": %s. Sibling: \"%s\"", FOPEN_MSG_NOT_FOUND, abs_path.c_str(), reason, sibling.filename().string().c_str());
-            return nullptr;
-        }
-        throw std::runtime_error(std::string(__func__) + ": " + FOPEN_MSG_OPEN_FAILED + ": \"" + abs_path + "\": " + reason);
-    }
-    // APS5_LOG_OUT("success: \"%s\"", abs_path.c_str());
-    auto stream = std::make_unique<FileStream>(handle.get(), true);
-    handle.release();
-    return stream.release();
+    // Like any libc: a file that cannot be opened (games probe optional files) returns NULL with
+    // errno set; the guest decides whether that is fatal.
+    if (!filename || !mode) { errno = 22; return nullptr; }
+    try {
+        const auto abs_path = ResolvePath_nid_no_patch(filename).string();
+        std::unique_ptr<std::FILE, decltype(&std::fclose)> handle(std::fopen(abs_path.c_str(), mode), std::fclose);
+        if (!handle) return nullptr;
+        auto stream = std::make_unique<FileStream>(handle.get(), true);
+        handle.release();
+        return stream.release();
+    } catch (const std::bad_alloc&) { errno = 12; return nullptr; }
+      catch (const std::filesystem::filesystem_error&) { errno = 5; return nullptr; }
 }
 
 int APS5_VABI fclose_nid_postfix(FileStream* stream) {
