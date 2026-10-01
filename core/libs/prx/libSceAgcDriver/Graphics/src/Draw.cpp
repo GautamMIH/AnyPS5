@@ -148,7 +148,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         if ((state.colorTargetMask & (1u << slot)) == 0) continue;
         const auto& color = state.colors[slot];
         const ColorTargetLayout colorLayout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
-        Require(color.bytes == (color.Layered() ? color.sliceBytes * color.layers : colorLayout.Bytes()), "color target transfer size mismatch");
+        Require(color.bytes == (color.Layered() ? color.LayeredBytes(colorLayout.Bytes()) : colorLayout.Bytes()), "color target transfer size mismatch");
         // The render cache evicts residents that share pages with a new target, so the targets of
         // one draw must be disjoint.
         for (std::uint32_t other = 0; other < slot; ++other) Require(!storage->colors[other] || !storage->colors[other]->SharesPages(color), "color targets of one draw share memory pages");

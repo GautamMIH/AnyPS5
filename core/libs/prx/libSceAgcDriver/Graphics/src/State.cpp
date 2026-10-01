@@ -520,6 +520,9 @@ State DecodeState(const QueueState& queue) {
         const auto attrib3 = read(cx, 0x3b8 + slot);
         color.tileMode = DecodeColorTileMode(attrib3);
         color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
+        color.surfaceExtent = color.extent;
+        color.mipLevel = viewMip;
+        color.mipCount = maxMip + 1u;
         color.elementBytes = decoded.elementBytes;
         std::uint64_t mipOffset = 0;
         if (maxMip != 0) {
@@ -550,13 +553,18 @@ State DecodeState(const QueueState& queue) {
             throw std::runtime_error(message.str());
         }
         if (color.Layered()) {
-            // Slices are laid out like texture array layers, so they share texture addressing.
-            Require(maxMip == 0 && color.tileMode == ColorTileMode::RenderTarget, "mipmapped or linear array color targets are not modelled");
-            color.sliceBytes = ComputeSurfaceSize(ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, color.elementBytes, color.extent.width, color.extent.height, 1), 1);
+            // Slices are laid out like texture array layers (each holds the whole mip chain), so they
+            // share texture addressing; the view renders one mip of slices [start, max].
+            if (color.tileMode != ColorTileMode::RenderTarget) {
+                std::ostringstream message;
+                message << "AGC graphics: linear array color targets are not modelled (CB_COLOR" << slot << " slices " << sliceStart << ".." << sliceMax << " of " << color.surfaceSlices << ", " << color.extent.width << "x" << color.extent.height << ")";
+                throw std::runtime_error(message.str());
+            }
+            color.sliceBytes = ComputeSurfaceSize(ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, color.elementBytes, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount), 1);
             color.baseLayer = sliceStart;
             color.layers = sliceMax - sliceStart + 1u;
             color.address += color.sliceBytes * sliceStart;
-            color.bytes = static_cast<std::size_t>(color.sliceBytes * color.layers);
+            color.bytes = static_cast<std::size_t>(color.LayeredBytes(colorLayout.Bytes()));
         }
         GuestMemory::CheckGpuRange(reinterpret_cast<const void*>(color.address), color.bytes, colorLayout.Alignment(), true);
         color.format = decoded.format;

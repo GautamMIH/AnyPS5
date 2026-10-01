@@ -48,7 +48,14 @@ struct ColorTarget {
     std::uint32_t baseLayer = 0;
     std::uint32_t surfaceSlices = 1;
     std::uint64_t sliceBytes = 0;
+    // The rendered mip of a mipmapped surface (address and extent are the mip's): the surface's
+    // mip 0 extent and mip count, for addressing the mip inside each slice's chain.
+    VkExtent2D surfaceExtent{};
+    std::uint32_t mipLevel = 0;
+    std::uint32_t mipCount = 1;
     bool Layered() const { return surfaceSlices > 1; }
+    // Bytes from the first rendered slice's mip to the end of the last one's.
+    std::uint64_t LayeredBytes(std::uint64_t mipBytes) const { return sliceBytes * (layers - 1u) + mipBytes; }
 };
 
 struct DepthTarget {

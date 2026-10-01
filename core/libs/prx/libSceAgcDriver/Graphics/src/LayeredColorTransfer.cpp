@@ -10,15 +10,19 @@ namespace AgcDriver::Graphics {
 
 LayeredColorTransfer::LayeredColorTransfer(const Context& context, const ColorTarget& color) : context(context), color(color) {
     Require(color.Layered() && color.tileMode == ColorTileMode::RenderTarget, "layered colour transfers need a tiled array surface");
-    mip = ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, color.elementBytes, color.extent.width, color.extent.height, 1).at(0);
-    Require(color.bytes == color.sliceBytes * color.layers, "layered colour target size disagrees with its slices");
+    // The rendered mip inside each slice's chain; TexelOffset counts from the slice start, the
+    // target's address from the mip.
+    mip = ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, color.elementBytes, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount).at(color.mipLevel);
+    Require(mip.width == color.extent.width && mip.height == color.extent.height, "layered colour target mip extent disagrees with its surface");
+    const ColorTargetLayout layout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
+    Require(color.bytes == color.LayeredBytes(layout.Bytes()), "layered colour target size disagrees with its slices");
     target = std::make_unique<RenderTarget>(context, color, false);
     const auto linearBytes = static_cast<std::size_t>(color.extent.width) * color.extent.height * color.elementBytes * color.layers;
     linear = std::make_unique<Buffer>(context, linearBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT);
 }
 
 std::uint64_t LayeredColorTransfer::texelOffset(std::uint32_t layer, std::uint32_t x, std::uint32_t y) const {
-    return layer * color.sliceBytes + TexelOffset(TextureTileMode::RenderTarget64KB, color.elementBytes, mip, x, y, color.baseLayer + layer);
+    return layer * color.sliceBytes + TexelOffset(TextureTileMode::RenderTarget64KB, color.elementBytes, mip, x, y, color.baseLayer + layer) - mip.tiledOffset;
 }
 
 void LayeredColorTransfer::Upload() {
