@@ -79,5 +79,7 @@ int main() {
     Require(inet_pton_nid_postfix(99, "127.0.0.1", parsed) == -1 && *__error_nid_postfix() == 47);
     Require(inet_pton_nid_postfix(2, "not-an-address", parsed) == 0);
     Require(inet_ntop_nid_postfix(2, parsed, text, 4) == nullptr && *__error_nid_postfix() == 28);
-    Require(socket_nid_postfix(2, 1, 0) == -1); // unsupported TCP must not appear to work
+    const int stream = socket_nid_postfix(2, 1, 0);
+    Require(stream >= 0);
+    Require(close_nid_postfix(stream) == 0);
 }

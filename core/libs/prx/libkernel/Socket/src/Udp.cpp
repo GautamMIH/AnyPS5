@@ -15,6 +15,7 @@
 #include <climits>
 #include <cstdint>
 #include <cstring>
+#include <new>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -39,7 +40,11 @@ int NativeError() {
         case WSAEACCES: return 13;
         case WSAEMSGSIZE: return 40;
         case WSAENETUNREACH: return 51;
+        case WSAEHOSTUNREACH: return 65;
         case WSAECONNRESET: return 54;
+        case WSAECONNABORTED: return 53;
+        case WSAEISCONN: return 56;
+        case WSAENOTCONN: return 57;
         case WSAENOBUFS: return 55;
         case WSAETIMEDOUT: return 60;
         case WSAECONNREFUSED: return 61;
@@ -54,16 +59,23 @@ int NativeError() {
         case EADDRNOTAVAIL: return 49;
         case EMSGSIZE: return 40;
         case ENETUNREACH: return 51;
+        case EHOSTUNREACH: return 65;
         case ECONNREFUSED: return 61;
+        case ECONNRESET: return 54;
+        case ECONNABORTED: return 53;
+        case EISCONN: return 56;
+        case ENOTCONN: return 57;
         default: return 5;
     }
 #endif
 }
 struct Socket {
     NativeSocket value;
+    int family;
+    int type;
     std::mutex modeMutex;
     bool nonblocking = false;
-    explicit Socket(NativeSocket value) : value(value) {}
+    Socket(NativeSocket value, int family, int type) : value(value), family(family), type(type) {}
     ~Socket() {
         if (value == Invalid) return;
 #ifdef _WIN32
@@ -197,16 +209,18 @@ int APS5_VABI getsockopt_nid_postfix(int descriptor, int level, int option,
 }
 int APS5_VABI socket_nid_postfix(int family, int type, int protocol) {
     if (family != 2 && family != 28) return Fail(47);
-    if (type != 2 || (protocol != 0 && protocol != 17)) return Fail(43);
+    const int nativeType = type == 1 ? SOCK_STREAM : type == 2 ? SOCK_DGRAM : -1;
+    const int expectedProtocol = type == 1 ? 6 : 17;
+    if (nativeType == -1 || (protocol != 0 && protocol != expectedProtocol)) return Fail(43);
 #ifdef _WIN32
     static const int startup = [] { WSADATA data{}; return WSAStartup(MAKEWORD(2, 2), &data); }();
     if (startup) return Fail(5);
 #endif
-    const auto native = ::socket(family == 2 ? AF_INET : AF_INET6, SOCK_DGRAM, protocol);
+    const auto native = ::socket(family == 2 ? AF_INET : AF_INET6, nativeType, protocol);
     if (native == Invalid) return Fail(NativeError());
-    Socket guard(native);
+    Socket guard(native, family, type);
     try {
-        auto socket = std::make_shared<Socket>(native);
+        auto socket = std::make_shared<Socket>(native, family, type);
         guard.value = Invalid;
         std::lock_guard lock(socketsMutex);
         if (nextDescriptor == INT_MAX) return Fail(24);
@@ -216,6 +230,63 @@ int APS5_VABI socket_nid_postfix(int family, int type, int protocol) {
     } catch (const std::bad_alloc&) {
         return Fail(12);
     }
+}
+int APS5_VABI connect_nid_postfix(int descriptor, const void* address, std::uint32_t length) {
+    const auto socket = Lookup(descriptor);
+    if (!socket) return -1;
+    sockaddr_storage native{};
+    socklen_t size;
+    if (!Address(address, length, native, size)) return -1;
+    if (native.ss_family != (socket->family == 2 ? AF_INET : AF_INET6)) return Fail(47);
+    return ::connect(socket->value, reinterpret_cast<sockaddr*>(&native), size) ? Fail(NativeError()) : 0;
+}
+int APS5_VABI listen_nid_postfix(int descriptor, int backlog) {
+    const auto socket = Lookup(descriptor);
+    if (!socket) return -1;
+    if (socket->type != 1) return Fail(45);
+    return ::listen(socket->value, backlog) ? Fail(NativeError()) : 0;
+}
+int APS5_VABI accept_nid_postfix(int descriptor, void* address, std::uint32_t* length) {
+    const auto listener = Lookup(descriptor);
+    if (!listener) return -1;
+    if (listener->type != 1 || (address && !length)) return Fail(22);
+    sockaddr_storage peer{};
+    socklen_t size = sizeof(peer);
+    const auto native = ::accept(listener->value, address ? reinterpret_cast<sockaddr*>(&peer) : nullptr,
+        address ? &size : nullptr);
+    if (native == Invalid) return Fail(NativeError());
+    Socket guard(native, listener->family, listener->type);
+    try {
+        auto accepted = std::make_shared<Socket>(native, listener->family, listener->type);
+        guard.value = Invalid;
+        std::lock_guard lock(socketsMutex);
+        if (nextDescriptor == INT_MAX) return Fail(24);
+        const int acceptedDescriptor = nextDescriptor++;
+        sockets.emplace(acceptedDescriptor, std::move(accepted));
+        if (address) GuestAddress(peer, address, length);
+        return acceptedDescriptor;
+    } catch (const std::bad_alloc&) {
+        return Fail(12);
+    }
+}
+std::int64_t APS5_VABI send_nid_postfix(int descriptor, const void* buffer, std::uint64_t length, int flags) {
+    const auto socket = Lookup(descriptor);
+    if (!socket) return -1;
+    if (flags != 0) return Fail(45);
+    if (length > INT_MAX) return Fail(40);
+    if (!buffer && length) return Fail(14);
+    const auto result = ::send(socket->value, static_cast<const char*>(buffer), static_cast<int>(length), 0);
+    return result < 0 ? Fail(NativeError()) : result;
+}
+std::int64_t APS5_VABI recv_nid_postfix(int descriptor, void* buffer, std::uint64_t length, int flags) {
+    const auto socket = Lookup(descriptor);
+    if (!socket) return -1;
+    if ((flags & ~2) != 0) return Fail(45);
+    if (length > INT_MAX) return Fail(40);
+    if (!buffer && length) return Fail(14);
+    const auto result = ::recv(socket->value, static_cast<char*>(buffer), static_cast<int>(length),
+        flags & 2 ? MSG_PEEK : 0);
+    return result < 0 ? Fail(NativeError()) : result;
 }
 int APS5_VABI bind_nid_postfix(int descriptor, const void* address, std::uint32_t length) {
     const auto socket = Lookup(descriptor);
@@ -262,11 +333,18 @@ std::int64_t APS5_VABI sendto_nid_postfix(int descriptor, const void* buffer, st
     if (flags != 0) return Fail(45);
     if (length > INT_MAX) return Fail(40);
     if (!buffer && length) return Fail(14);
-    sockaddr_storage native{};
-    socklen_t size;
-    if (!Address(address, addressLength, native, size)) return -1;
-    const auto result = ::sendto(socket->value, static_cast<const char*>(buffer), static_cast<int>(length), 0,
-        reinterpret_cast<sockaddr*>(&native), size);
+    int result;
+    if (!address) {
+        if (addressLength != 0) return Fail(22);
+        result = ::send(socket->value, static_cast<const char*>(buffer), static_cast<int>(length), 0);
+    } else {
+        sockaddr_storage native{};
+        socklen_t size;
+        if (!Address(address, addressLength, native, size)) return -1;
+        if (native.ss_family != (socket->family == 2 ? AF_INET : AF_INET6)) return Fail(47);
+        result = static_cast<int>(::sendto(socket->value, static_cast<const char*>(buffer), static_cast<int>(length), 0,
+            reinterpret_cast<sockaddr*>(&native), size));
+    }
     return result < 0 ? Fail(NativeError()) : result;
 }
 std::int64_t APS5_VABI recvfrom_nid_postfix(int descriptor, void* buffer, std::uint64_t length,
