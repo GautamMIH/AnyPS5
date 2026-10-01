@@ -202,7 +202,8 @@ void DefineInputs(SpirvEmitterState& state) {
                 if (candidate.kind == StageInputKind::Parameter && PixelParameterLocation(state, candidate.location) == location) shared = &candidate;
             }
             if (shared != nullptr) {
-                if (shared->perVertex != input.perVertex || PixelParameterIsFlat(state, shared->location) != PixelParameterIsFlat(state, input.location)) {
+                // Per-vertex inputs derive their own interpolation from the shared vertex values.
+                if (shared->perVertex != input.perVertex || (!input.perVertex && PixelParameterIsFlat(state, shared->location) != PixelParameterIsFlat(state, input.location))) {
                     FailEmit("pixel inputs reading the same parameter use different interpolation");
                 }
                 input.variableId = shared->variableId;

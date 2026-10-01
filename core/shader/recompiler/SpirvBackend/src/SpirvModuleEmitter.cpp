@@ -119,6 +119,12 @@ std::uint32_t EmitAttributeValue(SpirvEmitterState& state, std::uint32_t attr, s
         if (state.inputInfo.pixel == nullptr) {
             throw std::runtime_error("pixel input info is missing for a per-vertex attribute");
         }
+        if (PixelParameterIsFlat(state, attr)) {
+            // Flat: the provoking vertex, the first in the barycentric vertex order.
+            const auto bits = state.module.AllocateId();
+            state.module.AddFunction(spv::OpBitcast, TypeU32(state), bits, loadPerVertex(0u));
+            return bits;
+        }
         const auto barycentricKind = state.inputInfo.pixel->psNoPerspective ? StageInputKind::BaryCoordNoPerspective : StageInputKind::BaryCoordSmooth;
         const auto barycentric = InputVariableForKind(state, barycentricKind);
         std::uint32_t sum = 0;

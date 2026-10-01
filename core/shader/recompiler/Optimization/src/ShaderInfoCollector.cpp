@@ -230,6 +230,19 @@ void CollectPixelInputs(const IrProgram& program, const ShaderPixelInputInfo* pi
             }
         }
     }
+    // Inputs reading the same exported parameter (SPI_PS_INPUT_CNTL.OFFSET) share one variable; when
+    // they interpolate it differently (flat, smooth or custom), all read its per-vertex values and
+    // each derives its own (flat: the provoking vertex; smooth: barycentric weights).
+    constexpr std::uint32_t offsetMask = 0x3fu;
+    for (std::uint32_t input = 0; input < pixel->inputNum && input < 32u; input++) {
+        for (std::uint32_t other = 0; other < input; other++) {
+            if ((pixel->interpolatorSettings[input] & offsetMask) != (pixel->interpolatorSettings[other] & offsetMask)) continue;
+            if (perVertex[input] == perVertex[other] && (perVertex[input] || IsPixelParameterFlat(*pixel, input) == IsPixelParameterFlat(*pixel, other))) continue;
+            for (std::uint32_t member = 0; member < pixel->inputNum && member < 32u; member++) {
+                if ((pixel->interpolatorSettings[member] & offsetMask) == (pixel->interpolatorSettings[input] & offsetMask)) perVertex[member] = true;
+            }
+        }
+    }
     for (std::uint32_t input = 0; input < pixel->inputNum; input++) {
         AddInput(info, StageInputKind::Parameter, input, 4, "in_param_" + std::to_string(input), perVertex[input]);
     }
