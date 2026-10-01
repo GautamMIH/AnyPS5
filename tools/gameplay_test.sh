@@ -15,6 +15,8 @@
 #   DUMP_EVERY      dump every n-th presented frame as PPM                          (default: 600)
 #   RELINKER        relinker binary                          (default: build/core/relinker/relinker)
 # Rebuild the libs target first: the relinker copies build/core/libs/libs.
+# Game windows open behind the windows in use (ANYPS5_BACKGROUND_WINDOW=0 to bring them up).
+export ANYPS5_BACKGROUND_WINDOW=${ANYPS5_BACKGROUND_WINDOW:-1}
 set -u
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 : "${GAME:?set GAME to the game folder}"
