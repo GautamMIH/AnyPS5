@@ -717,6 +717,40 @@ std::uint32_t EmitIndirectImageSelector(SpirvValueEmitContext& ctx, const ImageE
     return selected;
 }
 
+// A run-time texel offset: Vulkan takes a non-constant Offset on gathers only, so the coordinates
+// move by whole texels of the level sampled (level 0 for an implicitly chosen one, where a mip
+// further down would move by more texels of its own).
+std::uint32_t OffsetCoordinates(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, const SampleSetup& setup, std::uint32_t level) {
+    auto& state = ctx.state;
+    const auto spatial = setup.dimensionInfo.spatialComponents;
+    const auto components = setup.dimensionInfo.coordinateComponents;
+    state.module.EmitCapability(spv::CapabilityImageQuery);
+    const auto image = LoadSampledImageDescriptor(state, access.mem.resource);
+    const auto size = state.module.AllocateId();
+    state.module.AddFunction(spv::OpImageQuerySizeLod, ImageViewSizeType(state, access.image.dimension), size, image, level);
+    const auto offsets = PackedOffset(ctx, access, setup.layout);
+    const auto component = [&](std::uint32_t composite, std::uint32_t type, std::uint32_t count, std::uint32_t index) {
+        if (count == 1u) return composite;
+        const auto value = state.module.AllocateId();
+        state.module.AddFunction(spv::OpCompositeExtract, type, value, composite, index);
+        return value;
+    };
+    auto coord = setup.coord;
+    for (std::uint32_t index = 0; index < spatial; ++index) {
+        const auto texels = Unary(state, spv::OpConvertSToF, TypeF32(state), component(offsets, TypeI32(state), spatial, index));
+        const auto extent = Unary(state, spv::OpConvertUToF, TypeF32(state), component(size, TypeU32(state), components, index));
+        const auto moved = Binary(state, spv::OpFAdd, TypeF32(state), component(coord, TypeF32(state), components, index), Binary(state, spv::OpFDiv, TypeF32(state), texels, extent));
+        if (components == 1u) {
+            coord = moved;
+        } else {
+            const auto inserted = state.module.AllocateId();
+            state.module.AddFunction(spv::OpCompositeInsert, TypeF32Vector(state, components), inserted, moved, coord, index);
+            coord = inserted;
+        }
+    }
+    return coord;
+}
+
 void EmitSampleOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, const SampleSetup& setup) {
     auto& state = ctx.state;
     const auto& mem = access.mem;
@@ -760,31 +794,36 @@ void EmitSampleOp(SpirvValueEmitContext& ctx, const ImageEmitAccess& access, con
             operands.push_back(clamp);
         }
     }
-    // The _o variants pass a texel offset (6-bit signed fields, one byte per axis); SPIR-V takes it
-    // as ConstOffset, before a MinLod operand (upstream ba22c37d).
+    // The _o variants pass a texel offset (6-bit signed fields, one byte per axis); SPIR-V takes a
+    // constant one as ConstOffset, before a MinLod operand (upstream ba22c37d).
+    auto coord = setup.coord;
     if (setup.layout.offset != NoImageComponent) {
         const auto* argument = access.address.Argument(setup.layout.offset);
         const auto* packed = argument != nullptr ? argument->Resolve() : nullptr;
         if (packed == nullptr || !packed->HasImmediate()) {
-            ctx.Fail(access.inst, "requires a constant texel offset for image sampling");
+            const auto level = HasFlag(mem, RdnaImageSampleFlagLod)
+                ? Unary(state, spv::OpConvertFToU, TypeU32(state), AddressF32(ctx, access, setup.layout.lod))
+                : ConstantU32(state, 0u);
+            coord = OffsetCoordinates(ctx, access, setup, level);
+        } else {
+            const auto bits = packed->ImmediateU32();
+            std::array<std::uint32_t, 3> values{};
+            for (std::uint32_t index = 0; index < setup.dimensionInfo.spatialComponents; index++) {
+                const auto field = (bits >> (index * 8u)) & 0x3fu;
+                values[index] = ConstantI32(state, static_cast<std::int32_t>(field ^ 0x20u) - 0x20);
+            }
+            const auto count = setup.dimensionInfo.spatialComponents;
+            const auto offset = count == 1u ? values[0] : count == 2u
+                ? state.module.Constant(spv::OpConstantComposite, TypeI32Vector(state, 2), values[0], values[1])
+                : state.module.Constant(spv::OpConstantComposite, TypeI32Vector(state, 3), values[0], values[1], values[2]);
+            operandMask |= spv::ImageOperandsConstOffsetMask;
+            operands.insert(operands.end() - ((operandMask & spv::ImageOperandsMinLodMask) != 0u ? 1 : 0), offset);
         }
-        const auto bits = packed->ImmediateU32();
-        std::array<std::uint32_t, 3> values{};
-        for (std::uint32_t index = 0; index < setup.dimensionInfo.spatialComponents; index++) {
-            const auto field = (bits >> (index * 8u)) & 0x3fu;
-            values[index] = ConstantI32(state, static_cast<std::int32_t>(field ^ 0x20u) - 0x20);
-        }
-        const auto count = setup.dimensionInfo.spatialComponents;
-        const auto offset = count == 1u ? values[0] : count == 2u
-            ? state.module.Constant(spv::OpConstantComposite, TypeI32Vector(state, 2), values[0], values[1])
-            : state.module.Constant(spv::OpConstantComposite, TypeI32Vector(state, 3), values[0], values[1], values[2]);
-        operandMask |= spv::ImageOperandsConstOffsetMask;
-        operands.insert(operands.end() - ((operandMask & spv::ImageOperandsMinLodMask) != 0u ? 1 : 0), offset);
     }
     const auto emitSample = [&](std::uint32_t resource) {
         const auto sampled = MakeSampledImage(state, resource, mem.sampler);
         const auto sample = state.module.AllocateId();
-        std::vector<std::uint32_t> words = {opcode, resultType, sample, sampled, setup.coord};
+        std::vector<std::uint32_t> words = {opcode, resultType, sample, sampled, coord};
         if (setup.dref) {
             words.push_back(drefValue);
         }
