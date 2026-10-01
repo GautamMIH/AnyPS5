@@ -22,8 +22,17 @@
 #include <io.h>
 #include <sys/stat.h>
 #include <sys/utime.h>
+// Guest files never use descriptors 0-2 (see the Linux NativeOpen).
 static int NativeOpen(const std::filesystem::path& p, int nativeFlags, int mode) {
-    return ::_wopen(p.wstring().c_str(), nativeFlags, mode);
+    int fd = ::_wopen(p.wstring().c_str(), nativeFlags, mode);
+    while (fd >= 0 && fd < 3) {
+        const int moved = ::_dup(fd);
+        const int error = errno;
+        ::_close(fd);
+        errno = error;
+        fd = moved;
+    }
+    return fd;
 }
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
     return ::_lseeki64(fd, offset, whence);
@@ -60,7 +69,7 @@ static std::int64_t NativePwrite(int fd, const void* buf, std::size_t n, std::in
     errno = error;
     return result;
 }
-static int NativeClose(int fd) { return ::_close(fd); }
+static int NativeClose(int fd) { return fd >= 0 && fd < 3 ? 0 : ::_close(fd); }
 static int NativeUnlink(const std::filesystem::path& p) { return ::_wunlink(p.wstring().c_str()); }
 static int NativeMkdir(const std::filesystem::path& p, int) { return ::_wmkdir(p.wstring().c_str()); }
 static int NativeRmdir(const std::filesystem::path& p) { return ::_wrmdir(p.wstring().c_str()); }
@@ -95,8 +104,16 @@ static int MapFlags(int sceFlags) {
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+// Guest files never use descriptors 0-2: games treat 0 as "no file" and close it (Unity closes
+// descriptor 0 at start), so the host's standard streams stay open and a file never lands there.
 static int NativeOpen(const std::filesystem::path& p, int nativeFlags, int mode) {
-    return ::open(p.c_str(), nativeFlags, static_cast<mode_t>(mode));
+    const int fd = ::open(p.c_str(), nativeFlags, static_cast<mode_t>(mode));
+    if (fd < 0 || fd >= 3) return fd;
+    const int moved = ::fcntl(fd, (nativeFlags & O_CLOEXEC) != 0 ? F_DUPFD_CLOEXEC : F_DUPFD, 3);
+    const int error = errno;
+    ::close(fd);
+    errno = error;
+    return moved;
 }
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
     return ::lseek(fd, static_cast<off_t>(offset), whence);
@@ -105,7 +122,8 @@ static std::int64_t NativeRead(int fd, void* buf, std::size_t n) { return ::read
 static std::int64_t NativeWrite(int fd, const void* buf, std::size_t n) { return ::write(fd, buf, n); }
 static std::int64_t NativePread(int fd, void* buf, std::size_t n, std::int64_t offset) { return ::pread(fd, buf, n, static_cast<off_t>(offset)); }
 static std::int64_t NativePwrite(int fd, const void* buf, std::size_t n, std::int64_t offset) { return ::pwrite(fd, buf, n, static_cast<off_t>(offset)); }
-static int NativeClose(int fd) { return ::close(fd); }
+// Closing 0-2 leaves the host's standard streams open (guest files never use them).
+static int NativeClose(int fd) { return fd >= 0 && fd < 3 ? 0 : ::close(fd); }
 static int NativeUnlink(const std::filesystem::path& p) { return ::unlink(p.c_str()); }
 static int NativeMkdir(const std::filesystem::path& p, int mode) { return ::mkdir(p.c_str(), static_cast<mode_t>(mode)); }
 static int NativeRmdir(const std::filesystem::path& p) { return ::rmdir(p.c_str()); }
@@ -161,6 +179,25 @@ bool traceFiles() {
         return value != nullptr && value[0] != '\0' && value[0] != '0';
     }();
     return enabled;
+}
+
+// ANYPS5_TRACE_FILES=2 also logs every descriptor read, seek and close (descriptor, offset, size,
+// result and host thread), to find descriptors whose file position several threads share.
+bool traceDescriptors() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_TRACE_FILES");
+        return value != nullptr && value[0] >= '2' && value[0] <= '9';
+    }();
+    return enabled;
+}
+
+std::int64_t traceDescriptor(const char* operation, int d, std::int64_t offset, std::uint64_t bytes, std::int64_t result) {
+    if (traceDescriptors()) {
+        const int error = errno;
+        std::fprintf(stderr, "[AnyPS5 fd] %s fd=%d offset=%lld bytes=%llu = %lld thread=%ld\n", operation, d, static_cast<long long>(offset), static_cast<unsigned long long>(bytes), static_cast<long long>(result), static_cast<long>(gettid()));
+        errno = error;
+    }
+    return result;
 }
 
 void trace(const char* operation, const char* path, const std::filesystem::path& host, int result) {
@@ -249,12 +286,12 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
 }
 
 int APS5_VABI sceKernelClose(int d) {
-    return sceResult(NativeClose(d));
+    return sceResult(static_cast<int>(traceDescriptor("close", d, -1, 0, NativeClose(d))));
 }
 
 std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
     if (buf == nullptr && nbytes != 0) return FileErrors::SceBsd(kErrorFault);
-    return sceResult64(NativeRead(d, buf, nbytes));
+    return sceResult64(traceDescriptor("read", d, -1, nbytes, NativeRead(d, buf, nbytes)));
 }
 
 std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes) {
@@ -264,12 +301,12 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
 
 std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
     if (whence < 0 || whence > 2) return FileErrors::SceBsd(kErrorInvalid);
-    return sceResult64(NativeLseek(d, offset, whence));
+    return sceResult64(traceDescriptor(whence == 0 ? "seek-set" : whence == 1 ? "seek-cur" : "seek-end", d, offset, 0, NativeLseek(d, offset, whence)));
 }
 
 std::int64_t APS5_VABI sceKernelPread(int d, void* buf, std::size_t nbytes, std::int64_t offset) {
     if (buf == nullptr && nbytes != 0) return FileErrors::SceBsd(kErrorFault);
-    return sceResult64(NativePread(d, buf, nbytes, offset));
+    return sceResult64(traceDescriptor("pread", d, offset, nbytes, NativePread(d, buf, nbytes, offset)));
 }
 
 std::int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, std::size_t nbytes, std::int64_t offset) {
@@ -337,11 +374,11 @@ int APS5_VABI open_nid_postfix(const char* path, int flags, int mode) {
 
 int APS5_VABI close_nid_postfix(int d) {
     if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Close(d);
-    return posixResult(NativeClose(d));
+    return posixResult(static_cast<int>(traceDescriptor("close", d, -1, 0, NativeClose(d))));
 }
 
 int64_t APS5_VABI read_nid_postfix(int d, void* buf, uint64_t nbytes) {
-    return posixResult64(NativeRead(d, buf, nbytes));
+    return posixResult64(traceDescriptor("read", d, -1, nbytes, NativeRead(d, buf, nbytes)));
 }
 
 int64_t APS5_VABI write_nid_postfix(int d, const void* buf, uint64_t nbytes) {
@@ -349,7 +386,7 @@ int64_t APS5_VABI write_nid_postfix(int d, const void* buf, uint64_t nbytes) {
 }
 
 int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t offset) {
-    return posixResult64(NativePread(d, buf, nbytes, offset));
+    return posixResult64(traceDescriptor("pread", d, offset, nbytes, NativePread(d, buf, nbytes, offset)));
 }
 
 int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_t nbytes, int64_t offset) {
@@ -358,7 +395,7 @@ int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_
 
 int64_t APS5_VABI lseek_nid_postfix(int d, int64_t offset, int whence) {
     if (whence < 0 || whence > 2) return FileErrors::PosixBsd(kErrorInvalid);
-    return posixResult64(NativeLseek(d, offset, whence));
+    return posixResult64(traceDescriptor(whence == 0 ? "seek-set" : whence == 1 ? "seek-cur" : "seek-end", d, offset, 0, NativeLseek(d, offset, whence)));
 }
 
 int APS5_VABI stat_nid_postfix(const char* path, FileStat* sb) {
