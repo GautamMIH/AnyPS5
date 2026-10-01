@@ -562,7 +562,9 @@ void Execute(const JobHeader& job, const AjmBuffer* inputs, const AjmBuffer* out
         } else if (instance->codec == CODEC_MP3) {
             RunMp3(*instance, job, inputs, outputs);
         } else {
-            throw std::runtime_error("AJM: decoding codec " + std::to_string(instance->codec) + " is not implemented");
+            // Fails loudly; with ANYPS5_REPORT_UNIMPLEMENTED the job reports a codec error instead.
+            NotImplemented_nid_no_patch(("AJM decoding codec " + std::to_string(instance->codec)).c_str());
+            WriteResult(job.sideband, job.sidebandSize, AJM_RESULT_CODEC_ERROR);
         }
         break;
     default:
