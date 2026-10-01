@@ -584,6 +584,9 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         if (state->properties.limits.timestampComputeAndGraphics) state->gpuTimestamps = std::make_shared<Graphics::GpuTimestamps>(state->device, state->deviceProc, state->properties.limits.timestampPeriod);
         else std::fprintf(stderr, "[AnyPS5] ANYPS5_GPU_TIMING: the device has no graphics timestamps\n");
     }
+    // Components copy the context when created: guest memory is imported first so every one of
+    // them (render and texture caches included) sees it.
+    state->guestGpuMemory = Graphics::GuestGpuMemory::Create(graphicsContext());
     state->bufferPool = std::make_shared<Graphics::BufferPool>(graphicsContext());
     state->descriptorCache = std::make_shared<Graphics::DescriptorCache>();
     state->samplerCache = std::make_shared<Graphics::SamplerCache>();
@@ -594,7 +597,6 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->graphicsPipelines = std::make_unique<Graphics::GraphicsPipelineCache>(graphicsContext());
     state->textureCache = std::make_unique<Graphics::TextureCache>(graphicsContext());
     state->colorTransfer = std::make_unique<Graphics::GpuColorTransfer>(graphicsContext());
-    state->guestGpuMemory = Graphics::GuestGpuMemory::Create(graphicsContext());
     if (window != nullptr) {
         require(window->getDrawableSize != nullptr, "missing window drawable size query");
         std::uint32_t drawableWidth = 0;
@@ -1001,6 +1003,7 @@ void VulkanDevice::ResolveFastClears(const Graphics::State& graphics) {
     const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
     });
+    const GuestMemory::AccessSite accessSite("fast_clear");
     Graphics::ApplyFastClears(graphics);
 }
 
@@ -1014,6 +1017,7 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
     const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
     });
+    const GuestMemory::AccessSite accessSite("draw");
     const auto context = graphicsContext();
     Graphics::Draw(context, graphics, draw, shaders, snapshots);
 }
@@ -1024,6 +1028,7 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
     });
+    const GuestMemory::AccessSite accessSite("dispatch");
     if (shader.spirv.size() < 5 || shader.spirv[0] != 0x07230203u) {
         throw std::runtime_error("Vulkan dispatch: invalid SPIR-V");
     }

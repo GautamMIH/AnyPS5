@@ -1,3 +1,4 @@
+#include <cstring>
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/shaders/TextureDetile_spv.h"
 #include "prx/libSceAgcDriver/Graphics/shaders/TextureMerge_spv.h"
@@ -184,10 +185,15 @@ VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elem
 
 void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool) {
     Require(commands != VK_NULL_HANDLE, "texture detiling requires an active command buffer");
+    Record(commands, Prepare(tileMode, elementBytes, source, sourceOffset, destination, destinationOffset, layout, arrayLayer, tile, pool));
+}
+
+TextureDetiler::PreparedPass TextureDetiler::Prepare(TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool) {
     Require(source != VK_NULL_HANDLE && destination != VK_NULL_HANDLE, "texture detiling requires source and destination buffers");
     Require(layout.width != 0 && layout.height != 0, "texture detiling requires a non-empty mip layout");
     Require(layout.tiledSize != 0 && layout.linearSize != 0, "texture detiling requires a non-empty mip layout");
-    const auto target = pipeline(tileMode, elementBytes, tile);
+    PreparedPass pass;
+    pass.pipeline = pipeline(tileMode, elementBytes, tile);
     const auto alignment = std::max<VkDeviceSize>(context.limits.minStorageBufferOffsetAlignment, 4);
     const auto sourceDescriptorOffset = sourceOffset - sourceOffset % alignment;
     const auto destinationDescriptorOffset = destinationOffset - destinationOffset % alignment;
@@ -197,25 +203,23 @@ void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode
     const auto sourceRange = (sourceBase + (tile ? layout.linearSize : layout.tiledSize) + 3) / 4 * 4;
     const auto destinationRange = (destinationBase + (tile ? layout.tiledSize : layout.linearSize) + 3) / 4 * 4;
     Require(sourceRange <= context.limits.maxStorageBufferRange && destinationRange <= context.limits.maxStorageBufferRange, "texture detiling buffer range exceeds device limits");
-    const auto set = pool == VK_NULL_HANDLE ? allocateSet() : allocateSet(pool);
+    pass.set = pool == VK_NULL_HANDLE ? allocateSet() : allocateSet(pool);
     const VkDescriptorBufferInfo sourceInfo{source, sourceDescriptorOffset, sourceRange};
     const VkDescriptorBufferInfo destinationInfo{destination, destinationDescriptorOffset, destinationRange};
     std::array<VkWriteDescriptorSet, 2> writes{};
     writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[0].dstSet = set;
+    writes[0].dstSet = pass.set;
     writes[0].dstBinding = 0;
     writes[0].descriptorCount = 1;
     writes[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[0].pBufferInfo = &sourceInfo;
     writes[1].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    writes[1].dstSet = set;
+    writes[1].dstSet = pass.set;
     writes[1].dstBinding = 1;
     writes[1].descriptorCount = 1;
     writes[1].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[1].pBufferInfo = &destinationInfo;
     context.Function<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets")(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
-    context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, target);
-    context.Function<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &set, 0, nullptr);
     Push push{};
     push.srcBase = static_cast<std::uint32_t>(sourceBase);
     push.dstBase = static_cast<std::uint32_t>(destinationBase);
@@ -228,10 +232,19 @@ void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode
     push.tailY = layout.tailY;
     push.elementBytes = elementBytes;
     push.arrayLayer = arrayLayer;
-    context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push), &push);
-    const auto groupsX = (layout.width + 7u) / 8u;
-    const auto groupsY = (layout.height + 7u) / 8u;
-    context.Function<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, groupsX, groupsY, 1);
+    static_assert(sizeof(Push) == sizeof(pass.push));
+    std::memcpy(pass.push.data(), &push, sizeof(push));
+    pass.groupsX = (layout.width + 7u) / 8u;
+    pass.groupsY = (layout.height + 7u) / 8u;
+    return pass;
+}
+
+void TextureDetiler::Record(VkCommandBuffer commands, const PreparedPass& pass) {
+    Require(commands != VK_NULL_HANDLE && pass.pipeline != VK_NULL_HANDLE && pass.set != VK_NULL_HANDLE, "texture detiling pass is not prepared");
+    context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pass.pipeline);
+    context.Function<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipelineLayout, 0, 1, &pass.set, 0, nullptr);
+    context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pass.push), pass.push.data());
+    context.Function<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, pass.groupsX, pass.groupsY, 1);
 }
 
 }

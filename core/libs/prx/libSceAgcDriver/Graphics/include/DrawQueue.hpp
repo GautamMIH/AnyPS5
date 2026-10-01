@@ -12,6 +12,10 @@ public:
     ~DrawQueue();
     VkCommandBuffer Begin(const Context& context);
     void Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage);
+    // A GPU write of guest memory recorded in the current batch that is not a draw (a resident
+    // surface written back into imported guest memory): CPU accesses to [begin, end) wait for the
+    // batch like they wait for draw writes, and storage stays alive until it completes.
+    void NoteGuestWrite(std::uint64_t begin, std::uint64_t end, std::shared_ptr<void> storage);
     void Flush();
     void Resolve(std::uint64_t address, std::size_t bytes);
     void Wait();

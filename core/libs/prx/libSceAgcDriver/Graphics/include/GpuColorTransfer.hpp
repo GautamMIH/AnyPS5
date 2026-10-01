@@ -15,6 +15,12 @@ public:
     void Upload(std::uint64_t address, std::uint32_t width, std::uint32_t height, ColorTileMode mode, std::uint32_t elementBytes = 4, ColorTail tail = {});
     void Detile(VkCommandBuffer commands, bool swapRedBlue = false);
     void Tile(VkCommandBuffer commands);
+    // GPU-only transfers between the tiled surface and a buffer holding guest memory (imported):
+    // UploadFrom copies the guest bytes in and detiles them; TileTo tiles the linear image data
+    // and copies it out. Both are recorded in queue order; the CPU copies nothing.
+    void UploadFrom(VkCommandBuffer commands, VkBuffer source, VkDeviceSize offset, std::uint32_t width, std::uint32_t height, ColorTileMode mode, std::uint32_t elementBytes, ColorTail tail);
+    void TileTo(VkCommandBuffer commands, VkBuffer destination, VkDeviceSize offset);
+    std::uint64_t TiledBytes() const;
     void WriteBack(std::uint64_t address);
     void WriteBackTracked(std::uint64_t address);
     bool MatchesGuest(std::uint64_t address);

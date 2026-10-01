@@ -406,6 +406,7 @@ private:
                 const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                     if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                 });
+                const GuestMemory::AccessSite accessSite("completion_release");
                 QueueState unused;
                 Pm4::Execute(next.release, unused);
                 if (TraceRelease()) std::fprintf(stderr, "[agc-release] written label=0x%llx marker=%llu\n", static_cast<unsigned long long>(next.release[3] | (static_cast<std::uint64_t>(next.release[4]) << 32u)), static_cast<unsigned long long>(next.marker));
@@ -616,6 +617,7 @@ private:
         const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
             static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
         });
+        const GuestMemory::AccessSite accessSite("dispatch_capture");
         const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
         ShaderRecompiler::RecompileRequest request{
             {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
@@ -791,6 +793,7 @@ private:
         const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
             static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
         });
+        const GuestMemory::AccessSite accessSite("draw_capture");
         ShaderMemory shaderMemory(memory);
         std::vector<ShaderRecompiler::RecompileResult> results;
         std::vector<Graphics::CompiledShader> stages;
@@ -950,6 +953,7 @@ private:
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                     });
+                    const GuestMemory::AccessSite accessSite("cond_branch");
                     target = Pm4::ResolveBranch(packet);
                 }
                 if (target) spliceCommands(submission, cursor, count, target->address, target->dwords, true);
@@ -974,6 +978,7 @@ private:
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                     });
+                    const GuestMemory::AccessSite accessSite("wait_reg_mem");
                     // The packet only waits until memory satisfies its condition: when it already
                     // does (labels are usually written by then), the GPU need not go idle first.
                     bool satisfied = Pm4::WaitSatisfied(packet);
@@ -1062,6 +1067,7 @@ private:
                         const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                             if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                         });
+                        const GuestMemory::AccessSite accessSite("indirect_dispatch_args");
                         direct = Pm4::ResolveDispatch(packet, queue);
                     }
                     withContext([&] { dispatch(queue, direct, submission); });
@@ -1074,6 +1080,7 @@ private:
                         const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                             if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                         });
+                        const GuestMemory::AccessSite accessSite("indirect_draw_args");
                         withContext([&] { draws = Pm4::ResolveIndirectDraws(packet, queue); });
                     }
                     for (const auto& indirect : draws) {
@@ -1087,6 +1094,7 @@ private:
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                     });
+                    const GuestMemory::AccessSite accessSite("pm4_execute");
                     withContext([&] { Pm4::Execute(packet, queue); });
                     timing.Mark("pm4_execute");
                 }

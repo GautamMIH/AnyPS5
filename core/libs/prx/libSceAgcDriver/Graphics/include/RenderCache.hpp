@@ -4,18 +4,27 @@
 #include "prx/libSceAgcDriver/Graphics/include/GpuColorTransfer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/LayeredColorTransfer.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
+#include <optional>
 #include <map>
 #include <vector>
 
 namespace AgcDriver::Graphics {
 
-class ResidentColor {
+class ResidentColor : public std::enable_shared_from_this<ResidentColor> {
 public:
     ResidentColor(const Context& context, const ColorTarget& color);
     ~ResidentColor();
     void Begin(VkCommandBuffer commands);
     void Download(VkCommandBuffer commands);
     void Commit();
+    // With guest memory imported, records the write-back on the draw queue instead: the image is
+    // tiled on the GPU and copied straight into guest memory, in order before later GPU work, with
+    // no CPU copy or wait. False when this target cannot (layered, or memory not imported).
+    bool WriteBackOnGpu();
+    // The draw queue was waited for: a queued GPU write-back reached guest memory, which the CPU may read.
+    void GpuWriteCompleted();
     void Transition(VkCommandBuffer commands, VkImageLayout layout);
     RenderTarget& Target() { return layered ? layered->Target() : transfer.Target(color, false); }
     const ColorTarget& Description() const { return color; }
@@ -28,6 +37,9 @@ public:
 
 private:
     void resolveCpuAccess(GuestMemoryTracking::Access access);
+    void downloadLinear(VkCommandBuffer commands);
+    // The imported guest memory holding the whole tiled surface, if any.
+    std::optional<GuestGpuMemory::View> guestView() const;
     Context context;
     ColorTarget color;
     GpuColorTransfer transfer;
@@ -36,19 +48,26 @@ private:
     VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     bool valid = false;
     bool dirty = false;
+    // A GPU write-back is queued: guest memory is current once the draw queue reaches it.
+    bool gpuWritePending = false;
     std::uint64_t generation = 0;
     std::unique_ptr<GuestMemoryTracking::Watch> memoryWatch;
 };
 
 // A depth/stencil surface kept on the GPU between draws. Guest memory holds the PS5 tiled depth
 // and stencil planes; they are detiled on upload and written back when the guest touches them.
-class ResidentDepth {
+class ResidentDepth : public std::enable_shared_from_this<ResidentDepth> {
 public:
     ResidentDepth(const Context& context, const DepthTarget& depth);
     ~ResidentDepth();
     void Begin(VkCommandBuffer commands);
     void Download(VkCommandBuffer commands);
     void Commit();
+    // As ResidentColor::WriteBackOnGpu: the planes are tiled on the GPU straight into imported
+    // guest memory, in draw-queue order. False when the GPU path does not apply (no imported
+    // memory, or a 16-bit plane the host widens to float).
+    bool WriteBackOnGpu();
+    void GpuWriteCompleted();
     RenderTarget& Target() { return *target; }
     const DepthTarget& Description() const { return depth; }
     bool Valid() const { return valid; }
@@ -70,7 +89,21 @@ public:
 
 private:
     void transition(VkCommandBuffer commands, VkImageLayout next);
-    void copy(VkCommandBuffer commands, bool toImage);
+    void copy(VkCommandBuffer commands, bool toImage, Buffer* depthBuffer, Buffer* stencilBuffer);
+    // Prepares the GPU passes over the planes' current guest views; false when the GPU path does not apply.
+    bool prepareGpu();
+    struct GpuPlane {
+        std::unique_ptr<Buffer> linear;
+        VkBuffer guest = VK_NULL_HANDLE;
+        VkDeviceSize guestOffset = 0;
+        TextureDetiler::PreparedPass detile;
+        TextureDetiler::PreparedPass tile;
+    };
+    GpuPlane gpuDepth;
+    GpuPlane gpuStencil;
+    VkDescriptorPool gpuPool = VK_NULL_HANDLE;
+    std::uint32_t gpuPoolSets = 0;
+    bool gpuWritePending = false;
     void protect(GuestMemoryTracking::Protection protection);
     void resolveCpuAccess(GuestMemoryTracking::Access access);
     Context context;
@@ -98,7 +131,9 @@ public:
     std::shared_ptr<ResidentColor> Find(std::uint64_t address) const;
     // The resident depth surface whose depth plane starts at address, if its image is current.
     std::shared_ptr<ResidentDepth> FindDepth(std::uint64_t address) const;
-    void Resolve(std::uint64_t address, std::size_t bytes, bool writable);
+    // Writes resident surfaces overlapping the range back to guest memory (and invalidates them
+    // when writable). For a GPU consumer, colour targets are written back on the GPU in queue order.
+    void Resolve(std::uint64_t address, std::size_t bytes, bool writable, bool gpuConsumer = false);
     void Flush();
 
 private:

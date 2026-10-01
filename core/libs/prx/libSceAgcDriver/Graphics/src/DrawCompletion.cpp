@@ -9,7 +9,8 @@ void DrawQueue::retire(Batch batch) {
     const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
     Require(drawCount >= batch.entries.size(), "draw queue completion count underflow");
     drawCount -= batch.entries.size();
-    for (auto& entry : batch.entries) entry.resources->WriteBack();
+    for (auto& entry : batch.entries)
+        if (entry.resources) entry.resources->WriteBack();
     timing.Mark("resources_writeback");
     if (batch.query >= 0) {
         // The batch completed, so its query result is available.

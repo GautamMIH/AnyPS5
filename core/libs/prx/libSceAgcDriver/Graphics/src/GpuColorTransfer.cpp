@@ -153,6 +153,41 @@ void GpuColorTransfer::Tile(VkCommandBuffer commands) {
     barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
 }
 
+void GpuColorTransfer::UploadFrom(VkCommandBuffer commands, VkBuffer source, VkDeviceSize offset, std::uint32_t newWidth, std::uint32_t newHeight, ColorTileMode newMode, std::uint32_t newElementBytes, ColorTail newTail) {
+    prepare(newWidth, newHeight, newMode, newElementBytes, newTail);
+    Require(commands != VK_NULL_HANDLE && source != VK_NULL_HANDLE, "color upload from guest memory is not prepared");
+    // Host writes before submission and earlier GPU work on the queue reach the copy.
+    VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+    const VkBufferCopy copy{offset, 0, TiledBytes()};
+    context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, source, tiled->Handle(), 1, &copy);
+    convert(commands, false, false);
+}
+
+void GpuColorTransfer::TileTo(VkCommandBuffer commands, VkBuffer destination, VkDeviceSize offset) {
+    Require(destination != VK_NULL_HANDLE, "color write-back target buffer is missing");
+    convert(commands, true, false);
+    const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    before.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+    const VkBufferCopy copy{0, offset, TiledBytes()};
+    context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, tiled->Handle(), destination, 1, &copy);
+    // Later GPU work reads guest memory after the copy; the host after the batch completes.
+    VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+}
+
+std::uint64_t GpuColorTransfer::TiledBytes() const {
+    Require(tiled != nullptr, "color transfer is not prepared");
+    return ColorTargetLayout(width, height, mode, elementBytes, tail).Bytes();
+}
+
 VkBuffer GpuColorTransfer::LinearBuffer() const {
     Require(linear != nullptr, "color transfer is not prepared");
     return linear->Handle();

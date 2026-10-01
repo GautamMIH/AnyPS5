@@ -40,9 +40,14 @@ bool ResidentColor::SharesPages(const ColorTarget& other) const {
 void ResidentColor::resolveCpuAccess(GuestMemoryTracking::Access access) {
     PerformanceTimer timing("Graphics.RenderMemory.CpuAccess");
     Require(memoryWatch != nullptr && context.drawQueue != nullptr, "render target memory resolver is unavailable");
-    if (dirty || access == GuestMemoryTracking::Access::Invalidate) {
+    if (dirty || gpuWritePending || access == GuestMemoryTracking::Access::Invalidate) {
         context.drawQueue->WaitGpu();
         timing.Mark("draw_wait");
+    }
+    if (gpuWritePending && !dirty) {
+        // The queued GPU write-back has reached guest memory.
+        gpuWritePending = false;
+        if (access == GuestMemoryTracking::Access::Read) memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
     }
     if (dirty) {
         CommandBatch batch(context);

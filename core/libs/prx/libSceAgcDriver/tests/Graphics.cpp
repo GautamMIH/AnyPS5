@@ -4,6 +4,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthTargetLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <array>
 #include <bit>
@@ -238,6 +240,27 @@ void ClipDistanceTests() {
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "without their CCDIST export vector");
     queue.context[0x207] = 0x280000;
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "PA_CL_VS_OUT_CNTL=0x280000");
+}
+
+// Resident depth planes are detiled and tiled on the GPU by the texture detiler's Depth64KB mode,
+// whose addressing (TexelOffset) must match the depth target layout the CPU path uses.
+void DepthPlaneAddressingTests() {
+    for (const std::uint32_t elementBytes : {1u, 2u, 4u}) {
+        const std::uint32_t width = 300, height = 200;
+        const AgcDriver::Graphics::DepthTargetLayout plane(width, height, elementBytes);
+        AgcDriver::Graphics::TileMipLayout mip{};
+        mip.tiledSize = plane.Bytes();
+        mip.linearSize = static_cast<std::uint64_t>(width) * height * elementBytes;
+        mip.width = width;
+        mip.height = height;
+        mip.blocksPerRow = elementBytes == 4 ? (width + 127u) / 128u : (width + 255u) / 256u;
+        mip.pitchBytes = width * elementBytes;
+        for (std::uint32_t y = 0; y < height; y += 3) {
+            for (std::uint32_t x = 0; x < width; x += 5) {
+                Require(AgcDriver::Graphics::TexelOffset(AgcDriver::Graphics::TextureTileMode::Depth64KB, elementBytes, mip, x, y) == plane.Offset(x, y), "GPU depth addressing differs from the depth target layout");
+            }
+        }
+    }
 }
 
 void ZeroExportTests() {
@@ -1255,6 +1278,7 @@ int main() {
         ColorMetadataPassTests();
         ClipDistanceTests();
         ZeroExportTests();
+        DepthPlaneAddressingTests();
         ShaderStageTests();
         InitialContextTests();
         pushConstantTests();

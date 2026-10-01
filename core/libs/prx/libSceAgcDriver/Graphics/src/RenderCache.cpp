@@ -3,6 +3,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include <cstdlib>
 #include <limits>
 
 namespace AgcDriver::Graphics {
@@ -29,7 +31,16 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
     if (!valid) {
         memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
         const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
-        if (layered) {
+        if (const auto view = layered ? std::nullopt : guestView()) {
+            // Detiled straight from imported guest memory, in queue order after earlier writes.
+            transfer.UploadFrom(commands, view->buffer, view->offset, color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
+            Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+            copy.imageExtent = {color.extent.width, color.extent.height, 1};
+            context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, transfer.LinearBuffer(), Target().Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            timing.Mark("gpu_upload", color.bytes);
+        } else if (layered) {
             layered->Upload();
             Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
             layered->RecordToImage(commands);
@@ -49,7 +60,53 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
     Transition(commands, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     valid = true;
     dirty = true;
+    gpuWritePending = false;
     memoryWatch->Protect(GuestMemoryTracking::Protection::None);
+}
+
+std::optional<GuestGpuMemory::View> ResidentColor::guestView() const {
+    if (context.guestGpuMemory == nullptr || layered) return std::nullopt;
+    const ColorTargetLayout layout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
+    auto view = context.guestGpuMemory->Resolve(color.address, layout.Bytes());
+    if (!view || view->bytes < layout.Bytes()) return std::nullopt;
+    return view;
+}
+
+void ResidentColor::downloadLinear(VkCommandBuffer commands) {
+    Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkMemoryBarrier reuse{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    reuse.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    reuse.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &reuse, 0, nullptr, 0, nullptr);
+    VkBufferImageCopy copy{};
+    copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    copy.imageExtent = {color.extent.width, color.extent.height, 1};
+    context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, Target().Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, transfer.LinearBuffer(), 1, &copy);
+}
+
+bool ResidentColor::WriteBackOnGpu() {
+    if (!dirty) return true;
+    if (context.drawQueue == nullptr) return false;
+    const auto view = guestView();
+    if (!view) return false;
+    PerformanceTimer timing("Graphics.ResidentColor.GpuWriteBack");
+    const auto commands = context.drawQueue->Begin(context);
+    downloadLinear(commands);
+    transfer.TileTo(commands, view->buffer, view->offset);
+    const ColorTargetLayout layout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
+    // CPU accesses of the range wait for the batch; the texture cache sees the range as written.
+    context.drawQueue->NoteGuestWrite(color.address, color.address + layout.Bytes(), shared_from_this());
+    WriteTracker::NoteGpuWrite(color.address, layout.Bytes());
+    dirty = false;
+    gpuWritePending = true;
+    timing.Mark("recorded", layout.Bytes());
+    return true;
+}
+
+void ResidentColor::GpuWriteCompleted() {
+    if (!gpuWritePending) return;
+    gpuWritePending = false;
+    if (!dirty && valid && memoryWatch) memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
 }
 
 void ResidentColor::Download(VkCommandBuffer commands) {
@@ -94,7 +151,8 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
             continue;
         }
         if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode && previous.elementBytes == color.elementBytes && previous.tail == color.tail && previous.layers == color.layers && previous.baseLayer == color.baseLayer && previous.surfaceSlices == color.surfaceSlices) return it->second;
-        Resolve(previous.address, previous.bytes, true);
+        // The new target is uploaded on the GPU after this, so the old one can be written back there.
+        Resolve(previous.address, previous.bytes, true, true);
         it->second->ReleaseMemory();
         it = entries.erase(it);
     }
@@ -132,7 +190,7 @@ std::shared_ptr<ResidentDepth> RenderCache::FindDepth(std::uint64_t address) con
     return nullptr;
 }
 
-void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writable) {
+void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writable, bool gpuConsumer) {
     std::vector<std::shared_ptr<ResidentColor>> affected;
     // Entries beginning before the end of the range and at most largestColor bytes before it.
     const auto end = entries.lower_bound(address + bytes);
@@ -145,13 +203,67 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
         if (entry->Dirty()) affected.push_back(entry);
         else if (writable) entry->Invalidate();
     }
+    // A GPU consumer (a draw or dispatch, which runs after the draw queue's batch in order) needs
+    // no CPU copy: colour targets are written back into imported guest memory on the GPU.
+    if ((gpuConsumer || GuestMemory::GpuAccessScope::Active()) && !affected.empty()) {
+        PerformanceTimer timing("Graphics.RenderCache.GpuResolve");
+        std::erase_if(affected, [&](const std::shared_ptr<ResidentColor>& entry) {
+            if (!entry->WriteBackOnGpu()) return false;
+            if (writable) entry->Invalidate();
+            return true;
+        });
+        timing.Mark("recorded");
+    }
     std::vector<std::shared_ptr<ResidentDepth>> affectedDepth;
     for (const auto& entry : depthEntries) {
         if (!entry->Overlaps(address, bytes)) continue;
         if (entry->Dirty()) affectedDepth.push_back(entry);
         else if (writable) entry->Invalidate();
     }
+    if ((gpuConsumer || GuestMemory::GpuAccessScope::Active()) && !affectedDepth.empty()) {
+        std::erase_if(affectedDepth, [&](const std::shared_ptr<ResidentDepth>& entry) {
+            if (!entry->WriteBackOnGpu()) return false;
+            if (writable) entry->Invalidate();
+            return true;
+        });
+    }
+    if (!affected.empty() || !affectedDepth.empty()) {
+        // A CPU consumer: surfaces with a GPU path are tiled into guest memory on the GPU, and the
+        // CPU waits once for the draw queue instead of downloading and tiling them itself.
+        bool recorded = false;
+        const auto viaGpu = [&](auto& list) {
+            std::erase_if(list, [&](const auto& entry) {
+                if (!entry->WriteBackOnGpu()) return false;
+                recorded = true;
+                return true;
+            });
+        };
+        viaGpu(affected);
+        viaGpu(affectedDepth);
+        if (recorded) {
+            PerformanceTimer timing("Graphics.RenderCache.GpuResolveWait");
+            context.drawQueue->WaitGpu();
+            timing.Mark("draw_wait");
+            for (const auto& [base, entry] : entries) entry->GpuWriteCompleted();
+            for (const auto& entry : depthEntries) entry->GpuWriteCompleted();
+            if (writable) {
+                for (const auto& [base, entry] : entries)
+                    if (!entry->Dirty() && entry->Valid() && !(address >= base + entry->Description().bytes || base >= address + bytes)) entry->Invalidate();
+                for (const auto& entry : depthEntries)
+                    if (!entry->Dirty() && entry->Valid() && entry->Overlaps(address, bytes)) entry->Invalidate();
+            }
+        }
+    }
     if (affected.empty() && affectedDepth.empty()) return;
+    // Debug aid: APS5_TRACE_RESOLVE=1 logs every resolve that writes resident surfaces back to guest
+    // memory, with the access that caused it.
+    static const bool traceResolve = std::getenv("APS5_TRACE_RESOLVE") != nullptr;
+    if (traceResolve) {
+        std::fprintf(stderr, "[resolve] site=%s range=0x%llx+0x%zx %s colors=%zu depths=%zu", GuestMemory::AccessSite::Current(), static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", affected.size(), affectedDepth.size());
+        for (const auto& entry : affected) std::fprintf(stderr, " color@0x%llx+0x%llx", static_cast<unsigned long long>(entry->Description().address), static_cast<unsigned long long>(entry->Description().bytes));
+        for (const auto& entry : affectedDepth) std::fprintf(stderr, " depth@0x%llx", static_cast<unsigned long long>(entry->Description().depthAddress));
+        std::fprintf(stderr, "\n");
+    }
     PerformanceTimer timing("Graphics.RenderCache.Resolve");
     if (context.drawQueue) context.drawQueue->Wait();
     CommandBatch batch(context);

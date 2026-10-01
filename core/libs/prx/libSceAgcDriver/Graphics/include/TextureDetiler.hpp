@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include <array>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -21,6 +22,18 @@ namespace AgcDriver::Graphics {
         // detiler's batch pools, which BeginBatch recycles, or from pool when the caller owns one
         // that outlives the command buffer.
         void Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile = false, VkDescriptorPool pool = VK_NULL_HANDLE);
+        // A pass prepared once (its descriptor set allocated from pool and written) and recorded any
+        // number of times while its buffers live: per-frame passes allocate nothing and never
+        // rewrite a set a pending command buffer may still use.
+        struct PreparedPass {
+            VkPipeline pipeline = VK_NULL_HANDLE;
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            std::array<std::uint32_t, 11> push{};
+            std::uint32_t groupsX = 0;
+            std::uint32_t groupsY = 0;
+        };
+        PreparedPass Prepare(TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool);
+        void Record(VkCommandBuffer commands, const PreparedPass& pass);
         void BeginBatch();
         // Copies bytes of source into guest where mask bytes are set (one pass per dword).
         void Merge(VkCommandBuffer commands, VkBuffer source, std::uint64_t sourceOffset, VkBuffer mask, std::uint64_t maskOffset, VkBuffer guest, std::uint64_t guestOffset, std::uint64_t bytes, VkDescriptorPool pool);

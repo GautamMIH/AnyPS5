@@ -4,6 +4,8 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthTargetLayout.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
 #include <cmath>
@@ -72,7 +74,92 @@ ResidentDepth::ResidentDepth(const Context& context, const DepthTarget& depth) :
     if (depth.hasStencil) watch(depth.stencilAddress, depth.stencilBytes);
 }
 
-ResidentDepth::~ResidentDepth() = default;
+ResidentDepth::~ResidentDepth() {
+    if (gpuPool != VK_NULL_HANDLE && context.detiler != nullptr) context.detiler->DestroyPool(gpuPool);
+}
+
+bool ResidentDepth::prepareGpu() {
+    if (context.guestGpuMemory == nullptr || context.detiler == nullptr || context.drawQueue == nullptr) return false;
+    // A 16-bit plane under a float host format is converted on the CPU.
+    if (depth.depthElementBytes != 0 && hostDepthBytes(depth) != depth.depthElementBytes) return false;
+    const auto plane = [&](GpuPlane& gpu, std::uint64_t address, std::uint32_t elementBytes) {
+        const DepthTargetLayout layout(depth.extent.width, depth.extent.height, elementBytes);
+        const auto view = context.guestGpuMemory->Resolve(address, layout.Bytes());
+        if (!view || view->bytes < layout.Bytes()) return false;
+        if (gpu.linear && gpu.guest == view->buffer && gpu.guestOffset == view->offset) return true;
+        TileMipLayout mip{};
+        mip.tiledSize = layout.Bytes();
+        mip.linearSize = layout.LinearBytes();
+        mip.width = depth.extent.width;
+        mip.height = depth.extent.height;
+        mip.blocksPerRow = elementBytes == 4 ? (depth.extent.width + 127u) / 128u : (depth.extent.width + 255u) / 256u;
+        mip.pitchBytes = depth.extent.width * elementBytes;
+        if (!gpu.linear) gpu.linear = std::make_unique<Buffer>(context, layout.LinearBytes(), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        // Sets are never rewritten: a changed guest view takes new ones once the old ones are idle.
+        if (gpuPool == VK_NULL_HANDLE || gpuPoolSets + 2 > 8) {
+            if (gpuPool != VK_NULL_HANDLE) {
+                context.drawQueue->WaitGpu();
+                context.detiler->DestroyPool(gpuPool);
+            }
+            gpuPool = context.detiler->CreatePool(8);
+            gpuPoolSets = 0;
+            gpuDepth.guest = gpuStencil.guest = VK_NULL_HANDLE;
+        }
+        gpu.detile = context.detiler->Prepare(TextureTileMode::Depth64KB, elementBytes, view->buffer, view->offset, gpu.linear->Handle(), 0, mip, 0, false, gpuPool);
+        gpu.tile = context.detiler->Prepare(TextureTileMode::Depth64KB, elementBytes, gpu.linear->Handle(), 0, view->buffer, view->offset, mip, 0, true, gpuPool);
+        gpuPoolSets += 2;
+        gpu.guest = view->buffer;
+        gpu.guestOffset = view->offset;
+        return true;
+    };
+    if (depth.depthElementBytes != 0 && !plane(gpuDepth, depth.depthAddress, depth.depthElementBytes)) return false;
+    if (depth.hasStencil && !plane(gpuStencil, depth.stencilAddress, 1)) return false;
+    return true;
+}
+
+void ResidentDepth::GpuWriteCompleted() {
+    if (!gpuWritePending) return;
+    gpuWritePending = false;
+    if (!dirty && valid && !watches.empty()) protect(GuestMemoryTracking::Protection::Read);
+}
+
+bool ResidentDepth::WriteBackOnGpu() {
+    if (!dirty) return true;
+    if (!prepareGpu()) return false;
+    PerformanceTimer timing("Graphics.ResidentDepth.GpuWriteBack");
+    const auto commands = context.drawQueue->Begin(context);
+    const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    VkMemoryBarrier reuse{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    reuse.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    reuse.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &reuse, 0, nullptr, 0, nullptr);
+    copy(commands, false, gpuDepth.linear.get(), gpuStencil.linear.get());
+    VkMemoryBarrier toShader{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    toShader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &toShader, 0, nullptr, 0, nullptr);
+    // Only texels inside the extent are written: padding keeps its guest contents, as on the CPU path.
+    if (gpuDepth.linear) context.detiler->Record(commands, gpuDepth.tile);
+    if (gpuStencil.linear && depth.hasStencil) context.detiler->Record(commands, gpuStencil.tile);
+    VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    after.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+    const auto keepAlive = shared_from_this();
+    if (depth.depthBytes != 0) {
+        context.drawQueue->NoteGuestWrite(depth.depthAddress, depth.depthAddress + depth.depthBytes, keepAlive);
+        WriteTracker::NoteGpuWrite(depth.depthAddress, depth.depthBytes);
+    }
+    if (depth.stencilBytes != 0) {
+        context.drawQueue->NoteGuestWrite(depth.stencilAddress, depth.stencilAddress + depth.stencilBytes, keepAlive);
+        WriteTracker::NoteGpuWrite(depth.stencilAddress, depth.stencilBytes);
+    }
+    dirty = false;
+    gpuWritePending = true;
+    timing.Mark("recorded", depth.depthBytes + depth.stencilBytes);
+    return true;
+}
 
 void ResidentDepth::protect(GuestMemoryTracking::Protection protection) {
     for (const auto& watch : watches) watch->Protect(protection);
@@ -92,7 +179,7 @@ void ResidentDepth::transition(VkCommandBuffer commands, VkImageLayout next) {
     layout = next;
 }
 
-void ResidentDepth::copy(VkCommandBuffer commands, bool toImage) {
+void ResidentDepth::copy(VkCommandBuffer commands, bool toImage, Buffer* depthBuffer, Buffer* stencilBuffer) {
     const auto planes = [&](Buffer* buffer, VkImageAspectFlags aspect) {
         if (buffer == nullptr) return;
         VkBufferImageCopy region{};
@@ -101,14 +188,31 @@ void ResidentDepth::copy(VkCommandBuffer commands, bool toImage) {
         if (toImage) context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, buffer->Handle(), target->Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
         else context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, target->Image(), VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, buffer->Handle(), 1, &region);
     };
-    planes(depthLinear.get(), VK_IMAGE_ASPECT_DEPTH_BIT);
-    planes(stencilLinear.get(), VK_IMAGE_ASPECT_STENCIL_BIT);
+    planes(depthBuffer, VK_IMAGE_ASPECT_DEPTH_BIT);
+    planes(stencilBuffer, VK_IMAGE_ASPECT_STENCIL_BIT);
 }
 
 void ResidentDepth::Begin(VkCommandBuffer commands) {
     PerformanceTimer timing("Graphics.ResidentDepth.Begin");
     Require(!watches.empty(), "depth target memory ownership was released");
-    if (!valid) {
+    if (!valid && prepareGpu()) {
+        protect(GuestMemoryTracking::Protection::Read);
+        // Detiled on the GPU straight from imported guest memory, after earlier queued writes.
+        const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+        VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        before.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+        if (gpuDepth.linear && depth.depthElementBytes != 0) context.detiler->Record(commands, gpuDepth.detile);
+        if (gpuStencil.linear && depth.hasStencil) context.detiler->Record(commands, gpuStencil.detile);
+        VkMemoryBarrier detiled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        detiled.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        detiled.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &detiled, 0, nullptr, 0, nullptr);
+        transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        copy(commands, true, depth.depthElementBytes != 0 ? gpuDepth.linear.get() : nullptr, depth.hasStencil ? gpuStencil.linear.get() : nullptr);
+        timing.Mark("gpu_detile", depth.depthBytes + depth.stencilBytes);
+    } else if (!valid) {
         protect(GuestMemoryTracking::Protection::Read);
         const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
         if (depthLinear) {
@@ -131,13 +235,14 @@ void ResidentDepth::Begin(VkCommandBuffer commands) {
         upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
         context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &upload, 0, nullptr, 0, nullptr);
         transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        copy(commands, true);
+        copy(commands, true, depthLinear.get(), stencilLinear.get());
     } else {
         timing.Mark("reuse");
     }
     transition(commands, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     valid = true;
     dirty = true;
+    gpuWritePending = false;
     ++generation;
     protect(GuestMemoryTracking::Protection::None);
 }
@@ -167,7 +272,7 @@ void ResidentDepth::Download(VkCommandBuffer commands) {
     reuse.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     barrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &reuse, 0, nullptr, 0, nullptr);
-    copy(commands, false);
+    copy(commands, false, depthLinear.get(), stencilLinear.get());
     VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     after.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
@@ -233,9 +338,14 @@ bool ResidentDepth::SharesPages(const DepthTarget& other) const {
 void ResidentDepth::resolveCpuAccess(GuestMemoryTracking::Access access) {
     PerformanceTimer timing("Graphics.DepthMemory.CpuAccess");
     Require(!watches.empty() && context.drawQueue != nullptr, "depth target memory resolver is unavailable");
-    if (dirty || access == GuestMemoryTracking::Access::Invalidate) {
+    if (dirty && WriteBackOnGpu()) timing.Mark("gpu_writeback_recorded");
+    if (dirty || gpuWritePending || access == GuestMemoryTracking::Access::Invalidate) {
         context.drawQueue->WaitGpu();
         timing.Mark("draw_wait");
+    }
+    if (gpuWritePending && !dirty) {
+        gpuWritePending = false;
+        if (access == GuestMemoryTracking::Access::Read) protect(GuestMemoryTracking::Protection::Read);
     }
     if (dirty) {
         CommandBatch batch(context);

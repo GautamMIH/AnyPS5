@@ -80,6 +80,14 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
     if (recording.entries.size() >= 8) Flush();
 }
 
+void DrawQueue::NoteGuestWrite(std::uint64_t begin, std::uint64_t end, std::shared_ptr<void> storage) {
+    Require(recording.commands != nullptr && storage != nullptr && begin < end, "guest write is not recorded in a draw batch");
+    Entry entry{std::move(storage), nullptr, {{begin, end}}};
+    writes.Add(begin, end);
+    recording.entries.push_back(std::move(entry));
+    ++drawCount;
+}
+
 void DrawQueue::Flush() {
     if (!recording.commands) return;
     Require(!recording.entries.empty() || recording.hasBarrier, "cannot submit an incomplete draw batch");
