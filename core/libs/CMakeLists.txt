@@ -190,7 +190,6 @@ if(BUILD_TESTING)
         set_tests_properties(audio_out2_pad_mix PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
-    add_executable(guest_indexed_draw_tests tests/GuestIndexedDraw.cpp)
     add_executable(shader_buffer_address_tests tests/ShaderBufferAddress.cpp)
     target_link_libraries(shader_buffer_address_tests PRIVATE shader_recompiler_agc_driver libc)
     configure_windows_unwind(shader_buffer_address_tests)

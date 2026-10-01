@@ -306,6 +306,16 @@ int APS5_VABI getsockname_nid_postfix(int descriptor, void* address, std::uint32
     GuestAddress(native, address, length);
     return 0;
 }
+int APS5_VABI getpeername_nid_postfix(int descriptor, void* address, std::uint32_t* length) {
+    const auto socket = Lookup(descriptor);
+    if (!socket) return -1;
+    if (!address || !length) return Fail(14);
+    sockaddr_storage native{};
+    socklen_t size = sizeof(native);
+    if (::getpeername(socket->value, reinterpret_cast<sockaddr*>(&native), &size)) return Fail(NativeError());
+    GuestAddress(native, address, length);
+    return 0;
+}
 int APS5_VABI ioctl_nid_postfix(int descriptor, std::uint64_t request, void* argument) {
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;
