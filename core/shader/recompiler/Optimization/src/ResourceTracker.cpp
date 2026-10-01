@@ -692,6 +692,9 @@ private:
                 std::fprintf(stderr, "[bda] %s at pc 0x%08x: %s access, offset %s%s\n", std::string(IrOpcodeName(op)).c_str(), flags.pc, kind, immediateOffset ? "immediate" : "dynamic", memory.kind == ResourceKind::ScalarAddress && !immediateOffset ? " (a register offset is not planned by the SRT walker)" : "");
             }
             m_info.usesDma = true;
+            // Global and flat stores write through the table too: the draw must lease registered
+            // memory writable, or the stores land in a read-only copy.
+            m_info.bdaWrites = m_info.bdaWrites || addressInfo.access == AddressAccess::Write;
             return;
         }
 
