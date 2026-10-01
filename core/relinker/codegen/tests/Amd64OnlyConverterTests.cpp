@@ -160,7 +160,29 @@ void matcherSubstitutions() {
     require(movntsd && movntsd->Lowering == Codegen::Amd64OnlyLowering::InPlace && movntsd->ReplacementBytes == Bytes{0xF2, 0x44, 0x0F, 0x11, 0x4C, 0x24, 0x10} && movntsd->InstructionName == "MOVNTSD", "MOVNTSD was not rewritten to MOVSD");
     requireFailure([&] { (void)match({0xF3, 0x0F, 0x2B, 0xC1}); }, "MOVNTSS with a register operand was accepted");
     const auto monitorx = match({0x0F, 0x01, 0xFA});
-    require(monitorx && monitorx->Lowering == Codegen::Amd64OnlyLowering::Unsupported && monitorx->InstructionName == "MONITORX", "MONITORX was not reported as unsupported");
+    require(monitorx && monitorx->Lowering == Codegen::Amd64OnlyLowering::InPlace && monitorx->ReplacementBytes == Bytes{0x0F, 0x1F, 0x00} && monitorx->InstructionName == "MONITORX", "MONITORX was not replaced by a NOP");
+    const auto mwaitx = match({0x0F, 0x01, 0xFB});
+    require(mwaitx && mwaitx->Lowering == Codegen::Amd64OnlyLowering::InPlace && mwaitx->ReplacementBytes == Bytes{0xF3, 0x90, 0x90} && mwaitx->InstructionName == "MWAITX", "MWAITX was not replaced by PAUSE");
+    const auto prefixedMonitorx = match({0x67, 0x0F, 0x01, 0xFA});
+    require(prefixedMonitorx && prefixedMonitorx->ReplacementBytes == Bytes{0x0F, 0x1F, 0x40, 0x00}, "Prefixed MONITORX was not padded to its length");
+    const auto prefixedMwaitx = match({0x2E, 0x41, 0x0F, 0x01, 0xFB});
+    require(prefixedMwaitx && prefixedMwaitx->ReplacementBytes == Bytes{0xF3, 0x90, 0x0F, 0x1F, 0x00}, "Prefixed MWAITX was not padded to its length");
+    Bytes longMonitorx(5, 0x2E);
+    longMonitorx.insert(longMonitorx.end(), {0x0F, 0x01, 0xFA});
+    const auto paddedMonitorx = match(longMonitorx);
+    require(paddedMonitorx && paddedMonitorx->ReplacementBytes == Bytes{0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00, 0x90}, "8-byte MONITORX was not padded with two NOPs");
+    Bytes longestMwaitx(12, 0x2E);
+    longestMwaitx.insert(longestMwaitx.end(), {0x0F, 0x01, 0xFB});
+    const auto paddedMwaitx = match(longestMwaitx);
+    require(paddedMwaitx && paddedMwaitx->ReplacementBytes == Bytes{0xF3, 0x90, 0x0F, 0x1F, 0x80, 0x00, 0x00, 0x00, 0x00, 0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00}, "15-byte MWAITX was not padded to its length");
+    const auto lockedMwaitx = match({0xF0, 0x0F, 0x01, 0xFB});
+    require(lockedMwaitx && lockedMwaitx->Lowering == Codegen::Amd64OnlyLowering::Unsupported, "LOCK MWAITX was replaced instead of failing");
+    Bytes overlongMonitorx(13, 0x2E);
+    overlongMonitorx.insert(overlongMonitorx.end(), {0x0F, 0x01, 0xFA});
+    const auto overlong = match(overlongMonitorx);
+    require(overlong && overlong->Lowering == Codegen::Amd64OnlyLowering::Unsupported, "MONITORX longer than 15 bytes was replaced instead of failing");
+    const auto clzero = match({0x0F, 0x01, 0xFC});
+    require(clzero && clzero->Lowering == Codegen::Amd64OnlyLowering::Unsupported && clzero->InstructionName == "CLZERO", "CLZERO was not reported as unsupported");
     const auto registerForm = match({0x66, 0x0F, 0x79, 0xCA});
     require(registerForm && registerForm->Lowering == Codegen::Amd64OnlyLowering::Trampoline && registerForm->InstructionName == "EXTRQ register form", "EXTRQ register form was not lowered through a stub");
     const auto insertqRegisterForm = match({0xF2, 0x0F, 0x79, 0xCA});
@@ -244,12 +266,12 @@ void converterSegment() {
     auto branchInside = file;
     branchInside[0x207] = 0x02;
     requireFailure([&] { (void)converter->Convert(branchInside, {segmentHeader(20)}); }, "Branch into an AMD-only instruction was accepted");
-    auto monitorx = file;
-    monitorx[0x20F] = 0x0F;
-    monitorx[0x210] = 0x01;
-    monitorx[0x211] = 0xFA;
-    monitorx[0x212] = 0x90;
-    requireFailure([&] { (void)converter->Convert(monitorx, {segmentHeader(20)}); }, "MONITORX was silently kept");
+    auto clzero = file;
+    clzero[0x20F] = 0x0F;
+    clzero[0x210] = 0x01;
+    clzero[0x211] = 0xFC;
+    clzero[0x212] = 0x90;
+    requireFailure([&] { (void)converter->Convert(clzero, {segmentHeader(20)}); }, "CLZERO was silently kept");
     auto registerForm = file;
     const Bytes extrqRegister = {0x66, 0x0F, 0x79, 0xCA};
     std::copy(extrqRegister.begin(), extrqRegister.end(), registerForm.begin() + 0x20F);
@@ -290,6 +312,20 @@ void converterSha256() {
     require(failureOffset([&] { (void)converter->Convert(memoryForm, {segmentHeader(text.size())}); }, "SHA-256 memory form was accepted") == 0x20C, "SHA-256 operand failure does not carry the file offset");
 }
 
+void converterMonitorWait() {
+    const auto converter = Codegen::MakeAmd64OnlyConverter();
+    Bytes file(0x300, 0xCC);
+    const Bytes text = {0x0F, 0x01, 0xFA, 0x0F, 0x01, 0xFB, 0x2E, 0x0F, 0x01, 0xFB, 0xC3};
+    std::copy(text.begin(), text.end(), file.begin() + 0x200);
+    const auto result = converter->Convert(file, {segmentHeader(text.size())});
+    require(result.ReplacedCount == 3 && result.Trampolines.empty() && result.Reports.size() == 3, "MONITORX/MWAITX were not replaced in place");
+    require(result.Reports[0].InstructionName == "MONITORX" && result.Reports[1].InstructionName == "MWAITX" && result.Reports[2].Offset == 0x206 && result.Reports[2].ReplacementLength == 4 && result.Reports[2].Lowering == Codegen::Amd64OnlyLowering::InPlace, "MONITORX/MWAITX reports are wrong");
+    auto expected = file;
+    const Bytes replaced = {0x0F, 0x1F, 0x00, 0xF3, 0x90, 0x90, 0xF3, 0x90, 0x66, 0x90, 0xC3};
+    std::copy(replaced.begin(), replaced.end(), expected.begin() + 0x200);
+    require(result.Bytes == expected, "MONITORX/MWAITX were replaced with the wrong bytes");
+}
+
 void converterFailureOffsets() {
     const auto converter = Codegen::MakeAmd64OnlyConverter();
     const auto file = segmentFixture();
@@ -303,10 +339,10 @@ void converterFailureOffsets() {
     auto movntsRegister = file;
     movntsRegister[0x212] = 0xC1;
     require(failureOffset([&] { (void)converter->Convert(movntsRegister, {segmentHeader(20)}); }, "MOVNTSS register form was accepted") == 0x20F, "MOVNTSS failure does not carry the file offset");
-    auto monitorx = file;
-    const Bytes monitorxBytes = {0x0F, 0x01, 0xFA, 0x90};
-    std::copy(monitorxBytes.begin(), monitorxBytes.end(), monitorx.begin() + 0x20F);
-    require(failureOffset([&] { (void)converter->Convert(monitorx, {segmentHeader(20)}); }, "MONITORX was accepted") == 0x20F, "Unsupported instruction failure does not carry the file offset");
+    auto clzero = file;
+    const Bytes clzeroBytes = {0x0F, 0x01, 0xFC, 0x90};
+    std::copy(clzeroBytes.begin(), clzeroBytes.end(), clzero.begin() + 0x20F);
+    require(failureOffset([&] { (void)converter->Convert(clzero, {segmentHeader(20)}); }, "CLZERO was accepted") == 0x20F, "Unsupported instruction failure does not carry the file offset");
 }
 
 Bytes elfFixture(const Bytes& text) {
@@ -531,6 +567,7 @@ int main() {
         sha256Execution();
         converterSegment();
         converterSha256();
+        converterMonitorWait();
         converterFailureOffsets();
         linuxPlacement();
         scannerZeroTail();

@@ -8,6 +8,7 @@
 #include <codegen/x86/StubBodyBuilder.hpp>
 #include <codegen/x86/X64OpcodeConstants.hpp>
 #include <codegen/CodegenException.hpp>
+#include <algorithm>
 #include <memory>
 #include <span>
 #include <vector>
@@ -17,6 +18,8 @@ namespace Codegen {
 namespace {
 
 using namespace Amd64OnlySubstitutionTable;
+
+constexpr std::size_t kMaxInstructionLength = 15;
 
 Amd64OnlyMatch _unsupported(const Entry& entry, const std::size_t length) {
     return Amd64OnlyMatch{entry.Name, length, Amd64OnlyLowering::Unsupported, {}, {}, 0};
@@ -38,6 +41,19 @@ const Entry& _sha256Entry(const Sha256Operands& operands) {
         return kSha256msg2;
     }
     return kSha256rnds2;
+}
+
+Amd64OnlyMatch _inPlace(const Entry& entry, const std::size_t length, std::vector<std::uint8_t> replacement) {
+    while (replacement.size() < length) {
+        const auto& nop = kNops[std::min<std::size_t>(length - replacement.size(), std::size(kNops)) - 1];
+        replacement.insert(replacement.end(), nop.Bytes, nop.Bytes + nop.Size);
+    }
+    return Amd64OnlyMatch{entry.Name, length, Amd64OnlyLowering::InPlace, std::move(replacement), {}, 0};
+}
+
+bool _validWait(const DecodedInstruction& instr) {
+    const auto opcode = instr.Data + instr.OpcodeOffset();
+    return instr.Length <= kMaxInstructionLength && std::find(instr.Data, opcode, X64OpcodeConstants::PrefixLock) == opcode;
 }
 
 class Amd64OnlyInstructionMatcher : public IAmd64OnlyInstructionMatcher {
@@ -144,10 +160,10 @@ std::optional<Amd64OnlyMatch> Amd64OnlyInstructionMatcher::Match(
         return _matchSha256(instr, trailing);
 
     if (instr.IsMonitorx())
-        return _unsupported(kMonitorx, length);
+        return _validWait(instr) ? _inPlace(kMonitorx, length, {}) : _unsupported(kMonitorx, length);
 
     if (instr.IsMwaitx())
-        return _unsupported(kMwaitx, length);
+        return _validWait(instr) ? _inPlace(kMwaitx, length, std::vector<std::uint8_t>(kPause.Bytes, kPause.Bytes + kPause.Size)) : _unsupported(kMwaitx, length);
 
     if (instr.IsClzero())
         return _unsupported(kClzero, length);
