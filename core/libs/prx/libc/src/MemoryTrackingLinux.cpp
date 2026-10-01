@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -18,6 +19,40 @@ namespace {
 
 FaultHandler faultHandler = nullptr;
 struct sigaction previousAction{};
+
+// Reads memory without faulting (the address may be unmapped): false if it is not readable.
+bool readSafely(std::uintptr_t address, void* destination, std::size_t bytes) {
+    iovec local{destination, bytes};
+    iovec remote{reinterpret_cast<void*>(address), bytes};
+    return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(bytes);
+}
+
+// Return addresses on the faulting thread's stack: words pointing into a loaded module just after
+// a call instruction (frame pointers are unreliable in guest code, so the stack is scanned).
+void reportCallers(std::uintptr_t stack) {
+    constexpr std::size_t words = 2048;
+    constexpr int maximum = 24;
+    int reported = 0;
+    for (std::size_t index = 0; index < words && reported < maximum; ++index) {
+        std::uintptr_t value = 0;
+        if (!readSafely(stack + index * sizeof(value), &value, sizeof(value))) break;
+        if (value < 0x10000) continue;
+        std::uint8_t before[6]{};
+        if (!readSafely(value - sizeof(before), before, sizeof(before))) continue;
+        // call rel32 (E8), call r/m (FF /2: 2, 3 or 6 bytes before the return address).
+        const bool call = before[1] == 0xe8 || before[0] == 0xff || before[3] == 0xff || before[4] == 0xff;
+        if (!call) continue;
+        Dl_info module{};
+        if (dladdr(reinterpret_cast<void*>(value), &module) == 0 || module.dli_fname == nullptr) continue;
+        const char* name = module.dli_fname;
+        for (const char* cursor = name; *cursor != '\0'; ++cursor) if (*cursor == '/') name = cursor + 1;
+        char line[384];
+        const int length = std::snprintf(line, sizeof(line), "    caller stack+0x%zx: %s+0x%lx (%s)\n", index * sizeof(value), name,
+            static_cast<unsigned long>(value - reinterpret_cast<std::uintptr_t>(module.dli_fbase)), module.dli_sname != nullptr ? module.dli_sname : "no symbol");
+        if (length > 0) static_cast<void>(write(STDERR_FILENO, line, static_cast<std::size_t>(std::min<int>(length, sizeof(line) - 1))));
+        ++reported;
+    }
+}
 
 void reportUnhandledFault(const siginfo_t* info, const ucontext_t* native) {
     const auto instruction = static_cast<std::uintptr_t>(native->uc_mcontext.gregs[REG_RIP]);
@@ -30,6 +65,7 @@ void reportUnhandledFault(const siginfo_t* info, const ucontext_t* native) {
         located ? static_cast<unsigned long>(instruction - reinterpret_cast<std::uintptr_t>(module.dli_fbase)) : 0ul,
         located && module.dli_sname != nullptr ? module.dli_sname : "no symbol");
     if (length > 0) static_cast<void>(write(STDERR_FILENO, message, static_cast<std::size_t>(std::min<int>(length, sizeof(message) - 1))));
+    reportCallers(static_cast<std::uintptr_t>(native->uc_mcontext.gregs[REG_RSP]));
 }
 
 void handleFault(int signal, siginfo_t* info, void* context) {
