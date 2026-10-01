@@ -4,6 +4,8 @@
 #include <codegen/x86/Sse4aLowering.hpp>
 #include <codegen/x86/Sse4aOperands.hpp>
 #include <codegen/x86/Sha256Operands.hpp>
+#include <codegen/x86/ClzeroOperands.hpp>
+#include <codegen/x86/ClzeroLowering.hpp>
 #include <codegen/x86/DecodedInstruction.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
 #include <codegen/IInstructionScanner.hpp>
@@ -20,6 +22,9 @@
 #include <sys/mman.h>
 #endif
 #include <functional>
+#include <optional>
+#include <span>
+#include <vector>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -97,6 +102,14 @@ const Bytes kInsertqWordBody = {
     0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
     0x00, 0x01, 0x08, 0x09, 0x04, 0x05, 0x06, 0x07, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80};
 
+const Bytes kClzeroBody = {
+    0x48, 0x8D, 0xA4, 0x24, 0x70, 0xFF, 0xFF, 0xFF, 0xF3, 0x0F, 0x7F, 0x04, 0x24, 0x51, 0x66, 0x48,
+    0x0F, 0x6E, 0xC0, 0x66, 0x0F, 0xDB, 0x05, 0x35, 0x00, 0x00, 0x00, 0x66, 0x48, 0x0F, 0x7E, 0xC1,
+    0x66, 0x0F, 0xEF, 0xC0, 0x66, 0x0F, 0xE7, 0x01, 0x66, 0x0F, 0xE7, 0x41, 0x10, 0x66, 0x0F, 0xE7,
+    0x41, 0x20, 0x66, 0x0F, 0xE7, 0x41, 0x30, 0x59, 0xF3, 0x0F, 0x6F, 0x04, 0x24, 0x48, 0x8D, 0xA4,
+    0x24, 0x90, 0x00, 0x00, 0x00, 0xE9, 0x00, 0x00, 0x00, 0x00, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC,
+    0xC0, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+
 void decoderLengths() {
     const Codegen::X64InstructionDecoder decoder;
     const std::vector<Bytes> instructions = {
@@ -151,6 +164,18 @@ void sha256Operands() {
     require(Codegen::DecodedInstruction{rounds.data(), rounds.size()}.IsShaNi(), "SHA256RNDS2 is not recognised as SHA-NI");
 }
 
+void clzeroOperands() {
+    const auto decode = [](const Bytes& bytes) { return Codegen::DecodeClzero(bytes.data(), bytes.size()); };
+    require(!decode({0x0F, 0x01, 0xFC}).AddressSize32 && decode({0x67, 0x0F, 0x01, 0xFC}).AddressSize32, "CLZERO address size was decoded incorrectly");
+    require(!decode({0x3E, 0x48, 0x0F, 0x01, 0xFC}).AddressSize32, "CLZERO with a DS override and REX was not decoded");
+    requireFailure([&] { (void)decode({0xF0, 0x0F, 0x01, 0xFC}); }, "LOCK CLZERO was accepted");
+    requireFailure([&] { (void)decode({0x64, 0x0F, 0x01, 0xFC}); }, "FS-relative CLZERO was accepted");
+    requireFailure([&] { (void)decode({0x65, 0x0F, 0x01, 0xFC}); }, "GS-relative CLZERO was accepted");
+    Bytes overlong(13, 0x2E);
+    overlong.insert(overlong.end(), {0x0F, 0x01, 0xFC});
+    requireFailure([&] { (void)decode(overlong); }, "CLZERO longer than 15 bytes was accepted");
+}
+
 void matcherSubstitutions() {
     const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
     const auto match = [&](const Bytes& bytes) { return matcher->Match(bytes.data(), bytes.size()); };
@@ -182,7 +207,13 @@ void matcherSubstitutions() {
     const auto overlong = match(overlongMonitorx);
     require(overlong && overlong->Lowering == Codegen::Amd64OnlyLowering::Unsupported, "MONITORX longer than 15 bytes was replaced instead of failing");
     const auto clzero = match({0x0F, 0x01, 0xFC});
-    require(clzero && clzero->Lowering == Codegen::Amd64OnlyLowering::Unsupported && clzero->InstructionName == "CLZERO", "CLZERO was not reported as unsupported");
+    require(clzero && clzero->Lowering == Codegen::Amd64OnlyLowering::Trampoline && clzero->InstructionName == "CLZERO", "CLZERO was not lowered through a stub");
+    for (const std::uint8_t prefix : {std::uint8_t{0x66}, std::uint8_t{0xF2}, std::uint8_t{0xF3}}) {
+        const auto prefixedClzero = match({prefix, 0x0F, 0x01, 0xFC});
+        require(prefixedClzero && prefixedClzero->Lowering == Codegen::Amd64OnlyLowering::Unsupported, "CLZERO with a 66, F2 or F3 prefix was not reported as unsupported");
+    }
+    const auto rdpru = match({0x0F, 0x01, 0xFD});
+    require(rdpru && rdpru->Lowering == Codegen::Amd64OnlyLowering::Unsupported && rdpru->InstructionName == "RDPRU", "RDPRU was not reported as unsupported");
     const auto registerForm = match({0x66, 0x0F, 0x79, 0xCA});
     require(registerForm && registerForm->Lowering == Codegen::Amd64OnlyLowering::Trampoline && registerForm->InstructionName == "EXTRQ register form", "EXTRQ register form was not lowered through a stub");
     const auto insertqRegisterForm = match({0xF2, 0x0F, 0x79, 0xCA});
@@ -224,6 +255,9 @@ void goldenBodies() {
     inPlace({0xF2, 0x0F, 0x78, 0xDB, 0x08, 0x00}, {0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00});
     inPlace({0xF2, 0x0F, 0x78, 0xC8, 0x20, 0x00}, {0x66, 0x0F, 0x3A, 0x0E, 0xC8, 0x03});
     inPlace({0xF2, 0x45, 0x0F, 0x78, 0xC8, 0x10, 0x00}, {0x66, 0x45, 0x0F, 0x3A, 0x0E, 0xC8, 0x01});
+    const Bytes clzeroSite = {0x0F, 0x01, 0xFC};
+    const auto clzero = Codegen::ClzeroLowering{}.LowerOutOfLine(Codegen::DecodeClzero(clzeroSite.data(), clzeroSite.size()));
+    require(clzero.Bytes == kClzeroBody && clzero.ReturnBranchOffset == 69, "CLZERO stub differs from the golden encoding");
     const auto highRegisters = Codegen::DecodeSse4a(kInsertqHighSite.data(), kInsertqHighSite.size());
     const auto generic = lowering.LowerOutOfLine(Codegen::Sse4aOperands{true, false, 9, 4, 5, 3});
     require(generic.Bytes[0] == 0x48 && generic.Bytes.size() % 16 == 0 && generic.ReturnBranchOffset < generic.Bytes.size(), "Generic INSERTQ body does not start with the red-zone skip");
@@ -266,12 +300,12 @@ void converterSegment() {
     auto branchInside = file;
     branchInside[0x207] = 0x02;
     requireFailure([&] { (void)converter->Convert(branchInside, {segmentHeader(20)}); }, "Branch into an AMD-only instruction was accepted");
-    auto clzero = file;
-    clzero[0x20F] = 0x0F;
-    clzero[0x210] = 0x01;
-    clzero[0x211] = 0xFC;
-    clzero[0x212] = 0x90;
-    requireFailure([&] { (void)converter->Convert(clzero, {segmentHeader(20)}); }, "CLZERO was silently kept");
+    auto rdpru = file;
+    rdpru[0x20F] = 0x0F;
+    rdpru[0x210] = 0x01;
+    rdpru[0x211] = 0xFD;
+    rdpru[0x212] = 0x90;
+    requireFailure([&] { (void)converter->Convert(rdpru, {segmentHeader(20)}); }, "RDPRU was silently kept");
     auto registerForm = file;
     const Bytes extrqRegister = {0x66, 0x0F, 0x79, 0xCA};
     std::copy(extrqRegister.begin(), extrqRegister.end(), registerForm.begin() + 0x20F);
@@ -326,6 +360,53 @@ void converterMonitorWait() {
     require(result.Bytes == expected, "MONITORX/MWAITX were replaced with the wrong bytes");
 }
 
+void converterClzero() {
+    const auto converter = Codegen::MakeAmd64OnlyConverter();
+    Bytes file(0x300, 0xCC);
+    const Bytes text = {
+        0x0F, 0x01, 0xFC,
+        0x48, 0x83, 0xC0, 0x40,
+        0x0F, 0x01, 0xFC,
+        0x0F, 0x01, 0xFC,
+        0x90,
+        0xC3};
+    std::copy(text.begin(), text.end(), file.begin() + 0x200);
+    const auto result = converter->Convert(file, {segmentHeader(text.size())});
+    require(result.Trampolines.size() == 2 && result.Reports.size() == 2 && result.Bytes == file, "CLZERO sites were not lowered through stubs");
+    const auto& advance = result.Trampolines[0];
+    require(advance.Offset == 0x200 && advance.Length == 7 && result.Reports[0].InstructionName == "CLZERO", "CLZERO did not absorb the following instruction");
+    const Bytes add = {0x48, 0x83, 0xC0, 0x40};
+    require(Bytes(advance.Body.begin() + static_cast<std::ptrdiff_t>(advance.ReturnBranchOffset - add.size()), advance.Body.begin() + static_cast<std::ptrdiff_t>(advance.ReturnBranchOffset)) == add, "Absorbed instruction does not run before the return jump");
+    const auto& pair = result.Trampolines[1];
+    require(pair.Offset == 0x207 && pair.Length == 6 && result.Reports[1].InstructionName == "CLZERO", "Consecutive CLZERO sites were not lowered into one stub");
+    auto beforeReturn = file;
+    beforeReturn[0x203] = 0xC3;
+    requireFailure([&] { (void)converter->Convert(beforeReturn, {segmentHeader(text.size())}); }, "Short CLZERO followed by a return was relocated");
+    auto segmentRelative = file;
+    const Bytes fsClzero = {0x64, 0x0F, 0x01, 0xFC};
+    std::copy(fsClzero.begin(), fsClzero.end(), segmentRelative.begin() + 0x20A);
+    require(failureOffset([&] { (void)converter->Convert(segmentRelative, {segmentHeader(text.size())}); }, "FS-relative CLZERO was accepted") == 0x20A, "CLZERO operand failure does not carry the file offset");
+}
+
+void converterSplitPrefixes() {
+    const auto converter = Codegen::MakeAmd64OnlyConverter();
+    for (const Bytes& instruction : {Bytes{0x48, 0x64, 0x0F, 0x01, 0xFC}, Bytes{0x48, 0x67, 0x0F, 0x01, 0xFC}, Bytes{0x48, 0xF0, 0x0F, 0x01, 0xFC}, Bytes{0x48, 0xF0, 0x0F, 0x38, 0xCB, 0xCA}}) {
+        Bytes file(0x300, 0xCC);
+        Bytes text = instruction;
+        text.insert(text.end(), {0x90, 0x90, 0xC3});
+        std::copy(text.begin(), text.end(), file.begin() + 0x200);
+        require(failureOffset([&] { (void)converter->Convert(file, {segmentHeader(text.size())}); }, "AMD-only instruction after a split REX and prefix was accepted") == 0x200, "Split prefix failure does not carry the file offset");
+    }
+    for (const Bytes& following : {Bytes{0x48, 0x64, 0x8B, 0x00}, Bytes{0x48, 0x67, 0x8B, 0x00}, Bytes{0x48, 0xF0, 0x01, 0x00}}) {
+        Bytes file(0x300, 0xCC);
+        Bytes text = {0x0F, 0x01, 0xFC};
+        text.insert(text.end(), following.begin(), following.end());
+        text.push_back(0xC3);
+        std::copy(text.begin(), text.end(), file.begin() + 0x200);
+        require(failureOffset([&] { (void)converter->Convert(file, {segmentHeader(text.size())}); }, "Split REX and prefix were moved into a stub") == 0x203, "Split prefix failure after a short site does not carry the file offset");
+    }
+}
+
 void converterFailureOffsets() {
     const auto converter = Codegen::MakeAmd64OnlyConverter();
     const auto file = segmentFixture();
@@ -339,10 +420,10 @@ void converterFailureOffsets() {
     auto movntsRegister = file;
     movntsRegister[0x212] = 0xC1;
     require(failureOffset([&] { (void)converter->Convert(movntsRegister, {segmentHeader(20)}); }, "MOVNTSS register form was accepted") == 0x20F, "MOVNTSS failure does not carry the file offset");
-    auto clzero = file;
-    const Bytes clzeroBytes = {0x0F, 0x01, 0xFC, 0x90};
-    std::copy(clzeroBytes.begin(), clzeroBytes.end(), clzero.begin() + 0x20F);
-    require(failureOffset([&] { (void)converter->Convert(clzero, {segmentHeader(20)}); }, "CLZERO was accepted") == 0x20F, "Unsupported instruction failure does not carry the file offset");
+    auto rdpru = file;
+    const Bytes rdpruBytes = {0x0F, 0x01, 0xFD, 0x90};
+    std::copy(rdpruBytes.begin(), rdpruBytes.end(), rdpru.begin() + 0x20F);
+    require(failureOffset([&] { (void)converter->Convert(rdpru, {segmentHeader(20)}); }, "RDPRU was accepted") == 0x20F, "Unsupported instruction failure does not carry the file offset");
 }
 
 Bytes elfFixture(const Bytes& text) {
@@ -543,9 +624,123 @@ void sha256Execution() {
         require(runRegisterFormStub(same, state, state) == sha256Reference(opcode, state, state, kStubScratch), "SHA-256 stub with equal operands computed the wrong result");
     }
 }
+
+struct ClzeroRun {
+    std::uint64_t Rax;
+    std::uint64_t Rcx;
+    std::uint64_t Flags;
+    std::uint64_t Xmm[16][2];
+};
+
+ClzeroRun runClzeroBody(const Codegen::Amd64OnlyMatch& match, const std::uint64_t rax, const std::uint64_t (&xmmIn)[16][2]) {
+    require(match.Lowering == Codegen::Amd64OnlyLowering::Trampoline, "CLZERO stub was not produced");
+    auto body = match.StubBody;
+    const auto ret = body.size();
+    body.push_back(0xC3);
+    const auto displacement = static_cast<std::int32_t>(ret - (match.ReturnBranchOffset + 5));
+    std::memcpy(body.data() + match.ReturnBranchOffset + 1, &displacement, sizeof(displacement));
+    void* code = mmap(nullptr, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    require(code != MAP_FAILED, "cannot map executable memory for the stub");
+    std::memcpy(code, body.data(), body.size());
+    ClzeroRun run{};
+    asm volatile(
+        "movdqu 0x00(%[xmmIn]), %%xmm0\n\t"
+        "movdqu 0x10(%[xmmIn]), %%xmm1\n\t"
+        "movdqu 0x20(%[xmmIn]), %%xmm2\n\t"
+        "movdqu 0x30(%[xmmIn]), %%xmm3\n\t"
+        "movdqu 0x40(%[xmmIn]), %%xmm4\n\t"
+        "movdqu 0x50(%[xmmIn]), %%xmm5\n\t"
+        "movdqu 0x60(%[xmmIn]), %%xmm6\n\t"
+        "movdqu 0x70(%[xmmIn]), %%xmm7\n\t"
+        "movdqu 0x80(%[xmmIn]), %%xmm8\n\t"
+        "movdqu 0x90(%[xmmIn]), %%xmm9\n\t"
+        "movdqu 0xa0(%[xmmIn]), %%xmm10\n\t"
+        "movdqu 0xb0(%[xmmIn]), %%xmm11\n\t"
+        "movdqu 0xc0(%[xmmIn]), %%xmm12\n\t"
+        "movdqu 0xd0(%[xmmIn]), %%xmm13\n\t"
+        "movdqu 0xe0(%[xmmIn]), %%xmm14\n\t"
+        "movdqu 0xf0(%[xmmIn]), %%xmm15\n\t"
+        "mov %[raxIn], %%rax\n\t"
+        "movabs $0x1122334455667788, %%rcx\n\t"
+        "sub $128, %%rsp\n\t"
+        "pushq $0x8D7\n\t"
+        "popfq\n\t"
+        "call *%[code]\n\t"
+        "pushfq\n\t"
+        "popq %[flags]\n\t"
+        "add $128, %%rsp\n\t"
+        "mov %%rax, %[raxOut]\n\t"
+        "mov %%rcx, %[rcxOut]\n\t"
+        "movdqu %%xmm0, 0x00(%[xmmOut])\n\t"
+        "movdqu %%xmm1, 0x10(%[xmmOut])\n\t"
+        "movdqu %%xmm2, 0x20(%[xmmOut])\n\t"
+        "movdqu %%xmm3, 0x30(%[xmmOut])\n\t"
+        "movdqu %%xmm4, 0x40(%[xmmOut])\n\t"
+        "movdqu %%xmm5, 0x50(%[xmmOut])\n\t"
+        "movdqu %%xmm6, 0x60(%[xmmOut])\n\t"
+        "movdqu %%xmm7, 0x70(%[xmmOut])\n\t"
+        "movdqu %%xmm8, 0x80(%[xmmOut])\n\t"
+        "movdqu %%xmm9, 0x90(%[xmmOut])\n\t"
+        "movdqu %%xmm10, 0xa0(%[xmmOut])\n\t"
+        "movdqu %%xmm11, 0xb0(%[xmmOut])\n\t"
+        "movdqu %%xmm12, 0xc0(%[xmmOut])\n\t"
+        "movdqu %%xmm13, 0xd0(%[xmmOut])\n\t"
+        "movdqu %%xmm14, 0xe0(%[xmmOut])\n\t"
+        "movdqu %%xmm15, 0xf0(%[xmmOut])\n\t"
+        : [flags] "=&r"(run.Flags), [raxOut] "=&r"(run.Rax), [rcxOut] "=&r"(run.Rcx)
+        : [xmmIn] "r"(xmmIn), [xmmOut] "r"(run.Xmm), [raxIn] "r"(rax), [code] "r"(code)
+        : "rax", "rcx", "xmm0", "xmm1", "xmm2", "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15", "memory", "cc");
+    munmap(code, 4096);
+    return run;
+}
+
+void clzeroExecution() {
+    const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
+    const Bytes plain = {0x0F, 0x01, 0xFC};
+    const Bytes addressSize32 = {0x67, 0x0F, 0x01, 0xFC};
+    const Bytes add = {0x48, 0x83, 0xC0, 0x40};
+    const std::vector<std::span<const std::uint8_t>> pair = {plain, plain};
+    struct Case {
+        std::optional<Codegen::Amd64OnlyMatch> Match;
+        bool Low;
+        std::uint64_t Junk;
+        std::uint64_t Advance;
+        const char* Name;
+    };
+    const std::vector<Case> cases = {
+        {matcher->Match(plain.data(), plain.size()), false, 0, 0, "CLZERO stub"},
+        {matcher->Match(addressSize32.data(), addressSize32.size()), true, 0x5A5A5A5A00000000ull, 0, "67h CLZERO stub"},
+        {matcher->Match(plain.data(), plain.size(), add), false, 0, 64, "CLZERO stub with a trailing add"},
+        {matcher->MatchSequence(pair, {}), false, 0, 0, "CLZERO sequence stub"}};
+    std::uint64_t xmmIn[16][2];
+    for (unsigned reg = 0; reg < 16; ++reg) {
+        xmmIn[reg][0] = 0x0101010101010101ull * (reg + 1);
+        xmmIn[reg][1] = ~xmmIn[reg][0];
+    }
+    for (const auto& item : cases) {
+        require(item.Match.has_value(), item.Name);
+        auto* buffer = static_cast<std::uint8_t*>(mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | (item.Low ? MAP_32BIT : 0), -1, 0));
+        require(buffer != MAP_FAILED, "cannot map the CLZERO buffer");
+        for (const std::size_t offset : {std::size_t{0x80}, std::size_t{0xAD}, std::size_t{0xFF}}) {
+            std::memset(buffer, 0xA5, 4096);
+            const auto address = reinterpret_cast<std::uint64_t>(buffer + offset);
+            const auto run = runClzeroBody(*item.Match, address | item.Junk, xmmIn);
+            const auto line = offset & ~std::size_t{63};
+            for (std::size_t index = 0; index < 4096; ++index)
+                require(buffer[index] == (index >= line && index < line + 64 ? 0x00 : 0xA5), "CLZERO stub did not clear exactly the addressed line");
+            require(run.Rax == (address | item.Junk) + item.Advance && run.Rcx == 0x1122334455667788ull, "CLZERO stub changed rax or rcx");
+            for (unsigned reg = 0; reg < 16; ++reg)
+                require(run.Xmm[reg][0] == xmmIn[reg][0] && run.Xmm[reg][1] == xmmIn[reg][1], "CLZERO stub clobbered an xmm register");
+            if (item.Advance == 0)
+                require((run.Flags & 0x8D5) == (0x8D7 & 0x8D5), "CLZERO stub changed RFLAGS");
+        }
+        munmap(buffer, 4096);
+    }
+}
 #else
 void registerFormExecution() {}
 void sha256Execution() {}
+void clzeroExecution() {}
 #endif
 
 void scannerZeroTail() {
@@ -561,13 +756,17 @@ int main() {
         decoderLengths();
         sse4aOperands();
         sha256Operands();
+        clzeroOperands();
         matcherSubstitutions();
         goldenBodies();
         registerFormExecution();
         sha256Execution();
+        clzeroExecution();
         converterSegment();
         converterSha256();
         converterMonitorWait();
+        converterClzero();
+        converterSplitPrefixes();
         converterFailureOffsets();
         linuxPlacement();
         scannerZeroTail();

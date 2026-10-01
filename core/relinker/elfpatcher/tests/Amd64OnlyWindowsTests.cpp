@@ -13,6 +13,7 @@
 #include <cstring>
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <random>
 #include <span>
 #include <stdexcept>
@@ -343,6 +344,55 @@ void executeSha256(const Harness& harness, const Codegen::IAmd64OnlyInstructionM
     }
 }
 
+void clzeroExecution(const Harness& harness, const Codegen::IAmd64OnlyInstructionMatcher& matcher, std::mt19937_64& random) {
+    const Bytes plain = {0x0F, 0x01, 0xFC};
+    const Bytes addressSize32 = {0x67, 0x0F, 0x01, 0xFC};
+    const std::vector<std::span<const std::uint8_t>> pair = {plain, plain};
+    constexpr std::size_t size = 3 * 4096;
+    auto* high = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    std::uint8_t* low = nullptr;
+    for (std::uintptr_t hint = 0x10000000; low == nullptr && hint < 0x80000000; hint += 0x10000000)
+        low = static_cast<std::uint8_t*>(VirtualAlloc(reinterpret_cast<void*>(hint), size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    require(high != nullptr && low != nullptr, "Cannot allocate the CLZERO buffers");
+    struct ClzeroCase {
+        std::optional<Codegen::Amd64OnlyMatch> Match;
+        std::uint8_t* Buffer;
+        std::uint64_t Junk;
+        std::string Name;
+    };
+    const std::vector<ClzeroCase> cases = {
+        {matcher.Match(plain.data(), plain.size()), high, 0, "clzero"},
+        {matcher.Match(addressSize32.data(), addressSize32.size()), low, 0x5A5A5A5A00000000ull, "67h clzero"},
+        {matcher.MatchSequence(pair, {}), high, 0, "clzero; clzero"}};
+    const std::array<std::uint64_t, 4> flags = {0x202, 0x203, 0x246, 0xAC7};
+    for (const auto& item : cases) {
+        require(item.Match.has_value() && item.Match->Lowering == Codegen::Amd64OnlyLowering::Trampoline, "CLZERO was not lowered through a stub: " + item.Name);
+        for (int image = 0; image < 64; ++image) {
+            const auto address = reinterpret_cast<std::uint64_t>(item.Buffer) + 64 + random() % (size - 128);
+            Bytes body = {0x48, 0xB8};
+            for (std::size_t index = 0; index < 8; ++index) body.push_back(static_cast<std::uint8_t>((address | item.Junk) >> (index * 8)));
+            body.insert(body.end(), {0x66, 0x0F, 0x1F, 0x44, 0x00, 0x00});
+            const auto prefix = body.size();
+            body.insert(body.end(), item.Match->StubBody.begin(), item.Match->StubBody.end());
+            State input{};
+            for (auto& lane : input.Xmm) for (auto& byte : lane) byte = static_cast<std::uint8_t>(random());
+            input.FlagsIn = flags[static_cast<std::size_t>(image) % flags.size()];
+            State state = input;
+            std::memset(item.Buffer, 0xA5, size);
+            harness.Run(body, prefix + item.Match->ReturnBranchOffset, state);
+            ++g_executions;
+            const auto line = address & ~std::uint64_t{63};
+            for (std::size_t index = 0; index < size; ++index) {
+                const auto at = reinterpret_cast<std::uint64_t>(item.Buffer + index);
+                require(item.Buffer[index] == (at >= line && at < line + 64 ? 0x00 : 0xA5), "Lowered CLZERO did not clear exactly the addressed line: " + item.Name);
+            }
+            requireEnvironment(input, state, 0, item.Name);
+        }
+    }
+    VirtualFree(high, 0, MEM_RELEASE);
+    VirtualFree(low, 0, MEM_RELEASE);
+}
+
 void cpuExecution() {
     const Harness harness;
     const auto matcher = Codegen::MakeAmd64OnlyInstructionMatcher();
@@ -367,6 +417,7 @@ void cpuExecution() {
         for (auto& step : steps) step = {static_cast<std::uint8_t>(0xCB + random() % 3), static_cast<std::uint8_t>(random() % 16), static_cast<std::uint8_t>(random() % 16)};
         executeSha256(harness, *matcher, steps, random, 2);
     }
+    clzeroExecution(harness, *matcher, random);
 }
 
 Bytes elfFixture(const Bytes& text) {
