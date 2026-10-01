@@ -16,13 +16,16 @@ std::vector<std::uint8_t> EntryStubBuilder::BuildEntryStub(
     const std::uint64_t stubVaddr,
     const std::uint64_t realEntryVaddr
 ) const {
+    // The guest entry takes EntryParams in rdi: argc 1, argv[0] the host's program path (a C
+    // string), argv[1] NULL. Host arguments are the emulator's, not the game's.
     std::vector<std::uint8_t> s;
     s.push_back(kStubOpPopRax);
-    _appendBytes(s, kStubOpMovRbxRsp, sizeof(kStubOpMovRbxRsp));
-    _appendBytes(s, kStubOpSubRsp0x30, sizeof(kStubOpSubRsp0x30));
+    _appendBytes(s, kStubOpMovRbxPtrRsp, sizeof(kStubOpMovRbxPtrRsp));
+    _appendBytes(s, kStubOpSubRsp0x120, sizeof(kStubOpSubRsp0x120));
     _appendBytes(s, kStubOpAndRsp0xf0, sizeof(kStubOpAndRsp0xf0));
-    _appendBytes(s, kStubOpMovDwordPtrRsp, sizeof(kStubOpMovDwordPtrRsp));
+    _appendBytes(s, kStubOpMovQwordPtrRsp1, sizeof(kStubOpMovQwordPtrRsp1));
     _appendBytes(s, kStubOpMovQwordPtrRsp8Rbx, sizeof(kStubOpMovQwordPtrRsp8Rbx));
+    _appendBytes(s, kStubOpMovQwordPtrRsp16Zero, sizeof(kStubOpMovQwordPtrRsp16Zero));
     _appendBytes(s, kStubOpMovRdiRsp, sizeof(kStubOpMovRdiRsp));
     _appendBytes(s, kStubOpXorRsiRsi, sizeof(kStubOpXorRsiRsi));
     const std::uint64_t callInsnVaddr = stubVaddr + s.size();

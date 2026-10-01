@@ -137,11 +137,16 @@ inline constexpr std::uint64_t kDynSymAlign = 8;
 inline constexpr std::uint32_t kDynamicLinkToStrTab = 2;
 
 inline constexpr std::uint8_t kStubOpPopRax = 0x58;
-inline constexpr std::uint8_t kStubOpMovRbxRsp[] = {0x48, 0x89, 0xe3};
-inline constexpr std::uint8_t kStubOpSubRsp0x30[] = {0x48, 0x83, 0xec, 0x30};
+// mov rbx, [rsp]: the host's argv[0] once argc is popped.
+inline constexpr std::uint8_t kStubOpMovRbxPtrRsp[] = {0x48, 0x8b, 0x1c, 0x24};
+// sub rsp, 0x120: room for the guest's EntryParams {int argc; u32 pad; const char* argv[33]; entry}.
+inline constexpr std::uint8_t kStubOpSubRsp0x120[] = {0x48, 0x81, 0xec, 0x20, 0x01, 0x00, 0x00};
 inline constexpr std::uint8_t kStubOpAndRsp0xf0[] = {0x48, 0x83, 0xe4, 0xf0};
-inline constexpr std::uint8_t kStubOpMovDwordPtrRsp[] = {0x89, 0x04, 0x24};
+// mov qword [rsp], 1: argc 1 and a zero pad.
+inline constexpr std::uint8_t kStubOpMovQwordPtrRsp1[] = {0x48, 0xc7, 0x04, 0x24, 0x01, 0x00, 0x00, 0x00};
 inline constexpr std::uint8_t kStubOpMovQwordPtrRsp8Rbx[] = {0x48, 0x89, 0x5c, 0x24, 0x08};
+// mov qword [rsp+0x10], 0: argv[1] = NULL ends the argument list.
+inline constexpr std::uint8_t kStubOpMovQwordPtrRsp16Zero[] = {0x48, 0xc7, 0x44, 0x24, 0x10, 0x00, 0x00, 0x00, 0x00};
 inline constexpr std::uint8_t kStubOpMovRdiRsp[] = {0x48, 0x89, 0xe7};
 inline constexpr std::uint8_t kStubOpXorRsiRsi[] = {0x48, 0x31, 0xf6};
 inline constexpr std::uint8_t kStubOpCallRel32 = 0xe8;
