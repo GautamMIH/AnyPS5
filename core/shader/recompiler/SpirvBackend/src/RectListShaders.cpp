@@ -382,7 +382,10 @@ RectListShaders BuildRectListShaders(const RecompileResult& vertex, const Recomp
     std::set<std::uint32_t> locations;
     for (const auto& input : fragment.fragmentParameters) {
         require(input.location < 32 && input.sourceLocation < 32 && locations.insert(input.location).second, "invalid fragment parameter location");
-        require(!input.perVertex, "custom per-vertex interpolation is unsupported");
+        // Per-vertex (custom) interpolation reads the generated triangle's vertices: non-flat
+        // parameters are linear over the rectangle (the fourth corner is extrapolated), so
+        // interpolating within either triangle gives the rectangle's values; flat ones carry vertex
+        // 0's value at every corner.
         const bool exported = std::find(vertex.parameterExports.begin(), vertex.parameterExports.end(), input.sourceLocation) != vertex.parameterExports.end();
         parameters.push_back({input.sourceLocation, input.location, input.flat, !exported});
     }

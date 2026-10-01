@@ -44,10 +44,9 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
                     if (memory.resource >= program.Info().buffers.size()) {
                         throw std::runtime_error("buffer operation has invalid resource metadata");
                     }
+                    // ADD_TID adds the lane index (SubgroupLocalInvocationId) to the record index, in
+                    // any stage; validation checks the device supports it in that stage.
                     if ((program.Info().buffers.at(memory.resource).packedStride & (1u << 20u)) != 0u) {
-                        if (program.Resources().stage != IrShaderStage::Compute) {
-                            throw std::runtime_error("buffer ADD_TID is only valid for compute shaders");
-                        }
                         requirements.subgroupLocalInvocationId = true;
                     }
                 }
