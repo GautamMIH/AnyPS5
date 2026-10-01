@@ -258,7 +258,14 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, binding.count, flags, nullptr}, {}, {}};
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             auto resource = DecodeTextureResource(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 8, 8));
-            Require(MatchesGuestDimension(*binding.imageShape, resource.dimension), "guest storage image dimension disagrees with the shader's declared image shape");
+            // A 2D access (MIMG DIM 2D) to a 2D array carries no slice coordinate, so the hardware
+            // addresses slice 0 of the view, the BASE_ARRAY layer: bound as a 2D image of that
+            // layer (upstream edb13581).
+            const bool firstLayer = *binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D && resource.dimension == TextureDimension::k2DArray;
+            if (firstLayer) resource.dimension = TextureDimension::k2D;
+            if (!MatchesGuestDimension(*binding.imageShape, resource.dimension)) {
+                throw std::runtime_error("AGC graphics: guest storage image dimension " + std::to_string(static_cast<int>(resource.dimension)) + " disagrees with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
+            }
             if (*binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2DArray) resource.dimension = TextureDimension::k2DArray;
             storageImages.push_back(std::make_unique<StorageImage>(context, resource));
             item.imageAllocations.push_back(storageImages.size() - 1);
