@@ -299,8 +299,20 @@ target_link_libraries(agc_driver_bda_device_tests PRIVATE SDL2-static libc shade
 set_target_properties(agc_driver_bda_device_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_bda_device_tests)
 
+add_executable(agc_driver_mix_precision_tests EXCLUDE_FROM_ALL
+        tests/MixPrecision.cpp
+)
+target_include_directories(agc_driver_mix_precision_tests PRIVATE
+        ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
+)
+target_link_libraries(agc_driver_mix_precision_tests PRIVATE libSceAgcDriver SDL2-static libc)
+set_target_properties(agc_driver_mix_precision_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_mix_precision_tests)
+
 if(BUILD_TESTING)
-    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_driver_flip_tests agc_driver_pm4_tests)
+    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_mix_precision_tests)
         string(REGEX REPLACE "_tests$" "" agcTestName "${agcTest}")
         set_target_properties(${agcTest} PROPERTIES EXCLUDE_FROM_ALL OFF)
         add_test(NAME ${agcTestName} COMMAND ${agcTest})

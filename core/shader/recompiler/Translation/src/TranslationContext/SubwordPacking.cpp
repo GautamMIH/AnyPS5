@@ -90,10 +90,10 @@ IrF32 TranslationContext::readF16AsF32(const RdnaOperand& operand) {
 }
 
 IrF32 TranslationContext::readMixF32(const RdnaOperand& operand) {
-    if (!operand.opSel) {
+    if (!operand.opSelHi) {
         return IrF32(*readOperand(operand, IrType::F32));
     }
-    return readF16LaneAsF32(operand, operand.opSelHi, false);
+    return readF16LaneAsF32(operand, operand.opSel, false);
 }
 
 IrU32 TranslationContext::readF16LaneBits(const RdnaOperand& operand, bool highLane) {
