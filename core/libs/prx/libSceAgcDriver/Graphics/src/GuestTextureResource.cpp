@@ -84,7 +84,6 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     requireValidDstSel(dstSelZ);
     requireValidDstSel(dstSelW);
 
-    Require(minLod == 0, "guest texture descriptor uses a nonzero minimum LOD clamp which is not implemented");
     Require(minLodWarn == 0, "guest texture descriptor uses a minimum LOD warning threshold which is not implemented");
     Require(mipStatsCntId == 0 && !mipStatsCntEn, "guest texture descriptor uses mip statistics counters which are not implemented");
     Require(!cornerSample, "guest texture descriptor uses corner sampling which is not implemented");
@@ -152,7 +151,13 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.dstSelY = static_cast<std::uint8_t>(dstSelY);
     result.dstSelZ = static_cast<std::uint8_t>(dstSelZ);
     result.dstSelW = static_cast<std::uint8_t>(dstSelW);
+    result.minLod = minLod;
     return result;
+}
+
+float EffectiveMinLod(const GuestTextureResource& resource) {
+    if (resource.minLod <= resource.baseLevel * 256u) return 0.0f;
+    return std::min(static_cast<float>(resource.minLod) / 256.0f, static_cast<float>(resource.lastLevel));
 }
 
 bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension) {

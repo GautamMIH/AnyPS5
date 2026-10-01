@@ -229,6 +229,13 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         viewInfo.format = vkFormat;
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
+        // T# MIN_LOD (upstream 2be78b69); views of render targets show one level, which no clamp changes.
+        VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
+        if (const auto clamp = EffectiveMinLod(descriptor); clamp != 0.0f) {
+            Require(context.imageViewMinLod, "guest texture descriptor uses a minimum LOD clamp, which needs VK_EXT_image_view_min_lod");
+            minLod.minLod = clamp;
+            viewInfo.pNext = &minLod;
+        }
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView");
     } catch (...) {
         release();

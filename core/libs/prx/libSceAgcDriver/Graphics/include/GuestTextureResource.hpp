@@ -28,6 +28,8 @@ enum class TextureDimension {
 };
 
 struct GuestTextureResource {
+    // T# word1 MIN_LOD: unsigned 4.8, in levels of the whole surface.
+    std::uint32_t minLod = 0;
     std::uint64_t baseAddress;
     std::uint32_t width;
     std::uint32_t height;
@@ -50,6 +52,10 @@ struct GuestTextureResource {
 };
 
 GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words);
+// The view's MIN_LOD clamp in levels of the whole image (the image holds every mip and the view
+// starts at BASE_LEVEL): 0 when it cannot change the level a sample reads (at or below BASE_LEVEL),
+// at most the view's last level (Vulkan's bound; the view selects that level anyway).
+float EffectiveMinLod(const GuestTextureResource& resource);
 bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, TextureDimension dimension);
 // The view a sampled image of this dimension presents to a shader of this shape: a 2D shape views
 // one layer of an array or cube, an array shape views a 2D texture or cube as layers.

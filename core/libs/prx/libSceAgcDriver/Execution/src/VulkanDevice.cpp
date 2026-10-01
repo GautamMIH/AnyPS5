@@ -108,6 +108,7 @@ struct VulkanDevice::State {
     bool depthClipControl = false;
     bool primitiveListRestart = false;
     bool occlusionQueryPrecise = false;
+    bool imageViewMinLod = false;
     bool depthRangeUnrestricted = false;
     bool externalMemoryHost = false;
     std::unique_ptr<Graphics::GuestGpuMemory> guestGpuMemory;
@@ -474,6 +475,15 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->primitiveListRestart = listRestartFeatures.primitiveTopologyListRestart == VK_TRUE;
         if (state->primitiveListRestart) deviceExtensions.push_back(VK_EXT_PRIMITIVE_TOPOLOGY_LIST_RESTART_EXTENSION_NAME);
     }
+    VkPhysicalDeviceImageViewMinLodFeaturesEXT minLodFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT};
+    if (hasExtension(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &minLodFeatures};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        state->imageViewMinLod = minLodFeatures.minLod == VK_TRUE;
+        if (state->imageViewMinLod) deviceExtensions.push_back(VK_EXT_IMAGE_VIEW_MIN_LOD_EXTENSION_NAME);
+    }
+    minLodFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT};
+    minLodFeatures.minLod = state->imageViewMinLod ? VK_TRUE : VK_FALSE;
     listRestartFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT};
     listRestartFeatures.primitiveTopologyListRestart = state->primitiveListRestart ? VK_TRUE : VK_FALSE;
     if (state->meshShader) {
@@ -538,6 +548,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     if (state->primitiveListRestart) {
         listRestartFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &listRestartFeatures;
+    }
+    if (state->imageViewMinLod) {
+        minLodFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
+        deviceInfo.pNext = &minLodFeatures;
     }
     byteFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
     if (state->fragmentShaderBarycentric) {
@@ -949,6 +963,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.imageGatherExtended = state->imageGatherExtended;
     context.primitiveListRestart = state->primitiveListRestart;
     context.shaderResourceMinLod = state->shaderResourceMinLod;
+    context.imageViewMinLod = state->imageViewMinLod;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
     context.externalMemoryHost = state->externalMemoryHost;

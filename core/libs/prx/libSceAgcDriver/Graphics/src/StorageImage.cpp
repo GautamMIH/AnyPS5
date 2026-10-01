@@ -31,6 +31,7 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
     volume = resource.dimension == TextureDimension::k3D;
     thick = IsThickVolume(resource);
     Require(resource.baseLevel == resource.lastLevel, "storage image views must address a single mip");
+    Require(resource.minLod <= resource.baseLevel * 256u, "guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");
     Require(!IsBlockCompressed(resource.format), "block-compressed storage images are invalid");
     const auto format = ResolveTextureFormat(resource.format);
     elementBytes = BytesPerElement(resource.format);
