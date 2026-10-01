@@ -1,4 +1,5 @@
 #include <elfpatcher/general/GuestModuleWriter.hpp>
+#include <elfpatcher/general/SharedPageLayout.hpp>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <io/BufferUtils.hpp>
 #include <algorithm>
@@ -19,6 +20,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteLinux(const Relinker::GuestIma
         }
         headers.push_back(header);
     }
+    SeparateSharedPages(bytes, headers);
     if (end > std::numeric_limits<std::uint64_t>::max() - 0x4000) throw Domain::RelinkerException("Guest virtual address overflow");
     Io::AlignBuffer(bytes, 0x4000);
     const auto extraOffset = bytes.size();

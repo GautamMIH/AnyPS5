@@ -1,4 +1,5 @@
 #include <elfpatcher/linux/LinuxElfPatcher.hpp>
+#include <elfpatcher/general/SharedPageLayout.hpp>
 #include <elfpatcher/general/ElfConstants.hpp>
 #include <elfpatcher/general/ProgramHeaderLayoutRequest.hpp>
 #include <elfpatcher/general/SectionHeaderTableRequest.hpp>
@@ -301,11 +302,16 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
 
     const std::uint64_t extraBlockSize = static_cast<std::uint64_t>(buf.size()) - extraBlockOff;
 
+    // Segments sharing a page with an earlier segment's memory get a page of their own (see
+    // SeparateSharedPages), after every patch to their bytes; their data goes after the extra block.
+    auto loadHeaders = originalHeaders;
+    SeparateSharedPages(buf, loadHeaders);
+
     ProgramHeaderLayoutRequest layoutRequest{};
     layoutRequest.PhOff = phOff;
     layoutRequest.PhEntSize = phEntSize;
     layoutRequest.PhNum = phNum;
-    layoutRequest.OriginalHeaders = originalHeaders;
+    layoutRequest.OriginalHeaders = loadHeaders;
     layoutRequest.ExtraBlockOffset = extraBlockOff;
     layoutRequest.ExtraBlockVaddr = extraBlockVaddr;
     layoutRequest.ExtraBlockSize = extraBlockSize;

@@ -116,13 +116,16 @@ std::uint64_t ProgramHeaderLayoutBuilder::ComputeExtraBlockVaddr(
     if (!foundLoad)
         throw Domain::RelinkerException("No kept PT_LOAD segment to anchor the extra block against");
 
+    // The block starts in the first page after the last segment: the loader maps it in whole pages,
+    // so sharing the page that holds the end of a segment's BSS would replace those zeroes with
+    // file bytes (it corrupted an IL2CPP module's GC thread table).
     const std::uint64_t align = kDefaultLoadAlignment;
     const std::uint64_t offsetRemainder = extraBlockOffset & (align - 1);
-    const std::uint64_t alignedFloor = highestVaddrEnd & ~(align - 1);
-    std::uint64_t vaddr = alignedFloor | offsetRemainder;
-    if (vaddr < highestVaddrEnd)
-        vaddr += align;
-    if (vaddr < highestVaddrEnd)
+    if (highestVaddrEnd > UINT64_MAX - (align - 1))
+        throw Domain::RelinkerException("Extra block vaddr computation overflowed");
+    const std::uint64_t firstFreePage = (highestVaddrEnd + align - 1) & ~(align - 1);
+    const std::uint64_t vaddr = firstFreePage | offsetRemainder;
+    if (vaddr < firstFreePage)
         throw Domain::RelinkerException("Extra block vaddr computation overflowed");
     return vaddr;
 }

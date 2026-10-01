@@ -13,6 +13,7 @@
 #include <elfpatcher/general/ProgramHeaderLayoutBuilder.hpp>
 #include <elfpatcher/general/SectionHeaderTableBuilder.hpp>
 #include <elfpatcher/general/SegmentFilter.hpp>
+#include <elfpatcher/general/SharedPageLayout.hpp>
 #include <elfpatcher/linux/LinuxElfPatcher.hpp>
 #include <io/ByteWriter.hpp>
 #include <array>
@@ -751,8 +752,55 @@ void scannerZeroTail() {
     requireFailure([&] { (void)scanner->ScanCodeSection(truncated, 0, truncated.size()); }, "Truncated non-zero tail must still fail");
 }
 
+// The appended block must not share the page that holds the end of the last segment's BSS: the
+// loader maps it in whole pages and would replace those zeroes with file bytes.
+void extraBlockAfterBss() {
+    const auto builder = Elfpatcher::ProgramHeaderLayoutBuilder(std::make_shared<Elfpatcher::SegmentFilter>(), std::make_shared<Io::ByteWriter>());
+    Domain::ProgramHeader data{};
+    data.Type = 1;
+    data.Flags = 6;
+    data.Offset = 0x3ba4000;
+    data.MappedAddress = 0x3ba0000;
+    data.PhysicalAddress = 0x3ba0000;
+    data.FileSize = 0x27d16c;
+    data.MemorySize = 0x4a5e30;
+    data.Alignment = 0x4000;
+    const std::vector<Domain::ProgramHeader> headers{data};
+    const auto vaddr = builder.ComputeExtraBlockVaddr(headers, 0x3e21e30);
+    require(vaddr == 0x4046e30, "extra block shares the page holding the end of BSS");
+    // Already page-aligned ends need no gap.
+    std::vector<Domain::ProgramHeader> aligned{data};
+    aligned.front().MemorySize = 0x4a6000;
+    require(builder.ComputeExtraBlockVaddr(aligned, 0x3e22000) == 0x4046000, "extra block skipped a free page");
+}
+
+// A segment starting inside a page that holds an earlier segment's memory is moved so that page
+// maps with the earlier segment's bytes (file data, zero BSS) instead of unrelated file bytes.
+void sharedPageLayout() {
+    std::vector<std::uint8_t> bytes(0x3000, 0xcc);
+    for (std::size_t i = 0; i < 0x80; ++i) bytes[0x1000 + i] = static_cast<std::uint8_t>(i + 1);
+    for (std::size_t i = 0; i < 0x100; ++i) bytes[0x2e30 + i - 0x1000] = 0xab;
+    Domain::ProgramHeader data{1, 6, 0x1000, 0x10000, 0x10000, 0x80, 0x800, 0x1000};
+    // Starts at 0x10e30, in the page holding data's file bytes [0x10000, 0x10080) and BSS up to 0x10800.
+    Domain::ProgramHeader code{1, 7, 0x1e30, 0x10e30, 0x10e30, 0x100, 0x100, 0x1000};
+    std::vector<Domain::ProgramHeader> headers{data, code};
+    Elfpatcher::SeparateSharedPages(bytes, headers);
+    const auto& moved = headers[1];
+    require(moved.MappedAddress == 0x10000 && moved.FileSize == 0xf30 && moved.Offset % 0x1000 == 0, "shared page not given its own file page");
+    for (std::size_t i = 0; i < 0x80; ++i) require(bytes[moved.Offset + i] == i + 1, "shared page lost the earlier segment's file bytes");
+    for (std::size_t i = 0x80; i < 0xe30; ++i) require(bytes[moved.Offset + i] == 0 || i >= 0x800, "shared page lost the earlier segment's BSS zeroes");
+    for (std::size_t i = 0; i < 0x100; ++i) require(bytes[moved.Offset + 0xe30 + i] == 0xab, "moved segment lost its data");
+    // A segment starting on a page of its own stays where it is.
+    std::vector<Domain::ProgramHeader> separate{data, Domain::ProgramHeader{1, 7, 0x2e30, 0x11e30, 0x11e30, 0x100, 0x100, 0x1000}};
+    const auto size = bytes.size();
+    Elfpatcher::SeparateSharedPages(bytes, separate);
+    require(separate[1].Offset == 0x2e30 && bytes.size() == size, "unshared segment moved");
+}
+
 int main() {
     try {
+        extraBlockAfterBss();
+        sharedPageLayout();
         decoderLengths();
         sse4aOperands();
         sha256Operands();
