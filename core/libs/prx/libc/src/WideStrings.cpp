@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <cwchar>
 #include <stdexcept>
 #include <string>
@@ -386,6 +387,59 @@ unsigned long long APS5_VABI wcstoull_nid_postfix(const GuestWchar* text, GuestW
 
 double APS5_VABI wcstod_nid_postfix(const GuestWchar* text, GuestWchar** end) {
     return parseNumber<double>(text, end, [](const char* narrow, char** narrowEnd) { return std::strtod(narrow, narrowEnd); });
+}
+
+long double APS5_VABI wcstold_nid_postfix(const GuestWchar* text, GuestWchar** end) {
+    // The guest's long double is the x87 80-bit format, as the host's.
+    static_assert(sizeof(long double) == 16 && std::numeric_limits<long double>::digits == 64);
+    return parseNumber<long double>(text, end, [](const char* narrow, char** narrowEnd) { return std::strtold(narrow, narrowEnd); });
+}
+
+unsigned long long APS5_VABI wcstoul_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
+    return parseNumber<unsigned long long>(text, end, [base](const char* narrow, char** narrowEnd) { return std::strtoull(narrow, narrowEnd, base); });
+}
+
+// The guest's wide characters are UTF-16 units (char16_t), not the host's 32-bit wchar_t, so these
+// work on units; collation and transformation are those of the C locale.
+const GuestWchar* APS5_VABI wcspbrk_nid_postfix(const GuestWchar* text, const GuestWchar* accept) {
+    for (; *text != 0; ++text) {
+        for (const auto* candidate = accept; *candidate != 0; ++candidate) {
+            if (*candidate == *text) return text;
+        }
+    }
+    return nullptr;
+}
+
+std::size_t APS5_VABI wcsspn_nid_postfix(const GuestWchar* text, const GuestWchar* accept) {
+    std::size_t length = 0;
+    for (; text[length] != 0; ++length) {
+        bool found = false;
+        for (const auto* candidate = accept; *candidate != 0 && !found; ++candidate) found = *candidate == text[length];
+        if (!found) break;
+    }
+    return length;
+}
+
+GuestWchar* APS5_VABI wmemset_nid_postfix(GuestWchar* destination, GuestWchar value, std::size_t count) {
+    for (std::size_t index = 0; index < count; ++index) destination[index] = value;
+    return destination;
+}
+
+int APS5_VABI wcscoll_nid_postfix(const GuestWchar* first, const GuestWchar* second) {
+    while (*first != 0 && *first == *second) {
+        ++first;
+        ++second;
+    }
+    return *first < *second ? -1 : *first > *second ? 1 : 0;
+}
+
+std::size_t APS5_VABI wcsxfrm_nid_postfix(GuestWchar* destination, const GuestWchar* source, std::size_t count) {
+    std::size_t length = 0;
+    while (source[length] != 0) ++length;
+    if (length < count) {
+        for (std::size_t index = 0; index <= length; ++index) destination[index] = source[index];
+    }
+    return length;
 }
 
 float APS5_VABI wcstof_nid_postfix(const GuestWchar* text, GuestWchar** end) {
