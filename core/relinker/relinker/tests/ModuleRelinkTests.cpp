@@ -103,7 +103,9 @@ void rejectsUnsupportedSelfs() {
     requireFailure([&] { (void)unwrapper.Unwrap(selfFile(0x800 | 0x2)); }, "Encrypted SELF segment was accepted");
     requireFailure([&] { (void)unwrapper.Unwrap(selfFile(0x800 | 0x8)); }, "Compressed SELF segment was accepted");
     requireFailure([&] { (void)unwrapper.Unwrap(selfFile(0x800 | (5ull << 20))); }, "SELF segment with a missing program header was accepted");
-    requireFailure([&] { (void)unwrapper.Unwrap(std::vector<std::uint8_t>(64, 0xab)); }, "Unknown file format was accepted");
+    // Inputs that are not SELFs pass through unchanged; the ELF parser rejects what is not an ELF.
+    const std::vector<std::uint8_t> unknown(64, 0xab);
+    require(unwrapper.Unwrap(unknown) == unknown, "A non-SELF input was changed by the SELF unwrapper");
 }
 
 std::string symbolName(const Domain::SysVDynamicSection& section, std::uint32_t index) {

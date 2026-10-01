@@ -46,10 +46,10 @@ bool SelfUnwrapper::IsSelf(const std::vector<std::uint8_t>& fileBytes) const {
 }
 
 std::vector<std::uint8_t> SelfUnwrapper::Unwrap(const std::vector<std::uint8_t>& fileBytes) const {
-    if (_hasMagic(fileBytes, kElfMagic))
-        return fileBytes;
+    // Anything that is not a SELF goes to the ELF parser as is, which names what it read
+    // (too small, or the magic bytes it found).
     if (!IsSelf(fileBytes))
-        throw RelinkerException("Input is neither an ELF nor a PS4/PS5 SELF file");
+        return fileBytes;
 
     const std::uint16_t segmentCount = _readU16(fileBytes, kSelfSegmentCountOffset);
     const std::size_t elfOffset = kSelfHeaderSize + static_cast<std::size_t>(segmentCount) * kSelfSegmentEntrySize;
