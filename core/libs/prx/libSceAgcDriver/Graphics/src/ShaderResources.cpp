@@ -294,7 +294,8 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             Require(view.has_value(), "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (" + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ") cannot be viewed with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
             resource.viewDimension = *view;
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
-            textures.push_back(context.textureCache->Get(words, resource, components));
+            const bool depthCompare = element < binding.imageDepthCompare.size() && binding.imageDepthCompare[element];
+            textures.push_back(context.textureCache->Get(words, resource, components, depthCompare));
             item.imageAllocations.push_back(textures.size() - 1);
         }
         Require(textures.size() <= context.limits.maxDescriptorSetSampledImages, "pipeline sampled-image descriptors exceed device limits");

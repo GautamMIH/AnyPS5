@@ -255,6 +255,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             for (const std::uint32_t resource : logical.resources) {
                 const auto& image = info.images.at(resource);
                 physical.imageWritten.push_back(image.written || image.atomic);
+                physical.imageDepthCompare.push_back(image.depthCompare);
             }
             break;
         case DescriptorRole::GuestSamplers:

@@ -72,14 +72,16 @@ bool TextureCache::unchanged(Entry& entry) {
     return !WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration);
 }
 
-std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
+std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool depthCompare) {
     Require(words.size() == 8, "texture cache descriptor must contain eight DWORDs");
     PerformanceTimer timing("Graphics.TextureCache");
     trim();
     Key key;
     std::copy(words.begin(), words.end(), key.begin());
-    key[8] = static_cast<std::uint32_t>(resource.dimension) | (static_cast<std::uint32_t>(resource.viewDimension) << 8u);
-    auto source = context.renderCache ? context.renderCache->Find(resource.baseAddress) : nullptr;
+    key[8] = static_cast<std::uint32_t>(resource.dimension) | (static_cast<std::uint32_t>(resource.viewDimension) << 8u) | (depthCompare ? 1u << 16u : 0u);
+    // Comparison sampling needs a depth view: a resident depth plane's own (below) or an uploaded
+    // depth-format image, never a copy into a color image.
+    auto source = context.renderCache && !depthCompare ? context.renderCache->Find(resource.baseAddress) : nullptr;
     if (source) {
         const auto& color = source->Description();
         const auto compatibleTiling = (color.tileMode == ColorTileMode::RenderTarget && resource.tileMode == TextureTileMode::RenderTarget64KB) || (color.tileMode == ColorTileMode::Linear && resource.tileMode == TextureTileMode::kLinear);
@@ -167,6 +169,9 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     }
 create:
     timing.Mark("lookup");
+    if (depthCompare && depthSource && !directDepth) {
+        throw std::runtime_error("AGC graphics: comparison sampling of a resident depth plane that cannot be viewed directly (being rendered, or ANYPS5_NO_DIRECT_DEPTH) is not implemented");
+    }
     if (depthSource) {
         auto texture = directDepth ? std::make_shared<Texture>(context, depthSource, components, Texture::DirectView{}) : std::make_shared<Texture>(context, depthSource, resource, components);
         timing.Mark("depth_texture");
@@ -214,7 +219,7 @@ create:
             static_cast<unsigned>(resource.format), static_cast<unsigned>(resource.dimension), entries.size(),
             static_cast<unsigned long long>(retainedBytes >> 20u), sameAddress, key[0], key[1], key[2], key[3], key[4], key[5], key[6], key[7]);
     }
-    auto texture = std::make_shared<Texture>(context, *context.detiler, resource, components, snapshot);
+    auto texture = std::make_shared<Texture>(context, *context.detiler, resource, components, snapshot, depthCompare);
     uploading.push_back(texture);
     timing.Mark("miss_create");
     const auto retained = snapshot.size() + texture->AllocationBytes();

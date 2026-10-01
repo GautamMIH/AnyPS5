@@ -266,6 +266,8 @@ struct DescriptorBinding {
     bool readOnly = false;
     std::optional<DescriptorImageShape> imageShape;
     std::vector<bool> samplerDepthCompare;
+    // Guest images sampled with a depth comparison (they need a depth-format view).
+    std::vector<bool> imageDepthCompare;
     // Guest image elements the shader stores to (or updates atomically); the others are only read.
     std::vector<bool> imageWritten;
     // Guest buffer elements the shader updates atomically (one entry per element of a GuestBuffers

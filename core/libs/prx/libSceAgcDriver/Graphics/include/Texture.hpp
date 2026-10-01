@@ -17,7 +17,9 @@ class Buffer;
 
 class Texture {
 public:
-    Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot);
+    // depthCompare: sampled with a depth comparison, which Vulkan defines on depth formats only, so an
+    // R32 float or R16 unorm texture is uploaded into a D32 float or D16 unorm image.
+    Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot, bool depthCompare = false);
     Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, const GuestTextureResource& descriptor, VkComponentMapping components);
     // Samples the depth plane of a resident depth surface (the texture format reinterprets its bits).
     Texture(const Context& context, const std::shared_ptr<ResidentDepth>& depthSource, const GuestTextureResource& descriptor, VkComponentMapping components);

@@ -51,10 +51,14 @@ std::uint64_t SliceLinearBytes(const std::vector<TileMipLayout>& mips) {
 
 }
 
-Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot) : context(context) {
+Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot, bool depthCompare) : context(context) {
     PerformanceTimer timing("Graphics.TextureCreate");
     try {
-        const auto vkFormat = ResolveTextureFormat(descriptor.format);
+        const auto colorFormat = ResolveTextureFormat(descriptor.format);
+        Require(!depthCompare || colorFormat == VK_FORMAT_R32_SFLOAT || colorFormat == VK_FORMAT_R16_UNORM, "comparison sampling requires an R32 float or R16 unorm depth texture");
+        Require(!depthCompare || descriptor.dimension != TextureDimension::k3D, "comparison sampling does not support 3D depth textures");
+        const auto vkFormat = depthCompare ? (colorFormat == VK_FORMAT_R32_SFLOAT ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_D16_UNORM) : colorFormat;
+        const VkImageAspectFlags aspect = depthCompare ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
         if (IsBlockCompressed(descriptor.format)) {
             Require(context.textureCompressionBC, "device does not support BC compressed textures");
         }
@@ -177,7 +181,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             toTransferDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransferDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             toTransferDst.image = image;
-            toTransferDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, descriptor.mipCount, 0, imageLayers};
+            toTransferDst.subresourceRange = {aspect, 0, descriptor.mipCount, 0, imageLayers};
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 1, &linearReadBarrier, 1, &toTransferDst);
 
             std::vector<VkBufferImageCopy> regions;
@@ -190,7 +194,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                     region.bufferOffset = linearLayerOffset + mip.linearOffset;
                     region.bufferRowLength = mip.pitchBytes / elementBytes * BlockWidth(descriptor.format);
                     region.bufferImageHeight = 0;
-                    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, volume ? 0u : layer, 1};
+                    region.imageSubresource = {aspect, level, volume ? 0u : layer, 1};
                     if (volume) region.imageOffset.z = static_cast<std::int32_t>(layer);
                     region.imageOffset = {0, 0, 0};
                     region.imageExtent = {std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1u};
@@ -227,8 +231,9 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         viewInfo.image = image;
         viewInfo.viewType = ViewTypeFor(descriptor.viewDimension, viewLayerCount);
         viewInfo.format = vkFormat;
-        viewInfo.components = components;
-        viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
+        // A depth view returns the comparison result; swizzles do not apply to it.
+        viewInfo.components = depthCompare ? VkComponentMapping{} : components;
+        viewInfo.subresourceRange = {aspect, descriptor.baseLevel, viewLevelCount, descriptor.baseArray, viewLayerCount};
         // T# MIN_LOD (upstream 2be78b69); views of render targets show one level, which no clamp changes.
         VkImageViewMinLodCreateInfoEXT minLod{VK_STRUCTURE_TYPE_IMAGE_VIEW_MIN_LOD_CREATE_INFO_EXT};
         if (const auto clamp = EffectiveMinLod(descriptor); clamp != 0.0f) {

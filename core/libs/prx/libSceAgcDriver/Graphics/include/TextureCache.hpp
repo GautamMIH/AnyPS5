@@ -17,7 +17,7 @@ public:
     ~TextureCache();
     TextureCache(const TextureCache&) = delete;
     TextureCache& operator=(const TextureCache&) = delete;
-    std::shared_ptr<Texture> Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components);
+    std::shared_ptr<Texture> Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool depthCompare = false);
     // The depth plane the work being set up renders to (0: none): textures over it are copies,
     // since sampling an attachment while rendering to it is a feedback loop.
     void SetRenderedDepth(std::uint64_t address) { renderedDepth = address; }
