@@ -11,6 +11,8 @@
 #include <cstdlib>
 #include <functional>
 #include <mutex>
+#include <map>
+#include <array>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -156,14 +158,28 @@ std::uint64_t APS5_VABI sceKernelGetProcessTimeCounterFrequency() {
 
 // Debug aid: APS5_TRACE_USLEEP reports every 2000 calls which guest call sites sleep, so a CPU
 // thread polling for GPU or I/O completion can be found (offsets are relative to the executable).
-static void TraceSleep(const void* caller, std::uint64_t microseconds) {
-    static const bool enabled = std::getenv("APS5_TRACE_USLEEP") != nullptr;
-    if (!enabled) return;
+// APS5_TRACE_USLEEP=2 adds the two callers above each site, from the guest's frame pointers (a
+// sleep helper's site alone does not say what is polled); frames off the current stack end it.
+static void TraceSleep(const void* caller, const void* guestFrame, std::uint64_t microseconds) {
+    static const char* setting = std::getenv("APS5_TRACE_USLEEP");
+    if (setting == nullptr) return;
+    static const bool chains = setting[0] == '2';
+    std::array<std::uintptr_t, 3> chain{reinterpret_cast<std::uintptr_t>(caller), 0, 0};
+    if (chains) {
+        const auto stack = reinterpret_cast<std::uintptr_t>(__builtin_frame_address(0));
+        auto frame = reinterpret_cast<std::uintptr_t>(guestFrame);
+        for (std::size_t depth = 1; depth < chain.size(); ++depth) {
+            if (frame <= stack || frame >= stack + (8u << 20u) || (frame & 7u) != 0) break;
+            const auto* words = reinterpret_cast<const std::uintptr_t*>(frame);
+            chain[depth] = words[1];
+            frame = words[0];
+        }
+    }
     static std::mutex mutex;
-    static std::unordered_map<std::uintptr_t, std::pair<std::uint64_t, std::uint64_t>> sites;
+    static std::map<std::array<std::uintptr_t, 3>, std::pair<std::uint64_t, std::uint64_t>> sites;
     static std::uint64_t calls = 0;
     std::lock_guard lock(mutex);
-    auto& site = sites[reinterpret_cast<std::uintptr_t>(caller)];
+    auto& site = sites[chain];
     ++site.first;
     site.second += microseconds;
     if (++calls % 2000 != 0) return;
@@ -172,10 +188,14 @@ static void TraceSleep(const void* caller, std::uint64_t microseconds) {
 #else
     const std::uintptr_t image = 0;
 #endif
-    std::vector<std::pair<std::uintptr_t, std::pair<std::uint64_t, std::uint64_t>>> hot(sites.begin(), sites.end());
+    std::vector<std::pair<std::array<std::uintptr_t, 3>, std::pair<std::uint64_t, std::uint64_t>>> hot(sites.begin(), sites.end());
     std::sort(hot.begin(), hot.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
     std::fprintf(stderr, "[usleep] %llu calls:", static_cast<unsigned long long>(calls));
-    for (std::size_t i = 0; i < hot.size() && i < 6; ++i) std::fprintf(stderr, " exe+0x%llx x%llu (%llu us)", static_cast<unsigned long long>(hot[i].first - image), static_cast<unsigned long long>(hot[i].second.first), static_cast<unsigned long long>(hot[i].second.second));
+    for (std::size_t i = 0; i < hot.size() && i < 6; ++i) {
+        std::fprintf(stderr, " exe+0x%llx", static_cast<unsigned long long>(hot[i].first[0] - image));
+        for (std::size_t depth = 1; depth < chain.size() && hot[i].first[depth] != 0; ++depth) std::fprintf(stderr, "<0x%llx", static_cast<unsigned long long>(hot[i].first[depth] - image));
+        std::fprintf(stderr, " x%llu (%llu us)", static_cast<unsigned long long>(hot[i].second.first), static_cast<unsigned long long>(hot[i].second.second));
+    }
     std::fprintf(stderr, "\n");
 }
 
@@ -218,7 +238,7 @@ void KernelTraceWait_nid_postfix(const char* kind, const void* caller, std::uint
 }
 
 int APS5_VABI sceKernelUsleep_nid_postfix(KernelUseconds microseconds) {
-    TraceSleep(__builtin_return_address(0), microseconds);
+    TraceSleep(__builtin_return_address(0), *static_cast<void* const*>(__builtin_frame_address(0)), microseconds);
     TimedWait::SleepNanos(static_cast<std::uint64_t>(microseconds) * 1000ULL);
     return 0;
 }
