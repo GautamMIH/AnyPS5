@@ -146,6 +146,8 @@ Pipeline::Pipeline(const Context& context, const State& state, std::span<const R
         raster.cullMode = state.cullMode;
         raster.frontFace = state.frontFace;
         raster.lineWidth = 1;
+        Require(!state.depthClamp || context.depthClamp, "disabled depth clipping requires the depthClamp device feature");
+        raster.depthClampEnable = state.depthClamp ? VK_TRUE : VK_FALSE;
         if (state.hasDepthTarget && state.depthState.depthBias) {
             raster.depthBiasEnable = VK_TRUE;
             raster.depthBiasConstantFactor = state.depthState.depthBiasConstant;

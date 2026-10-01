@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -43,6 +44,69 @@ VkImageViewType ViewTypeFor(TextureDimension dimension, std::uint32_t viewLayerC
     throw std::runtime_error("AGC graphics: Texture encountered an unknown guest texture dimension");
 }
 
+float HalfToFloat(std::uint16_t half) {
+    const std::uint32_t sign = (half & 0x8000u) << 16u;
+    std::uint32_t exponent = (half >> 10u) & 0x1fu;
+    std::uint32_t mantissa = half & 0x3ffu;
+    std::uint32_t bits = 0;
+    if (exponent == 0x1fu) {
+        bits = sign | 0x7f800000u | (mantissa << 13u);
+    } else if (exponent != 0) {
+        bits = sign | ((exponent + 112u) << 23u) | (mantissa << 13u);
+    } else if (mantissa != 0) {
+        exponent = 113;
+        while ((mantissa & 0x400u) == 0) {
+            mantissa <<= 1u;
+            --exponent;
+        }
+        bits = sign | (exponent << 23u) | ((mantissa & 0x3ffu) << 13u);
+    } else {
+        bits = sign;
+    }
+    float value = 0;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+float SrgbToLinear(float value) {
+    return value <= 0.04045f ? value / 12.92f : std::pow((value + 0.055f) / 1.055f, 2.4f);
+}
+
+template<typename T>
+T Load(const std::byte* texel, std::size_t offset = 0) {
+    T value{};
+    std::memcpy(&value, texel + offset, sizeof(value));
+    return value;
+}
+
+// A comparison sample compares against the texel's first channel whatever the format (engines bind
+// a colour placeholder where no shadow map is used). Vulkan compares depth formats only, so the
+// channel is decoded (sRGB to linear, as the sampler would) into a D32 image. Null for formats this
+// does not decode.
+using ChannelDecoder = float (*)(const std::byte*);
+ChannelDecoder CompareChannelDecoder(VkFormat format) {
+    switch (format) {
+        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8B8A8_UNORM:
+            return [](const std::byte* texel) { return static_cast<float>(Load<std::uint8_t>(texel)) / 255.0f; };
+        case VK_FORMAT_R8_SRGB: case VK_FORMAT_R8G8_SRGB: case VK_FORMAT_R8G8B8A8_SRGB:
+            return [](const std::byte* texel) { return SrgbToLinear(static_cast<float>(Load<std::uint8_t>(texel)) / 255.0f); };
+        case VK_FORMAT_B8G8R8A8_UNORM:
+            return [](const std::byte* texel) { return static_cast<float>(Load<std::uint8_t>(texel, 2)) / 255.0f; };
+        case VK_FORMAT_B8G8R8A8_SRGB:
+            return [](const std::byte* texel) { return SrgbToLinear(static_cast<float>(Load<std::uint8_t>(texel, 2)) / 255.0f); };
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+            return [](const std::byte* texel) { return static_cast<float>(Load<std::uint32_t>(texel) & 0x3ffu) / 1023.0f; };
+        case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16B16A16_UNORM:
+            return [](const std::byte* texel) { return static_cast<float>(Load<std::uint16_t>(texel)) / 65535.0f; };
+        case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16B16A16_SFLOAT:
+            return [](const std::byte* texel) { return HalfToFloat(Load<std::uint16_t>(texel)); };
+        case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32B32A32_SFLOAT:
+            return [](const std::byte* texel) { return Load<float>(texel); };
+        default:
+            return nullptr;
+    }
+}
+
 std::uint64_t SliceLinearBytes(const std::vector<TileMipLayout>& mips) {
     std::uint64_t bytes = 0;
     for (const auto& mip : mips) bytes = std::max(bytes, mip.linearOffset + mip.linearSize);
@@ -55,9 +119,11 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
     PerformanceTimer timing("Graphics.TextureCreate");
     try {
         const auto colorFormat = ResolveTextureFormat(descriptor.format);
-        Require(!depthCompare || colorFormat == VK_FORMAT_R32_SFLOAT || colorFormat == VK_FORMAT_R16_UNORM, "comparison sampling requires an R32 float or R16 unorm depth texture");
+        const bool depthLayout = colorFormat == VK_FORMAT_R32_SFLOAT || colorFormat == VK_FORMAT_R16_UNORM;
+        const auto decodeChannel = depthCompare && !depthLayout ? CompareChannelDecoder(colorFormat) : nullptr;
+        Require(!depthCompare || depthLayout || decodeChannel != nullptr, "comparison sampling of a texture whose first channel is not decoded (guest format " + std::to_string(static_cast<unsigned>(descriptor.format)) + ", Vulkan format " + std::to_string(static_cast<int>(colorFormat)) + ")");
         Require(!depthCompare || descriptor.dimension != TextureDimension::k3D, "comparison sampling does not support 3D depth textures");
-        const auto vkFormat = depthCompare ? (colorFormat == VK_FORMAT_R32_SFLOAT ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_D16_UNORM) : colorFormat;
+        const auto vkFormat = depthCompare ? (colorFormat == VK_FORMAT_R16_UNORM ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT) : colorFormat;
         const VkImageAspectFlags aspect = depthCompare ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
         if (IsBlockCompressed(descriptor.format)) {
             Require(context.textureCompressionBC, "device does not support BC compressed textures");
@@ -72,7 +138,16 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         const auto guestSliceBytes = guestBytes / arrayLayers;
         Require(snapshot.size() == guestBytes, "texture snapshot size mismatch");
 
-        const auto sliceLinearBytes = SliceLinearBytes(mips);
+        // Converted comparison textures upload packed floats: per layer, each mip's texels in rows.
+        std::vector<std::uint64_t> convertedMipOffsets;
+        std::uint64_t convertedSliceBytes = 0;
+        if (decodeChannel) {
+            for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
+                convertedMipOffsets.push_back(convertedSliceBytes);
+                convertedSliceBytes += static_cast<std::uint64_t>(std::max(descriptor.width >> level, 1u)) * std::max(descriptor.height >> level, 1u) * sizeof(float);
+            }
+        }
+        const auto sliceLinearBytes = decodeChannel ? convertedSliceBytes : SliceLinearBytes(mips);
         Require(arrayLayers == 0 || sliceLinearBytes <= UINT64_MAX / arrayLayers, "detiled texture buffer size overflows");
         const auto linearBytes = sliceLinearBytes * arrayLayers;
 
@@ -109,7 +184,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             uploadLinear = std::make_unique<Buffer>(context, static_cast<std::size_t>(linearBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
             auto& linear = *uploadLinear;
             timing.Mark("linear_buffer");
-            if (!thick) {
+            if (!thick && !decodeChannel) {
                 uploadDetiler = &detiler;
                 uploadPool = detiler.CreatePool(static_cast<std::uint32_t>(arrayLayers * mips.size()));
             }
@@ -142,7 +217,24 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             const VkBufferMemoryBarrier preBarriers[] = {stagingReadBarrier, linearWriteBarrier};
             context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 2, preBarriers, 0, nullptr);
 
-            if (thick) {
+            if (decodeChannel) {
+                auto destination = linear.Bytes();
+                for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
+                    for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
+                        const auto width = std::max(descriptor.width >> level, 1u);
+                        const auto height = std::max(descriptor.height >> level, 1u);
+                        auto* out = destination.data() + layer * convertedSliceBytes + convertedMipOffsets[level];
+                        for (std::uint32_t y = 0; y < height; ++y) {
+                            for (std::uint32_t x = 0; x < width; ++x) {
+                                const auto source = static_cast<std::uint64_t>(layer) * guestSliceBytes + TexelOffset(descriptor.tileMode, elementBytes, mips[level], x, y, layer);
+                                Require(source + elementBytes <= snapshot.size(), "comparison texel lies outside the texture snapshot");
+                                const float value = decodeChannel(snapshot.data() + source);
+                                std::memcpy(out + (static_cast<std::size_t>(y) * width + x) * sizeof(float), &value, sizeof(value));
+                            }
+                        }
+                    }
+                }
+            } else if (thick) {
                 // Thick blocks span slices, which the 2D detile shader cannot address.
                 const auto& mip = mips.front();
                 auto destination = linear.Bytes();
@@ -191,8 +283,8 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                 for (std::uint32_t level = 0; level < descriptor.mipCount; ++level) {
                     const auto& mip = mips[level];
                     VkBufferImageCopy region{};
-                    region.bufferOffset = linearLayerOffset + mip.linearOffset;
-                    region.bufferRowLength = mip.pitchBytes / elementBytes * BlockWidth(descriptor.format);
+                    region.bufferOffset = linearLayerOffset + (decodeChannel ? convertedMipOffsets[level] : mip.linearOffset);
+                    region.bufferRowLength = decodeChannel ? 0u : mip.pitchBytes / elementBytes * BlockWidth(descriptor.format);
                     region.bufferImageHeight = 0;
                     region.imageSubresource = {aspect, level, volume ? 0u : layer, 1};
                     if (volume) region.imageOffset.z = static_cast<std::int32_t>(layer);

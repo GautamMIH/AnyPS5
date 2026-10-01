@@ -120,6 +120,8 @@ struct State {
     bool primitiveRestart = false;
     VkViewport viewport;
     bool negativeOneToOne;
+    // PA_CL_CLIP_CNTL ZCLIP_NEAR/FAR_DISABLE: no depth clipping, depth clamped to the viewport range.
+    bool depthClamp = false;
     VkRect2D scissor;
     VkCullModeFlags cullMode;
     VkFrontFace frontFace;

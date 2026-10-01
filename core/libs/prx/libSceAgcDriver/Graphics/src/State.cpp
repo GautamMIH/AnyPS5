@@ -438,7 +438,12 @@ State DecodeState(const QueueState& queue) {
     }
     // DX_CLIP_SPACE_DEF (bit 19) selects the depth clip range; DX_LINEAR_ATTR_CLIP_ENA (bit 24)
     // clips attributes linearly, as Vulkan implementations always do (RADV sets it).
-    zero(cx, 0x204, ~0x1080000u, "unsupported PA_CL_CLIP_CNTL flags");
+    // ZCLIP_NEAR_DISABLE and ZCLIP_FAR_DISABLE (bits 26-27) turn depth clipping off; the DB still
+    // clamps depth to the viewport range, which is Vulkan's depth clamp (RADV sets both for it).
+    zero(cx, 0x204, ~0x0d080000u, "unsupported PA_CL_CLIP_CNTL flags");
+    const auto depthClipDisable = read(cx, 0x204) & 0x0c000000u;
+    Require(depthClipDisable == 0 || depthClipDisable == 0x0c000000u, "PA_CL_CLIP_CNTL disables only one of near and far depth clipping, which is unsupported");
+    result.depthClamp = depthClipDisable != 0;
     result.negativeOneToOne = (read(cx, 0x204) & 0x80000u) == 0;
     const auto raster = read(cx, 0x205);
     // POLY_OFFSET_FRONT/BACK_ENABLE (bits 11-12) request depth bias; see decodeDepthBias.

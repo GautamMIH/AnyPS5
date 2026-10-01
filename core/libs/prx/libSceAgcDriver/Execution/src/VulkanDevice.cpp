@@ -122,6 +122,7 @@ struct VulkanDevice::State {
     bool storageImageWriteWithoutFormat = false;
     bool clipDistance = false;
     bool cullDistance = false;
+    bool depthClamp = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
     std::unique_ptr<Graphics::TextureDetiler> detiler;
@@ -526,6 +527,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.shaderCullDistance = available.shaderCullDistance;
     state->cullDistance = enabled.shaderCullDistance == VK_TRUE;
     if (state->cullDistance) state->capabilities.push_back(spv::CapabilityCullDistance);
+    enabled.depthClamp = available.depthClamp;
+    state->depthClamp = enabled.depthClamp == VK_TRUE;
     enabled.depthBounds = available.depthBounds;
     state->depthBounds = enabled.depthBounds == VK_TRUE;
     enabled.depthBiasClamp = available.depthBiasClamp;
@@ -977,6 +980,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
     context.clipDistance = state->clipDistance;
+    context.depthClamp = state->depthClamp;
     context.cullDistance = state->cullDistance;
     context.externalMemoryHost = state->externalMemoryHost;
     context.guestGpuMemory = state->guestGpuMemory.get();

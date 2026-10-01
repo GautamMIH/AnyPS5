@@ -305,6 +305,10 @@ void DepthClipTests() {
     queue.context[0xb4] = std::bit_cast<std::uint32_t>(2.0f);
     expectFailure([&] { AgcDriver::Graphics::DecodeState(queue); }, "inverted viewport depth clamp");
     queue.context[0xb4] = 0;
+    // ZCLIP_NEAR_DISABLE and ZCLIP_FAR_DISABLE together: depth clamp instead of depth clipping.
+    Require(!AgcDriver::Graphics::DecodeState(queue).depthClamp, "depth clamp without disabled depth clipping");
+    queue.context[0x204] = 0x0c080000;
+    Require(AgcDriver::Graphics::DecodeState(queue).depthClamp, "disabled depth clipping did not clamp depth");
     for (std::uint32_t bit = 0; bit < 32; ++bit) {
         if (bit == 19) continue;
         queue.context[0x204] = 1u << bit;

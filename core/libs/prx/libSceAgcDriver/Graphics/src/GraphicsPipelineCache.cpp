@@ -61,6 +61,7 @@ std::string makeKey(const Context& context, const State& state, const std::array
     append(key, state.viewport.minDepth);
     append(key, state.viewport.maxDepth);
     append(key, state.negativeOneToOne);
+    append(key, state.depthClamp);
     append(key, state.scissor.offset.x);
     append(key, state.scissor.offset.y);
     append(key, state.scissor.extent.width);

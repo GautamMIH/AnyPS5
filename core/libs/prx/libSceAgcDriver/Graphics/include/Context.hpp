@@ -85,6 +85,8 @@ struct Context {
     bool primitiveListRestart = false;
     bool storageImageReadWithoutFormat = false;
     bool storageImageWriteWithoutFormat = false;
+    // depthClamp: draws with depth clipping disabled (PA_CL_CLIP_CNTL ZCLIP_*_DISABLE).
+    bool depthClamp = false;
     // shaderClipDistance / shaderCullDistance: vertex-stage clip and cull distance outputs.
     bool clipDistance = false;
     bool cullDistance = false;
