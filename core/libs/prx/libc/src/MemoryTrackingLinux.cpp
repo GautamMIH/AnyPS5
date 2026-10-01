@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <system_error>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/uio.h>
 #include <ucontext.h>
 #include <unistd.h>
@@ -58,13 +59,25 @@ void reportUnhandledFault(const siginfo_t* info, const ucontext_t* native) {
     const auto instruction = static_cast<std::uintptr_t>(native->uc_mcontext.gregs[REG_RIP]);
     Dl_info module{};
     const bool located = dladdr(reinterpret_cast<void*>(instruction), &module) != 0 && module.dli_fname != nullptr;
+    // The host thread carries the guest thread's name (scePthreadCreate).
+    char thread[17]{};
+    if (prctl(PR_GET_NAME, thread, 0, 0, 0) != 0) thread[0] = '\0';
     char message[512];
-    const int length = std::snprintf(message, sizeof(message), "[AnyPS5] unhandled SIGSEGV: address %p, rip %p in %s+0x%lx (%s)\n",
-        info->si_addr, reinterpret_cast<void*>(instruction),
+    const int length = std::snprintf(message, sizeof(message), "[AnyPS5] unhandled SIGSEGV in thread \"%s\": address %p, rip %p in %s+0x%lx (%s)\n",
+        thread, info->si_addr, reinterpret_cast<void*>(instruction),
         located ? module.dli_fname : "unknown",
         located ? static_cast<unsigned long>(instruction - reinterpret_cast<std::uintptr_t>(module.dli_fbase)) : 0ul,
         located && module.dli_sname != nullptr ? module.dli_sname : "no symbol");
     if (length > 0) static_cast<void>(write(STDERR_FILENO, message, static_cast<std::size_t>(std::min<int>(length, sizeof(message) - 1))));
+    const auto* g = native->uc_mcontext.gregs;
+    char registers[640];
+    const int registerLength = std::snprintf(registers, sizeof(registers),
+        "    rax %llx rbx %llx rcx %llx rdx %llx rsi %llx rdi %llx rbp %llx rsp %llx\n    r8 %llx r9 %llx r10 %llx r11 %llx r12 %llx r13 %llx r14 %llx r15 %llx\n",
+        static_cast<unsigned long long>(g[REG_RAX]), static_cast<unsigned long long>(g[REG_RBX]), static_cast<unsigned long long>(g[REG_RCX]), static_cast<unsigned long long>(g[REG_RDX]),
+        static_cast<unsigned long long>(g[REG_RSI]), static_cast<unsigned long long>(g[REG_RDI]), static_cast<unsigned long long>(g[REG_RBP]), static_cast<unsigned long long>(g[REG_RSP]),
+        static_cast<unsigned long long>(g[REG_R8]), static_cast<unsigned long long>(g[REG_R9]), static_cast<unsigned long long>(g[REG_R10]), static_cast<unsigned long long>(g[REG_R11]),
+        static_cast<unsigned long long>(g[REG_R12]), static_cast<unsigned long long>(g[REG_R13]), static_cast<unsigned long long>(g[REG_R14]), static_cast<unsigned long long>(g[REG_R15]));
+    if (registerLength > 0) static_cast<void>(write(STDERR_FILENO, registers, static_cast<std::size_t>(std::min<int>(registerLength, sizeof(registers) - 1))));
     reportCallers(static_cast<std::uintptr_t>(native->uc_mcontext.gregs[REG_RSP]));
 }
 
