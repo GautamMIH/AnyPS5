@@ -105,6 +105,10 @@ struct Instance {
     std::uint32_t mp3Channels = 0;
     std::uint32_t mp3SampleRate = 0;
     std::uint32_t mp3Bitrate = 0;
+    // Resample parameters (input samples per output sample, and its change per sample). Decoders
+    // produce at the codec rate: only the identity ratio is applied.
+    float resampleRatio = 1.0f;
+    float resampleRatioChange = 0.0f;
     // Opus: the FFmpeg decoder for the initialized channel count (always 48 kHz).
     AVCodecContext* opus = nullptr;
     std::uint32_t opusChannels = 0;
@@ -128,6 +132,7 @@ enum class JobKind : std::uint32_t {
     SetGaplessDecode = 3,
     Run = 4,
     GetStatistics = 5,
+    SetResample = 6,
 };
 
 struct JobHeader {
@@ -695,6 +700,17 @@ void Execute(const JobHeader& job, const AjmBuffer* inputs, const AjmBuffer* out
         WriteResult(job.sideband, job.sidebandSize, 0);
         break;
     }
+    case JobKind::SetResample: {
+        float ratio = 1.0f;
+        float change = 0.0f;
+        std::memcpy(&ratio, job.parameters, sizeof(ratio));
+        std::memcpy(&change, job.parameters + sizeof(ratio), sizeof(change));
+        AJM_TRACE("[ajm] instance %u set resample: ratio %g, change %g per sample, flags 0x%llx\n", job.instance, ratio, change, static_cast<unsigned long long>(job.flags));
+        instance->resampleRatio = ratio;
+        instance->resampleRatioChange = change;
+        WriteResult(job.sideband, job.sidebandSize, 0);
+        break;
+    }
     case JobKind::Run:
         if (!instance->initialized) {
             AJM_TRACE("[ajm] instance %u run before initialize\n", job.instance);
@@ -851,6 +867,18 @@ int APS5_VABI sceAjmBatchJobRun(AjmBatchInfo* info, uint32_t instance, uint64_t 
 
 int APS5_VABI sceAjmBatchJobDecode(AjmBatchInfo* info, uint32_t instance, const void* bitstream_input, size_t bitstream_input_size, void* pcm_output, size_t pcm_output_size, void* result) {
     return sceAjmBatchJobRun(info, instance, SIDEBAND_STREAM, bitstream_input, bitstream_input_size, pcm_output, pcm_output_size, result, sizeof(SidebandResult) + sizeof(SidebandStream));
+}
+
+int APS5_VABI sceAjmBatchJobSetResampleParametersEx(AjmBatchInfo* info, uint32_t instance, float ratio_start, float ratio_change_per_sample, uint32_t flags, void* result) {
+    auto header = MakeHeader(JobKind::SetResample, instance, result, sizeof(SidebandResult));
+    std::memcpy(header.parameters, &ratio_start, sizeof(ratio_start));
+    std::memcpy(header.parameters + sizeof(ratio_start), &ratio_change_per_sample, sizeof(ratio_change_per_sample));
+    header.flags = flags;
+    return Append(info, header, nullptr, nullptr);
+}
+
+int APS5_VABI sceAjmBatchJobSetResampleParameters(AjmBatchInfo* info, uint32_t instance, float ratio, uint32_t flags, void* result) {
+    return sceAjmBatchJobSetResampleParametersEx(info, instance, ratio, 0.0f, flags, result);
 }
 
 int APS5_VABI sceAjmBatchJobGetStatistics(AjmBatchInfo* info, float interval, void* result) {
