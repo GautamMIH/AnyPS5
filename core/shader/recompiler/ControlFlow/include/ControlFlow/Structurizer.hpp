@@ -10,6 +10,7 @@ public:
     void Structurize(ControlFlowGraph& graph) const;
 
 private:
+    void structurizeOnce(ControlFlowGraph& graph) const;
     void computeDominatorTree(ControlFlowGraph& graph) const;
     void detectNaturalLoops(ControlFlowGraph& graph) const;
     void computePostDominators(ControlFlowGraph& graph) const;

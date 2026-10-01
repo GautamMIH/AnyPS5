@@ -1,5 +1,6 @@
 #include "ControlFlow/Structurizer.hpp"
 #include <algorithm>
+#include <string_view>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -327,6 +328,28 @@ std::vector<std::uint32_t> linearTail(const ControlFlowGraph& graph, std::uint32
     return tail;
 }
 
+// The arm leads, through blocks only the header reaches, straight to a return: `if (c) return;`.
+bool isPrivateExit(const ControlFlowGraph& graph, std::uint32_t header, std::uint32_t arm) {
+    std::vector<bool> visited(graph.blocks.size(), false);
+    for (auto blockId = arm;;) {
+        if (visited[blockId] || !graph.Dominates(header, blockId)) {
+            return false;
+        }
+        visited[blockId] = true;
+        const auto& block = graph.FindBlock(blockId);
+        if (block.successors.empty()) {
+            return block.terminator.kind == TerminatorKind::Return;
+        }
+        if (block.successors.size() != 1) {
+            return false;
+        }
+        blockId = block.successors.front();
+    }
+}
+
+// Set while a graph is structurized again with the early-return merge rule (see Structurize).
+thread_local bool earlyReturnMerges = false;
+
 std::uint32_t mergeBesideReturns(const ControlFlowGraph& graph, const BasicBlock& header) {
     const auto reach = [&](std::uint32_t start) {
         std::vector<std::uint32_t> reached;
@@ -452,7 +475,25 @@ std::uint32_t findSelectionMerge(const ControlFlowGraph& graph, const BasicBlock
                 if (graph.Dominates(block.id, trueTarget) && hasLinearPathToTerminal(graph, falseTarget)) {
                     return trueTarget;
                 }
-                return mergeBesideReturns(graph, block);
+                if (const auto merge = mergeBesideReturns(graph, block); merge != InvalidControlFlowId) {
+                    return merge;
+                }
+                // An early return nested in an enclosing selection, `if (a) { if (b) return; } next:`
+                // (a Zorro shader): the other arm continues at the enclosing merge, which only blocks
+                // dominating the header also reach. The construct merges there and the shared merge is
+                // split later. Only on the retry of a graph the rules above left without a merge, so
+                // routing keeps every shape it structures.
+                if (!earlyReturnMerges) return InvalidControlFlowId;
+                const bool trueExits = isPrivateExit(graph, block.id, trueTarget);
+                const bool falseExits = isPrivateExit(graph, block.id, falseTarget);
+                if (trueExits != falseExits) {
+                    const auto continues = trueExits ? falseTarget : trueTarget;
+                    const auto& predecessors = graph.FindBlock(continues).predecessors;
+                    if (std::all_of(predecessors.begin(), predecessors.end(), [&](std::uint32_t predecessor) { return predecessor == block.id || graph.Dominates(predecessor, block.id); })) {
+                        return continues;
+                    }
+                }
+                return InvalidControlFlowId;
             }
         }
         return globalMerge;
@@ -1086,6 +1127,24 @@ void tarjanVisit(TarjanState& state, std::uint32_t blockId) {
 }
 
 void Structurizer::Structurize(ControlFlowGraph& graph) const {
+    const auto original = graph;
+    try {
+        structurizeOnce(graph);
+    } catch (const std::runtime_error& error) {
+        if (std::string_view(error.what()).find("has no structured merge") == std::string_view::npos) throw;
+        graph = original;
+        earlyReturnMerges = true;
+        try {
+            structurizeOnce(graph);
+        } catch (...) {
+            earlyReturnMerges = false;
+            throw;
+        }
+        earlyReturnMerges = false;
+    }
+}
+
+void Structurizer::structurizeOnce(ControlFlowGraph& graph) const {
     recomputeAnalyses(graph);
     verifyReducibility(graph);
     canonicalizeNaturalLoops(graph);
