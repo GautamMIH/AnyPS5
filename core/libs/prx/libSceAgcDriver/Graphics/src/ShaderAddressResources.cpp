@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
+#include <cstdlib>
 
 namespace AgcDriver::Graphics {
 
@@ -22,7 +23,13 @@ void ShaderResources::prepareAddressBindings(std::span<const CompiledShader> sha
     }
     if (usesBda) {
         Require(context.bufferDeviceAddress, "buffer device address is not enabled");
-        guestMemory.AcquireRegistered();
+        // Registered memory is only written through the table by programs that store through it:
+        // for the others it is read-only, so no write is resolved, noted or written back.
+        // Debug aid: ANYPS5_BDA_ALWAYS_WRITABLE=1 leases registered memory writable for every program.
+        static const bool alwaysWritable = std::getenv("ANYPS5_BDA_ALWAYS_WRITABLE") != nullptr;
+        bool bdaWrites = alwaysWritable;
+        for (const auto& shader : shaders) bdaWrites = bdaWrites || shader.program->bdaWrites;
+        guestMemory.AcquireRegistered(bdaWrites);
         for (const auto& snapshot : snapshots) guestMemory.AddSnapshot(snapshot);
     }
 }

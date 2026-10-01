@@ -6,7 +6,7 @@
 
 namespace AgcDriver::Graphics {
 
-void GuestBufferMemory::AcquireRegistered() {
+void GuestBufferMemory::AcquireRegistered(bool writes) {
     Require(!uploaded && regions.empty() && lease.empty(), "guest allocation lease must precede resource registration");
     lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
     regions.reserve(lease.size());
@@ -14,7 +14,7 @@ void GuestBufferMemory::AcquireRegistered() {
         validate(range->address, range->bytes);
         // With a mirror, registered memory is used in place instead of captured.
         if (context.guestGpuMemory != nullptr) {
-            regions.push_back({range->address, range->address + range->bytes, range->writable, {}, nullptr, true});
+            regions.push_back({range->address, range->address + range->bytes, range->writable && writes, {}, nullptr, true});
             continue;
         }
         std::vector<std::byte> snapshot;

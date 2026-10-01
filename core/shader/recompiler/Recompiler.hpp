@@ -351,6 +351,10 @@ struct RecompileResult {
     std::vector<DescriptorBinding> bindings;
     std::vector<std::byte> pushConstants;
     std::uint32_t bdaAbiVersion = 0;
+    // Some access may store through the BDA table (ShaderInfo::bdaWrites). False proves the program
+    // only reads through it, so a driver may expose the table's memory read-only; a producer that
+    // does not set it leaves the conservative default.
+    bool bdaWrites = true;
     std::vector<VertexAttribute> vertexAttributes;
     std::int32_t vertexOffsetSgpr = -1;
     std::int32_t instanceOffsetSgpr = -1;

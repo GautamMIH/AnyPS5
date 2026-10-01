@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <optional>
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
@@ -59,6 +60,15 @@ void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes, st
     writes.emplace_back(address, address + bytes);
 }
 
+void GuestBufferMemory::AddReadOnly(std::uint64_t address, std::size_t bytes, std::size_t leading) {
+    validate(address, bytes);
+    Require(leading <= address, "guest memory range underflow");
+    std::optional<GuestMemory::GpuAccessScope> gpuAccess;
+    if (context.guestGpuMemory != nullptr) gpuAccess.emplace();
+    GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), bytes + leading, 1, false);
+    regions.push_back({address - leading, address + bytes, false, {}, nullptr, true});
+}
+
 void GuestBufferMemory::AddSnapshot(const GuestMemorySnapshot& snapshot) {
     validate(snapshot.address, snapshot.bytes.size());
     // With a mirror the GPU reads memory as it is at execution, like the console; the capture
@@ -118,6 +128,9 @@ void GuestBufferMemory::Upload(bool addressable) {
         region.begin -= padding;
         const auto bytes = region.end - region.begin;
         Require(bytes <= std::numeric_limits<std::size_t>::max(), "guest GPU allocation size overflow");
+        // Debug aid: APS5_TRACE_BUFFER_VIEWS=1 logs every region a draw or dispatch binds.
+        static const bool traceViews = std::getenv("APS5_TRACE_BUFFER_VIEWS") != nullptr;
+        if (traceViews) std::fprintf(stderr, "[buffer-view] 0x%llx+0x%llx %s\n", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes), region.writable ? "writable" : region.live ? "live" : "snapshot");
         if (context.guestGpuMemory != nullptr && (region.writable || region.live)) {
             // Resident render targets over the range reach guest memory first, as a read would.
             {

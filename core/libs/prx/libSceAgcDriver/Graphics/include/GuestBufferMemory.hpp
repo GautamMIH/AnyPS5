@@ -21,10 +21,15 @@ struct GuestMemorySnapshot {
 class GuestBufferMemory {
 public:
     explicit GuestBufferMemory(const Context& context);
-    void AcquireRegistered();
+    // Leases the registered allocations for BDA access; writes false exposes them read-only (no
+    // shader of the work stores through the table).
+    void AcquireRegistered(bool writes = true);
     // leading: bytes before address the region also covers for a view's alignment; they are
     // uploaded but never written back.
     void AddWritable(std::uint64_t address, std::size_t bytes, std::size_t leading = 0);
+    // A range the shader only reads (DescriptorBinding::bufferWritten proves it): read live at
+    // execution like a writable one, but never written back, noted as written or resolved as a write.
+    void AddReadOnly(std::uint64_t address, std::size_t bytes, std::size_t leading = 0);
     // A writable view whose base cannot meet the storage buffer offset alignment, even with the
     // misalignment carried to the shader (BufferViewMisalignment covers dword multiples only): it
     // gets its own buffer starting at the base. Views with the same base share it.

@@ -339,6 +339,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
 #endif
 
     result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
+    result.bdaWrites = program.Info().bdaWrites;
     result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
     result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;
     for (const auto& output : program.Info().outputs) {

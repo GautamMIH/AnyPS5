@@ -113,7 +113,11 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
                 Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, binding.count, flags, nullptr}, {}};
                 if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
                     Require(binding.guestDescriptor.size() == static_cast<std::uint64_t>(binding.count) * 4, "guest buffer descriptor must contain four DWORDs per array element");
-                    for (std::uint32_t element = 0; element < binding.count; ++element) item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), targets, indexAddress, indexBytes));
+                    for (std::uint32_t element = 0; element < binding.count; ++element) {
+                        // The recompiler proves elements read-only (bufferWritten false); the rest may be written.
+                        const bool written = !binding.readOnly && (element >= binding.bufferWritten.size() || binding.bufferWritten[element]);
+                        item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), targets, indexAddress, indexBytes, written));
+                    }
                 } else if (addressRole) {
                     item.allocations.push_back(allocations.size());
                     allocations.push_back({0, 0, false, nullptr, binding.role});
@@ -190,7 +194,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
     }
 }
 
-std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes) {
+std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes, bool written) {
     Require(words.size() == 4, "buffer descriptor must contain four DWORDs");
     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
     const auto address = descriptor.Base48();
@@ -218,9 +222,9 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     } catch (const std::runtime_error&) {
         return unusable("unmapped range");
     }
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
+    if (written) GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
     for (const auto& target : targets) Require(!overlap(address, size, target.address, target.bytes), "shader buffer aliases the render target");
-    Require(!overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
+    Require(!written || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
     // The view starts BufferViewMisalignment bytes below the base to meet the descriptor offset
     // alignment; the recompiler passed the same difference to the shader. The extra bytes are
     // uploaded but never written back.
@@ -232,7 +236,8 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
         allocations.push_back({address, size, true, nullptr});
         return allocations.size() - 1;
     }
-    guestMemory.AddWritable(address, size, below);
+    if (written) guestMemory.AddWritable(address, size, below);
+    else guestMemory.AddReadOnly(address, size, below);
     allocations.push_back({address - below, size + below, true, nullptr});
     return allocations.size() - 1;
 }
