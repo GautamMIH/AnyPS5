@@ -97,7 +97,9 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "address range overflow");
     PerformanceTimer timing("GuestMemory.CheckRange");
     MemoryAccessScope::Resolve(address, bytes, writable);
+    timing.Mark("scope_resolve");
     GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
+    timing.Mark("tracking_resolve");
     auto cursor = address;
     const auto end = address + bytes;
 #ifdef _WIN32
@@ -115,7 +117,10 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
 #else
     // Guest memory is answered from libc's area map. /proc/self/maps serves other memory; its
     // snapshot goes stale whenever watches change page protection, and a reload costs ~20 ms.
-    if (GuestMemoryBacking::GuestVirtualAccessible_nid_postfix(address, bytes, writable)) return;
+    if (GuestMemoryBacking::GuestVirtualAccessible_nid_postfix(address, bytes, writable)) {
+        timing.Mark("area_map");
+        return;
+    }
     auto& cache = mappingCache();
     const std::lock_guard lock(cache.mutex);
     const auto generation = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();

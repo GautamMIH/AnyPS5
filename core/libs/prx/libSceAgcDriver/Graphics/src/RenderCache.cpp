@@ -41,6 +41,15 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
             copy.imageExtent = {color.extent.width, color.extent.height, 1};
             context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, transfer.LinearBuffer(), Target().Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
             timing.Mark("gpu_upload", color.bytes);
+        } else if (layered && layered->PrepareGpu()) {
+            // Slices detiled on the GPU from imported guest memory (ANYPS5_CPU_LAYERED=1: on the CPU).
+            layered->RecordGpuUpload(commands);
+            Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            VkBufferImageCopy copy{};
+            copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, color.layers};
+            copy.imageExtent = {color.extent.width, color.extent.height, 1};
+            context.Function<PFN_vkCmdCopyBufferToImage>("vkCmdCopyBufferToImage")(commands, layered->GpuLinearBuffer(), Target().Image(), VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+            timing.Mark("gpu_layered_upload", color.bytes);
         } else if (layered) {
             layered->Upload();
             Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -88,6 +97,24 @@ void ResidentColor::downloadLinear(VkCommandBuffer commands) {
 bool ResidentColor::WriteBackOnGpu() {
     if (!dirty) return true;
     if (context.drawQueue == nullptr) return false;
+    if (layered) {
+        if (!layered->PrepareGpu()) return false;
+        PerformanceTimer timing("Graphics.ResidentColor.GpuWriteBack");
+        if (TraceRenderTargets()) std::fprintf(stderr, "[rt] writeback layered color@0x%llx+0x%llx site=%s\n", static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.bytes), GuestMemory::AccessSite::Current());
+        const auto commands = context.drawQueue->Begin(context);
+        Transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+        VkMemoryBarrier reuse{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        reuse.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+        reuse.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &reuse, 0, nullptr, 0, nullptr);
+        layered->RecordGpuWriteBack(commands);
+        context.drawQueue->NoteGuestWrite(color.address, color.address + color.bytes, shared_from_this());
+        WriteTracker::NoteGpuWrite(color.address, color.bytes);
+        dirty = false;
+        gpuWritePending = true;
+        timing.Mark("recorded", color.bytes);
+        return true;
+    }
     const auto view = guestView();
     if (!view) return false;
     PerformanceTimer timing("Graphics.ResidentColor.GpuWriteBack");
@@ -264,7 +291,7 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
     static const bool traceResolve = std::getenv("APS5_TRACE_RESOLVE") != nullptr;
     if (traceResolve) {
         std::fprintf(stderr, "[resolve] site=%s range=0x%llx+0x%zx %s colors=%zu depths=%zu", GuestMemory::AccessSite::Current(), static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", affected.size(), affectedDepth.size());
-        for (const auto& entry : affected) std::fprintf(stderr, " color@0x%llx+0x%llx", static_cast<unsigned long long>(entry->Description().address), static_cast<unsigned long long>(entry->Description().bytes));
+        for (const auto& entry : affected) std::fprintf(stderr, " color@0x%llx+0x%llx(%ux%u layers %u%s)", static_cast<unsigned long long>(entry->Description().address), static_cast<unsigned long long>(entry->Description().bytes), entry->Description().extent.width, entry->Description().extent.height, entry->Description().layers, entry->Description().Layered() ? " layered" : "");
         for (const auto& entry : affectedDepth) std::fprintf(stderr, " depth@0x%llx", static_cast<unsigned long long>(entry->Description().depthAddress));
         std::fprintf(stderr, "\n");
     }

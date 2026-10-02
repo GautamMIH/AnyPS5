@@ -3,6 +3,8 @@
 
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include <memory>
 #include <vector>
 
@@ -15,6 +17,7 @@ namespace AgcDriver::Graphics {
 class LayeredColorTransfer {
 public:
     LayeredColorTransfer(const Context& context, const ColorTarget& color);
+    ~LayeredColorTransfer();
     LayeredColorTransfer(const LayeredColorTransfer&) = delete;
     LayeredColorTransfer& operator=(const LayeredColorTransfer&) = delete;
     RenderTarget& Target() { return *target; }
@@ -25,6 +28,16 @@ public:
     // Tiles the linear buffer back into the slices and writes them to guest memory.
     void WriteBackTracked();
 
+    // GPU transfers over imported guest memory: one detile (or tile) pass per slice between the
+    // guest view and a device-local linear buffer, recorded in queue order. PrepareGpu (re)builds
+    // the passes for the target's current guest view; false when the GPU path does not apply.
+    bool PrepareGpu();
+    // Detiles the slices from guest memory into the image (left in TRANSFER_DST_OPTIMAL by the caller's transition).
+    void RecordGpuUpload(VkCommandBuffer commands);
+    // Copies the image (in TRANSFER_SRC_OPTIMAL) into the slices in guest memory.
+    void RecordGpuWriteBack(VkCommandBuffer commands);
+    VkBuffer GpuLinearBuffer() const { return gpuLinear->Handle(); }
+
 private:
     std::uint64_t texelOffset(std::uint32_t layer, std::uint32_t x, std::uint32_t y) const;
     Context context;
@@ -33,6 +46,12 @@ private:
     std::unique_ptr<RenderTarget> target;
     std::unique_ptr<Buffer> linear;
     std::vector<std::byte> tiled;
+    std::unique_ptr<Buffer> gpuLinear;
+    VkDescriptorPool gpuPool = VK_NULL_HANDLE;
+    VkBuffer gpuGuest = VK_NULL_HANDLE;
+    VkDeviceSize gpuGuestOffset = 0;
+    std::vector<TextureDetiler::PreparedPass> detilePasses;
+    std::vector<TextureDetiler::PreparedPass> tilePasses;
 };
 
 }
