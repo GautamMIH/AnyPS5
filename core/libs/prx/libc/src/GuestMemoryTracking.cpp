@@ -12,12 +12,15 @@
 namespace GuestMemoryTracking {
 namespace {
 
+// Watches may share pages (neighbouring render targets, mip levels): a page's protection is the
+// strictest of the watches covering it, and its native protection returns when none protects it.
 struct Entry {
     std::uint64_t address;
     std::size_t bytes;
     void* context;
     Resolver resolver;
     Protection protection = Protection::ReadWrite;
+    // The native protection of the entry's pages, recorded when it was created.
     std::vector<Platform::Region> original;
     bool resolving = false;
     bool active = false;
@@ -25,7 +28,9 @@ struct Entry {
 
 struct Registry {
     std::recursive_mutex mutex;
-    std::map<std::uint64_t, std::shared_ptr<Entry>> entries;
+    std::multimap<std::uint64_t, std::shared_ptr<Entry>> entries;
+    // The longest entry: entries overlapping an address start at most this far before it.
+    std::size_t largest = 0;
     bool installed = false;
 };
 
@@ -52,16 +57,56 @@ void resolve(const std::shared_ptr<Entry>& entry, Access access) {
     }
 }
 
+std::multimap<std::uint64_t, std::shared_ptr<Entry>>::const_iterator firstCandidate(std::uint64_t address) {
+    const auto& registryValue = registry();
+    return registryValue.entries.lower_bound(address > registryValue.largest ? address - registryValue.largest : 0);
+}
+
 std::vector<std::shared_ptr<Entry>> overlapping(std::uint64_t address, std::size_t bytes) {
     const auto end = checkedEnd(address, bytes);
-    auto& entries = registry().entries;
-    auto first = entries.upper_bound(address);
-    if (first != entries.begin()) --first;
+    const auto& entries = registry().entries;
     std::vector<std::shared_ptr<Entry>> result;
-    for (auto it = first; it != entries.end() && it->first < end; ++it) {
+    for (auto it = firstCandidate(address); it != entries.end() && it->first < end; ++it) {
         if (it->first + it->second->bytes > address) result.push_back(it->second);
     }
     return result;
+}
+
+// The regions' parts within [first, last).
+std::vector<Platform::Region> clip(const std::vector<Platform::Region>& regions, std::uint64_t first, std::uint64_t last) {
+    std::vector<Platform::Region> result;
+    for (const auto& region : regions) {
+        const auto from = std::max(first, region.address);
+        const auto to = std::min<std::uint64_t>(last, region.address + region.bytes);
+        if (from < to) result.push_back({from, static_cast<std::size_t>(to - from), region.protection});
+    }
+    return result;
+}
+
+// Sets the pages of [first, last) to the strictest protection of the entries covering them, or to
+// their native protection (from native, or any covering entry) where no entry protects them.
+void apply(std::uint64_t first, std::uint64_t last, const std::vector<Platform::Region>& native) {
+    const auto entries = overlapping(first, static_cast<std::size_t>(last - first));
+    std::vector<std::uint64_t> cuts{first, last};
+    for (const auto& entry : entries) {
+        if (entry->address > first) cuts.push_back(entry->address);
+        if (entry->address + entry->bytes < last) cuts.push_back(entry->address + entry->bytes);
+    }
+    std::sort(cuts.begin(), cuts.end());
+    cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+    for (std::size_t index = 0; index + 1 < cuts.size(); ++index) {
+        const auto from = cuts[index];
+        const auto to = cuts[index + 1];
+        auto protection = Protection::ReadWrite;
+        const std::vector<Platform::Region>* source = &native;
+        for (const auto& entry : entries) {
+            if (entry->address > from || entry->address + entry->bytes < to) continue;
+            protection = std::min(protection, entry->protection);
+            source = &entry->original;
+        }
+        if (protection == Protection::ReadWrite) Platform::Restore(clip(*source, from, to));
+        else Platform::Protect(from, static_cast<std::size_t>(to - from), protection);
+    }
 }
 
 bool fault(std::uint64_t address, bool writable) {
@@ -96,8 +141,26 @@ void* GuestMemoryTrackingCreate_nid_postfix(std::uint64_t address, std::size_t b
     const auto last = (end + pageSize - 1) / pageSize * pageSize;
     std::lock_guard lock(registry().mutex);
     GuestMemoryBacking::GuestMemoryBackingRequire_nid_postfix(first, static_cast<std::size_t>(last - first));
-    if (!overlapping(first, static_cast<std::size_t>(last - first)).empty()) throw std::runtime_error("overlapping guest memory ownership pages");
-    static_cast<void>(Platform::Query(first, static_cast<std::size_t>(last - first)));
+    // Native protection: queried where no entry watches the pages, taken from the entries that do
+    // (their pages may be protected now).
+    std::vector<Platform::Region> original;
+    auto cursor = first;
+    for (const auto& other : overlapping(first, static_cast<std::size_t>(last - first))) {
+        const auto from = std::max(cursor, other->address);
+        const auto to = std::min<std::uint64_t>(last, other->address + other->bytes);
+        if (to <= cursor) continue;
+        if (cursor < from) {
+            auto queried = Platform::Query(cursor, static_cast<std::size_t>(from - cursor));
+            original.insert(original.end(), queried.begin(), queried.end());
+        }
+        auto shared = clip(other->original, from, to);
+        original.insert(original.end(), shared.begin(), shared.end());
+        cursor = to;
+    }
+    if (cursor < last) {
+        auto queried = Platform::Query(cursor, static_cast<std::size_t>(last - cursor));
+        original.insert(original.end(), queried.begin(), queried.end());
+    }
     if (!registry().installed) {
         Platform::Install(fault);
         registry().installed = true;
@@ -107,7 +170,9 @@ void* GuestMemoryTrackingCreate_nid_postfix(std::uint64_t address, std::size_t b
     entry->bytes = static_cast<std::size_t>(last - first);
     entry->context = context;
     entry->resolver = resolver;
+    entry->original = std::move(original);
     auto handle = std::make_unique<std::shared_ptr<Entry>>(entry);
+    registry().largest = std::max(registry().largest, entry->bytes);
     registry().entries.emplace(first, std::move(entry));
     return handle.release();
 }
@@ -117,8 +182,13 @@ void GuestMemoryTrackingDestroy_nid_postfix(void* handle) noexcept {
     std::lock_guard lock(registry().mutex);
     std::unique_ptr<std::shared_ptr<Entry>> owner(static_cast<std::shared_ptr<Entry>*>(handle));
     const auto& entry = **owner;
-    Platform::Restore(entry.original);
-    registry().entries.erase(entry.address);
+    auto& entries = registry().entries;
+    for (auto [it, end] = entries.equal_range(entry.address); it != end; ++it) {
+        if (it->second.get() != &entry) continue;
+        entries.erase(it);
+        break;
+    }
+    if (entry.protection != Protection::ReadWrite) apply(entry.address, entry.address + entry.bytes, entry.original);
 }
 
 void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection) {
@@ -126,15 +196,9 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
     std::lock_guard lock(registry().mutex);
     auto& entry = **static_cast<std::shared_ptr<Entry>*>(handle);
     if (entry.protection == protection) return;
-    if (protection == Protection::ReadWrite) {
-        Platform::Restore(entry.original);
-        entry.original.clear();
-    } else {
-        if (entry.original.empty()) entry.original = Platform::Query(entry.address, entry.bytes);
-        Platform::Protect(entry.address, entry.bytes, protection);
-        entry.active = true;
-    }
+    if (protection != Protection::ReadWrite) entry.active = true;
     entry.protection = protection;
+    apply(entry.address, entry.address + entry.bytes, entry.original);
 }
 
 void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable) {
@@ -144,10 +208,8 @@ void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t b
     // Checked thousands of times a frame: find whether a watch needs resolving before copying the
     // overlapping entries (resolving may change the registry).
     const auto& entries = registry().entries;
-    auto first = entries.upper_bound(address);
-    if (first != entries.begin()) --first;
     bool needed = false;
-    for (auto it = first; it != entries.end() && it->first < end && !needed; ++it) {
+    for (auto it = firstCandidate(address); it != entries.end() && it->first < end && !needed; ++it) {
         const auto& entry = *it->second;
         needed = it->first + entry.bytes > address && (entry.protection == Protection::None || (writable && entry.protection == Protection::Read));
     }
@@ -172,9 +234,10 @@ void GuestMemoryTrackingValidate_nid_postfix(std::uint64_t address, std::size_t 
     const auto end = checkedEnd(address, bytes);
     std::lock_guard lock(registry().mutex);
     for (const auto& entry : overlapping(address, bytes)) {
+        const auto last = std::min(end, entry->address + entry->bytes);
+        if (last <= address) continue;
         if (address < entry->address) validate(address, static_cast<std::size_t>(entry->address - address));
         const auto first = std::max(address, entry->address);
-        const auto last = std::min(end, entry->address + entry->bytes);
         if (entry->protection == Protection::ReadWrite) validate(first, static_cast<std::size_t>(last - first));
         else if (entry->original.empty()) throw std::runtime_error("protected guest memory has no native permission record");
         address = last;

@@ -6,11 +6,20 @@
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <map>
 #include <vector>
 
 namespace AgcDriver::Graphics {
+
+// Debug aid: APS5_TRACE_RT=1 logs render-target uploads, write-backs and invalidations with the
+// access site that caused them.
+inline bool TraceRenderTargets() {
+    static const bool enabled = std::getenv("APS5_TRACE_RT") != nullptr;
+    return enabled;
+}
 
 class ResidentColor : public std::enable_shared_from_this<ResidentColor> {
 public:
@@ -33,7 +42,9 @@ public:
     std::uint64_t Generation() const { return generation; }
     void Invalidate();
     void ReleaseMemory();
-    bool SharesPages(const ColorTarget& other) const;
+    // Whether the targets' bytes overlap. Targets that only share pages (neighbouring mip levels or
+    // targets packed in one allocation) stay resident side by side.
+    bool Overlaps(const ColorTarget& other) const;
 
 private:
     void resolveCpuAccess(GuestMemoryTracking::Access access);
@@ -75,7 +86,7 @@ public:
     void Invalidate();
     void ReleaseMemory();
     bool Overlaps(std::uint64_t address, std::size_t bytes) const;
-    bool SharesPages(const DepthTarget& other) const;
+    bool Overlaps(const DepthTarget& other) const;
     // Changes whenever a draw may have written the depth image.
     std::uint64_t Generation() const { return generation; }
     // Bytes per depth texel in the host image (and in CopyDepth's output).

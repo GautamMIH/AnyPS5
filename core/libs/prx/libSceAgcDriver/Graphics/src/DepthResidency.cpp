@@ -305,6 +305,7 @@ void ResidentDepth::Commit() {
 
 void ResidentDepth::Invalidate() {
     Require(!dirty, "cannot discard GPU-owned depth target contents");
+    if (TraceRenderTargets() && valid) std::fprintf(stderr, "[rt] invalidate depth@0x%llx site=%s\n", static_cast<unsigned long long>(depth.depthAddress), GuestMemory::AccessSite::Current());
     protect(GuestMemoryTracking::Protection::ReadWrite);
     valid = false;
 }
@@ -319,11 +320,9 @@ bool ResidentDepth::Overlaps(std::uint64_t address, std::size_t bytes) const {
     return rangesOverlap(address, bytes, depth.depthAddress, depth.depthBytes) || rangesOverlap(address, bytes, depth.stencilAddress, depth.stencilBytes);
 }
 
-bool ResidentDepth::SharesPages(const DepthTarget& other) const {
-    const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
+bool ResidentDepth::Overlaps(const DepthTarget& other) const {
     const auto pages = [&](std::uint64_t address, std::size_t bytes, std::uint64_t otherAddress, std::size_t otherBytes) {
-        if (bytes == 0 || otherBytes == 0) return false;
-        return address / pageSize <= (otherAddress + otherBytes - 1) / pageSize && otherAddress / pageSize <= (address + bytes - 1) / pageSize;
+        return bytes != 0 && otherBytes != 0 && rangesOverlap(address, bytes, otherAddress, otherBytes);
     };
     const std::pair<std::uint64_t, std::size_t> mine[] = {{depth.depthAddress, depth.depthBytes}, {depth.stencilAddress, depth.stencilBytes}};
     const std::pair<std::uint64_t, std::size_t> theirs[] = {{other.depthAddress, other.depthBytes}, {other.stencilAddress, other.stencilBytes}};
@@ -366,7 +365,7 @@ std::shared_ptr<ResidentDepth> RenderCache::GetDepth(const DepthTarget& depth) {
     }
     for (auto it = depthEntries.begin(); it != depthEntries.end();) {
         const auto& previous = (*it)->Description();
-        if (!(*it)->SharesPages(depth)) {
+        if (!(*it)->Overlaps(depth)) {
             ++it;
             continue;
         }
@@ -378,9 +377,9 @@ std::shared_ptr<ResidentDepth> RenderCache::GetDepth(const DepthTarget& depth) {
         (*it)->ReleaseMemory();
         it = depthEntries.erase(it);
     }
-    // A color target sharing pages with this depth surface would fight over page protection.
+    // A color target overlapping this depth surface holds the same bytes: it goes first.
     for (auto it = entries.begin(); it != entries.end();) {
-        const bool shares = (depth.depthBytes != 0 && it->second->SharesPages(ColorTarget{depth.depthAddress, {}, VK_FORMAT_UNDEFINED, depth.depthBytes, 0})) || (depth.stencilBytes != 0 && it->second->SharesPages(ColorTarget{depth.stencilAddress, {}, VK_FORMAT_UNDEFINED, depth.stencilBytes, 0}));
+        const bool shares = (depth.depthBytes != 0 && it->second->Overlaps(ColorTarget{depth.depthAddress, {}, VK_FORMAT_UNDEFINED, depth.depthBytes, 0})) || (depth.stencilBytes != 0 && it->second->Overlaps(ColorTarget{depth.stencilAddress, {}, VK_FORMAT_UNDEFINED, depth.stencilBytes, 0}));
         if (!shares) {
             ++it;
             continue;

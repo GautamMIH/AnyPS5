@@ -30,6 +30,7 @@ class SamplerCache;
 class GuestGpuMemory;
 class ImageMemory;
 class GpuTimestamps;
+class DrawProfiler;
 
 inline void Require(bool condition, const std::string& reason) {
     if (!condition) throw std::runtime_error("AGC graphics: " + reason);
@@ -134,6 +135,7 @@ struct Context {
     mutable std::shared_ptr<ImageMemory> imageMemory;
     // GPU timing of command batches (ANYPS5_GPU_TIMING=1), null otherwise.
     mutable std::shared_ptr<GpuTimestamps> gpuTimestamps;
+    mutable std::shared_ptr<DrawProfiler> drawProfiler;
 };
 
 }

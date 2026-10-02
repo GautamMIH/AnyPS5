@@ -2,6 +2,7 @@
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -125,7 +126,72 @@ static void CheckAccessibleRanges() {
     Require(!GuestVirtualAccessible_nid_postfix(address, 4, false));
 }
 
+#if defined(__linux__)
+// Watches sharing a page: the page takes the strictest protection, a fault resolves only the
+// watches that block it, and native access returns once no watch protects the page.
+struct SharedWatch {
+    GuestMemoryTracking::Watch* watch = nullptr;
+    int reads = 0;
+    int writes = 0;
+};
+
+static void ResolveSharedWatch(void* context, GuestMemoryTracking::Access access) {
+    auto& shared = *static_cast<SharedWatch*>(context);
+    if (access == GuestMemoryTracking::Access::Read) {
+        ++shared.reads;
+        shared.watch->Protect(GuestMemoryTracking::Protection::Read);
+    } else {
+        ++shared.writes;
+        shared.watch->Protect(GuestMemoryTracking::Protection::ReadWrite);
+    }
+}
+
+static void CheckSharedWatchPages() {
+    const auto page = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
+    void* mapping = nullptr;
+    Require(sceKernelMapFlexibleMemory(&mapping, 0x10000, 3, 0) == 0);
+    auto* bytes = static_cast<volatile unsigned char*>(mapping);
+    const auto base = reinterpret_cast<std::uint64_t>(mapping);
+    SharedWatch first;
+    SharedWatch second;
+    // first covers pages 0-1, second pages 1-2: page 1 is shared.
+    auto* firstWatch = new GuestMemoryTracking::Watch(base, page + page / 2, &first, ResolveSharedWatch);
+    auto* secondWatch = new GuestMemoryTracking::Watch(base + page + page / 2, page + page / 2, &second, ResolveSharedWatch);
+    first.watch = firstWatch;
+    second.watch = secondWatch;
+    firstWatch->Protect(GuestMemoryTracking::Protection::None);
+    secondWatch->Protect(GuestMemoryTracking::Protection::Read);
+    // Reading second's bytes in the shared page faults on first's protection: only first resolves.
+    Require(bytes[page + page / 2 + 8] == 0);
+    Require(first.reads == 1 && first.writes == 0 && second.reads == 0 && second.writes == 0);
+    // Writing page 2 (second's alone) resolves second.
+    bytes[page * 2 + 8] = 5;
+    Require(second.writes == 1 && first.writes == 0);
+    // Writing the shared page now resolves first only (second already allows writes).
+    bytes[page + 8] = 6;
+    Require(first.writes == 1 && second.writes == 1);
+    // Protected again, then destroyed: page 0 and the shared page return to native access while
+    // second still watches page 2.
+    firstWatch->Protect(GuestMemoryTracking::Protection::None);
+    secondWatch->Protect(GuestMemoryTracking::Protection::Read);
+    delete firstWatch;
+    bytes[0] = 7;
+    Require(bytes[page + 8] == 6);
+    Require(first.reads == 1 && first.writes == 1 && second.reads == 0 && second.writes == 1);
+    bytes[page + page / 2 + 8] = 9;
+    Require(second.writes == 2);
+    secondWatch->Protect(GuestMemoryTracking::Protection::None);
+    delete secondWatch;
+    bytes[page * 2 + 8] = 1;
+    Require(bytes[page * 2 + 8] == 1 && second.writes == 2);
+    Require(sceKernelMunmap(base, 0x10000) == 0);
+}
+#endif
+
 int main() {
+#if defined(__linux__)
+    CheckSharedWatchPages();
+#endif
     CheckNamedAndHintedMappings();
     CheckSingleViews();
     CheckAccessibleRanges();

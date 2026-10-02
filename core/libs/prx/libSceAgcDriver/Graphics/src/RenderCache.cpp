@@ -29,6 +29,7 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
     ++generation;
     Require(memoryWatch != nullptr, "render target memory ownership was released");
     if (!valid) {
+        if (TraceRenderTargets()) std::fprintf(stderr, "[rt] upload color@0x%llx+0x%llx %ux%u\n", static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.bytes), color.extent.width, color.extent.height);
         memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
         const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
         if (const auto view = layered ? std::nullopt : guestView()) {
@@ -90,6 +91,7 @@ bool ResidentColor::WriteBackOnGpu() {
     const auto view = guestView();
     if (!view) return false;
     PerformanceTimer timing("Graphics.ResidentColor.GpuWriteBack");
+    if (TraceRenderTargets()) std::fprintf(stderr, "[rt] writeback color@0x%llx+0x%llx site=%s\n", static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.bytes), GuestMemory::AccessSite::Current());
     const auto commands = context.drawQueue->Begin(context);
     downloadLinear(commands);
     transfer.TileTo(commands, view->buffer, view->offset);
@@ -146,18 +148,19 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
     }
     for (auto it = entries.begin(); it != entries.end();) {
         const auto& previous = it->second->Description();
-        if (!it->second->SharesPages(color)) {
+        if (!it->second->Overlaps(color)) {
             ++it;
             continue;
         }
         if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode && previous.elementBytes == color.elementBytes && previous.tail == color.tail && previous.layers == color.layers && previous.baseLayer == color.baseLayer && previous.surfaceSlices == color.surfaceSlices) return it->second;
+        if (TraceRenderTargets()) std::fprintf(stderr, "[rt] replace color@0x%llx+0x%llx %ux%u fmt%d tile%u eb%u dirty=%d -> color@0x%llx+0x%llx %ux%u fmt%d tile%u eb%u\n", static_cast<unsigned long long>(previous.address), static_cast<unsigned long long>(previous.bytes), previous.extent.width, previous.extent.height, static_cast<int>(previous.format), static_cast<unsigned>(previous.tileMode), static_cast<unsigned>(previous.elementBytes), it->second->Dirty() ? 1 : 0, static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.bytes), color.extent.width, color.extent.height, static_cast<int>(color.format), static_cast<unsigned>(color.tileMode), static_cast<unsigned>(color.elementBytes));
         // The new target is uploaded on the GPU after this, so the old one can be written back there.
         Resolve(previous.address, previous.bytes, true, true);
         it->second->ReleaseMemory();
         it = entries.erase(it);
     }
     for (auto it = depthEntries.begin(); it != depthEntries.end();) {
-        if (!(*it)->Overlaps(color.address, color.bytes) && !(*it)->SharesPages(DepthTarget{color.address, 0, {}, 0, false, VK_FORMAT_UNDEFINED, color.bytes, 0})) {
+        if (!(*it)->Overlaps(color.address, color.bytes)) {
             ++it;
             continue;
         }
@@ -200,6 +203,7 @@ void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writabl
         const auto& entry = it->second;
         const auto& color = entry->Description();
         if (address >= base + color.bytes || base >= address + bytes) continue;
+        if (TraceRenderTargets() && (entry->Dirty() || (writable && entry->Valid()))) std::fprintf(stderr, "[rt] resolve 0x%llx+0x%zx %s%s hits color@0x%llx site=%s\n", static_cast<unsigned long long>(address), bytes, writable ? "write" : "read", gpuConsumer || GuestMemory::GpuAccessScope::Active() ? " gpu" : "", static_cast<unsigned long long>(base), GuestMemory::AccessSite::Current());
         if (entry->Dirty()) affected.push_back(entry);
         else if (writable) entry->Invalidate();
     }

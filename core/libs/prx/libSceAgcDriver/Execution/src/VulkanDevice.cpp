@@ -130,6 +130,7 @@ struct VulkanDevice::State {
     std::shared_ptr<Graphics::BufferPool> bufferPool;
     std::shared_ptr<Graphics::ImageMemory> imageMemory;
     std::shared_ptr<Graphics::GpuTimestamps> gpuTimestamps;
+    std::shared_ptr<Graphics::DrawProfiler> drawProfiler;
     // Compute pipelines by compiled variant (or SPIR-V), descriptor layout and push stages.
     std::map<std::string, std::shared_ptr<ComputePipeline>> computePipelines;
     std::shared_ptr<Graphics::DescriptorCache> descriptorCache;
@@ -233,6 +234,7 @@ struct VulkanDevice::State {
             bufferPool.reset();
             imageMemory.reset();
             gpuTimestamps.reset();
+            drawProfiler.reset();
             descriptorCache.reset();
             samplerCache.reset();
             const auto destroyFence = reinterpret_cast<PFN_vkDestroyFence>(deviceProc(device, "vkDestroyFence"));
@@ -583,6 +585,9 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     if (std::getenv("ANYPS5_GPU_TIMING") != nullptr) {
         if (state->properties.limits.timestampComputeAndGraphics) state->gpuTimestamps = std::make_shared<Graphics::GpuTimestamps>(state->device, state->deviceProc, state->properties.limits.timestampPeriod);
         else std::fprintf(stderr, "[AnyPS5] ANYPS5_GPU_TIMING: the device has no graphics timestamps\n");
+    }
+    if (std::getenv("APS5_PROFILE_GPU_DRAWS") != nullptr && state->properties.limits.timestampComputeAndGraphics) {
+        state->drawProfiler = std::make_shared<Graphics::DrawProfiler>(state->device, state->deviceProc, state->properties.limits.timestampPeriod);
     }
     // Components copy the context when created: guest memory is imported first so every one of
     // them (render and texture caches included) sees it.
@@ -988,6 +993,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.guestGpuMemory = state->guestGpuMemory.get();
     context.imageMemory = state->imageMemory;
     context.gpuTimestamps = state->gpuTimestamps;
+    context.drawProfiler = state->drawProfiler;
     return context;
 }
 
@@ -1092,25 +1098,35 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    std::uint32_t profile = UINT32_MAX;
+    if (state->drawProfiler) {
+        char key[96];
+        std::snprintf(key, sizeof(key), "dispatch cs=%016llx", static_cast<unsigned long long>(shader.variantId));
+        profile = state->drawProfiler->Begin(context, commands, key);
+    }
     barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
     resources->RecordUploads(commands);
+    if (state->drawProfiler) state->drawProfiler->Mark(context, commands, profile, 1);
     state->DeviceFunction<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline);
     resources->Bind(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->layout);
     if (pushStages != 0) {
         state->DeviceFunction<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipeline->layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, Graphics::PipelinePushConstantBytes, pushBytes.data());
     }
     state->DeviceFunction<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, x, y, z);
+    if (state->drawProfiler) state->drawProfiler->Mark(context, commands, profile, 2);
     resources->RecordDownloads(commands);
     VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     after.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+    if (state->drawProfiler) state->drawProfiler->Mark(context, commands, profile, 3);
     timing.Mark("command_record");
     state->drawQueue->Enqueue(std::move(resources), std::move(pipeline));
     timing.Mark("enqueue");
 }
 
 void VulkanDevice::ReportGpuTime(FrameTiming& frame) {
+    if (state->drawProfiler) state->drawProfiler->EndFrame();
     if (!state->gpuTimestamps) return;
     std::uint64_t busy = 0;
     for (const auto& [label, nanoseconds, batches] : state->gpuTimestamps->Drain(busy)) frame.Add("GPU", label, std::chrono::nanoseconds(nanoseconds), batches);

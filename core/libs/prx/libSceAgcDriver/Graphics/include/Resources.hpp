@@ -4,6 +4,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include <cstdint>
 #include <tuple>
+#include <array>
+#include <deque>
+#include <string>
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -122,6 +125,47 @@ private:
     std::mutex mutex;
     std::map<const char*, std::pair<std::uint64_t, std::uint64_t>> totals;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> intervals;
+};
+
+// Debug aid: APS5_PROFILE_GPU_DRAWS=1 times every draw and dispatch on the GPU in three phases
+// (setup: barriers, uploads and target transitions; work: the render pass or dispatch; teardown:
+// downloads and barriers), totalled per key (the shaders and targets) and printed every
+// APS5_PROFILE_GPU_FRAMES (60) frames, heaviest first.
+class DrawProfiler {
+public:
+    static constexpr std::uint32_t Marks = 4;
+    DrawProfiler(VkDevice device, PFN_vkGetDeviceProcAddr deviceProc, float period);
+    ~DrawProfiler();
+    DrawProfiler(const DrawProfiler&) = delete;
+    DrawProfiler& operator=(const DrawProfiler&) = delete;
+    // Starts a record (outside a render pass): resets its queries and writes mark 0. Returns
+    // UINT32_MAX when every slot is waiting to be read.
+    std::uint32_t Begin(const Context& context, VkCommandBuffer commands, std::string key);
+    // Writes mark 1-3 of a record (any mark may be inside a render pass).
+    void Mark(const Context& context, VkCommandBuffer commands, std::uint32_t record, std::uint32_t mark) const;
+    // Reads finished records; prints the totals at the end of each reporting interval.
+    void EndFrame();
+
+private:
+    static constexpr std::uint32_t Records = 16384;
+    struct Pending {
+        std::uint32_t record;
+        std::string key;
+    };
+    struct Total {
+        std::array<std::uint64_t, Marks - 1> phases{};
+        std::uint64_t count = 0;
+    };
+    VkDevice device;
+    PFN_vkGetDeviceProcAddr deviceProc;
+    double period;
+    VkQueryPool pool = VK_NULL_HANDLE;
+    std::mutex mutex;
+    std::uint32_t next = 0;
+    std::deque<Pending> pending;
+    std::map<std::string, Total> totals;
+    std::uint32_t frames = 0;
+    std::uint32_t interval = 60;
 };
 
 // Frees the command buffers and fences recycled from destroyed command batches of the pool (before

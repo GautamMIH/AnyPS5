@@ -2,6 +2,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <exception>
+#include <cstdio>
+#include <cstdlib>
 #include <optional>
 #include <algorithm>
 #include <mutex>
@@ -435,6 +437,69 @@ std::vector<std::tuple<const char*, std::uint64_t, std::uint64_t>> GpuTimestamps
     }
     intervals.clear();
     return result;
+}
+
+DrawProfiler::DrawProfiler(VkDevice device, PFN_vkGetDeviceProcAddr deviceProc, float period) : device(device), deviceProc(deviceProc), period(period) {
+    VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    info.queryCount = Records * Marks;
+    Check(reinterpret_cast<PFN_vkCreateQueryPool>(deviceProc(device, "vkCreateQueryPool"))(device, &info, nullptr, &pool), "vkCreateQueryPool draw profile");
+    if (const char* frames = std::getenv("APS5_PROFILE_GPU_FRAMES")) interval = std::max(1, std::atoi(frames));
+}
+
+DrawProfiler::~DrawProfiler() {
+    if (pool != VK_NULL_HANDLE) reinterpret_cast<PFN_vkDestroyQueryPool>(deviceProc(device, "vkDestroyQueryPool"))(device, pool, nullptr);
+}
+
+std::uint32_t DrawProfiler::Begin(const Context& context, VkCommandBuffer commands, std::string key) {
+    std::uint32_t record = 0;
+    {
+        std::lock_guard lock(mutex);
+        if (pending.size() >= Records) return UINT32_MAX;
+        record = next;
+        next = (next + 1) % Records;
+        pending.push_back({record, std::move(key)});
+    }
+    context.Function<PFN_vkCmdResetQueryPool>("vkCmdResetQueryPool")(commands, pool, record * Marks, Marks);
+    context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, record * Marks);
+    return record;
+}
+
+void DrawProfiler::Mark(const Context& context, VkCommandBuffer commands, std::uint32_t record, std::uint32_t mark) const {
+    if (record == UINT32_MAX) return;
+    context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool, record * Marks + mark);
+}
+
+void DrawProfiler::EndFrame() {
+    std::lock_guard lock(mutex);
+    const auto results = reinterpret_cast<PFN_vkGetQueryPoolResults>(deviceProc(device, "vkGetQueryPoolResults"));
+    // The queue runs in order: the first record not yet finished ends the read.
+    while (!pending.empty()) {
+        std::array<std::uint64_t, Marks> values{};
+        if (results(device, pool, pending.front().record * Marks, Marks, sizeof(values), values.data(), sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) break;
+        auto& total = totals[pending.front().key];
+        for (std::uint32_t phase = 0; phase + 1 < Marks; ++phase)
+            if (values[phase + 1] >= values[phase]) total.phases[phase] += static_cast<std::uint64_t>(static_cast<double>(values[phase + 1] - values[phase]) * period);
+        ++total.count;
+        pending.pop_front();
+    }
+    if (++frames < interval) return;
+    std::vector<std::pair<std::string, Total>> sorted(totals.begin(), totals.end());
+    const auto sum = [](const Total& total) { return total.phases[0] + total.phases[1] + total.phases[2]; };
+    std::sort(sorted.begin(), sorted.end(), [&](const auto& a, const auto& b) { return sum(a.second) > sum(b.second); });
+    Total all;
+    for (const auto& [key, total] : sorted) {
+        for (std::uint32_t phase = 0; phase + 1 < Marks; ++phase) all.phases[phase] += total.phases[phase];
+        all.count += total.count;
+    }
+    const auto perFrame = [&](std::uint64_t nanoseconds) { return static_cast<double>(nanoseconds) / 1e6 / frames; };
+    std::fprintf(stderr, "[gpu-profile] %u frames: %.1f draws+dispatches/frame, ms/frame setup %.2f work %.2f teardown %.2f\n", frames, static_cast<double>(all.count) / frames, perFrame(all.phases[0]), perFrame(all.phases[1]), perFrame(all.phases[2]));
+    for (std::size_t index = 0; index < sorted.size() && index < 30; ++index) {
+        const auto& [key, total] = sorted[index];
+        std::fprintf(stderr, "[gpu-profile]   %7.2f ms/frame (setup %.2f work %.2f teardown %.2f) %6.1f/frame %7.1f us each  %s\n", perFrame(sum(total)), perFrame(total.phases[0]), perFrame(total.phases[1]), perFrame(total.phases[2]), static_cast<double>(total.count) / frames, static_cast<double>(sum(total)) / 1e3 / static_cast<double>(total.count), key.c_str());
+    }
+    totals.clear();
+    frames = 0;
 }
 
 void CommandBatch::beginTiming() {

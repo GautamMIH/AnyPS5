@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include <limits>
 
 namespace AgcDriver::Graphics {
@@ -16,6 +17,7 @@ ResidentColor::~ResidentColor() = default;
 
 void ResidentColor::Invalidate() {
     Require(!dirty, "cannot discard GPU-owned render target contents");
+    if (TraceRenderTargets() && valid) std::fprintf(stderr, "[rt] invalidate color@0x%llx+0x%llx site=%s\n", static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.bytes), GuestMemory::AccessSite::Current());
     if (memoryWatch) memoryWatch->Protect(GuestMemoryTracking::Protection::ReadWrite);
     valid = false;
 }
@@ -26,19 +28,15 @@ void ResidentColor::ReleaseMemory() {
     memoryWatch.reset();
 }
 
-bool ResidentColor::SharesPages(const ColorTarget& other) const {
-    const auto pageSize = GuestMemoryTracking::GuestMemoryTrackingPageSize_nid_postfix();
-    Require(color.bytes != 0 && other.bytes != 0, "empty render target page range");
-    Require(color.bytes <= std::numeric_limits<std::uint64_t>::max() - color.address && other.bytes <= std::numeric_limits<std::uint64_t>::max() - other.address, "render target page range overflow");
-    const auto first = color.address / pageSize;
-    const auto last = (color.address + color.bytes - 1) / pageSize;
-    const auto otherFirst = other.address / pageSize;
-    const auto otherLast = (other.address + other.bytes - 1) / pageSize;
-    return first <= otherLast && otherFirst <= last;
+bool ResidentColor::Overlaps(const ColorTarget& other) const {
+    Require(color.bytes != 0 && other.bytes != 0, "empty render target range");
+    Require(color.bytes <= std::numeric_limits<std::uint64_t>::max() - color.address && other.bytes <= std::numeric_limits<std::uint64_t>::max() - other.address, "render target range overflow");
+    return color.address < other.address + other.bytes && other.address < color.address + color.bytes;
 }
 
 void ResidentColor::resolveCpuAccess(GuestMemoryTracking::Access access) {
     PerformanceTimer timing("Graphics.RenderMemory.CpuAccess");
+    if (TraceRenderTargets()) std::fprintf(stderr, "[rt] cpu %s color@0x%llx dirty=%d site=%s\n", access == GuestMemoryTracking::Access::Read ? "read" : access == GuestMemoryTracking::Access::Invalidate ? "invalidate" : "write", static_cast<unsigned long long>(color.address), dirty ? 1 : 0, GuestMemory::AccessSite::Current());
     Require(memoryWatch != nullptr && context.drawQueue != nullptr, "render target memory resolver is unavailable");
     if (dirty || gpuWritePending || access == GuestMemoryTracking::Access::Invalidate) {
         context.drawQueue->WaitGpu();

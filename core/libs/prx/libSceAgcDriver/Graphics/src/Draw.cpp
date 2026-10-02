@@ -150,9 +150,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         const auto& color = state.colors[slot];
         const ColorTargetLayout colorLayout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
         Require(color.bytes == (color.Layered() ? color.LayeredBytes(colorLayout.Bytes()) : colorLayout.Bytes()), "color target transfer size mismatch");
-        // The render cache evicts residents that share pages with a new target, so the targets of
-        // one draw must be disjoint.
-        for (std::uint32_t other = 0; other < slot; ++other) Require(!storage->colors[other] || !storage->colors[other]->SharesPages(color), "color targets of one draw share memory pages");
+        // The render cache evicts residents that overlap a new target, so the targets of one draw
+        // must be disjoint.
+        for (std::uint32_t other = 0; other < slot; ++other) Require(!storage->colors[other] || !storage->colors[other]->Overlaps(color), "color targets of one draw overlap");
         storage->colors[slot] = context.renderCache->Get(color, state.blends[slot].blendEnable != 0);
     }
     if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
@@ -161,6 +161,18 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
     const auto commands = context.drawQueue->Begin(context);
+    std::uint32_t profile = UINT32_MAX;
+    if (context.drawProfiler) {
+        std::string key = "draw";
+        char part[64];
+        for (const auto& shader : shaders) {
+            std::snprintf(part, sizeof(part), " %u:%016llx", static_cast<unsigned>(shader.stage), static_cast<unsigned long long>(shader.program->variantId));
+            key += part;
+        }
+        std::snprintf(part, sizeof(part), " %ux%u rt%x%s", state.renderExtent.width, state.renderExtent.height, state.colorTargetMask, state.hasDepthTarget ? " depth" : "");
+        key += part;
+        profile = context.drawProfiler->Begin(context, commands, std::move(key));
+    }
     VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
     upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
@@ -170,6 +182,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         if (color) color->Begin(commands);
     }
     if (storage->depth) storage->depth->Begin(commands);
+    if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 1);
     pipeline.Begin(commands, state.renderExtent);
     if (depthFastClear) {
         // An HTILE fast clear stands for the whole surface holding the clear values.
@@ -212,11 +225,13 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         }
     }
     context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(commands);
+    if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 2);
     resources->RecordDownloads(commands);
     VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     download.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     download.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT | shaderStages, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
+    if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 3);
     timing.Mark("command_record");
     context.drawQueue->Enqueue(std::move(resources), std::move(storage));
     timing.Mark("enqueue");
