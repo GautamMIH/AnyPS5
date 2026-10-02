@@ -3,6 +3,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include <stdexcept>
+#include <string>
 
 static constexpr int SCE_OK = 0;
 
@@ -57,10 +58,8 @@ int APS5_VABI scePthreadAttrSetstacksize(PthreadAttr* attr, std::size_t stacksiz
     if (!attr || !*attr) throw std::runtime_error("scePthreadAttrSetstacksize: null attr");
     if (stacksize < 16384) throw std::runtime_error("scePthreadAttrSetstacksize: too small");
 #ifdef _WIN32
-    SYSTEM_INFO system{};
-    GetSystemInfo(&system);
-    if (stacksize % system.dwPageSize != 0 || stacksize > std::numeric_limits<unsigned>::max())
-        throw std::runtime_error("scePthreadAttrSetstacksize: invalid Windows stack size");
+    if (stacksize > std::numeric_limits<unsigned>::max() - 0xffffu)
+        throw std::runtime_error(std::string(__func__) + ": stack size exceeds the Windows limit");
 #endif
     (*attr)->_stacksize = stacksize;
     return SCE_OK;

@@ -8,6 +8,7 @@
 #include <codegen/x86/ClzeroLowering.hpp>
 #include <codegen/x86/DecodedInstruction.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
+#include <codegen/x86/X64InstructionRewriter.hpp>
 #include <codegen/IInstructionScanner.hpp>
 #include <elfpatcher/general/EntryStubBuilder.hpp>
 #include <elfpatcher/general/ProgramHeaderLayoutBuilder.hpp>
@@ -120,7 +121,9 @@ void decoderLengths() {
         {0x66, 0x0F, 0xC4, 0xC0, 0x01}, {0xC2, 0x08, 0x00}, {0xC8, 0x10, 0x00, 0x00}, {0xF3, 0x0F, 0x2B, 0x07},
         {0xF2, 0x44, 0x0F, 0x2B, 0x4C, 0x24, 0x10}, {0x0F, 0x01, 0xFA}, {0x0F, 0xB9, 0x00},
         {0x41, 0x0F, 0xBB, 0xF7}, {0x0F, 0xBB, 0x47, 0x08},
-        {0x0F, 0x38, 0xCB, 0xCA}, {0x45, 0x0F, 0x38, 0xCC, 0xE1}, {0x0F, 0x38, 0xCD, 0x08}, {0x0F, 0x38, 0xCB, 0x0D, 0x10, 0x00, 0x00, 0x00}};
+        {0x0F, 0x38, 0xCB, 0xCA}, {0x45, 0x0F, 0x38, 0xCC, 0xE1}, {0x0F, 0x38, 0xCD, 0x08}, {0x0F, 0x38, 0xCB, 0x0D, 0x10, 0x00, 0x00, 0x00},
+        {0x48, 0x66, 0xB8, 0x34, 0x12}, {0x66, 0x48, 0xB8, 1, 2, 3, 4, 5, 6, 7, 8}, {0x41, 0x48, 0xB8, 1, 2, 3, 4, 5, 6, 7, 8},
+        {0x48, 0x64, 0x8B, 0x00}, {0x48, 0xF3, 0x0F, 0x2B, 0x00}, {0x48, 0x67, 0x0F, 0x01, 0xFC}, {0x48, 0x48, 0x0F, 0x01, 0xFC}};
     Bytes padded;
     for (const auto& instruction : instructions) {
         padded = instruction;
@@ -128,6 +131,12 @@ void decoderLengths() {
         require(decoder.Decode(padded.data(), padded.size()) == instruction.size(), "AMD-only or repaired two-byte opcode was decoded with the wrong length");
     }
     requireFailure([&] { const Bytes bare = {0x0F, 0x78, 0xC3, 0x08, 0x28}; (void)decoder.Decode(bare.data(), bare.size()); }, "0F 78 without an SSE4a prefix was accepted");
+    const Bytes strayRex = {0x48, 0x64, 0x8B, 0x00, 0x90};
+    const auto stray = decoder.DecodeInstruction(strayRex.data(), strayRex.size());
+    require(stray.Length == 4 && stray.OpcodeOffset == 2 && stray.RexPrefix == 0 && stray.SegmentPrefix == 0x64, "A REX before a legacy prefix was kept");
+    const Bytes lastRex = {0x41, 0x48, 0x8B, 0x00, 0x90};
+    const auto last = decoder.DecodeInstruction(lastRex.data(), lastRex.size());
+    require(last.Length == 4 && last.OpcodeOffset == 2 && last.RexPrefix == 0x48, "The REX before the opcode was not the one kept");
 }
 
 void sse4aOperands() {
@@ -145,6 +154,9 @@ void sse4aOperands() {
     const Bytes registerForm = {0x66, 0x45, 0x0F, 0x79, 0xCA};
     const auto decoded = Codegen::DecodeSse4a(registerForm.data(), registerForm.size());
     require(decoded.RegisterForm && !decoded.Insertq && decoded.Destination == 9 && decoded.Source == 10, "Register form operands were decoded incorrectly");
+    const Bytes strayRex = {0x41, 0xF2, 0x0F, 0x79, 0xCA};
+    const auto ignored = Codegen::DecodeSse4a(strayRex.data(), strayRex.size());
+    require(ignored.RegisterForm && ignored.Insertq && ignored.Destination == 1 && ignored.Source == 2, "A REX before a legacy prefix was applied");
     requireFailure([] { const Bytes bytes = {0x66, 0x0F, 0x78, 0xCB, 0x08, 0x28}; (void)Codegen::DecodeSse4a(bytes.data(), bytes.size()); }, "EXTRQ with a non-zero reg field was accepted");
     requireFailure([] { const Bytes bytes = {0xF2, 0x0F, 0x78, 0x1B, 0x08, 0x08}; (void)Codegen::DecodeSse4a(bytes.data(), bytes.size()); }, "SSE4a memory operand was accepted");
     requireFailure([] { const Bytes bytes = {0xF2, 0x0F, 0x78, 0xC8, 0x20, 0x30}; (void)Codegen::DecodeSse4a(bytes.data(), bytes.size()); }, "Field beyond bit 64 was accepted");
@@ -161,6 +173,8 @@ void sha256Operands() {
     requireFailure([] { const Bytes bytes = {0x0F, 0x38, 0xCC, 0x08}; (void)Codegen::DecodeSha256(bytes.data(), bytes.size()); }, "SHA-256 memory operand was accepted");
     requireFailure([] { const Bytes bytes = {0x66, 0x0F, 0x38, 0xCB, 0xCA}; (void)Codegen::DecodeSha256(bytes.data(), bytes.size()); }, "Prefixed 0F 38 CB was decoded as SHA-256");
     requireFailure([] { const Bytes bytes = {0x0F, 0x38, 0xC9, 0xCA}; (void)Codegen::DecodeSha256(bytes.data(), bytes.size()); }, "SHA-1 was decoded as SHA-256");
+    check({0x41, 0x2E, 0x0F, 0x38, 0xCC, 0xCA}, Codegen::Sha256Operation::Msg1, 1, 2);
+    check({0x2E, 0x41, 0x0F, 0x38, 0xCC, 0xCA}, Codegen::Sha256Operation::Msg1, 1, 10);
     const Bytes rounds = {0x0F, 0x38, 0xCB, 0xCA};
     require(Codegen::DecodedInstruction{rounds.data(), rounds.size()}.IsShaNi(), "SHA256RNDS2 is not recognised as SHA-NI");
 }
@@ -389,23 +403,38 @@ void converterClzero() {
     require(failureOffset([&] { (void)converter->Convert(segmentRelative, {segmentHeader(text.size())}); }, "FS-relative CLZERO was accepted") == 0x20A, "CLZERO operand failure does not carry the file offset");
 }
 
-void converterSplitPrefixes() {
+void converterStrayRex() {
     const auto converter = Codegen::MakeAmd64OnlyConverter();
-    for (const Bytes& instruction : {Bytes{0x48, 0x64, 0x0F, 0x01, 0xFC}, Bytes{0x48, 0x67, 0x0F, 0x01, 0xFC}, Bytes{0x48, 0xF0, 0x0F, 0x01, 0xFC}, Bytes{0x48, 0xF0, 0x0F, 0x38, 0xCB, 0xCA}}) {
+    const auto convert = [&](const Bytes& text) {
         Bytes file(0x300, 0xCC);
-        Bytes text = instruction;
-        text.insert(text.end(), {0x90, 0x90, 0xC3});
         std::copy(text.begin(), text.end(), file.begin() + 0x200);
-        require(failureOffset([&] { (void)converter->Convert(file, {segmentHeader(text.size())}); }, "AMD-only instruction after a split REX and prefix was accepted") == 0x200, "Split prefix failure does not carry the file offset");
-    }
+        return std::pair{file, converter->Convert(file, {segmentHeader(text.size())})};
+    };
+    for (const Bytes& instruction : {Bytes{0x48, 0x64, 0x0F, 0x01, 0xFC, 0x90, 0x90, 0xC3}, Bytes{0x48, 0xF0, 0x0F, 0x01, 0xFC, 0x90, 0x90, 0xC3}})
+        require(failureOffset([&] { (void)convert(instruction); }, "CLZERO with a FS or LOCK prefix after a stray REX was accepted") == 0x200, "Stray REX failure does not carry the file offset");
+    const auto [addressFile, addressSize32] = convert({0x48, 0x67, 0x0F, 0x01, 0xFC, 0xC3});
+    require(addressSize32.Trampolines.size() == 1 && addressSize32.Trampolines[0].Length == 5 && addressSize32.Reports[0].InstructionName == "CLZERO", "67h CLZERO after a stray REX was not lowered as one instruction");
+    const auto [movntsFile, movnts] = convert({0x48, 0xF3, 0x0F, 0x2B, 0x00, 0xC3});
+    auto expected = movntsFile;
+    expected[0x203] = 0x11;
+    require(movnts.ReplacedCount == 1 && movnts.Reports[0].InstructionName == "MOVNTSS" && movnts.Bytes == expected, "MOVNTSS after a stray REX was not rewritten");
     for (const Bytes& following : {Bytes{0x48, 0x64, 0x8B, 0x00}, Bytes{0x48, 0x67, 0x8B, 0x00}, Bytes{0x48, 0xF0, 0x01, 0x00}}) {
-        Bytes file(0x300, 0xCC);
         Bytes text = {0x0F, 0x01, 0xFC};
         text.insert(text.end(), following.begin(), following.end());
         text.push_back(0xC3);
-        std::copy(text.begin(), text.end(), file.begin() + 0x200);
-        require(failureOffset([&] { (void)converter->Convert(file, {segmentHeader(text.size())}); }, "Split REX and prefix were moved into a stub") == 0x203, "Split prefix failure after a short site does not carry the file offset");
+        const auto [file, result] = convert(text);
+        require(result.Trampolines.size() == 1 && result.Trampolines[0].Length == 7, "Instruction with a stray REX was not absorbed whole");
+        const auto& body = result.Trampolines[0].Body;
+        const auto returnBranch = result.Trampolines[0].ReturnBranchOffset;
+        require(Bytes(body.begin() + static_cast<std::ptrdiff_t>(returnBranch - following.size()), body.begin() + static_cast<std::ptrdiff_t>(returnBranch)) == following, "Absorbed instruction lost its prefixes");
     }
+}
+
+void rewriterStrayRex() {
+    const Bytes code = {0x48, 0x2E, 0xE9, 0x01, 0x00, 0x00, 0x00, 0x90, 0xC3};
+    const auto rewritten = Codegen::X64InstructionRewriter{}.Rewrite(code, {7, {0x66, 0x90}});
+    const Bytes expected = {0x48, 0x2E, 0xE9, 0x02, 0x00, 0x00, 0x00, 0x66, 0x90, 0xC3};
+    require(rewritten.Bytes == expected, "Branch with a stray REX was not adjusted by a length-changing rewrite");
 }
 
 void converterFailureOffsets() {
@@ -814,7 +843,8 @@ int main() {
         converterSha256();
         converterMonitorWait();
         converterClzero();
-        converterSplitPrefixes();
+        converterStrayRex();
+        rewriterStrayRex();
         converterFailureOffsets();
         linuxPlacement();
         scannerZeroTail();

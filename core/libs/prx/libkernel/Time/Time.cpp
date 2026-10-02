@@ -599,8 +599,8 @@ uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
 }
 
 unsigned int APS5_VABI sceKernelSleep(unsigned int seconds) {
- std::this_thread::sleep_for(std::chrono::seconds(seconds));
- return 0;
+    TimedWait::SleepNanos(static_cast<std::uint64_t>(seconds) * 1000000000ULL);
+    return 0;
 }
 
 }

@@ -511,138 +511,6 @@ struct AudioPropagationSystemMemory {
     std::size_t size_gpu_mem;
 };
 
-using Ngs2Handle = std::uintptr_t;
-using Ngs2BufferAllocHandler = std::int32_t (*)(void*);
-using Ngs2BufferFreeHandler = std::int32_t (*)(void*);
-
-struct Ngs2ContextBufferInfo {
-    void* host_buffer;
-    std::size_t host_buffer_size;
-    std::uintptr_t reserved[5];
-    std::uintptr_t user_data;
-};
-
-struct Ngs2BufferAllocator {
-    Ngs2BufferAllocHandler alloc_handler;
-    Ngs2BufferFreeHandler free_handler;
-    std::uintptr_t user_data;
-};
-
-struct Ngs2SystemOption {
-    std::size_t size;
-    char name[16];
-    std::uint32_t flags;
-    std::uint32_t max_grain_samples;
-    std::uint32_t num_grain_samples;
-    std::uint32_t sample_rate;
-    std::uint32_t reserved[6];
-};
-
-struct Ngs2SystemInfo {
-    char name[16];
-    Ngs2Handle system_handle;
-    Ngs2ContextBufferInfo buffer_info;
-    std::uint32_t uid;
-    std::uint32_t min_grain_samples;
-    std::uint32_t max_grain_samples;
-    std::uint32_t state_flags;
-    std::uint32_t rack_count;
-    float last_render_ratio;
-    std::int64_t last_render_tick;
-    std::int64_t render_count;
-    std::uint32_t sample_rate;
-    std::uint32_t num_grain_samples;
-};
-
-struct Ngs2RackOption {
-    std::size_t size;
-    char name[16];
-    std::uint32_t flags;
-    std::uint32_t max_grain_samples;
-    std::uint32_t max_voices;
-    std::uint32_t max_input_delay_blocks;
-    std::uint32_t max_matrices;
-    std::uint32_t max_ports;
-    std::uint32_t reserved[20];
-};
-
-struct Ngs2VoiceParamHeader {
-    std::uint16_t size;
-    std::int16_t next;
-    std::uint32_t id;
-};
-
-struct Ngs2RenderBufferInfo {
-    void* buffer;
-    std::size_t buffer_size;
-    std::uint32_t waveform_type;
-    std::uint32_t num_channels;
-};
-
-struct Ngs2VoiceState {
-    std::uint32_t state_flags;
-};
-
-struct Ngs2WaveformFormat {
-    std::uint32_t waveform_type;
-    std::uint32_t num_channels;
-    std::uint32_t sample_rate;
-    std::uint32_t config_data;
-    std::uint32_t frame_offset;
-    std::uint32_t frame_margin;
-};
-
-struct Ngs2WaveformBlock {
-    std::uint64_t data_offset;
-    std::uint64_t data_size;
-    std::uint32_t num_repeats;
-    std::uint32_t num_skip_samples;
-    std::uint32_t num_samples;
-    std::uint32_t reserved;
-    std::uintptr_t user_data;
-};
-
-struct Ngs2WaveformInfo {
-    Ngs2WaveformFormat format;
-    std::uint32_t data_offset;
-    std::uint32_t data_size;
-    std::uint32_t loop_begin_position;
-    std::uint32_t loop_end_position;
-    std::uint32_t num_samples;
-    std::uint32_t audio_unit_size;
-    std::uint32_t num_audio_unit_samples;
-    std::uint32_t num_audio_unit_per_frame;
-    std::uint32_t audio_frame_size;
-    std::uint32_t num_audio_frame_samples;
-    std::uint32_t num_delay_samples;
-    std::uint32_t num_blocks;
-    Ngs2WaveformBlock block[4];
-};
-
-struct Ngs2PanParam {
-    std::uint32_t reserved[16];
-};
-
-struct Ngs2PanWork {
-    std::uint32_t reserved[64];
-};
-
-struct Ngs2GeomListenerParam {
-    std::uint32_t reserved[32];
-};
-
-struct Ngs2GeomListenerWork {
-    std::uint32_t reserved[64];
-};
-
-struct Ngs2GeomSourceParam {
-    std::uint32_t reserved[32];
-};
-
-struct Ngs2GeomAttribute {
-    std::uint32_t reserved[32];
-};
-
 struct AvPlayerAudio {
     std::uint16_t channel_count;
     std::uint8_t reserved1[2];
@@ -796,6 +664,59 @@ struct AudiodecCtrl {
     void* pBsiInfo;
     AudiodecAuInfo* pAuInfo;
     AudiodecPcmItem* pPcmItem;
+};
+
+struct AudiodecParamAt9 {
+    std::uint32_t ui_size;
+    std::int32_t i_bw_pcm;
+    std::uint8_t ui_config_data[4];
+};
+
+struct AudiodecAt9Info {
+    std::uint32_t ui_size;
+    std::uint32_t ui_channel;
+    std::uint32_t ui_bitrate;
+    std::uint32_t ui_sampling_rate;
+    std::uint32_t ui_super_frame_size;
+    std::uint32_t ui_frames_in_super_frame;
+    std::uint32_t ui_next_frame_size;
+    std::uint32_t ui_frame_samples;
+    std::int32_t i_result;
+};
+
+struct AudiodecParamMp3 {
+    std::uint32_t ui_size;
+    std::int32_t i_bw_pcm;
+};
+
+struct AudiodecMp3Info {
+    std::uint32_t ui_size;
+    std::uint32_t ui_header;
+    std::uint8_t uc_crc;
+    std::uint8_t uc_mode;
+    std::uint8_t uc_mode_extension;
+    std::uint8_t uc_copyright;
+    std::uint8_t uc_original;
+    std::uint8_t uc_emphasis;
+    std::uint8_t uc_reserved[2];
+    std::int32_t i_result;
+};
+
+struct AudiodecParamM4aac {
+    std::uint32_t ui_size;
+    std::int32_t i_bw_pcm;
+    std::uint32_t ui_config_number;
+    std::uint32_t ui_sampling_freq_index;
+    std::uint32_t ui_max_channels;
+    std::uint32_t ui_enable_heaac;
+};
+
+struct AudiodecM4aacInfo {
+    std::uint32_t ui_size;
+    std::uint32_t ui_sampling_freq;
+    std::uint32_t ui_number_of_channels;
+    std::uint32_t ui_heaac;
+    std::int32_t i_result;
 };
 
 struct VoiceInitParam {
@@ -974,7 +895,7 @@ struct MouseData {
     std::uint8_t reserved[8];
 };
 
-constexpr std::uint32_t KEYBOARD_MAX_KEYCODES = 6;
+constexpr std::uint32_t KEYBOARD_MAX_KEYCODES = 16;
 
 struct KeyboardData {
     std::uint64_t timestamp;
@@ -1141,6 +1062,13 @@ struct ImeDialogResult {
 };
 
 using Result = ImeDialogResult;
+
+struct MsgDialogResult {
+    std::int32_t mode;
+    std::int32_t result;
+    std::int32_t button_id;
+    char reserved[32];
+};
 
 struct PositionAndForm {
     std::uint32_t type;
@@ -1538,6 +1466,35 @@ struct JpegEncEncodeParam {
 struct JpegEncOutputInfo {
     std::uint32_t size;
     std::uint32_t height;
+};
+
+struct JpegDecCreateParam {
+    std::uint32_t size;
+    std::uint32_t attribute;
+};
+
+struct JpegDecParseParam {
+    const void* jpeg_mem_addr;
+    std::uint32_t jpeg_mem_size;
+    std::uint32_t reserved0;
+};
+
+struct JpegDecDecodeParam {
+    const void* jpeg_mem_addr;
+    void* image_mem_addr;
+    std::uint32_t jpeg_mem_size;
+    std::uint32_t image_mem_size;
+    std::uint16_t pixel_format;
+    std::uint16_t reserved0;
+    std::uint32_t image_pitch;
+};
+
+struct JpegDecImageInfo {
+    std::uint32_t image_width;
+    std::uint32_t image_height;
+    std::uint16_t color_space;
+    std::uint16_t bit_depth;
+    std::uint32_t image_flag;
 };
 
 struct PlayGoInitParams {

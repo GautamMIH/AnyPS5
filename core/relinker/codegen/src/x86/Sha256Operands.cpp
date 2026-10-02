@@ -8,9 +8,15 @@ using namespace X64OpcodeConstants;
 
 Sha256Operands DecodeSha256(const std::uint8_t* data, const std::size_t length) {
     std::size_t pos = 0;
+    std::uint8_t rex = 0;
 
     while (pos < length) {
         const std::uint8_t b = data[pos];
+        if (b >= RexMin && b <= RexMax) {
+            rex = b;
+            pos += 1;
+            continue;
+        }
         if (b == PrefixOperandSize || b == PrefixRepne || b == PrefixRep) {
             throw CodegenException("Not a SHA-256 instruction");
         }
@@ -19,12 +25,7 @@ Sha256Operands DecodeSha256(const std::uint8_t* data, const std::size_t length) 
             b != PrefixSegEs && b != PrefixSegFs && b != PrefixSegGs) {
             break;
         }
-        pos += 1;
-    }
-
-    std::uint8_t rex = 0;
-    if (pos < length && data[pos] >= RexMin && data[pos] <= RexMax) {
-        rex = data[pos];
+        rex = 0;
         pos += 1;
     }
 

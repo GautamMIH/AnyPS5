@@ -24,23 +24,25 @@ bool SaveexecWritesDestinationFirst() {
     return writeFirst;
 }
 
-void TranslationContext::sSaveexec(const RdnaInstruction& inst, IrOpcode operation, bool negateExec, bool negateSource, bool write64) {
+void TranslationContext::sSaveexec(const RdnaInstruction& inst, IrOpcode operation, bool negateExec, bool negateSource, bool write64, bool negateResult, bool writeDestination) {
     // Callers name the lane-wise operation; the exec mask words themselves combine bitwise.
     if (operation == IrOpcode::LogicalAnd) operation = IrOpcode::BitwiseAnd32;
     else if (operation == IrOpcode::LogicalOr) operation = IrOpcode::BitwiseOr32;
     else if (operation == IrOpcode::LogicalXor) operation = IrOpcode::BitwiseXor32;
-    const bool writeFirst = SaveexecWritesDestinationFirst();
+    const bool writeFirst = SaveexecWritesDestinationFirst() && writeDestination;
     if (write64) {
         const std::array<IrU32, 2> oldExec{IrU32(ir.GetExecLo()), IrU32(ir.GetExecHi())};
         if (writeFirst) writeU32Pair(inst.destination, oldExec);
         const std::array<IrU32, 2> source = readU32Pair(sourceAt(inst, 0u));
-        if (!writeFirst) writeU32Pair(inst.destination, oldExec);
+        if (!writeFirst && writeDestination) writeU32Pair(inst.destination, oldExec);
         IrValue& lowExecOperand = negateExec ? ir.BitwiseNot(oldExec[0].Value()) : oldExec[0].Value();
         IrValue& lowSourceOperand = negateSource ? ir.BitwiseNot(source[0].Value()) : source[0].Value();
         IrValue& highExecOperand = negateExec ? ir.BitwiseNot(oldExec[1].Value()) : oldExec[1].Value();
         IrValue& highSourceOperand = negateSource ? ir.BitwiseNot(source[1].Value()) : source[1].Value();
-        const IrU32 newExecLo(ir.Emit(operation, IrType::U32, {&lowExecOperand, &lowSourceOperand}));
-        const IrU32 newExecHi(ir.Emit(operation, IrType::U32, {&highExecOperand, &highSourceOperand}));
+        IrValue& lowCombined = ir.Emit(operation, IrType::U32, {&lowExecOperand, &lowSourceOperand});
+        IrValue& highCombined = ir.Emit(operation, IrType::U32, {&highExecOperand, &highSourceOperand});
+        const IrU32 newExecLo(negateResult ? ir.BitwiseNot(lowCombined) : lowCombined);
+        const IrU32 newExecHi(negateResult ? ir.BitwiseNot(highCombined) : highCombined);
         ir.SetExecLo(newExecLo.Value());
         ir.SetExecHi(newExecHi.Value());
         const IrU1 nonZero(ir.LogicalOr(ir.INotEqual(newExecLo.Value(), ir.Constant(0u)), ir.INotEqual(newExecHi.Value(), ir.Constant(0u))));
@@ -51,10 +53,11 @@ void TranslationContext::sSaveexec(const RdnaInstruction& inst, IrOpcode operati
     const IrU32 oldExec(ir.GetExecLo());
     if (writeFirst) writeRawU32(inst.destination, oldExec);
     const IrU32 source = readU32(sourceAt(inst, 0u));
-    if (!writeFirst) writeRawU32(inst.destination, oldExec);
+    if (!writeFirst && writeDestination) writeRawU32(inst.destination, oldExec);
     IrValue& execOperand = negateExec ? ir.BitwiseNot(oldExec.Value()) : oldExec.Value();
     IrValue& sourceOperand = negateSource ? ir.BitwiseNot(source.Value()) : source.Value();
-    const IrU32 newExec(ir.Emit(operation, IrType::U32, {&execOperand, &sourceOperand}));
+    IrValue& combined = ir.Emit(operation, IrType::U32, {&execOperand, &sourceOperand});
+    const IrU32 newExec(negateResult ? ir.BitwiseNot(combined) : combined);
     ir.SetExecLo(newExec.Value());
     const IrU1 nonZero(ir.INotEqual(newExec.Value(), ir.Constant(0u)));
     ir.SetScc(nonZero.Value());
@@ -175,7 +178,12 @@ void TranslationContext::sBarrier() {
     (void)ir.Emit(IrOpcode::Barrier, IrType::Void, {});
 }
 
-void TranslationContext::sSendmsg(const RdnaInstruction&) {
+void TranslationContext::sSendmsg(const RdnaInstruction& inst) {
+    constexpr std::uint32_t GsAllocReq = 9u;
+    if (program.Resources().stage == IrShaderStage::Mesh && (inst.rawWords[0] & 0xfu) == GsAllocReq) {
+        (void)ir.Emit(IrOpcode::MeshAllocate, IrType::Void, {&ir.GetM0()});
+        return;
+    }
     (void)ir.Emit(IrOpcode::Sendmsg, IrType::Void, {});
 }
 

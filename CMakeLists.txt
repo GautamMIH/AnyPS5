@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 project(Relinker CXX)
 
+set(ANYPS5_TEST_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
+
+function(add_test_executable target)
+    add_executable(${target} ${ARGN})
+    set_target_properties(${target} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "$<1:${ANYPS5_TEST_OUTPUT_DIRECTORY}>")
+endfunction()
+
 option(BUILD_TESTING "Build and register relinker tests" OFF)
 if(BUILD_TESTING)
     enable_testing()
@@ -34,6 +41,13 @@ set(ANYPS5_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
 set(CMAKE_EXE_LINKER_FLAGS "")
 add_subdirectory(3rdparty/SDL2)
 set(CMAKE_EXE_LINKER_FLAGS "${ANYPS5_EXE_LINKER_FLAGS}")
+set(ARCHITECTURE x86_64)
+add_subdirectory(3rdparty/ffmpeg-core)
+if(MINGW)
+    target_link_libraries(ffmpeg INTERFACE bcrypt ole32 user32)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(ffmpeg INTERFACE LINKER:--exclude-libs,ALL)
+endif()
 
 set(FT_DISABLE_ZLIB ON CACHE BOOL "" FORCE)
 set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)

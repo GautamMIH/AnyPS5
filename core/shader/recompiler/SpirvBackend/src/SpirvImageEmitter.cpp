@@ -240,6 +240,9 @@ std::uint32_t ResultVector(SpirvValueEmitContext& ctx, const ImageEmitAccess& ac
         valueClass = IrTextureNumericClass::Float;
     }
     const bool integer = valueClass == IrTextureNumericClass::Uint || valueClass == IrTextureNumericClass::Sint;
+    if (mem.dataBits == 16u && access.image.depthBits) {
+        ctx.Fail(access.inst, "reads the bits of a depth plane as 16-bit results");
+    }
     if (mem.dataBits == 16u) {
         if (mem.dataDwords > 4u) {
             ctx.Fail(access.inst, "has more than four packed image result dwords");
@@ -282,8 +285,18 @@ std::uint32_t ResultVector(SpirvValueEmitContext& ctx, const ImageEmitAccess& ac
             component[index] = index == 0u ? F32BitsToU32(ctx, value) : ConstantU32(state, 0);
             continue;
         }
+        const auto selector = (access.image.shaderSwizzle >> (index * 3u)) & 7u;
+        if (access.image.depthBits && !gather && selector != 4u) {
+            component[index] = ConstantU32(state, selector == 1u || selector == 7u ? 1u : 0u);
+            continue;
+        }
         const auto scalar = state.module.AllocateId();
         state.module.AddFunction(spv::OpCompositeExtract, ImageScalarType(state, valueClass), scalar, value, index);
+        if (access.image.depthUnorm16) {
+            const auto scaled = Binary(state, spv::OpFMul, TypeF32(state), scalar, ConstantF32Value(state, 65535.0f));
+            component[index] = Unary(state, spv::OpConvertFToU, TypeU32(state), Binary(state, spv::OpFAdd, TypeF32(state), scaled, ConstantF32Value(state, 0.5f)));
+            continue;
+        }
         component[index] = SampledComponentBits(ctx, scalar, valueClass);
     }
     const auto result = state.module.AllocateId();

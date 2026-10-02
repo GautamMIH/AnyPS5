@@ -764,6 +764,11 @@ private:
             // share the fused shader's user data and leave the address unset.
             initializeMerged(programs.back(), 0x82, type == 4 && queue.shader.contains(0x82));
             if (type == 4) append(0x88, 6, Stage::Mesh, 0x8b, 0x8c, Role::GeometryBack);
+            // The translated mesh program fetches indices through a V# in hidden user words 4-7.
+            auto& words = programs.front().userData;
+            require(programs.front().firstUserSgpr == 0 && words.size() >= ShaderRecompiler::MeshIndexBufferUserWord + 4, "mesh program lacks the hidden user words");
+            const auto descriptor = Graphics::MeshIndexBufferDescriptor(drawParameters, programs.front().binary.codeAddress);
+            std::copy(descriptor.begin(), descriptor.end(), words.begin() + ShaderRecompiler::MeshIndexBufferUserWord);
         } else {
             append(0xc8, 2, Stage::Vertex, 0x8b, 0x8c, Role::Main);
         }
@@ -799,9 +804,10 @@ private:
         std::vector<Graphics::CompiledShader> stages;
         results.reserve(programs.size() + (graphics.rectList ? 2u : 0u));
         stages.reserve(programs.size());
-        // Mesh stages read the draw's parameters from the first push-constant dwords
-        // (MeshDrawDwordCount, pushed by Graphics::Draw); stage push data follows them.
-        std::uint32_t pushCursorBytes = graphics.stages.mesh.has_value() ? Graphics::MeshDrawParameterBytes : 0u;
+        // Mesh stages read the draw's parameters from the end of the push block (MeshDrawPushOffsetBytes,
+        // pushed by Graphics::Draw); stage push data stays below them.
+        std::uint32_t pushCursorBytes = 0;
+        const std::uint32_t pushLimitBytes = graphics.stages.mesh.has_value() ? ShaderRecompiler::MeshDrawPushOffsetBytes : Graphics::PipelinePushConstantBytes;
         const auto vertexStageInfo = [&](const auto& program) {
             auto info = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, program.systemSgprs);
             info.paClVsOutCntl = readRegister(queue.context, 0x207);
@@ -825,7 +831,7 @@ private:
                 binary,
                 {waveSize, program.firstUserSgpr, program.userData, std::nullopt, program.binary.stage == Stage::Fragment ? pixel : std::nullopt, program.binary.stage == Stage::Fragment ? std::nullopt : std::optional(vertexStageInfo(program)), memory},
                 device->Target(),
-                {0, 0, pushCursorBytes, Graphics::PipelinePushConstantBytes - pushCursorBytes},
+                {0, 0, pushCursorBytes, pushLimitBytes - pushCursorBytes},
                 ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
             };
             PerformanceTimer shaderTiming("Driver.GraphicsShader");
@@ -850,7 +856,7 @@ private:
                 if (drawParameters.firstVertex == 0 && result.vertexOffsetSgpr >= 0) drawParameters.firstVertex = offsetValue(result.vertexOffsetSgpr);
                 if (result.instanceOffsetSgpr >= 0) drawParameters.firstInstance = offsetValue(result.instanceOffsetSgpr);
             }
-            require(result.pushConstants.size() <= Graphics::PipelinePushConstantBytes - pushCursorBytes, "stage push constants exceed the pipeline push constant block");
+            require(result.pushConstants.size() <= pushLimitBytes - pushCursorBytes, "stage push constants exceed the pipeline push constant block");
             stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushCursorBytes});
             pushCursorBytes += static_cast<std::uint32_t>(result.pushConstants.size());
         }

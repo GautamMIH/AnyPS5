@@ -3,6 +3,7 @@
 #include "Recompiler.hpp"
 #include <atomic>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -84,6 +85,22 @@ void SetDebugProbeActive(bool active) {
 
 bool DebugProbeActive() {
     return g_debugProbeActive.load();
+}
+
+bool RayTracingStrict() {
+    static const bool strict = [] {
+        const char* text = std::getenv("APS5_RAYTRACING");
+        return text != nullptr && std::strcmp(text, "strict") == 0;
+    }();
+    return strict;
+}
+
+bool RayTracingMiss() {
+    static const bool miss = [] {
+        const char* text = std::getenv("APS5_RAYTRACING");
+        return text != nullptr && std::strcmp(text, "miss") == 0;
+    }();
+    return miss;
 }
 
 DebugProbe DebugProbeConfig() {

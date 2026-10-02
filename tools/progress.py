@@ -12,6 +12,7 @@ ISA = Path(__file__).resolve().parent / "rdna_isa.txt"
 SOURCE = f'https://github.com/{os.environ.get("GITHUB_REPOSITORY", "boykopovar/AnyPS5")}/blob/main'
 DEFINITION = re.compile(r"\bAPS5_VABI\s+(\w+)\s*\([^;{]*\)\s*(?:noexcept\s*)?\{")
 STUB = "NotImplemented_nid_no_patch"
+STUB_WRAPPER = re.compile(r"\bstatic\s+(?:\[\[noreturn\]\]\s+)?void\s+(\w+)\s*\([^;{]*\)\s*\{")
 FLAT_SEGMENTS = ("GLOBAL_", "SCRATCH_")
 OPCODE_SENTINELS = {"Invalid", "Count", "Unknown", "Unsupported"}
 OPCODE_ALIASES = {
@@ -23,6 +24,15 @@ OPCODE_ALIASES = {
     "VAddcU32": "V_ADD_CO_CI_U32",
     "VMadMixloF16": "V_FMA_MIXLO_F16",
     "VMadMixhiF16": "V_FMA_MIXHI_F16",
+}
+OPCODE_VARIANTS = {
+    "SAddI32": ("S_ADDK_I32",),
+    "SCmpLeU32": ("S_CMPK_LE_U32",),
+    "SCmpLtI32": ("S_CMPK_LT_I32",),
+    "SWaitcnt": ("S_WAITCNT_VSCNT",),
+    "VAddI32": ("V_ADD_CO_U32",),
+    "VSubrevI32": ("V_SUBREV_CO_U32",),
+    "ImageSample": ("IMAGE_SAMPLE_L", "IMAGE_SAMPLE_B", "IMAGE_SAMPLE_C_LZ", "IMAGE_SAMPLE_L_O"),
 }
 REPORT_ROWS = 100
 PANEL_WIDTH, GAP, MAP_HEIGHT, HEADER = 495, 10, 280, 30
@@ -41,16 +51,25 @@ def body_end(text, start):
     return len(text)
 
 
+def stub_calls(text):
+    calls = [STUB]
+    for match in STUB_WRAPPER.finditer(text):
+        if STUB in text[match.end() - 1:body_end(text, match.end() - 1)]:
+            calls.append(match.group(1) + "(")
+    return calls
+
+
 def scan_library(path):
     done, todo = set(), set()
     for source in path.rglob("*.cpp"):
         text = source.read_text(errors="ignore")
+        calls = stub_calls(text)
         for match in DEFINITION.finditer(text):
             name = match.group(1)
             if name.endswith("_nid_no_patch"):
                 continue
             body = text[match.end() - 1:body_end(text, match.end() - 1)]
-            (todo if STUB in body else done).add(name)
+            (todo if any(call in body for call in calls) else done).add(name)
     todo -= done
     return {"name": path.name, "label": path.name.removeprefix("libSce"), "done": len(done), "todo": len(todo),
             "done_names": sorted(done), "todo_names": sorted(todo)}
@@ -81,6 +100,7 @@ def collect_shaders():
     opcodes = [o for o in re.findall(r"^\s*([A-Z]\w*)\s*[,=]", enum, re.M) if o not in OPCODE_SENTINELS]
     supported, extra = set(), []
     for opcode in opcodes:
+        supported.update(name for name in OPCODE_VARIANTS.get(opcode, ()) if name in isa)
         name = OPCODE_ALIASES.get(opcode) or by_camel.get(opcode)
         if name in isa:
             supported.add(name)
@@ -255,7 +275,7 @@ def compare(title, column, unit, base, head):
     delta = round(head["percent"] - base["percent"], 2)
     icon = "📈" if delta > 0 else "📉" if delta < 0 else "➖"
     counts = [f"{n:+} {label}" for n, label in ((len(implemented), "implemented"), (len(declared), "declared"),
-                                                (-len(removed), "removed")) if n]
+                                                (-len(regressed), "reverted"), (-len(removed), "removed")) if n]
     lines = [f'{icon} **{title}**: {head["percent"]}% ({delta:+}%, {", ".join(counts)} {unit})', ""]
     lines += details("✅", "implemented", column, implemented)
     lines += details("🆕", "declared as stubs", column, declared)

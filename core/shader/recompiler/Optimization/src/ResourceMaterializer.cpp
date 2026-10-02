@@ -25,6 +25,8 @@ struct DecodedImage {
     std::uint32_t shaderSwizzle = ShaderImageIdentitySwizzle;
     bool cube = false;
     bool fmask = false;
+    bool depthBits = false;
+    bool depthUnorm16 = false;
 };
 
 ShaderBufferResource decodeBufferDescriptor(const DescriptorValue& value) {
@@ -148,6 +150,12 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
     }
     const bool rawSintStorage = storage && format == IrBufferFormat::Format32SInt && base.written && !base.read && !base.atomic;
     decoded.numericClass = SampledTextureNumericClass(format);
+    if (!storage && !base.depthCompare && IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3])) {
+        decoded.depthBits = true;
+        decoded.depthUnorm16 = DepthBitsTextureWidth(descriptor.dwords[1], descriptor.dwords[3]) == 16u;
+        decoded.numericClass = IrTextureNumericClass::Float;
+        decoded.shaderSwizzle = descriptorImageSwizzle(descriptor);
+    }
     if (storage) {
         if ((!rawSintStorage && decoded.numericClass == IrTextureNumericClass::Sint) || decoded.numericClass == IrTextureNumericClass::Unsupported) {
             throw std::runtime_error("storage image descriptor uses an unsupported format");
@@ -162,7 +170,7 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
 }
 
 bool requiresPointSampler(const ResourceSpecialization::Image& image) {
-    return image.numericClass == IrTextureNumericClass::Sint || image.conversionFormat != IrBufferFormat::Invalid;
+    return image.numericClass == IrTextureNumericClass::Sint || image.conversionFormat != IrBufferFormat::Invalid || image.depthBits;
 }
 
 void resolveIndirectImage(const IrResourcePlan& plan, std::uint32_t imageIndex, const DescriptorSource::IndirectImage& indirect, const SrtRuntime& runtime, SrtWalker& walker, DescriptorValue& resolved, std::vector<DescriptorValue>& candidates) {
@@ -303,6 +311,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
         entry.packedStride = packedStride;
         entry.descriptorFormat = buffer.formatted ? decoded.Format() : IrBufferFormat::Invalid;
         entry.descriptorSwizzle = buffer.formatted ? decoded.DstSelXYZW() : DstSel(4, 5, 6, 7);
+        entry.empty = decoded.GetSize() == 0u || decoded.Base48() == 0u;
         result.buffers.push_back(entry);
     }
 
@@ -324,6 +333,8 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
         entry.indirectSearchIterations = 0u;
         entry.cube = decoded.cube;
         entry.fmask = decoded.fmask;
+        entry.depthBits = decoded.depthBits;
+        entry.depthUnorm16 = decoded.depthUnorm16;
         result.images.push_back(entry);
     }
 
@@ -396,6 +407,7 @@ void ResourceMaterializer::Apply(IrProgram& program, const ResourceSpecializatio
         buffers[i].packedStride = specialization.buffers[i].packedStride;
         buffers[i].descriptorFormat = specialization.buffers[i].descriptorFormat;
         buffers[i].descriptorSwizzle = specialization.buffers[i].descriptorSwizzle;
+        buffers[i].empty = specialization.buffers[i].empty;
     }
 
     auto images = resources.info.images;
@@ -418,6 +430,8 @@ void ResourceMaterializer::Apply(IrProgram& program, const ResourceSpecializatio
         image.indirectMappingOffset = source.indirectMappingOffset;
         image.indirectSearchIterations = source.indirectSearchIterations;
         image.cube = source.cube;
+        image.depthBits = source.depthBits;
+        image.depthUnorm16 = source.depthUnorm16;
         image.indirectResources.clear();
     }
     for (std::uint32_t index = 0; index < images.size(); index++) {
@@ -653,11 +667,11 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
 }
 
 bool ResourceSpecialization::Buffer::operator==(const Buffer& other) const {
-    return packedStride == other.packedStride && descriptorFormat == other.descriptorFormat && descriptorSwizzle == other.descriptorSwizzle;
+    return packedStride == other.packedStride && descriptorFormat == other.descriptorFormat && descriptorSwizzle == other.descriptorSwizzle && empty == other.empty;
 }
 
 bool ResourceSpecialization::Image::operator==(const Image& other) const {
-    return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask;
+    return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask && depthBits == other.depthBits && depthUnorm16 == other.depthUnorm16;
 }
 
 bool ResourceSpecialization::operator==(const ResourceSpecialization& other) const {

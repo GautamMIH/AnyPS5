@@ -934,7 +934,7 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
 
 ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
     const auto& limits = state->properties.limits;
-    ShaderRecompiler::SpirvTarget target{VK_API_VERSION_1_1, state->meshShader ? 0x00010400u : 0x00010300u, state->subgroup.subgroupSize, ShaderRecompiler::BdaAbi::Version, state->capabilities, state->spirvExtensions, false, {limits.maxComputeWorkGroupSize[0], limits.maxComputeWorkGroupSize[1], limits.maxComputeWorkGroupSize[2]}, limits.maxComputeWorkGroupInvocations, limits.maxComputeSharedMemorySize, {}, {}};
+    ShaderRecompiler::SpirvTarget target{VK_API_VERSION_1_1, state->meshShader ? 0x00010400u : 0x00010300u, state->subgroup.subgroupSize, ShaderRecompiler::BdaAbi::Version, state->capabilities, state->spirvExtensions, state->fragmentShaderBarycentric, {limits.maxComputeWorkGroupSize[0], limits.maxComputeWorkGroupSize[1], limits.maxComputeWorkGroupSize[2]}, limits.maxComputeWorkGroupInvocations, limits.maxComputeSharedMemorySize, {}, {}};
     target.storageBufferOffsetAlignment = static_cast<std::uint32_t>(limits.minStorageBufferOffsetAlignment);
     if (state->meshShader) {
         const auto& mesh = state->meshLimits;

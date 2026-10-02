@@ -566,17 +566,22 @@ std::uint32_t OpusPacketSamples(const std::uint8_t* packet, std::size_t size) {
     return frames == 0 || samples > 5760 ? 0 : samples;
 }
 
-// One decoded FFmpeg frame of float samples (planar or interleaved) as interleaved PCM in the
-// instance's encoding.
+// One decoded FFmpeg frame of float or 16-bit samples (planar or interleaved; FFmpeg builds without
+// the float MP3 decoder produce planar 16-bit) as interleaved PCM in the instance's encoding.
 void ConvertFloatFrame(const AVFrame& decoded, std::uint32_t encoding, std::size_t sampleBytes, std::vector<std::uint8_t>& pcm, const char* codec) {
-    const bool planar = decoded.format == AV_SAMPLE_FMT_FLTP;
-    if (!planar && decoded.format != AV_SAMPLE_FMT_FLT) throw std::runtime_error(std::string("AJM ") + codec + ": FFmpeg sample format " + std::to_string(decoded.format) + " is not converted");
+    const auto format = static_cast<AVSampleFormat>(decoded.format);
+    const bool planar = format == AV_SAMPLE_FMT_FLTP || format == AV_SAMPLE_FMT_S16P;
+    const bool integer = format == AV_SAMPLE_FMT_S16P || format == AV_SAMPLE_FMT_S16;
+    if (format != AV_SAMPLE_FMT_FLTP && format != AV_SAMPLE_FMT_FLT && format != AV_SAMPLE_FMT_S16P && format != AV_SAMPLE_FMT_S16)
+        throw std::runtime_error(std::string("AJM ") + codec + ": FFmpeg sample format " + std::to_string(decoded.format) + " is not converted");
     const auto channels = static_cast<std::size_t>(decoded.ch_layout.nb_channels);
     const auto samples = static_cast<std::size_t>(decoded.nb_samples);
     pcm.resize(samples * channels * sampleBytes);
     for (std::size_t sample = 0; sample < samples; ++sample) {
         for (std::size_t channel = 0; channel < channels; ++channel) {
-            const float value = planar ? reinterpret_cast<const float*>(decoded.extended_data[channel])[sample] : reinterpret_cast<const float*>(decoded.extended_data[0])[sample * channels + channel];
+            const auto* plane = decoded.extended_data[planar ? channel : 0];
+            const std::size_t index = planar ? sample : sample * channels + channel;
+            const float value = integer ? reinterpret_cast<const std::int16_t*>(plane)[index] / 32768.0f : reinterpret_cast<const float*>(plane)[index];
             auto* out = pcm.data() + (sample * channels + channel) * sampleBytes;
             if (encoding == 0) {
                 const auto converted = static_cast<std::int16_t>(std::clamp(std::lrint(value * 32768.0), -32768L, 32767L));

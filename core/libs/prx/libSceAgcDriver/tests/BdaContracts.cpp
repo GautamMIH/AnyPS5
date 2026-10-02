@@ -38,7 +38,11 @@ void RunBdaContractTests() {
     auto& block = program.CreateBlock();
     block.AppendInstruction(&program.CreateValue(IrOpcode::Barrier, IrType::Void));
     program.BlockOrder().push_back(&block);
-    reject([&] { ValidateBdaTarget(program, target); }, "workgroup barrier");
+    ValidateBdaTarget(program, target);
+    AgcDriver::Graphics::Require(!BdaInvocationsMayStop(program), "a BDA program with barriers must keep its invocations running");
+    program.Resources().stage = IrShaderStage::TessellationControl;
+    reject([&] { ValidateBdaTarget(program, target); }, "barrier-safe");
+    program.Resources().stage = IrShaderStage::Compute;
     RecompileRequest request{};
     request.target.bdaAbiVersion = BdaAbi::Version;
     request.target.supportedCapabilities = capabilities;
@@ -50,5 +54,6 @@ void RunBdaContractTests() {
     AgcDriver::Graphics::Require(decoded.request.target.bdaAbiVersion == BdaAbi::Version && decoded.request.target.supportedCapabilities.size() == capabilities.size() && decoded.request.target.supportedExtensions[1] == extensions[1], "BDA request serialization changed target contract");
     auto invalid = encoded;
     invalid[0] = invalid[0] == 'A' ? 'B' : 'A';
-    reject([&] { static_cast<void>(serializer.Deserialize(invalid)); }, "serialization version");
+    reject([&] { static_cast<void>(serializer.Deserialize(invalid)); }, "request signature");
+    reject([&] { static_cast<void>(serializer.Deserialize("NVNQQWMAAAA=")); }, "serialization version");
 }

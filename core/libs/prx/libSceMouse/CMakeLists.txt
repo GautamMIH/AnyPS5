@@ -7,7 +7,7 @@ set_target_properties(libSceMouse PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceMouse)
 
 if(BUILD_TESTING)
-    add_executable(mouse_tests
+    add_test_executable(mouse_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/tests/Mouse.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../libSceVideoOut/src/MouseInput.cpp
     )

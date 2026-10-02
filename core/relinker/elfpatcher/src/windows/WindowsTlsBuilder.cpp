@@ -18,6 +18,7 @@ struct TlsAccess {
     std::size_t Length;
     bool StoreImmediate;
     std::uint32_t Immediate;
+    std::uint8_t Register;
 };
 
 void patchAccess(std::vector<PeSection>& sections, const TlsAccess& access, const std::uint32_t target) {
@@ -76,11 +77,12 @@ PeDirectory WindowsTlsBuilder::Build(const std::vector<std::uint8_t>& source, co
                     if (value == 0x66) hasOperandSizePrefix = true;
                     else if (value != 0x64 && !(prefix + 1 == position && value >= 0x40 && value <= 0x4f)) supportedPrefixes = false;
                 }
-                const bool loadPointer = supportedPrefixes && info.RexPrefix == 0x48 && info.Length - position == 7 && bytes[position] == 0x8b && bytes[position + 1] == 0x04 && bytes[position + 2] == 0x25 && Io::ReadU32(source, header.Offset + offset + position + 3) == 0;
+                const auto loadRegister = info.Length - position == 7 ? static_cast<std::uint8_t>(((bytes[position + 1] >> 3) & 7) | ((info.RexPrefix & 4) << 1)) : std::uint8_t{4};
+                const bool loadPointer = supportedPrefixes && (info.RexPrefix == 0x48 || info.RexPrefix == 0x4c) && loadRegister != 4 && bytes[position] == 0x8b && (bytes[position + 1] & 0xc7) == 0x04 && bytes[position + 2] == 0x25 && Io::ReadU32(source, header.Offset + offset + position + 3) == 0;
                 const bool storeImmediate = supportedPrefixes && !hasOperandSizePrefix && (info.RexPrefix == 0 || info.RexPrefix == 0x40) && info.Length - position == 11 && bytes[position] == 0xc7 && bytes[position + 1] == 0x04 && bytes[position + 2] == 0x25 && Io::ReadU32(source, header.Offset + offset + position + 3) == 0x28;
                 if (!loadPointer && !storeImmediate)
                     throw Domain::RelinkerException("Unsupported Windows guest TLS instruction", header.Offset + offset);
-                accesses.push_back({rva, info.Length, storeImmediate, storeImmediate ? Io::ReadU32(source, header.Offset + offset + position + 7) : 0});
+                accesses.push_back({rva, info.Length, storeImmediate, storeImmediate ? Io::ReadU32(source, header.Offset + offset + position + 7) : 0, storeImmediate ? std::uint8_t{0} : loadRegister});
             }
         }
     }
@@ -135,15 +137,21 @@ PeDirectory WindowsTlsBuilder::Build(const std::vector<std::uint8_t>& source, co
         if (target != branchTargets.end() && *target < access.Rva + access.Length)
             throw Domain::RelinkerException("Branch enters a guest TLS instruction", *target);
         patchAccess(sections, access, code.GetRva());
-        code.Emit({0x48, 0x8d, 0x64, 0x24, 0x80, 0x51});
-        if (access.StoreImmediate) code.Emit({0x50});
+        const bool preserveAccumulator = access.StoreImmediate || access.Register != 0;
+        const bool preserveCounter = access.Register != 1;
+        code.Emit({0x48, 0x8d, 0x64, 0x24, 0x80});
+        if (preserveCounter) code.Emit({0x51});
+        if (preserveAccumulator) code.Emit({0x50});
         loadPointer();
         if (access.StoreImmediate) {
             code.Emit({0xc7, 0x40, 0x28});
             code.U32(access.Immediate);
-            code.Emit({0x58});
+        } else if (access.Register != 0) {
+            code.Emit({static_cast<std::uint8_t>(0x48 | (access.Register >> 3)), 0x89, static_cast<std::uint8_t>(0xc0 | (access.Register & 7))});
         }
-        code.Emit({0x59, 0x48, 0x8d, 0xa4, 0x24, 0x80, 0, 0, 0});
+        if (preserveAccumulator) code.Emit({0x58});
+        if (preserveCounter) code.Emit({0x59});
+        code.Emit({0x48, 0x8d, 0xa4, 0x24, 0x80, 0, 0, 0});
         code.Rip({0xe9}, CheckedRva(access.Rva + access.Length));
     }
 

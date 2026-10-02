@@ -85,4 +85,10 @@ int APS5_VABI sceShareUnregisterContentEventCallback(void* callback) {
     return 0;
 }
 
+APS5_EXPORT("GQTObcITIXI", sceShareUnknown_GQTObcITIXI);
+int32_t APS5_VABI sceShareUnknown_GQTObcITIXI(void) {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
 }

@@ -10,10 +10,12 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "src/AacDecoder.hpp"
+#include "src/Codecs.hpp"
 
 // libSceAudiodec decodes whole access units synchronously. Codec ids and error codes follow fpPS4
 // (ps4_libsceaudiodec.pas); the M4AAC parameter and stream-information layouts were read from titles
-// (see docs/research-notes.md).
+// (see docs/research-notes.md). AT9 and MP3 (upstream's decoders, src/Codecs) use the
+// AudiodecParamAt9/Mp3 and AudiodecAt9Info/Mp3Info layouts of SceTypes.hpp.
 namespace {
 
 constexpr std::uint32_t kCodecAt9 = 1;
@@ -42,6 +44,7 @@ constexpr int kErrorM4aacInvalidEnableHeaac = static_cast<int>(0x807F0302);
 constexpr int kErrorM4aacInvalidConfigNumber = static_cast<int>(0x807F0303);
 constexpr int kErrorM4aacInvalidMaxChannels = static_cast<int>(0x807F0304);
 constexpr int kErrorM4aacInvalidEnableNondelayOutput = static_cast<int>(0x807F0305);
+constexpr int kErrorAt9InvalidConfigData = static_cast<int>(0x807F1000);
 
 // PCM word sizes: 2 is 32-bit float (titles size output as channels * 4 bytes), others 16-bit.
 constexpr std::uint32_t kWordSizeFloat = 2;
@@ -72,6 +75,9 @@ static_assert(sizeof(M4aacBsiInfo) == 0x14);
 struct Decoder {
     std::uint32_t codec;
     std::unique_ptr<Audiodec::AacDecoder> aac;
+    // AT9 and MP3.
+    std::unique_ptr<Audiodec::Decoder> unit;
+    Audiodec::At9Format at9{};
 };
 
 std::mutex& decodersMutex() {
@@ -160,6 +166,82 @@ int decodeM4aac(Decoder& decoder, AudiodecCtrl& ctrl) {
     }
 }
 
+// AT9 and MP3 output 16-bit (1) or float (2) PCM; 24-bit (0) is not implemented.
+int validateUnitWordSize(std::int32_t wordSize) {
+    if (wordSize == Audiodec::WORD_SIZE_16BIT || wordSize == Audiodec::WORD_SIZE_FLOAT) return 0;
+    if (wordSize == 0) NotImplemented_nid_no_patch("libSceAudiodec 24-bit PCM output");
+    return kErrorInvalidWordLength;
+}
+
+int validateUnitCtrl(const AudiodecCtrl& ctrl, std::uint32_t codec) {
+    const std::uint32_t paramSize = *static_cast<const std::uint32_t*>(ctrl.pParam);
+    const std::uint32_t infoSize = *static_cast<const std::uint32_t*>(ctrl.pBsiInfo);
+    if (codec == kCodecAt9) {
+        if (paramSize != sizeof(AudiodecParamAt9)) return kErrorInvalidParamSize;
+        if (infoSize != sizeof(AudiodecAt9Info)) return kErrorInvalidBsiInfoSize;
+    } else {
+        if (paramSize != sizeof(AudiodecParamMp3)) return kErrorInvalidParamSize;
+        if (infoSize != sizeof(AudiodecMp3Info)) return kErrorInvalidBsiInfoSize;
+    }
+    return validateUnitWordSize(static_cast<const AudiodecParamMp3*>(ctrl.pParam)->i_bw_pcm);
+}
+
+void fillAt9Info(AudiodecAt9Info& info, const Audiodec::At9Format& format) {
+    const std::uint32_t superframeSamples = format.frameSamples * format.framesInSuperframe;
+    info.ui_channel = format.channels;
+    info.ui_bitrate = static_cast<std::uint32_t>(static_cast<std::uint64_t>(format.superframeSize) * 8 * format.sampleRate / superframeSamples);
+    info.ui_sampling_rate = format.sampleRate;
+    info.ui_super_frame_size = format.superframeSize;
+    info.ui_frames_in_super_frame = format.framesInSuperframe;
+    info.ui_next_frame_size = format.superframeSize;
+    info.ui_frame_samples = format.frameSamples;
+    info.i_result = 0;
+}
+
+void fillMp3Info(AudiodecMp3Info& info, const Audiodec::Mp3Header& header) {
+    info.ui_header = header.word;
+    info.uc_crc = header.crc;
+    info.uc_mode = header.mode;
+    info.uc_mode_extension = header.modeExtension;
+    info.uc_copyright = header.copyright;
+    info.uc_original = header.original;
+    info.uc_emphasis = header.emphasis;
+    info.uc_reserved[0] = 0;
+    info.uc_reserved[1] = 0;
+    info.i_result = 0;
+}
+
+int createUnit(const AudiodecCtrl& ctrl, Decoder& decoder) {
+    if (const auto result = validateUnitCtrl(ctrl, decoder.codec); result != 0) return result;
+    if (decoder.codec == kCodecAt9) {
+        const auto& param = *static_cast<const AudiodecParamAt9*>(ctrl.pParam);
+        decoder.unit = Audiodec::CreateAt9(param.i_bw_pcm, param.ui_config_data, decoder.at9);
+        if (!decoder.unit) return kErrorAt9InvalidConfigData;
+        fillAt9Info(*static_cast<AudiodecAt9Info*>(ctrl.pBsiInfo), decoder.at9);
+    } else {
+        decoder.unit = Audiodec::CreateMp3(static_cast<const AudiodecParamMp3*>(ctrl.pParam)->i_bw_pcm);
+    }
+    return 0;
+}
+
+int decodeUnit(Decoder& decoder, AudiodecCtrl& ctrl) {
+    if (const auto result = validateUnitCtrl(ctrl, decoder.codec); result != 0) return result;
+    if (ctrl.pPcmItem->ui_pcm_size == 0) return kErrorInvalidPcmSize;
+    const auto decoded = decoder.unit->Decode(static_cast<const std::uint8_t*>(ctrl.pAuInfo->p_au_addr), ctrl.pAuInfo->ui_au_size, static_cast<std::uint8_t*>(ctrl.pPcmItem->p_pcm_addr), ctrl.pPcmItem->ui_pcm_size);
+    if (decoded.status == Audiodec::DecodeStatus::NotEnoughRoom) return kErrorInvalidPcmSize;
+    if (decoded.status != Audiodec::DecodeStatus::Ok) {
+        if (tracing()) std::fprintf(stderr, "[audiodec] codec %u decode failed (status %d)\n", decoder.codec, static_cast<int>(decoded.status));
+        ctrl.pAuInfo->ui_au_size = 0;
+        ctrl.pPcmItem->ui_pcm_size = 0;
+        return kErrorApiFail;
+    }
+    if (decoder.codec == kCodecMp3) fillMp3Info(*static_cast<AudiodecMp3Info*>(ctrl.pBsiInfo), decoded.mp3);
+    else fillAt9Info(*static_cast<AudiodecAt9Info*>(ctrl.pBsiInfo), decoder.at9);
+    ctrl.pAuInfo->ui_au_size = static_cast<std::uint32_t>(decoded.consumed);
+    ctrl.pPcmItem->ui_pcm_size = static_cast<std::uint32_t>(decoded.produced);
+    return 0;
+}
+
 }
 
 extern "C" {
@@ -181,12 +263,7 @@ int32_t APS5_VABI sceAudiodecCreateDecoder(AudiodecCtrl* ctrl, uint32_t codec_ty
     if (!knownCodec(codec_type)) return kErrorInvalidType;
     auto decoder = std::make_shared<Decoder>();
     decoder->codec = codec_type;
-    if (codec_type != kCodecM4aac) {
-        // The AT9 and MP3 parameter layouts have not been confirmed from titles yet.
-        NotImplemented_nid_no_patch(codec_type == kCodecAt9 ? "sceAudiodecCreateDecoder (AT9)" : "sceAudiodecCreateDecoder (MP3)");
-        return kErrorApiFail;
-    }
-    if (const auto result = createM4aac(*ctrl, *decoder); result != 0) return result;
+    if (const auto result = codec_type == kCodecM4aac ? createM4aac(*ctrl, *decoder) : createUnit(*ctrl, *decoder); result != 0) return result;
     std::lock_guard lock(decodersMutex());
     const auto handle = nextHandle++;
     decoders().emplace(handle, std::move(decoder));
@@ -207,6 +284,7 @@ int32_t APS5_VABI sceAudiodecDecode(int32_t handle, AudiodecCtrl* ctrl) {
     if (ctrl->pAuInfo->p_au_addr == nullptr) return kErrorInvalidAuPointer;
     if (ctrl->pPcmItem->p_pcm_addr == nullptr) return kErrorInvalidPcmPointer;
     if (ctrl->pAuInfo->ui_au_size == 0) return kErrorInvalidAuSize;
+    if (decoder->codec != kCodecM4aac) return decodeUnit(*decoder, *ctrl);
     if (static_cast<const M4aacParam*>(ctrl->pParam)->wordSize > 3) return kErrorInvalidWordLength;
     return decodeM4aac(*decoder, *ctrl);
 }
@@ -215,6 +293,7 @@ int32_t APS5_VABI sceAudiodecClearContext(int32_t handle) {
     const auto decoder = find(handle);
     if (!decoder) return kErrorInvalidHandle;
     if (decoder->aac) decoder->aac->Reset();
+    if (decoder->unit) decoder->unit->Reset();
     return 0;
 }
 

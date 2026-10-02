@@ -4,7 +4,6 @@
 #include <atomic>
 #include <cstdio>
 
-// Logs the first three calls of the surrounding call site, then stays silent (keeps guest logs usable).
 #define APS5_HIT(tag, ...) \
     do { \
         static std::atomic<int> aps5HitCount{0}; \
@@ -15,4 +14,4 @@
         } \
     } while (0)
 
-#endif
+#endif  // CORE_LIBS_HITLOG_HPP

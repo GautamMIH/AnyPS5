@@ -15,3 +15,21 @@ target_include_directories(libSceAudioOut PRIVATE
 )
 target_link_libraries(libSceAudioOut PRIVATE libc libkernel SDL2-static)
 configure_windows_unwind(libSceAudioOut)
+
+if(MINGW)
+    foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
+        string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+    endforeach()
+endif()
+
+if(BUILD_TESTING)
+    add_test_executable(audio_out2_pad_mix_tests tests/AudioOut2PadMix.cpp src/AudioOut2PadMix.cpp)
+    target_include_directories(audio_out2_pad_mix_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(audio_out2_pad_mix_tests PRIVATE libc)
+    configure_windows_unwind(audio_out2_pad_mix_tests)
+    add_test(NAME audio_out2_pad_mix COMMAND audio_out2_pad_mix_tests)
+    if(WIN32)
+        set_tests_properties(audio_out2_pad_mix PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()

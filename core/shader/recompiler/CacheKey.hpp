@@ -30,8 +30,11 @@ public:
         append(key, request.context.compute);
         append(key, request.context.pixel);
         append(key, request.context.vertex);
+        appendMesh(key, request);
         append(key, request.target);
         append(key, DebugProbeActive());
+        append(key, RayTracingStrict());
+        append(key, RayTracingMiss());
     }
 
     // The key's request context alone (no code, no target), for callers that identify the code and
@@ -44,7 +47,31 @@ public:
         append(key, request.context.compute);
         append(key, request.context.pixel);
         append(key, request.context.vertex);
+        appendMesh(key, request);
         append(key, DebugProbeActive());
+    }
+
+    // A hash over every field Build appends except the code, the target and the probe flag: the
+    // key of a source memo whose owner fixes the code (a registered shader at an offset) and the
+    // device itself, and which is bypassed while the probe is active.
+    static std::uint64_t ContextHash(const RecompileRequest& request) {
+        struct ContextKeyStorage {};
+        auto& key = HostThreadLocal<std::vector<std::uint64_t>, ContextKeyStorage>();
+        key.clear();
+        append(key, request.shader.stage);
+        append(key, request.context.waveSize);
+        append(key, request.context.userDataBaseRegister);
+        append(key, request.context.userData.size());
+        append(key, request.context.compute);
+        append(key, request.context.pixel);
+        append(key, request.context.vertex);
+        appendMesh(key, request);
+        std::uint64_t hash = 0xcbf29ce484222325ull;
+        for (const auto value : key) {
+            hash ^= value;
+            hash *= 0x100000001b3ull;
+        }
+        return hash;
     }
 
     // A 64-bit hash of the code, two dwords per step; collisions are resolved by comparing the code.
@@ -61,6 +88,14 @@ public:
     }
 
 private:
+    static void appendMesh(std::vector<std::uint64_t>& key, const RecompileRequest& request) {
+        if (request.shader.stage != ShaderStage::Mesh) return;
+        const auto* mesh = request.graphics && request.graphics->mesh ? &*request.graphics->mesh : nullptr;
+        append(key, mesh != nullptr);
+        if (mesh == nullptr) return;
+        for (const auto value : {mesh->inputPrimitive, mesh->primitivesPerGroup, mesh->verticesPerGroup, mesh->maxVertices, mesh->maxPrimitives, mesh->threadsPerGroup, mesh->ldsSizeDwords, mesh->provokingVertex, mesh->esgsItemSize}) append(key, value);
+    }
+
     template<typename TValue>
     static void append(std::vector<std::uint64_t>& key, TValue value) requires (std::is_integral_v<TValue> || std::is_enum_v<TValue>) {
         key.push_back(static_cast<std::uint64_t>(value));
@@ -102,8 +137,9 @@ private:
         if (value.interpolatorCount > value.interpolatorSettings.size()) throw std::runtime_error("Shader cache: invalid interpolator count");
         for (std::uint32_t i = 0; i < value.interpolatorCount; ++i) append(key, value.interpolatorSettings[i]);
         append(key, value.wave32);
-        append(key, value.perspectiveCenterVgpr);
+        append(key, value.inputAddr);
         append(key, value.hasPerspectiveCenterVgpr);
+        append(key, value.perspectiveCentroid);
         append(key, value.posX);
         append(key, value.posY);
         append(key, value.posZ);
@@ -112,6 +148,7 @@ private:
         append(key, value.ancillary);
         append(key, value.sampleShading);
         append(key, value.noPerspective);
+        append(key, value.linearCentroid);
         append(key, value.pixelKillEnable);
         append(key, value.depthExportEnable);
         append(key, value.sampleMaskExportEnable);
@@ -119,8 +156,6 @@ private:
         append(key, value.executeOnNoop);
         append(key, value.targetOutputMode);
         append(key, value.targetExportMapping);
-        append(key, value.inputAddr);
-        append(key, value.inputLoaded);
     }
 
     static void append(std::vector<std::uint64_t>& key, const ShaderVertexResourceDestination& value) {

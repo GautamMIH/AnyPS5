@@ -2,11 +2,11 @@
 #include <cstddef>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libSceHttp/src/HttpErrors.hpp"
 #include <atomic>
 
 // No network is emulated: contexts, templates and requests can be created, but any request
 // that would touch the network fails with the library's network error.
-static constexpr int ERROR_NETWORK = static_cast<int>(0x80431063);
 static std::atomic<int> g_nextHandle{1};
 
 extern "C" {
@@ -41,10 +41,10 @@ int APS5_VABI sceHttpCreateConnectionWithURL(int tmpl_id, const char* url, int e
 }
 
 int APS5_VABI sceHttpCreateEpoll(int http_ctx_id, HttpEpollHandle* eh) {
- (void)http_ctx_id;
- (void)eh;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+    (void)http_ctx_id;
+    if (!eh) return ERROR_INVALID_VALUE;
+    *eh = new HttpEpoll{};
+    return 0;
 }
 
 int APS5_VABI sceHttpCreateRequest(int conn_id, int method, const char* path, uint64_t content_length) {
@@ -88,7 +88,7 @@ int APS5_VABI sceHttpDeleteTemplate(int tmpl_id) {
 
 int APS5_VABI sceHttpDestroyEpoll(int http_ctx_id, HttpEpollHandle eh) {
     (void)http_ctx_id;
-    (void)eh;
+    delete eh;
     return 0;
 }
 
@@ -216,35 +216,6 @@ int APS5_VABI sceHttpUnsetEpoll(int id) {
     return 0;
 }
 
-int APS5_VABI sceHttpUriBuild(char* out, size_t* require, size_t prepare, const SceHttpUriElement* src_element, uint32_t option) {
- (void)out;
- (void)require;
- (void)prepare;
- (void)src_element;
- (void)option;
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceHttpUriEscape(char* out, size_t* require, size_t prepare, const char* in) {
- (void)out;
- (void)require;
- (void)prepare;
- (void)in;
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
-int APS5_VABI sceHttpUriParse(SceHttpUriElement* out, const char* src_url, void* pool, size_t* require, size_t prepare) {
- (void)out;
- (void)src_url;
- (void)pool;
- (void)require;
- (void)prepare;
- NotImplemented_nid_no_patch(__func__);
- return 0;
-}
-
 int APS5_VABI sceHttpWaitRequest(HttpEpollHandle eh, HttpNBEvent* nbev, int maxevents, int timeout) {
     (void)eh;
     (void)nbev;
@@ -253,19 +224,25 @@ int APS5_VABI sceHttpWaitRequest(HttpEpollHandle eh, HttpNBEvent* nbev, int maxe
     return ERROR_NETWORK;
 }
 
-int APS5_VABI sceHttpCreateRequestWithURL() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceHttpCreateRequestWithURL(int conn_id, int method, const char* url, uint64_t content_length) {
+    (void)conn_id;
+    (void)method;
+    (void)url;
+    (void)content_length;
+    return g_nextHandle.fetch_add(1, std::memory_order_relaxed);
 }
 
-int APS5_VABI sceHttpReadData() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceHttpReadData(int request_id, void* data, size_t size) {
+    (void)request_id;
+    (void)data;
+    (void)size;
+    return ERROR_NETWORK;
 }
 
-int APS5_VABI sceHttpSetChunkedTransferEnabled() {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceHttpSetChunkedTransferEnabled(int id, int enable) {
+    (void)id;
+    (void)enable;
+    return 0;
 }
 
 }

@@ -13,6 +13,7 @@ struct ResourceSpecialization {
         std::uint32_t packedStride = 0;
         IrBufferFormat descriptorFormat = IrBufferFormat::Invalid;
         std::uint32_t descriptorSwizzle = ShaderImageIdentitySwizzle;
+        bool empty = false;
 
         bool operator==(const Buffer& other) const;
     };
@@ -28,6 +29,8 @@ struct ResourceSpecialization {
         std::uint32_t indirectSearchIterations = 0;
         bool cube = false;
         bool fmask = false;
+        bool depthBits = false;
+        bool depthUnorm16 = false;
 
         bool operator==(const Image& other) const;
     };

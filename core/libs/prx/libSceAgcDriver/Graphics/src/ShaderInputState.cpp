@@ -113,37 +113,37 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     for (std::uint32_t i = 0; i < 8u; ++i) {
         targetOutputMode[i] = static_cast<std::uint8_t>((colFormat >> (4u * i)) & 0xFu);
     }
-    const bool hasPerspectiveCenterVgpr = (activeInputs & 0x2u) != 0;
-    // SPI_PS_INPUT_ADDR places every input it names, loaded or not: the center pair follows the
-    // sample pair when ADDR names it.
     const bool pixelKillEnable = ((shaderControl >> 6u) & 0x1u) != 0;
     const bool depthExportEnable = (shaderControl & 0x1u) != 0;
     const bool sampleMaskExportEnable = ((shaderControl >> 8u) & 0x1u) != 0;
     const auto zOrder = (shaderControl >> 4u) & 0x3u;
-    const auto targetExportMapping = colorComponentMappings;
+    // SPI_PS_INPUT_ENA/ADDR bits: 0 PERSP_SAMPLE, 1 PERSP_CENTER, 2 PERSP_CENTROID, 4 LINEAR_SAMPLE,
+    // 5 LINEAR_CENTER, 6 LINEAR_CENTROID, 8-11 POS_X..W, 12 FRONT_FACE, 13 ANCILLARY. The flags are
+    // the loaded inputs; inputAddr places every named input's VGPRs, loaded or not.
+    const auto loaded = [&](std::uint32_t bit) { return (activeInputs & (1u << bit)) != 0; };
     return ShaderRecompiler::ShaderPixelStageInfo{
-        inputNum,
-        interpolatorSettings,
-        (inControl & 0x8000u) != 0,
-        hasPerspectiveCenterVgpr ? ((addr & 0x1u) ? 2u : 0u) : 0u,
-        hasPerspectiveCenterVgpr,
-        (activeInputs & 0x100u) != 0,
-        (activeInputs & 0x200u) != 0,
-        (activeInputs & 0x400u) != 0,
-        (activeInputs & 0x800u) != 0,
-        (activeInputs & 0x1000u) != 0,
-        (activeInputs & 0x2000u) != 0,
-        (activeInputs & 0x11u) == 0x11u,
-        (activeInputs & 0x60u) != 0,
-        pixelKillEnable,
-        depthExportEnable,
-        sampleMaskExportEnable,
-        zOrder == 1u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable,
-        ((shaderControl >> 10u) & 0x1u) != 0,
-        targetOutputMode,
-        targetExportMapping,
-        addr,
-        activeInputs
+        .interpolatorCount = inputNum,
+        .interpolatorSettings = interpolatorSettings,
+        .wave32 = (inControl & 0x8000u) != 0,
+        .inputAddr = addr,
+        .hasPerspectiveCenterVgpr = loaded(1),
+        .perspectiveCentroid = loaded(2),
+        .posX = loaded(8),
+        .posY = loaded(9),
+        .posZ = loaded(10),
+        .posW = loaded(11),
+        .frontFace = loaded(12),
+        .ancillary = loaded(13),
+        .sampleShading = loaded(0) && loaded(4),
+        .noPerspective = loaded(5),
+        .linearCentroid = loaded(6),
+        .pixelKillEnable = pixelKillEnable,
+        .depthExportEnable = depthExportEnable,
+        .sampleMaskExportEnable = sampleMaskExportEnable,
+        .earlyZ = zOrder == 1u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable,
+        .executeOnNoop = ((shaderControl >> 10u) & 0x1u) != 0,
+        .targetOutputMode = targetOutputMode,
+        .targetExportMapping = colorComponentMappings
     };
 }
 

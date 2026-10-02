@@ -24,7 +24,11 @@ std::uint64_t address(std::uint32_t low, std::uint32_t high) {
 std::uint32_t registerOffset(std::uint32_t value) {
     require(value != 0xffffffffu, "indirect register sentinel semantics are not implemented");
     const auto offset = value & ~0x70000000u;
-    require(offset <= 0xffffu, "extended register semantics are not implemented");
+    if (offset > 0xffffu) {
+        char what[80];
+        std::snprintf(what, sizeof(what), "extended register semantics are not implemented (offset dword 0x%08x)", value);
+        throw std::runtime_error(what);
+    }
     return offset;
 }
 
@@ -160,8 +164,9 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         case 0x3f: return {};
         case 0x33: return "command-buffer branching is not implemented";
         case 0x3c: case 0x93: return {};
-        case 0x39: case 0x59:
+        case 0x39:
             return "cooperative command-queue waits are not implemented";
+        case 0x59: return {};
         case 0x84: case 0x85: case 0x86: case 0x88:
             return "separate CE/DE execution and counter synchronization are not implemented";
         case 0x49: return {};
@@ -287,6 +292,12 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             size(4);
             require((packet[1] & 3u) == 0, "misaligned nested command buffer");
             require((packet[3] & 0x0fe00000u) == 0x0f200000u, "unsupported INDIRECT_BUFFER control fields");
+            break;
+        // REWIND: the CP re-reads the command buffer from this point (for packets the CPU writes
+        // while it runs); packets here are read from memory as they are executed (upstream PR #258).
+        case 0x59:
+            size(2);
+            require((packet[1] & 0x7fffffffu) == 0, "unsupported REWIND payload bits");
             break;
         case 0x3c: case 0x93: {
             size(opcode == 0x3c ? 7 : 9);
@@ -673,6 +684,7 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             queue.predicateSkip = ((flags >> 8u) & 1u) == 0 ? value != 0 : value == 0;
             return;
         }
+        case 0x59: return;
         case 0x13: queue.indexBufferSize = packet[1]; return;
         case 0x26: queue.indexBase = address(packet[1], packet[2]); return;
         case 0x2a: queue.indexType = packet[1]; return;

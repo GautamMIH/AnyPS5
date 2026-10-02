@@ -1,5 +1,6 @@
 #include "Translation/MemoryInstructions.hpp"
 #include "Translation/TranslationContext.hpp"
+#include "Recompiler.hpp"
 #include <stdexcept>
 
 namespace ShaderRecompiler {
@@ -41,6 +42,16 @@ MemoryInfo imageMemoryInfoFromInstruction(const RdnaInstruction& inst) {
 }
 
 bool TranslationContext::imageBvhIntersectRay(const RdnaInstruction& inst) {
+    if (RayTracingStrict()) {
+        throw std::runtime_error("ray tracing is not implemented");
+    }
+    if (RayTracingMiss()) {
+        IrValue& miss = ir.Constant(0xffffffffu);
+        for (std::uint32_t i = 0u; i < inst.dataDwordCount; ++i) {
+            writeOperand(offsetOperand(inst.destination, i), &miss);
+        }
+        return true;
+    }
     // The node test only: the guest shader owns the traversal and its stack. The T# is read at run
     // time and the node through the BDA page table, so the access is address-based (kind Global);
     // imageSampleFlags carries A16 (the direction and inverse direction as halves).

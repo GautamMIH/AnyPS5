@@ -178,7 +178,11 @@ void testDecode() {
 }
 
 void testControls() {
-    const auto handle = sceVideoOutOpen(255, 0, 0, nullptr);
+    std::array<std::uint32_t, 4> openParam{VIDEO_OUT_OPEN_PARAM_SIZE, 0, 0, 0};
+    const auto handle = sceVideoOutOpen(255, 0, 0, openParam.data());
+    check(handle >= 0, "open with a zeroed param failed");
+    openParam[0] = 24;
+    expectFailure([&] { sceVideoOutOpen(255, 0, 0, openParam.data()); });
     const auto cfg = VideoOutDriver::Get().GetConfig(handle);
     for (int rate = 0; rate <= 2; ++rate) {
         check(sceVideoOutSetFlipRate(handle, rate) == 0 && cfg->flipRate == rate, "flip rate was not applied");

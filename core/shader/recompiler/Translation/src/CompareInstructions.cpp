@@ -54,14 +54,21 @@ void TranslationContext::emitFloatCompare(const RdnaInstruction& inst, IrOpcode 
     emitCompareResult(inst, IrU1(ir.Emit(opcode, IrType::U1, {lhs, rhs})), false, cmpx);
 }
 
-void TranslationContext::emitFloatOrderedCompare(const RdnaInstruction& inst, bool ordered) {
-    IrValue* lhs = readOperand(sourceAt(inst, 0u), IrType::F32);
-    IrValue* rhs = readOperand(sourceAt(inst, 1u), IrType::F32);
+void TranslationContext::emitInteger64Order(const RdnaInstruction& inst, bool signedValue, bool swap, bool negate, bool cmpx) {
+    IrValue* lhs = readOperand(sourceAt(inst, swap ? 1u : 0u), IrType::U64);
+    IrValue* rhs = readOperand(sourceAt(inst, swap ? 0u : 1u), IrType::U64);
+    IrValue& less = ir.Emit(signedValue ? IrOpcode::SLessThan64 : IrOpcode::ULessThan64, IrType::U1, {lhs, rhs});
+    emitCompareResult(inst, IrU1(negate ? ir.LogicalNot(less) : less), false, cmpx);
+}
+
+void TranslationContext::emitFloatOrderedCompare(const RdnaInstruction& inst, bool ordered, bool half, bool cmpx) {
+    IrValue* lhs = half ? &readF16AsF32(sourceAt(inst, 0u)).Value() : readOperand(sourceAt(inst, 0u), IrType::F32);
+    IrValue* rhs = half ? &readF16AsF32(sourceAt(inst, 1u)).Value() : readOperand(sourceAt(inst, 1u), IrType::F32);
     IrValue& lhsNan = ir.Emit(IrOpcode::FPIsNan32, IrType::U1, {lhs});
     IrValue& rhsNan = ir.Emit(IrOpcode::FPIsNan32, IrType::U1, {rhs});
     IrValue& unordered = ir.LogicalOr(lhsNan, rhsNan);
     IrValue& result = ordered ? ir.LogicalNot(unordered) : unordered;
-    emitCompareResult(inst, IrU1(result), false, false);
+    emitCompareResult(inst, IrU1(result), false, cmpx);
 }
 
 void TranslationContext::emitFloatClassCompare(const RdnaInstruction& inst, bool cmpx) {

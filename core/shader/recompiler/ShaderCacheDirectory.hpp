@@ -16,25 +16,10 @@
 #include <thread>
 #include <vector>
 
-// Files of the persistent shader caches (from upstream cf721a27).
 namespace ShaderRecompiler {
 
-// A shader_cache folder beside the running executable, so a relinked game stays a self-contained
-// folder; ANYPS5_SHADER_CACHE_DIR overrides it and ANYPS5_NO_SHADER_CACHE=1 turns the caches off
-// (empty path).
-inline std::filesystem::path ShaderCacheDirectory() {
-    const char* disabled = std::getenv("ANYPS5_NO_SHADER_CACHE");
-    if (disabled != nullptr && *disabled != '\0' && std::strcmp(disabled, "0") != 0) return {};
-    const char* directory = std::getenv("ANYPS5_SHADER_CACHE_DIR");
-    if (directory != nullptr && *directory != '\0') return std::filesystem::path(directory);
-    std::error_code error;
-    const auto executable = std::filesystem::read_symlink("/proc/self/exe", error);
-    if (error) return {};
-    return executable.parent_path() / "shader_cache";
-}
+std::filesystem::path ShaderCacheDirectory();
 
-// Writes a temporary file beside `path` and renames it over `path`, so readers see the old file or
-// the whole new one.
 inline bool WriteFileAtomically(const std::filesystem::path& path, std::span<const std::byte> bytes) {
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);

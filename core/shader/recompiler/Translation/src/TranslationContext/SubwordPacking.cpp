@@ -127,7 +127,7 @@ IrU32 TranslationContext::packHalf2x16(IrF32 low, IrF32 high) {
 }
 
 void TranslationContext::write16Bits(const RdnaOperand& operand, IrU32 value) {
-    if (operand.sdwaSel != 6u) {
+    if (operand.sdwaSel != 6u || operand.explicitSdwaDst) {
         writeRawU32(operand, value);
         return;
     }

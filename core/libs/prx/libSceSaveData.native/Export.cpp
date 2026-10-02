@@ -10,8 +10,11 @@
 #include <mutex>
 #include <vector>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>

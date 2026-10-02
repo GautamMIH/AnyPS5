@@ -17,7 +17,7 @@ struct DirectMemoryBlock {
 
 int DirectMemoryAlloc(int64_t searchStart, int64_t searchEnd, size_t len, size_t alignment, int memoryType, int64_t* physOut);
 void DirectMemoryFree(int64_t start, size_t len);
-bool DirectMemoryQueryBlock(uint64_t offset, DirectMemoryBlock* block);
+bool DirectMemoryFind(int64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType);
 size_t DirectMemoryFreeRun(uint64_t offset, uint64_t limit);
 int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart, size_t alignment);
 int DoMapAnon(void** addr, size_t len, int prot, int flags);

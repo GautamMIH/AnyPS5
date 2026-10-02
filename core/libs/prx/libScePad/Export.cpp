@@ -19,6 +19,12 @@ namespace {
 bool padInitialized = false;
 std::set<std::tuple<int, int, int>> openedPorts;
 
+bool ValidPort(int userId, int type, int index) {
+    const bool personalPort = type == PAD_PORT_TYPE_STANDARD || type == PAD_PORT_TYPE_SPECIAL;
+    const bool systemRemote = userId == PAD_USER_ID_SYSTEM && type == PAD_PORT_TYPE_REMOTE;
+    return index == 0 && (personalPort || systemRemote);
+}
+
 }
 
 extern "C" {
@@ -27,6 +33,8 @@ int APS5_VABI scePadClose_nid_postfix(int handle) {
  if (handle != PAD_HANDLE) {
   return PAD_ERROR_INVALID_HANDLE;
  }
+ // Every port shares the one handle, so closing it closes them all.
+ openedPorts.clear();
  return PAD_OK;
 }
 
@@ -132,12 +140,7 @@ int APS5_VABI scePadInit_nid_postfix(void) {
 
 int APS5_VABI scePadOpen_nid_postfix(int userId, int type, int index, const void* param) {
  (void)param;
- if (index != 0) {
-  return PAD_ERROR_INVALID_ARG;
- }
- const bool personalPort = (type == PAD_PORT_TYPE_STANDARD || type == PAD_PORT_TYPE_SPECIAL);
- const bool systemRemote = (userId == PAD_USER_ID_SYSTEM && type == PAD_PORT_TYPE_REMOTE);
- if (!personalPort && !systemRemote) {
+ if (!ValidPort(userId, type, index)) {
   return PAD_ERROR_INVALID_ARG;
  }
  openedPorts.insert({userId, type, index});

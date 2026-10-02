@@ -64,13 +64,13 @@ foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
     string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
 endforeach()
 
-add_executable(agc_command_tests EXCLUDE_FROM_ALL tests/Commands.cpp)
+add_test_executable(agc_command_tests EXCLUDE_FROM_ALL tests/Commands.cpp)
 target_include_directories(agc_command_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(agc_command_tests PRIVATE libSceAgc libc)
 configure_windows_unwind(agc_command_tests)
 configure_windows_unwind(libSceAgc)
 
-add_executable(agc_register_command_tests EXCLUDE_FROM_ALL
+add_test_executable(agc_register_command_tests EXCLUDE_FROM_ALL
         tests/RegisterCommands.cpp
         Command/src/Packet.cpp
         DcbState/src/Registers.cpp
@@ -84,6 +84,18 @@ if(BUILD_TESTING)
     add_test(NAME agc_register_command_tests COMMAND agc_register_command_tests)
     if(WIN32)
         set_tests_properties(agc_register_command_tests PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
+if(BUILD_TESTING)
+    add_test_executable(guest_shader_link_tests ${LIBS_INCLUDE_DIR}/tests/GuestShaderLink.cpp)
+    target_include_directories(guest_shader_link_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_shader_link_tests PRIVATE libSceAgc libc)
+    configure_windows_unwind(guest_shader_link_tests)
+    add_test(NAME guest_shader_link COMMAND guest_shader_link_tests)
+    if(WIN32)
+        set_tests_properties(guest_shader_link PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()

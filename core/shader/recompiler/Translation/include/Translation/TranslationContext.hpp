@@ -12,8 +12,10 @@ public:
     TranslationContext(IrProgram& program, IrBlock& block, std::uint32_t vectorLimit);
 
     void TranslateInstruction(const RdnaInstruction& instruction);
+    void SetPixelInput(const ShaderPixelInputInfo* info, bool barycentricEnabled) { pixelInput = info; fragmentShaderBarycentricEnabled = barycentricEnabled; }
     void TranslateEmbeddedFetch(const RdnaInstruction& instruction, std::uint32_t attribute, std::uint32_t componentCount, const ShaderBufferResource& resource);
     void AddBranchCondition(const BasicBlock& source, BlockInfo& info);
+    void TranslateCodeTableLoad(const RdnaInstruction& instruction, const ControlFlowGraph::CodeTableLoad& table);
 
 private:
     struct AddressOperands {
@@ -115,7 +117,8 @@ private:
     void emitIntegerCompare(const RdnaInstruction& inst, IrOpcode opcode, IrType type, bool scalar, bool cmpx);
     void emitInteger16Compare(const RdnaInstruction& inst, IrOpcode opcode, bool signedValue, bool cmpx);
     void emitFloatCompare(const RdnaInstruction& inst, IrOpcode opcode, bool half, bool cmpx);
-    void emitFloatOrderedCompare(const RdnaInstruction& inst, bool ordered);
+    void emitInteger64Order(const RdnaInstruction& inst, bool signedValue, bool swap, bool negate, bool cmpx);
+    void emitFloatOrderedCompare(const RdnaInstruction& inst, bool ordered, bool half, bool cmpx);
     void emitFloatClassCompare(const RdnaInstruction& inst, bool cmpx);
     void vCvtF32Ubyte(const RdnaInstruction& inst, std::uint32_t byteIndex);
     void vCvtF32U32(const RdnaInstruction& inst);
@@ -151,6 +154,9 @@ private:
     bool floatCube(const RdnaInstruction& inst, std::uint32_t resultKind);
     bool integer16Shift(const RdnaInstruction& inst, IrOpcode opcode, bool arithmetic);
     bool integer16Binary(const RdnaInstruction& inst, IrOpcode opcode, bool sign);
+    bool integer16Mad(const RdnaInstruction& inst, bool sign, bool wide);
+    bool vAddSubNcI32(const RdnaInstruction& inst, bool subtract);
+    bool integer16Ternary(const RdnaInstruction& inst, IrOpcode opcode, bool sign);
     bool vMed3I16(const RdnaInstruction& inst);
     bool packedInteger16Shift(const RdnaInstruction& inst, IrOpcode opcode, bool arithmetic);
     bool packedInteger16Binary(const RdnaInstruction& inst, IrOpcode opcode);
@@ -196,7 +202,7 @@ private:
     bool vCndmaskB32(const RdnaInstruction& inst);
     bool packB16(const RdnaInstruction& inst, bool high0, bool high1);
     void sSubvectorLoop(const RdnaInstruction& inst, bool begin);
-    void sSaveexec(const RdnaInstruction& inst, IrOpcode operation, bool negateExec, bool negateSource, bool write64);
+    void sSaveexec(const RdnaInstruction& inst, IrOpcode operation, bool negateExec, bool negateSource, bool write64, bool negateResult = false, bool writeDestination = true);
     void addU32(const RdnaInstruction& inst, bool vector, bool useCarryIn);
     void subU32(const RdnaInstruction& inst, bool vector, bool reverse);
     void subbU32(const RdnaInstruction& inst, bool vector, bool reverse);
@@ -222,7 +228,7 @@ private:
     void vReadlaneB32(const RdnaInstruction& inst);
     void vWritelaneB32(const RdnaInstruction& inst);
     void vPermlane16B32(const RdnaInstruction& inst, bool x16);
-    void vInterpP1F32();
+    void vInterpP1F32(const RdnaInstruction& inst);
     void vInterpP2F32(const RdnaInstruction& inst);
     void vInterpMovF32(const RdnaInstruction& inst);
     void eXP(const RdnaInstruction& inst);
@@ -232,6 +238,8 @@ private:
     bool emitMemory(const RdnaInstruction& inst);
 
     IrProgram& program;
+    const ShaderPixelInputInfo* pixelInput = nullptr;
+    bool fragmentShaderBarycentricEnabled = false;
     IrBuilder ir;
     IrBlock& block;
     IrU1 instructionBranchCondition;

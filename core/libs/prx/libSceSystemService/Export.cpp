@@ -33,11 +33,16 @@ int APS5_VABI sceSystemServiceGetDisplaySafeAreaInfo(SystemServiceDisplaySafeAre
 }
 
 int APS5_VABI sceSystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLuminance* luminance) {
- if (!luminance) return static_cast<int>(0x80A10003);
- luminance->max_full_frame_tone_map_luminance = 1000.0f;
- luminance->max_tone_map_luminance = 1000.0f;
- luminance->min_tone_map_luminance = 0.01f;
- return 0;
+ if (luminance == nullptr) {
+  return SYSTEM_SERVICE_ERROR_PARAMETER;
+ }
+ // The presenter always outputs through an SDR sRGB swapchain: titles map into the 100 cd/m2
+ // SDR reference white.
+ constexpr float SdrReferenceWhiteNits = 100.0f;
+ luminance->max_full_frame_tone_map_luminance = SdrReferenceWhiteNits;
+ luminance->max_tone_map_luminance = SdrReferenceWhiteNits;
+ luminance->min_tone_map_luminance = 0.0f;
+ return SYSTEM_SERVICE_OK;
 }
 
 int APS5_VABI sceSystemServiceGetNoticeScreenSkipFlag(bool* value) {
@@ -116,14 +121,14 @@ int APS5_VABI sceSystemServiceSetNoticeScreenSkipFlag(void) {
  return SYSTEM_SERVICE_OK;
 }
 
-int APS5_VABI sceSystemServiceInitializePlayerDialogParam(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceSystemServiceInitializePlayerDialogParam(void* param) {
+ if (param == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
+ return SYSTEM_SERVICE_OK;
 }
 
-int APS5_VABI sceSystemServiceLaunchPlayerDialog(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceSystemServiceLaunchPlayerDialog(const void* param) {
+ if (param == nullptr) return SYSTEM_SERVICE_ERROR_PARAMETER;
+ return SYSTEM_SERVICE_OK;
 }
 
 }

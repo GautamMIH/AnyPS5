@@ -53,12 +53,64 @@ struct ShaderComputeStageInfo {
     }
 };
 
+enum class PixelInput : std::uint32_t {
+    PerspectiveSample,
+    PerspectiveCenter,
+    PerspectiveCentroid,
+    PerspectivePullModel,
+    LinearSample,
+    LinearCenter,
+    LinearCentroid,
+    LineStipple,
+    PositionX,
+    PositionY,
+    PositionZ,
+    PositionW,
+    FrontFace,
+    Ancillary,
+    SampleCoverage,
+    PositionFixedPoint,
+    Count
+};
+
+constexpr std::uint32_t PixelInputBit(PixelInput input) {
+    return 1u << static_cast<std::uint32_t>(input);
+}
+
+constexpr std::uint32_t PixelInputVgprCount(PixelInput input) {
+    switch (input) {
+    case PixelInput::PerspectiveSample:
+    case PixelInput::PerspectiveCenter:
+    case PixelInput::PerspectiveCentroid:
+    case PixelInput::LinearSample:
+    case PixelInput::LinearCenter:
+    case PixelInput::LinearCentroid:
+        return 2u;
+    case PixelInput::PerspectivePullModel:
+        return 3u;
+    default:
+        return 1u;
+    }
+}
+
+constexpr std::uint32_t PixelInputVgpr(std::uint32_t inputAddr, PixelInput input) {
+    std::uint32_t vgpr = 0;
+    for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(input); ++i) {
+        if ((inputAddr & (1u << i)) != 0u) vgpr += PixelInputVgprCount(static_cast<PixelInput>(i));
+    }
+    return vgpr;
+}
+
 struct ShaderPixelStageInfo {
     std::uint32_t interpolatorCount;
     std::array<std::uint32_t, 32> interpolatorSettings;
     bool wave32;
-    std::uint32_t perspectiveCenterVgpr;
+    // SPI_PS_INPUT_ADDR: every input it names takes its VGPRs in SPI order (two per I/J pair, three
+    // for the pull model, one otherwise), loaded or not (PixelInputVgpr); the flags below are the
+    // loaded ones (ENA & ADDR).
+    std::uint32_t inputAddr;
     bool hasPerspectiveCenterVgpr;
+    bool perspectiveCentroid;
     bool posX;
     bool posY;
     bool posZ;
@@ -67,6 +119,7 @@ struct ShaderPixelStageInfo {
     bool ancillary;
     bool sampleShading;
     bool noPerspective;
+    bool linearCentroid;
     bool pixelKillEnable;
     bool depthExportEnable;
     bool sampleMaskExportEnable;
@@ -74,11 +127,6 @@ struct ShaderPixelStageInfo {
     bool executeOnNoop;
     std::array<std::uint8_t, 8> targetOutputMode;
     std::array<std::uint8_t, 8> targetExportMapping;
-    // SPI_PS_INPUT_ADDR: every input it names takes its VGPRs in SPI order (two per I/J pair, three
-    // for the pull model, one otherwise), loaded or not; inputLoaded (ENA & ADDR) are the ones the
-    // hardware writes. 0 when unknown: the loaded inputs above then make the layout.
-    std::uint32_t inputAddr = 0;
-    std::uint32_t inputLoaded = 0;
 };
 
 struct ShaderVertexBufferResource {
@@ -198,6 +246,7 @@ struct MeshConfiguration {
     std::uint32_t threadsPerGroup;
     std::uint32_t ldsSizeDwords;
     std::uint32_t provokingVertex;
+    std::uint32_t esgsItemSize = 0;
 };
 
 struct TessellationConfiguration {
@@ -207,6 +256,10 @@ struct TessellationConfiguration {
     std::uint32_t partitioning;
     std::uint32_t outputTopology;
 };
+
+inline constexpr std::uint32_t MeshDrawPushOffsetBytes = 104;
+inline constexpr std::uint32_t MeshDrawPushBytes = 24;
+inline constexpr std::uint32_t MeshIndexBufferUserWord = 4;
 
 struct GraphicsDrawParameters {
     std::uint64_t indexAddress;
@@ -350,6 +403,7 @@ struct RecompileResult {
     SharedSpirv spirv;
     std::vector<DescriptorBinding> bindings;
     std::vector<std::byte> pushConstants;
+    std::uint32_t memoryOffsetDword = 0;
     std::uint32_t bdaAbiVersion = 0;
     // Some access may store through the BDA table (ShaderInfo::bdaWrites). False proves the program
     // only reads through it, so a driver may expose the table's memory read-only; a producer that
@@ -388,6 +442,8 @@ struct ResourceCapture;
 // cache keys on it.
 void SetDebugProbeActive(bool active);
 [[nodiscard]] bool DebugProbeActive();
+[[nodiscard]] bool RayTracingStrict();
+[[nodiscard]] bool RayTracingMiss();
 
 struct RectListShaders {
     RecompileResult control;

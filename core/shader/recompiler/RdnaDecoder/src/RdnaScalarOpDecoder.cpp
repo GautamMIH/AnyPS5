@@ -40,13 +40,28 @@ RdnaOpcode decodeSop1Opcode(std::uint32_t opcode) {
         case 0x26u: return RdnaOpcode::SXorSaveexecB64;
         case 0x27u: return RdnaOpcode::SAndn2SaveexecB64;
         case 0x28u: return RdnaOpcode::SOrn2SaveexecB64;
+        case 0x29u: return RdnaOpcode::SNandSaveexecB64;
+        case 0x2au: return RdnaOpcode::SNorSaveexecB64;
+        case 0x2bu: return RdnaOpcode::SXnorSaveexecB64;
         case 0x2du: return RdnaOpcode::SQuadmaskB64;
         case 0x34u: return RdnaOpcode::SAbsI32;
         case 0x37u: return RdnaOpcode::SAndn1SaveexecB64;
+        case 0x38u: return RdnaOpcode::SOrn1SaveexecB64;
+        case 0x39u: return RdnaOpcode::SAndn1WrexecB64;
+        case 0x3au: return RdnaOpcode::SAndn2WrexecB64;
         case 0x3bu: return RdnaOpcode::SBitreplicateB64B32;
         case 0x3cu: return RdnaOpcode::SAndSaveexecB32;
+        case 0x3du: return RdnaOpcode::SOrSaveexecB32;
+        case 0x3eu: return RdnaOpcode::SXorSaveexecB32;
+        case 0x3fu: return RdnaOpcode::SAndn2SaveexecB32;
         case 0x40u: return RdnaOpcode::SOrn2SaveexecB32;
+        case 0x41u: return RdnaOpcode::SNandSaveexecB32;
+        case 0x42u: return RdnaOpcode::SNorSaveexecB32;
+        case 0x43u: return RdnaOpcode::SXnorSaveexecB32;
         case 0x44u: return RdnaOpcode::SAndn1SaveexecB32;
+        case 0x45u: return RdnaOpcode::SOrn1SaveexecB32;
+        case 0x46u: return RdnaOpcode::SAndn1WrexecB32;
+        case 0x47u: return RdnaOpcode::SAndn2WrexecB32;
         default: throw std::invalid_argument("unsupported SOP1 opcode " + std::to_string(opcode));
     }
 }
@@ -176,6 +191,9 @@ RdnaOpcode decodeSoppOpcode(std::uint32_t opcode) {
         case 0x0fu: return RdnaOpcode::SSetprio;
         case 0x10u: return RdnaOpcode::SSendmsg;
         case 0x12u: return RdnaOpcode::STrap;
+        case 0x13u: return RdnaOpcode::SIcacheInv;
+        case 0x14u: return RdnaOpcode::SIncperflevel;
+        case 0x15u: return RdnaOpcode::SDecperflevel;
         case 0x16u: return RdnaOpcode::STtracedata;
         case 0x17u:
         case 0x18u:
@@ -183,7 +201,9 @@ RdnaOpcode decodeSoppOpcode(std::uint32_t opcode) {
         case 0x1au: return RdnaOpcode::SCbranchCdbg;
         case 0x20u: return RdnaOpcode::SInstPrefetch;
         case 0x21u: return RdnaOpcode::SClause;
+        case 0x22u: return RdnaOpcode::SWaitIdle;
         case 0x23u: return RdnaOpcode::SWaitcntDepctr;
+        case 0x28u: return RdnaOpcode::STtracedata;
         default: throw std::invalid_argument("unsupported SOPP opcode " + std::to_string(opcode));
     }
 }
@@ -199,7 +219,8 @@ bool isSoppWaitOpcode(RdnaOpcode opcode) {
     return opcode == RdnaOpcode::SNop || opcode == RdnaOpcode::SWaitcnt || opcode == RdnaOpcode::SWaitcntDepctr ||
         opcode == RdnaOpcode::SSleep || opcode == RdnaOpcode::SSetprio || opcode == RdnaOpcode::SSendmsg ||
         opcode == RdnaOpcode::STrap || opcode == RdnaOpcode::STtracedata || opcode == RdnaOpcode::SInstPrefetch ||
-        opcode == RdnaOpcode::SClause || opcode == RdnaOpcode::SCbranchCdbg;
+        opcode == RdnaOpcode::SClause || opcode == RdnaOpcode::SCbranchCdbg || opcode == RdnaOpcode::SIcacheInv ||
+        opcode == RdnaOpcode::SIncperflevel || opcode == RdnaOpcode::SDecperflevel || opcode == RdnaOpcode::SWaitIdle;
 }
 
 std::uint32_t scalarDestinationDwordCount(RdnaOpcode opcode) {
@@ -218,6 +239,12 @@ std::uint32_t scalarDestinationDwordCount(RdnaOpcode opcode) {
         case RdnaOpcode::SXorSaveexecB64:
         case RdnaOpcode::SAndn2SaveexecB64:
         case RdnaOpcode::SOrn2SaveexecB64:
+        case RdnaOpcode::SNandSaveexecB64:
+        case RdnaOpcode::SNorSaveexecB64:
+        case RdnaOpcode::SXnorSaveexecB64:
+        case RdnaOpcode::SOrn1SaveexecB64:
+        case RdnaOpcode::SAndn1WrexecB64:
+        case RdnaOpcode::SAndn2WrexecB64:
         case RdnaOpcode::SQuadmaskB64:
         case RdnaOpcode::SAndn1SaveexecB64:
         case RdnaOpcode::SBitreplicateB64B32:

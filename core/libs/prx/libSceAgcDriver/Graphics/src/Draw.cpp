@@ -30,6 +30,15 @@ struct DrawStorage {
 
 }
 
+std::array<std::uint32_t, 4> MeshIndexBufferDescriptor(const Pm4::DrawParameters& draw, std::uint64_t unreadAddress) {
+    const auto address = draw.indexed ? draw.indexAddress : unreadAddress;
+    const auto bytes = draw.indexed ? (static_cast<std::uint64_t>(draw.indexCount) * draw.indexSize + 3u) & ~std::uint64_t{3} : 4u;
+    Require(address != 0 && bytes != 0 && bytes <= 0xffffffffu && (address >> 48u) == 0, "invalid mesh index buffer range");
+    // Raw buffer: 32-bit format, stride 0, no swizzle (as the SDK's index V#s).
+    constexpr std::uint32_t RawWord3 = 0x31016facu;
+    return {static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u) & 0xffffu, static_cast<std::uint32_t>(bytes), RawWord3};
+}
+
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
     PerformanceTimer timing("Graphics.Draw");
     ApplyFastClears(state);
@@ -204,14 +213,11 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     resources->Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.Layout());
     pipeline.PushConstants(commands, shaders);
     if (state.stages.mesh) {
-        const std::array<std::uint32_t, MeshDrawParameterBytes / sizeof(std::uint32_t)> parameters{
-            draw.indexCount,
-            draw.indexed ? 0u : draw.firstVertex,
-            draw.firstInstance,
-            draw.indexed ? draw.indexSize : 0u,
-            static_cast<std::uint32_t>(draw.indexAddress),
-            static_cast<std::uint32_t>(draw.indexAddress >> 32u)};
-        context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipeline.Layout(), PushConstantStages(shaders), 0, MeshDrawParameterBytes, parameters.data());
+        // Mesh programs read the draw's parameters from the end of the push block (upstream's NGG
+        // translation ABI); the index buffer is a V# in the front program's user words 4-7.
+        const std::array<std::uint32_t, ShaderRecompiler::MeshDrawPushBytes / sizeof(std::uint32_t)> parameters{draw.indexCount, draw.firstVertex, draw.firstInstance, draw.indexed ? draw.indexSize : 0u, 0u, 0u};
+        static_assert(ShaderRecompiler::MeshDrawPushOffsetBytes + ShaderRecompiler::MeshDrawPushBytes == PipelinePushConstantBytes);
+        context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, pipeline.Layout(), PushConstantStages(shaders), ShaderRecompiler::MeshDrawPushOffsetBytes, ShaderRecompiler::MeshDrawPushBytes, parameters.data());
     }
     if (state.stages.mesh) {
         context.Function<PFN_vkCmdDrawMeshTasksEXT>("vkCmdDrawMeshTasksEXT")(commands, meshGroups, draw.instanceCount, 1);

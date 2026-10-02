@@ -1,6 +1,7 @@
 #define _GLIBCXX_HAS_GTHREADS 0
 #include "MemoryPool.hpp"
 #include "DirectMemory.hpp"
+#include <iterator>
 #include <map>
 #include <mutex>
 
@@ -30,26 +31,30 @@ struct PhysicalMemoryPool {
         return SCE_KERNEL_ERROR_EAGAIN;
     }
 
+    // Frees every block piece in [start, start + len), which may span several allocations.
     void Free(uint64_t start, size_t len) {
         std::lock_guard<std::mutex> lock(_mutex);
         _mark(start, len, false);
+        const uint64_t end = start + len;
         auto it = _ranges.upper_bound(start);
-        if (it == _ranges.begin()) return;
-        --it;
-        if (start + len > it->second.end) return;
-        const DirectMemoryBlock block = it->second;
-        _ranges.erase(it);
-        if (block.start < start) _ranges[block.start] = {block.start, start, block.memoryType};
-        if (start + len < block.end) _ranges[start + len] = {start + len, block.end, block.memoryType};
+        if (it != _ranges.begin() && std::prev(it)->second.end > start) --it;
+        while (it != _ranges.end() && it->first < end) {
+            const DirectMemoryBlock block = it->second;
+            it = _ranges.erase(it);
+            if (block.start < start) _ranges[block.start] = {block.start, start, block.memoryType};
+            if (block.end > end) it = _ranges.emplace(end, DirectMemoryBlock{end, block.end, block.memoryType}).first;
+        }
     }
 
-    bool Query(uint64_t offset, DirectMemoryBlock* block) {
+    // The block containing offset, or with findNext the first block above it.
+    bool Find(uint64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType) {
         std::lock_guard<std::mutex> lock(_mutex);
         auto it = _ranges.upper_bound(offset);
-        if (it == _ranges.begin()) return false;
-        --it;
-        if (offset >= it->second.end) return false;
-        *block = it->second;
+        if (it != _ranges.begin() && std::prev(it)->second.end > offset) --it;
+        else if (!findNext || it == _ranges.end()) return false;
+        *start = static_cast<int64_t>(it->second.start);
+        *end = static_cast<int64_t>(it->second.end);
+        *memoryType = it->second.memoryType;
         return true;
     }
 
@@ -94,8 +99,8 @@ void DirectMemoryFree(int64_t start, size_t len) {
     PhysicalMemoryPool::Instance().Free(static_cast<uint64_t>(start), len);
 }
 
-bool DirectMemoryQueryBlock(uint64_t offset, DirectMemoryBlock* block) {
-    return PhysicalMemoryPool::Instance().Query(offset, block);
+bool DirectMemoryFind(int64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType) {
+    return PhysicalMemoryPool::Instance().Find(static_cast<uint64_t>(offset), findNext, start, end, memoryType);
 }
 
 size_t DirectMemoryFreeRun(uint64_t offset, uint64_t limit) {

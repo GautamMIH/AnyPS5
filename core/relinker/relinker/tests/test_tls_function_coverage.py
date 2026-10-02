@@ -11,7 +11,22 @@ from test_optional_plt import fixture
 TLS_LOAD = bytes.fromhex("66 66 66 64 48 8b 04 25 00 00 00 00")
 
 
-def make_image(transfer, metadata, extent=None):
+def register_load(register):
+    high, low = register >> 3, register & 7
+    extension = b"\x41" if high else b""
+    save = extension + bytes([0x50 + low]) if register else b""
+    restore = extension + bytes([0x58 + low]) if register else b""
+    prefix = save + bytes.fromhex("b8 07 00 00 00 b9 05 00 00 00")
+    load = bytes([0x64, 0x48 | high << 2, 0x8b, 0x04 | low << 3, 0x25, 0, 0, 0, 0])
+    rest = extension + bytes([0x8b, 0x40 | low]) + (b"\x24" if low == 4 else b"") + b"\xf0" + restore + b"\xc3"
+    if register != 1:
+        rest = bytes.fromhex("83 f9 05 75") + bytes([len(rest)]) + rest
+    if register != 0:
+        rest = bytes.fromhex("83 f8 07 75") + bytes([len(rest)]) + rest
+    return len(prefix), prefix + load + rest + restore + bytes.fromhex("31 c0 c3")
+
+
+def make_image(transfer, metadata, extent=None, body=None):
     image = fixture()
     image.extend(b"\x90" * 0x1000)
     struct.pack_into("<Q", image, 24, 0x1200)
@@ -31,7 +46,8 @@ def make_image(transfer, metadata, extent=None):
     else:
         raise ValueError(transfer)
     image[0x1200:0x1200 + len(code)] = code
-    body = TLS_LOAD + bytes.fromhex("8b 40 f0 c3")
+    if body is None:
+        body = TLS_LOAD + bytes.fromhex("8b 40 f0 c3")
     image[target:target + len(body)] = body
     image[0x1850:0x1850 + len(TLS_LOAD)] = TLS_LOAD
     struct.pack_into("<QQq", image, 0x700, 0x300, 8, 0x1200)
@@ -103,6 +119,13 @@ def main():
         external[0x1300:0x1310] = external[0x1240:0x1250]
         external[0x1240:0x1250] = b"\xe8" + struct.pack("<i", 0x1300 - 0x1245) + b"\xc3" + b"\x90" * 10
         convert("direct-call-from-indirect-block", external, tls_address=0x1300)
+        for register in range(16):
+            offset, body = register_load(register)
+            image = make_image("register", "unwind", body=body)
+            if register == 4:
+                convert("load-register-4", image, "Unsupported Windows guest TLS instruction")
+            else:
+                convert("load-register-" + str(register), image, tls_address=0x1240 + offset)
         conflicting = make_image("register", "symbol")
         unwind = make_image("register", "unwind", 0x51)
         conflicting[0x900:0x9a0] = unwind[0x900:0x9a0]

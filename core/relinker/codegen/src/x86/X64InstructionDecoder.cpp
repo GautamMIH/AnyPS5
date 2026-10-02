@@ -17,36 +17,25 @@ std::size_t X64InstructionDecoder::Decode(const std::uint8_t* data, std::size_t 
     while (pos < available) {
         const std::uint8_t b = data[pos];
 
+        if (b >= RexMin && b <= RexMax) {
+            rexPresent = true;
+            rex = b;
+            pos += 1;
+            continue;
+        }
+
         if (b == PrefixRepne) {
             repnePrefix = true;
-            pos += 1;
-            continue;
-        }
-
-        if (b == PrefixLock || b == PrefixRep ||
-            b == PrefixSegCs || b == PrefixSegSs || b == PrefixSegDs || b == PrefixSegEs ||
-            b == PrefixSegFs || b == PrefixSegGs) {
-            pos += 1;
-            continue;
-        }
-
-        if (b == PrefixOperandSize) {
+        } else if (b == PrefixOperandSize) {
             operandSizeOverride = true;
-            pos += 1;
-            continue;
+        } else if (b != PrefixLock && b != PrefixRep && b != PrefixAddressSize &&
+                   b != PrefixSegCs && b != PrefixSegSs && b != PrefixSegDs &&
+                   b != PrefixSegEs && b != PrefixSegFs && b != PrefixSegGs) {
+            break;
         }
 
-        if (b == PrefixAddressSize) {
-            pos += 1;
-            continue;
-        }
-
-        break;
-    }
-
-    if (pos < available && data[pos] >= RexMin && data[pos] <= RexMax) {
-        rexPresent = true;
-        rex = data[pos];
+        rexPresent = false;
+        rex = 0;
         pos += 1;
     }
 
@@ -340,20 +329,23 @@ DecodedInstructionInfo X64InstructionDecoder::DecodeInstruction(
 
     while (pos < info.Length) {
         std::uint8_t b = data[pos];
+        if (b >= RexMin && b <= RexMax) {
+            info.RexPrefix = b;
+            ++pos;
+            continue;
+        }
         if (b == PrefixLock || b == PrefixRepne || b == PrefixRep ||
             b == PrefixSegCs || b == PrefixSegSs || b == PrefixSegDs ||
             b == PrefixSegEs || b == PrefixSegFs || b == PrefixSegGs ||
             b == PrefixOperandSize || b == PrefixAddressSize) {
             if (b >= PrefixSegFs && b <= PrefixSegGs)
                 info.SegmentPrefix = b;
+            info.RexPrefix = 0;
             ++pos;
             continue;
         }
         break;
     }
-
-    if (pos < info.Length && data[pos] >= RexMin && data[pos] <= RexMax)
-        info.RexPrefix = data[pos++];
 
     info.OpcodeOffset = pos;
 

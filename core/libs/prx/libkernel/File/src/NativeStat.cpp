@@ -1,4 +1,5 @@
 #include "prx/libkernel/File/include/NativeStat.hpp"
+#include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
 
 #include <cerrno>
 #include <stdexcept>
@@ -10,6 +11,10 @@
 using NativeStat = struct __stat64;
 static int DoStat(const std::filesystem::path& p, NativeStat* st) {
     return _wstat64(p.wstring().c_str(), st);
+}
+static int DoFstat(int fd, NativeStat* st) {
+    if (const auto directory = File::DirectoryDescriptorPath(fd)) return DoStat(*directory, st);
+    return _fstat64(fd, st);
 }
 #else
 #include <sys/stat.h>
@@ -38,7 +43,7 @@ int FillFileStat(const std::filesystem::path& nativePath, FileStat* sb) {
 int FillFileStatFromDescriptor(int descriptor, FileStat* sb) {
     NativeStat st{};
 #ifdef _WIN32
-    if (_fstat64(descriptor, &st) != 0)
+    if (DoFstat(descriptor, &st) != 0)
         return errno;
 #else
     if (::fstat(descriptor, &st) != 0)

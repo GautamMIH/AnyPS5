@@ -36,6 +36,8 @@ std::uint32_t GlslStd450(SpirvEmitterState& state);
 std::uint32_t PixelParameterLocation(const SpirvEmitterState& state, std::uint32_t attr);
 bool PixelParameterIsFlat(const SpirvEmitterState& state, std::uint32_t attr);
 bool PixelParameterIsCustom(const SpirvEmitterState& state, std::uint32_t attr);
+bool PixelParameterIsDefault(const SpirvEmitterState& state, std::uint32_t attr);
+bool PixelParameterIsLinear(const SpirvEmitterState& state, std::uint32_t attr);
 VertexInputScalarKind VertexParameterScalarKind(const SpirvEmitterState& state, std::uint32_t location);
 std::uint32_t VertexParameterComponentCount(const SpirvInputBinding& input);
 std::uint32_t VertexParameterScalarType(SpirvEmitterState& state, VertexInputScalarKind kind);

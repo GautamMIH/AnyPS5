@@ -190,21 +190,19 @@ void DefineInputs(SpirvEmitterState& state) {
             addBuiltin(StageInputKind::WorkgroupId, 3u, "gl_WorkGroupID");
         }
     }
-    for (std::size_t index = 0; index < state.inputs.size(); ++index) {
-        auto& input = state.inputs[index];
-        if (input.kind == StageInputKind::Parameter && state.program.Resources().stage == IrShaderStage::Pixel) {
+    const bool pixelStage = state.program.Resources().stage == IrShaderStage::Pixel;
+    for (auto& input : state.inputs) {
+        if (pixelStage && input.kind == StageInputKind::Parameter) {
             // Several pixel inputs may read the same exported parameter (SPI_PS_INPUT_CNTL.OFFSET);
             // Vulkan allows one variable per location, so they share it.
             const auto location = PixelParameterLocation(state, input.location);
-            const SpirvInputBinding* shared = nullptr;
-            for (std::size_t other = 0; other < index && shared == nullptr; ++other) {
-                const auto& candidate = state.inputs[other];
-                if (candidate.kind == StageInputKind::Parameter && PixelParameterLocation(state, candidate.location) == location) shared = &candidate;
-            }
-            if (shared != nullptr) {
+            const auto shared = std::find_if(state.inputs.begin(), state.inputs.end(), [&](const SpirvInputBinding& other) {
+                return &other != &input && other.kind == StageInputKind::Parameter && other.variableId != 0u && PixelParameterLocation(state, other.location) == location;
+            });
+            if (shared != state.inputs.end()) {
                 // Per-vertex inputs derive their own interpolation from the shared vertex values.
                 if (shared->perVertex != input.perVertex || (!input.perVertex && PixelParameterIsFlat(state, shared->location) != PixelParameterIsFlat(state, input.location))) {
-                    FailEmit("pixel inputs reading the same parameter use different interpolation");
+                    throw std::runtime_error("SPIR-V module emission failed: pixel inputs sharing parameter " + std::to_string(location) + " disagree on per-vertex access or interpolation");
                 }
                 input.variableId = shared->variableId;
                 continue;
@@ -263,7 +261,7 @@ void DefineInputs(SpirvEmitterState& state) {
             } else if (flat) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationFlat);
             }
-            if (state.program.Resources().stage == IrShaderStage::Pixel && PixelInfo(state).psNoPerspective && !flat && !input.perVertex) {
+            if (!flat && !input.perVertex && PixelParameterIsLinear(state, input.location)) {
                 state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationNoPerspective);
             }
             state.module.AddAnnotation(spv::OpDecorate, input.variableId, spv::DecorationLocation, PixelParameterLocation(state, input.location));

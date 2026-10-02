@@ -279,8 +279,9 @@ void writePixelInfo(Writer& writer, const ShaderPixelStageInfo& info) {
         writer.WriteU32(value);
     }
     writer.WriteBool(info.wave32);
-    writer.WriteU32(info.perspectiveCenterVgpr);
+    writer.WriteU32(info.inputAddr);
     writer.WriteBool(info.hasPerspectiveCenterVgpr);
+    writer.WriteBool(info.perspectiveCentroid);
     writer.WriteBool(info.posX);
     writer.WriteBool(info.posY);
     writer.WriteBool(info.posZ);
@@ -289,6 +290,7 @@ void writePixelInfo(Writer& writer, const ShaderPixelStageInfo& info) {
     writer.WriteBool(info.ancillary);
     writer.WriteBool(info.sampleShading);
     writer.WriteBool(info.noPerspective);
+    writer.WriteBool(info.linearCentroid);
     writer.WriteBool(info.pixelKillEnable);
     writer.WriteBool(info.depthExportEnable);
     writer.WriteBool(info.sampleMaskExportEnable);
@@ -299,15 +301,19 @@ void writePixelInfo(Writer& writer, const ShaderPixelStageInfo& info) {
     }
 }
 
-ShaderPixelStageInfo readPixelInfo(Reader& reader) {
+ShaderPixelStageInfo readPixelInfo(Reader& reader, std::uint32_t version) {
     ShaderPixelStageInfo info{};
     info.interpolatorCount = reader.ReadU32();
     for (std::uint32_t& value : info.interpolatorSettings) {
         value = reader.ReadU32();
     }
     info.wave32 = reader.ReadBool();
-    info.perspectiveCenterVgpr = reader.ReadU32();
+    const auto inputAddrOrCenterVgpr = reader.ReadU32();
     info.hasPerspectiveCenterVgpr = reader.ReadBool();
+    if (version >= 5u) {
+        info.inputAddr = inputAddrOrCenterVgpr;
+        info.perspectiveCentroid = reader.ReadBool();
+    }
     info.posX = reader.ReadBool();
     info.posY = reader.ReadBool();
     info.posZ = reader.ReadBool();
@@ -316,6 +322,7 @@ ShaderPixelStageInfo readPixelInfo(Reader& reader) {
     info.ancillary = reader.ReadBool();
     info.sampleShading = reader.ReadBool();
     info.noPerspective = reader.ReadBool();
+    if (version >= 5u) info.linearCentroid = reader.ReadBool();
     info.pixelKillEnable = reader.ReadBool();
     info.depthExportEnable = reader.ReadBool();
     info.sampleMaskExportEnable = reader.ReadBool();
@@ -323,6 +330,14 @@ ShaderPixelStageInfo readPixelInfo(Reader& reader) {
     info.executeOnNoop = reader.ReadBool();
     for (std::uint8_t& value : info.targetOutputMode) {
         value = reader.ReadU8();
+    }
+    if (version < 5u) {
+        const auto input = [](PixelInput value, bool present) { return present ? PixelInputBit(value) : 0u; };
+        info.inputAddr = input(PixelInput::PerspectiveSample, info.hasPerspectiveCenterVgpr && inputAddrOrCenterVgpr == 2u) | input(PixelInput::PerspectiveCenter, info.hasPerspectiveCenterVgpr) |
+            input(PixelInput::LinearSample, info.sampleShading) | input(PixelInput::LinearCenter, info.noPerspective) |
+            input(PixelInput::PositionX, info.posX) | input(PixelInput::PositionY, info.posY) | input(PixelInput::PositionZ, info.posZ) | input(PixelInput::PositionW, info.posW) |
+            input(PixelInput::FrontFace, info.frontFace) | input(PixelInput::Ancillary, info.ancillary);
+        if (info.sampleShading) info.inputAddr |= PixelInputBit(PixelInput::PerspectiveSample);
     }
     return info;
 }
@@ -426,9 +441,10 @@ void writeMeshConfiguration(Writer& writer, const MeshConfiguration& configurati
     writer.WriteU32(configuration.threadsPerGroup);
     writer.WriteU32(configuration.ldsSizeDwords);
     writer.WriteU32(configuration.provokingVertex);
+    writer.WriteU32(configuration.esgsItemSize);
 }
 
-MeshConfiguration readMeshConfiguration(Reader& reader) {
+MeshConfiguration readMeshConfiguration(Reader& reader, std::uint32_t version) {
     MeshConfiguration configuration{};
     configuration.inputPrimitive = reader.ReadU32();
     configuration.primitivesPerGroup = reader.ReadU32();
@@ -438,6 +454,7 @@ MeshConfiguration readMeshConfiguration(Reader& reader) {
     configuration.threadsPerGroup = reader.ReadU32();
     configuration.ldsSizeDwords = reader.ReadU32();
     configuration.provokingVertex = reader.ReadU32();
+    configuration.esgsItemSize = version >= 4u ? reader.ReadU32() : 4u;
     return configuration;
 }
 
@@ -482,7 +499,7 @@ void writeGuestContext(Writer& writer, const GuestContext& context) {
     }
 }
 
-GuestContext readGuestContext(Reader& reader, DeserializedRequest& result) {
+GuestContext readGuestContext(Reader& reader, DeserializedRequest& result, std::uint32_t version) {
     GuestContext context{};
     context.waveSize = reader.ReadU32();
     context.userDataBaseRegister = reader.ReadU32();
@@ -493,7 +510,7 @@ GuestContext readGuestContext(Reader& reader, DeserializedRequest& result) {
         context.compute = result.compute;
     }
     if (reader.ReadBool()) {
-        result.pixel = readPixelInfo(reader);
+        result.pixel = readPixelInfo(reader, version);
         context.pixel = result.pixel;
     }
     if (reader.ReadBool()) {
@@ -615,7 +632,7 @@ void writeGraphicsCompileContext(Writer& writer, const GraphicsCompileContext& g
     writer.WriteU32(graphics.draw.instanceCount);
 }
 
-GraphicsCompileContext readGraphicsCompileContext(Reader& reader, DeserializedGraphicsCompileContext& storage) {
+GraphicsCompileContext readGraphicsCompileContext(Reader& reader, DeserializedGraphicsCompileContext& storage, std::uint32_t version) {
     GraphicsCompileContext graphics{};
     graphics.firstUserSgpr = reader.ReadU32();
     const auto programCount = reader.ReadU64();
@@ -639,7 +656,7 @@ GraphicsCompileContext readGraphicsCompileContext(Reader& reader, DeserializedGr
     }
     graphics.linkedPrograms = storage.linkedPrograms;
     if (reader.ReadBool()) {
-        storage.mesh = readMeshConfiguration(reader);
+        storage.mesh = readMeshConfiguration(reader, version);
         graphics.mesh = storage.mesh;
     }
     if (reader.ReadBool()) {
@@ -660,7 +677,7 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     std::string buffer;
     Writer writer(buffer);
     writer.WriteU32(0x41505335u);
-    writer.WriteU32(4u);
+    writer.WriteU32(5u);
     writeShaderBinary(writer, request.shader);
     writeGuestContext(writer, request.context);
     writeSpirvTarget(writer, request.target);
@@ -676,11 +693,6 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
             writer.WriteU32(value);
         }
     }
-    // Version 4: a pixel request's input layout (SPI_PS_INPUT_ADDR and the loaded inputs).
-    if (request.context.pixel.has_value()) {
-        writer.WriteU32(request.context.pixel->inputAddr);
-        writer.WriteU32(request.context.pixel->inputLoaded);
-    }
     return base64Encode(buffer);
 }
 
@@ -689,25 +701,21 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     Reader reader(decoded);
     if (reader.ReadU32() != 0x41505335u) throw std::runtime_error("invalid recompile request signature");
     const auto version = reader.ReadU32();
-    if (version < 1u || version > 4u) throw std::runtime_error("unsupported recompile request serialization version");
+    if (version < 1u || version > 5u) throw std::runtime_error("unsupported recompile request serialization version");
     DeserializedRequest result{};
     result.request.shader = readShaderBinary(reader, result.shaderCode, result.shaderHeader);
-    result.request.context = readGuestContext(reader, result);
+    result.request.context = readGuestContext(reader, result, version);
     result.request.target = readSpirvTarget(reader, result);
     result.request.layout = readBindingLayout(reader);
     if (reader.ReadBool()) {
         result.graphicsStorage = std::make_unique<DeserializedGraphicsCompileContext>();
-        result.request.graphics = readGraphicsCompileContext(reader, *result.graphicsStorage);
+        result.request.graphics = readGraphicsCompileContext(reader, *result.graphicsStorage, version);
     }
     if (version >= 2u) result.request.useCache = reader.ReadBool();
     if (version >= 3u && result.request.context.compute.has_value()) {
         for (std::uint32_t& value : result.request.context.compute->partialThreads) {
             value = reader.ReadU32();
         }
-    }
-    if (version >= 4u && result.request.context.pixel.has_value()) {
-        result.request.context.pixel->inputAddr = reader.ReadU32();
-        result.request.context.pixel->inputLoaded = reader.ReadU32();
     }
     return result;
 }

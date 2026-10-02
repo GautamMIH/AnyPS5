@@ -357,6 +357,32 @@ std::uint32_t toProgramCounter(std::uint32_t wordIndex) {
     return wordIndex * 4u;
 }
 
+RdnaOpcode cacheControlOpcode(RdnaInstructionFamily family, std::uint32_t opcode) {
+    if (family == RdnaInstructionFamily::SMEM) {
+        switch (opcode) {
+            case 0x1fu: return RdnaOpcode::SGl1Inv;
+            case 0x20u: return RdnaOpcode::SDcacheInv;
+            case 0x21u: return RdnaOpcode::SDcacheWb;
+            default: return RdnaOpcode::Invalid;
+        }
+    }
+    switch (opcode) {
+        case 0x71u: return RdnaOpcode::BufferGl0Inv;
+        case 0x72u: return RdnaOpcode::BufferGl1Inv;
+        default: return RdnaOpcode::Invalid;
+    }
+}
+
+RdnaInstruction cacheControlInstruction(RdnaInstructionFamily family, RdnaOpcode op, std::uint32_t opcode, std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex) {
+    RdnaInstruction instruction{};
+    instruction.programCounter = programCounter;
+    instruction.family = family;
+    instruction.opcodeId = opcode;
+    instruction.op = op;
+    setRawWords(instruction, code, wordIndex, 2u);
+    return instruction;
+}
+
 }
 
 RdnaInstruction DecodeRdnaSmem(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex) {
@@ -371,6 +397,9 @@ RdnaInstruction DecodeRdnaSmem(std::uint32_t programCounter, std::span<const std
     const auto sdst = (word0 >> 6u) & 0x7Fu;
     const auto sbase = word0 & 0x3Fu;
     const auto soffsetCode = (word1 >> 25u) & 0x7Fu;
+    if (const auto cacheOp = cacheControlOpcode(RdnaInstructionFamily::SMEM, opcode); cacheOp != RdnaOpcode::Invalid) {
+        return cacheControlInstruction(RdnaInstructionFamily::SMEM, cacheOp, opcode, programCounter, code, wordIndex);
+    }
     const auto& info = lookupOpcode(smemOpcodes, opcode, "SMEM opcode is not supported");
 
     RdnaInstruction instruction{};
@@ -413,6 +442,9 @@ RdnaInstruction DecodeRdnaMubuf(std::uint32_t programCounter, std::span<const st
     const auto vaddr = word1 & 0xFFu;
     const auto srsrc = (word1 >> 16u) & 0x1Fu;
     const auto soffsetCode = (word1 >> 24u) & 0xFFu;
+    if (const auto cacheOp = cacheControlOpcode(RdnaInstructionFamily::MUBUF, opcode); cacheOp != RdnaOpcode::Invalid) {
+        return cacheControlInstruction(RdnaInstructionFamily::MUBUF, cacheOp, opcode, programCounter, code, wordIndex);
+    }
     const auto& info = lookupOpcode(mubufOpcodes, opcode, "MUBUF opcode is not supported");
 
     RdnaInstruction instruction{};

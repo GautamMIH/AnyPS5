@@ -17,14 +17,14 @@
 namespace {
 
 constexpr int PLAYGO_OK = 0;
-constexpr int PLAYGO_ERROR_NOT_INITIALIZED = static_cast<int>(0x80B2000E);
-constexpr int PLAYGO_ERROR_ALREADY_INITIALIZED = static_cast<int>(0x80B2000F);
-constexpr int PLAYGO_ERROR_BAD_HANDLE = static_cast<int>(0x80B20012);
-constexpr int PLAYGO_ERROR_BAD_POINTER = static_cast<int>(0x80B20013);
-constexpr int PLAYGO_ERROR_BAD_SIZE = static_cast<int>(0x80B20014);
-constexpr int PLAYGO_ERROR_BAD_CHUNK_ID = static_cast<int>(0x80B20015);
-constexpr int PLAYGO_ERROR_BAD_SPEED = static_cast<int>(0x80B20016);
-constexpr int PLAYGO_ERROR_BAD_LOCUS = static_cast<int>(0x80B20019);
+constexpr int PLAYGO_ERROR_NOT_INITIALIZED = static_cast<int>(0x80B20005);
+constexpr int PLAYGO_ERROR_ALREADY_INITIALIZED = static_cast<int>(0x80B20006);
+constexpr int PLAYGO_ERROR_BAD_HANDLE = static_cast<int>(0x80B20009);
+constexpr int PLAYGO_ERROR_BAD_POINTER = static_cast<int>(0x80B2000A);
+constexpr int PLAYGO_ERROR_BAD_SIZE = static_cast<int>(0x80B2000B);
+constexpr int PLAYGO_ERROR_BAD_CHUNK_ID = static_cast<int>(0x80B2000C);
+constexpr int PLAYGO_ERROR_BAD_SPEED = static_cast<int>(0x80B2000D);
+constexpr int PLAYGO_ERROR_BAD_LOCUS = static_cast<int>(0x80B20010);
 
 constexpr int kHandle = 1;
 constexpr std::int8_t kLocusLocalFast = 3;
@@ -221,7 +221,7 @@ int APS5_VABI scePlayGoSetToDoList(int handle, const PlayGoToDo* todo_list, uint
     if (number_of_entries == 0) return PLAYGO_ERROR_BAD_SIZE;
     for (uint32_t i = 0; i < number_of_entries; ++i) {
         if (!isValidChunk(todo_list[i].chunk_id)) return PLAYGO_ERROR_BAD_CHUNK_ID;
-        if (todo_list[i].locus < 0 || todo_list[i].locus > kLocusLocalFast) return PLAYGO_ERROR_BAD_LOCUS;
+        if (todo_list[i].locus != 0 && todo_list[i].locus != 2 && todo_list[i].locus != kLocusLocalFast) return PLAYGO_ERROR_BAD_LOCUS; // not downloaded, local slow, local fast
     }
     return PLAYGO_OK;
 }

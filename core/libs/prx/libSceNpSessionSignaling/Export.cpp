@@ -49,4 +49,21 @@ int APS5_VABI sceNpSessionSignalingTerminate(void) {
     return 0;
 }
 
+int32_t APS5_VABI sceNpSessionSignalingGetConnectionStatus(int32_t context_id, int32_t connection_id, int32_t* status, void* peer_address, uint16_t* peer_port) {
+ (void)context_id;
+ (void)connection_id;
+ (void)status;
+ (void)peer_address;
+ (void)peer_port;
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int32_t APS5_VABI sceNpSessionSignalingGetLocalNetInfo(int32_t context_id, void* info) {
+ (void)context_id;
+ (void)info;
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
 }

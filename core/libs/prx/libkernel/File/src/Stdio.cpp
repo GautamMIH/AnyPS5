@@ -8,6 +8,7 @@
 #include "prx/libkernel/File/include/FileErrors.hpp"
 #include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
+#include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
 #include <cstdarg>
 #include <filesystem>
 #include <system_error>
@@ -79,6 +80,12 @@ int readDirectory(int fd, char* buf, int nbytes) {
         position = static_cast<off_t>(next);
     }
     return static_cast<int>(written);
+#elif defined(_WIN32)
+    if (buf == nullptr) return FileErrors::SceBsd(kErrorFault);
+    if (nbytes <= 0) return FileErrors::SceBsd(kErrorInvalid);
+    // Directories open as stand-in descriptors on Windows (see Open.cpp).
+    const int written = File::ReadDirectoryDescriptor(fd, buf, nbytes);
+    return written < 0 ? FileErrors::SceBsd(20) : written;
 #else
     (void)fd;
     (void)buf;
@@ -97,7 +104,9 @@ int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {
 }
 
 int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep) {
-#if defined(__linux__)
+#if defined(_WIN32)
+    if (basep) *basep = 0;
+#elif defined(__linux__)
     if (basep) {
         const off_t position = ::lseek(fd, 0, SEEK_CUR);
         if (position < 0) return FileErrors::Sce(errno);

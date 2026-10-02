@@ -9,11 +9,13 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <vector>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Ampr/include/AmprPackets.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/File/include/FileErrors.hpp"
+#include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 
 #if defined(__linux__)
@@ -120,6 +122,46 @@ int resolveMany(const char* const* paths, std::uint32_t count, std::uint32_t* id
     return 0;
 }
 
+// Joins prefix and each path (a null path stays null, so it fails like an unprefixed null path).
+struct PrefixedPaths {
+    std::vector<std::string> storage;
+    std::vector<const char*> pointers;
+};
+
+bool prefixPaths(const char* prefix, const char* const* paths, std::uint32_t count, PrefixedPaths& out) {
+    if (!prefix || !paths || count == 0 || count > kMaxResolveCount) return false;
+    out.storage.resize(count);
+    out.pointers.resize(count);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        if (!paths[index]) {
+            out.pointers[index] = nullptr;
+            continue;
+        }
+        out.storage[index] = std::string(prefix) + paths[index];
+        out.pointers[index] = out.storage[index].c_str();
+    }
+    return true;
+}
+
+// The ForEach variants resolve every path and report each outcome; a failed path gets id
+// 0xFFFFFFFF, size 0 and an SCE kernel error in results.
+int resolveEach(const char* const* paths, std::uint32_t count, std::uint32_t* ids, std::uint64_t* sizes, int* results) {
+    if (count == 0 || count > kMaxResolveCount) return failure(kBsdInvalid);
+    if (!paths || !ids) return failure(kBsdFault);
+    for (std::uint32_t index = 0; index < count; ++index) {
+        std::uint64_t size = 0;
+        const int error = paths[index] ? resolve(paths[index], ids[index], size) : kBsdFault;
+        if (traceFiles()) std::fprintf(stderr, "[AnyPS5 file] apr-resolve %s = %d (id %u, %llu bytes)\n", paths[index] ? paths[index] : "(null)", error, error == 0 ? ids[index] : 0u, static_cast<unsigned long long>(size));
+        if (error != 0) {
+            ids[index] = 0xFFFFFFFFu;
+            size = 0;
+        }
+        if (sizes) sizes[index] = size;
+        if (results) results[index] = error == 0 ? 0 : static_cast<int>(0x80020000u | static_cast<unsigned>(error));
+    }
+    return 0;
+}
+
 std::uint32_t readFile(const AmprPackets::ReadFile& packet) {
 #if defined(__linux__)
     int descriptor;
@@ -220,6 +262,54 @@ int APS5_VABI sceKernelAprGetFileSize(uint32_t file_id, uint64_t* size) {
     if (file == filesById.end()) return failure(kBsdBadDescriptor);
     *size = file->second.Size;
     return 0;
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizes(const char* prefix, const char* const* paths, uint32_t count, uint32_t* ids, uint64_t* sizes, uint32_t* error_index) {
+    if (!sizes) return failure(kBsdFault);
+    PrefixedPaths prefixed;
+    if (!prefixPaths(prefix, paths, count, prefixed)) return failure(!prefix || !paths ? kBsdFault : kBsdInvalid);
+    return resolveMany(prefixed.pointers.data(), count, ids, sizes, error_index);
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIds(const char* prefix, const char* const* paths, uint32_t count, uint32_t* ids, uint32_t* error_index) {
+    PrefixedPaths prefixed;
+    if (!prefixPaths(prefix, paths, count, prefixed)) return failure(!prefix || !paths ? kBsdFault : kBsdInvalid);
+    return resolveMany(prefixed.pointers.data(), count, ids, nullptr, error_index);
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsToIdsForEach(const char* const* paths, uint32_t count, uint32_t* ids, int* results) {
+    return resolveEach(paths, count, ids, nullptr, results);
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsToIdsAndFileSizesForEach(const char* const* paths, uint32_t count, uint32_t* ids, uint64_t* sizes, int* results) {
+    if (!sizes) return failure(kBsdFault);
+    return resolveEach(paths, count, ids, sizes, results);
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIdsForEach(const char* prefix, const char* const* paths, uint32_t count, uint32_t* ids, int* results) {
+    PrefixedPaths prefixed;
+    if (!prefixPaths(prefix, paths, count, prefixed)) return failure(!prefix || !paths ? kBsdFault : kBsdInvalid);
+    return resolveEach(prefixed.pointers.data(), count, ids, nullptr, results);
+}
+
+int APS5_VABI sceKernelAprResolveFilepathsWithPrefixToIdsAndFileSizesForEach(const char* prefix, const char* const* paths, uint32_t count, uint32_t* ids, uint64_t* sizes, int* results) {
+    if (!sizes) return failure(kBsdFault);
+    PrefixedPaths prefixed;
+    if (!prefixPaths(prefix, paths, count, prefixed)) return failure(!prefix || !paths ? kBsdFault : kBsdInvalid);
+    return resolveEach(prefixed.pointers.data(), count, ids, sizes, results);
+}
+
+int APS5_VABI sceKernelAprGetFileStat(uint32_t file_id, FileStat* stat) {
+    if (!stat) return failure(kBsdFault);
+    int descriptor;
+    {
+        const std::lock_guard lock(fileMutex);
+        const auto file = filesById.find(file_id);
+        if (file == filesById.end()) return failure(kBsdBadDescriptor);
+        descriptor = file->second.Descriptor;
+    }
+    const int error = File::FillFileStatFromDescriptor(descriptor, stat);
+    return error == 0 ? 0 : failure(FileErrors::ToBsd(error));
 }
 
 int APS5_VABI sceKernelAprSubmitCommandBuffer(AmprCommandBuffer* cb, uint32_t priority) {

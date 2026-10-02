@@ -3,14 +3,24 @@
 #include "ControlFlow/RequestSerializer.hpp"
 #include "Optimization/RequestMemoryView.hpp"
 #include "Optimization/ResourceProgram.hpp"
+#include "Optimization/ShaderStageInputInfo.hpp"
 #if ANYPS5_ENABLE_SPIRV_TOOLS
 #include "SpirvBackend/SpirvOptimizer.hpp"
 #endif
+#include "CacheKey.hpp"
+#include <spirv/unified1/spirv.hpp>
+#include <algorithm>
 #include <array>
+#include <initializer_list>
 #include <iostream>
+#include <map>
 #include <future>
 #include <stdexcept>
+#include <span>
 #include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -111,6 +121,185 @@ void verifyProgramCounterRelativeData() {
     require(moved.cacheHit, "program counter data: relocating the shader recompiled it");
     require(dataBase(moved) == codeAddress + 0x1000u + 56u, "program counter data: the relocated shader bound the old address");
 }
+void verifyMeshConfiguration() {
+    using namespace ShaderRecompiler;
+    ShaderMeshInputInfo list;
+    list.inputPrimitive = 4u;
+    require(list.InputPrimitiveSize() == 3u && list.InputPrimitiveStep() == 3u && list.InputVertexCount(21u) == 63u && list.InputPrimitiveCount(63u) == 21u && list.InputPrimitiveCount(2u) == 0u && list.InputVertexCount(0u) == 0u, "triangle list subgroup sizes changed");
+    ShaderMeshInputInfo strip;
+    strip.inputPrimitive = 6u;
+    require(strip.InputPrimitiveSize() == 3u && strip.InputPrimitiveStep() == 1u && strip.InputVertexCount(21u) == 23u && strip.InputPrimitiveCount(23u) == 21u, "triangle strip subgroup sizes changed");
+    ShaderMeshInputInfo lines;
+    lines.inputPrimitive = 2u;
+    ShaderMeshInputInfo points;
+    points.inputPrimitive = 1u;
+    require(lines.InputPrimitiveSize() == 2u && lines.InputPrimitiveStep() == 2u && points.InputPrimitiveSize() == 1u && points.InputVertexCount(5u) == 5u, "line or point subgroup sizes changed");
+
+    static constexpr std::array<std::uint32_t, 1> code{0xbf810000u};
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Mesh, 0x10000u, code, 0, {}};
+    request.context.waveSize = 64;
+    const MeshConfiguration mesh{4u, 21u, 63u, 64u, 21u, 64u, 256u, 0u, 12u};
+    request.graphics = GraphicsCompileContext{0u, {}, mesh, std::nullopt, {}};
+    const auto replay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(request));
+    require(replay.request.graphics.has_value() && replay.request.graphics->mesh.has_value() && replay.request.graphics->mesh->esgsItemSize == 12u && replay.request.graphics->mesh->primitivesPerGroup == 21u, "mesh configuration was lost in serialization");
+    std::vector<std::uint64_t> key;
+    RecompileCacheKey::Build(request, key);
+    const auto first = key;
+    auto other = request;
+    auto otherMesh = mesh;
+    otherMesh.esgsItemSize = 16u;
+    other.graphics = GraphicsCompileContext{0u, {}, otherMesh, std::nullopt, {}};
+    RecompileCacheKey::Build(other, key);
+    require(key != first && RecompileCacheKey::ContextHash(request) != RecompileCacheKey::ContextHash(other), "the cache keys ignore the mesh configuration");
+}
+
+ShaderRecompiler::ShaderPixelStageInfo twoParameterPixel() {
+    ShaderRecompiler::ShaderPixelStageInfo pixel{};
+    pixel.interpolatorCount = 2u;
+    pixel.interpolatorSettings[1] = 1u;
+    pixel.wave32 = true;
+    pixel.inputAddr = ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PerspectiveCenter) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::LinearCenter);
+    pixel.hasPerspectiveCenterVgpr = true;
+    pixel.noPerspective = true;
+    pixel.targetOutputMode[0] = 9u;
+    pixel.targetExportMapping[0] = 0xe4u;
+    return pixel;
+}
+
+std::vector<std::uint32_t> noPerspectiveLocations(std::span<const std::uint32_t> code) {
+    using namespace ShaderRecompiler;
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.pixel = twoParameterPixel();
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 64;
+    request.layout.pushConstantSizeBytes = 128;
+    request.useCache = false;
+    const auto result = Recompile(request);
+    const auto& words = result.spirv.Words();
+    std::map<std::uint32_t, std::uint32_t> locations;
+    std::vector<std::uint32_t> decorated;
+    for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
+        if (static_cast<spv::Op>(words[at] & 0xffffu) != spv::OpDecorate) continue;
+        if (words[at + 2] == spv::DecorationLocation) locations[words[at + 1]] = words[at + 3];
+        if (words[at + 2] == spv::DecorationNoPerspective) decorated.push_back(words[at + 1]);
+    }
+    std::vector<std::uint32_t> result2;
+    for (const auto id : decorated) result2.push_back(locations.count(id) != 0 ? locations.at(id) : 0xffffffffu);
+    return result2;
+}
+
+void verifyPixelInputs() {
+    using namespace ShaderRecompiler;
+    require(PixelInputVgpr(0x326u, PixelInput::PerspectiveCentroid) == 2u && PixelInputVgpr(0x326u, PixelInput::LinearCenter) == 4u && PixelInputVgpr(0x326u, PixelInput::PositionX) == 6u, "the SPI_PS_INPUT_ADDR layout moved the inputs");
+    require(PixelInputVgpr(0x7afu, PixelInput::PerspectiveCentroid) == 4u && PixelInputVgpr(0x7afu, PixelInput::PositionX) == 12u && PixelInputVgpr(0x7afu, PixelInput::PositionZ) == 14u, "ADDR-only inputs did not reserve their VGPRs");
+
+    static constexpr std::array<std::uint32_t, 7> byPair{0xc8100000u, 0xc8110001u, 0xc8140402u, 0xc8150403u, 0xf800180fu, 0x05040504u, 0xbf810000u};
+    const auto linear = noPerspectiveLocations(byPair);
+    require(linear.size() == 1u && linear[0] == 1u, "only the parameter interpolated through the linear pair must be NoPerspective");
+    static constexpr std::array<std::uint32_t, 7> bothPairs{0xc8100000u, 0xc8110001u, 0xc8140002u, 0xc8150003u, 0xf800180fu, 0x05040504u, 0xbf810000u};
+    expectFailure([&] { static_cast<void>(noPerspectiveLocations(bothPairs)); }, "interpolated through both a perspective and a linear I/J pair", "a parameter read through both pairs was given one interpolation");
+
+    static constexpr std::array<std::uint32_t, 1> code{0xbf810000u};
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
+    request.context.waveSize = 64;
+    auto pixel = twoParameterPixel();
+    pixel.inputAddr |= PixelInputBit(PixelInput::PerspectiveCentroid) | PixelInputBit(PixelInput::LinearCentroid);
+    pixel.perspectiveCentroid = true;
+    pixel.linearCentroid = true;
+    request.context.pixel = pixel;
+    const auto replay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(request));
+    const auto& back = *replay.request.context.pixel;
+    require(back.inputAddr == pixel.inputAddr && back.perspectiveCentroid && back.linearCentroid && back.noPerspective, "the pixel input layout did not survive serialization");
+    std::vector<std::uint64_t> key;
+    RecompileCacheKey::Build(request, key);
+    const auto first = key;
+    for (const auto change : {0, 1, 2}) {
+        auto other = request;
+        auto changed = pixel;
+        if (change == 0) changed.inputAddr |= PixelInputBit(PixelInput::PerspectiveSample);
+        if (change == 1) changed.perspectiveCentroid = false;
+        if (change == 2) changed.linearCentroid = false;
+        other.context.pixel = changed;
+        RecompileCacheKey::Build(other, key);
+        require(key != first && RecompileCacheKey::ContextHash(request) != RecompileCacheKey::ContextHash(other), "the cache keys ignore the pixel input layout");
+    }
+}
+
+ShaderRecompiler::RecompileResult recompileSlots(std::initializer_list<std::uint32_t> controls, std::span<const std::uint32_t> code) {
+    using namespace ShaderRecompiler;
+    ShaderPixelStageInfo pixel{};
+    pixel.interpolatorCount = static_cast<std::uint32_t>(controls.size());
+    std::uint32_t index = 0;
+    for (const auto control : controls) pixel.interpolatorSettings[index++] = control;
+    pixel.inputAddr = PixelInputBit(PixelInput::PerspectiveCenter);
+    pixel.hasPerspectiveCenterVgpr = true;
+    pixel.targetOutputMode[0] = 9u;
+    pixel.targetExportMapping[0] = 0xe4u;
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
+    request.context.waveSize = 64;
+    request.context.pixel = pixel;
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 64;
+    request.target.fragmentShaderBarycentricEnabled = true;
+    request.layout.pushConstantSizeBytes = 128;
+    request.useCache = false;
+    return Recompile(request);
+}
+
+std::vector<std::pair<std::uint32_t, bool>> slotInputs(std::initializer_list<std::uint32_t> controls, std::span<const std::uint32_t> code) {
+    const auto result = recompileSlots(controls, code);
+    const auto& words = result.spirv.Words();
+    std::map<std::uint32_t, std::uint32_t> locations;
+    std::map<std::uint32_t, bool> perVertex;
+    std::vector<std::uint32_t> inputs;
+    for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) {
+        const auto op = static_cast<spv::Op>(words[at] & 0xffffu);
+        if (op == spv::OpVariable && words[at + 3] == spv::StorageClassInput) inputs.push_back(words[at + 2]);
+        if (op == spv::OpDecorate && words[at + 2] == spv::DecorationLocation) locations[words[at + 1]] = words[at + 3];
+        if (op == spv::OpDecorate && words[at + 2] == spv::DecorationPerVertexKHR) perVertex[words[at + 1]] = true;
+    }
+    std::vector<std::pair<std::uint32_t, bool>> located;
+    for (const auto id : inputs) {
+        if (locations.contains(id)) located.emplace_back(locations.at(id), perVertex.contains(id));
+    }
+    std::sort(located.begin(), located.end());
+    return located;
+}
+
+void verifyPixelParameterSlots() {
+    static constexpr std::array<std::uint32_t, 7> shared{0xc8100000u, 0xc8110001u, 0xc8140500u, 0xc8150501u, 0xf800180fu, 0x05040504u, 0xbf810000u};
+    auto inputs = slotInputs({0x3u, 0x3u}, shared);
+    require(inputs.size() == 1u && inputs[0].first == 3u && inputs[0].second, "inputs reading one slot were not declared once at the slot");
+    inputs = slotInputs({0x404u, 0x0u}, shared);
+    require(inputs.size() == 2u && inputs[0].first == 0u && inputs[1].first == 4u, "inputs of different slots moved");
+    require(slotInputs({0x20u, 0x2320u}, shared).empty(), "a defaulted input was declared as a parameter");
+    static constexpr std::array<std::uint32_t, 8> mixed{0xc8100000u, 0xc8110001u, 0xc8160402u, 0xc81a0802u, 0xc81e0f02u, 0xf800180fu, 0x07060504u, 0xbf810000u};
+    inputs = slotInputs({0x0u, 0x400u, 0x22u, 0x320u}, mixed);
+    require(inputs.size() == 1u && inputs[0].first == 0u && inputs[0].second, "a slot read flat and interpolated did not become one per-vertex input");
+    static constexpr std::array<std::uint32_t, 7> vertices{0xc8120002u, 0xc8160000u, 0xc81a0001u, 0xc81e0302u, 0xf800180fu, 0x07060504u, 0xbf810000u};
+    const auto subtracts = [](std::initializer_list<std::uint32_t> controls) {
+        const auto result = recompileSlots(controls, vertices);
+        const auto& words = result.spirv.Words();
+        std::size_t count = 0;
+        for (std::size_t at = 5; at < words.size() && (words[at] >> 16u) != 0; at += words[at] >> 16u) count += (words[at] & 0xffffu) == spv::OpFSub;
+        return count;
+    };
+    inputs = slotInputs({0x423u}, vertices);
+    require(inputs.size() == 1u && inputs[0].first == 3u && inputs[0].second, "a pass-through input (OFFSET bit 5 with FLAT_SHADE) was not read per vertex at its slot");
+    require(subtracts({0x423u}) == 0u, "v_interp_mov p10/p20 of a pass-through input subtracted vertex 0");
+    inputs = slotInputs({0x403u}, vertices);
+    require(inputs.size() == 1u && inputs[0].first == 3u && inputs[0].second && subtracts({0x403u}) == 2u, "v_interp_mov p10/p20 of a flat input did not read differences to vertex 0");
+    require(slotInputs({0x23u}, vertices).empty(), "a defaulted input (OFFSET bit 5 without FLAT_SHADE) was declared as a parameter");
+    expectFailure([] { static_cast<void>(recompileSlots({0x423u, 0x3u}, shared)); }, "passes its vertices through unchanged", "an interpolated pass-through input was accepted");
+}
+
 }
 
 int main() {
@@ -118,6 +307,9 @@ int main() {
         using namespace ShaderRecompiler;
         verifyRegisterSources();
         verifyProgramCounterRelativeData();
+        verifyMeshConfiguration();
+        verifyPixelInputs();
+        verifyPixelParameterSlots();
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         const std::vector<std::uint32_t> minimalSpirv{
             0x07230203u, 0x00010000u, 0u, 5u, 0u,

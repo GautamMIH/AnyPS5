@@ -27,6 +27,7 @@ constexpr int32_t APP_CONTENT_APPPARAM_SKU_FLAG_FULL = 3;
 constexpr char kParamJsonPath[] = "/app0/sce_sys/param.json";
 constexpr char kTemporaryMountPoint[] = "/temp0";
 constexpr char kDownloadMountPoint[] = "/download0";
+constexpr uint32_t kTemporaryDataOptionFormat = 1;
 
 bool readUserDefinedParam(uint32_t index, int32_t& value) {
     std::ifstream stream(ResolvePath_nid_no_patch(kParamJsonPath));
@@ -104,7 +105,18 @@ int APS5_VABI sceAppContentAppParamGetInt(uint32_t param_id, int32_t* value) {
 
 int APS5_VABI sceAppContentDownloadDataGetAvailableSpaceKb(const AppContentMountPoint* mount_point, size_t* available_space_kb) {
  if (!isMountPoint(mount_point, kDownloadMountPoint)) return APP_CONTENT_ERROR_PARAMETER;
- return availableKilobytes(kDownloadMountPoint, available_space_kb);
+ if (const int result = availableKilobytes(kDownloadMountPoint, available_space_kb); result != 0) return result;
+ // The title's declared download data size (param.json) caps the space, less what is already stored.
+ const std::uint64_t quotaKb = GetAppDownloadDataSizeMiB_nid_postfix() * 1024u;
+ if (quotaKb != 0) {
+  std::uint64_t usedKb = 0;
+  std::error_code error;
+  for (const auto& entry : std::filesystem::recursive_directory_iterator(ResolvePath_nid_no_patch(kDownloadMountPoint), error)) {
+   if (entry.is_regular_file(error)) usedKb += (entry.file_size(error) + 1023u) / 1024u;
+  }
+  *available_space_kb = static_cast<size_t>(std::min<std::uint64_t>(quotaKb - std::min(quotaKb, usedKb), *available_space_kb));
+ }
+ return 0;
 }
 
 int APS5_VABI sceAppContentInitialize(const AppContentInitParam* init_param, AppContentBootParam* boot_param) {
@@ -129,10 +141,12 @@ int APS5_VABI sceAppContentTemporaryDataGetAvailableSpaceKb(const AppContentMoun
 }
 
 int APS5_VABI sceAppContentTemporaryDataMount2(uint32_t option, AppContentMountPoint* mount_point) {
- (void)option;
  if (!mount_point) return APP_CONTENT_ERROR_PARAMETER;
+ if (option > kTemporaryDataOptionFormat) throw std::invalid_argument(std::string(__func__) + ": unknown option " + std::to_string(option));
  std::error_code error;
- std::filesystem::create_directories(ResolvePath_nid_no_patch(kTemporaryMountPoint), error);
+ const auto path = ResolvePath_nid_no_patch(kTemporaryMountPoint);
+ if (option == kTemporaryDataOptionFormat) std::filesystem::remove_all(path, error);
+ std::filesystem::create_directories(path, error);
  if (error) return APP_CONTENT_ERROR_BUSY;
  *mount_point = AppContentMountPoint{};
  std::strncpy(mount_point->data, kTemporaryMountPoint, sizeof(mount_point->data) - 1);

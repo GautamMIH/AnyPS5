@@ -149,6 +149,65 @@ uint32_t APS5_VABI sceAmprMeasureCommandSizeWriteAddress_04_00(void) {
     return AmprPackets::kWriteAddressSize;
 }
 
+// The OnCompletion forms (upstream's exports) are the _04_00 commands without flags.
+int APS5_VABI sceAmprCommandBufferWriteAddressOnCompletion(AmprCommandBuffer* cb, uint64_t* address, uint64_t value) {
+    return sceAmprCommandBufferWriteAddress_04_00(cb, address, value, 0);
+}
+
+uint32_t APS5_VABI sceAmprMeasureCommandSizeWriteAddressOnCompletion(void) {
+    return AmprPackets::kWriteAddressSize;
+}
+
+uint32_t APS5_VABI sceAmprMeasureCommandSizeWriteKernelEventQueueOnCompletion(void) {
+    return AmprPackets::kWriteKernelEventQueueSize;
+}
+
+// No packet encoding (and no executor in libkernel) exists yet for waits and counters.
+int APS5_VABI sceAmprCommandBufferWriteCounterOnCompletion() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWaitOnAddress() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWaitOnCounter() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWriteAddressFromTimeCounterOnCompletion() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWriteAddressFromCounterOnCompletion() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprCommandBufferWriteAddressFromCounterPairOnCompletion() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeWriteCounterOnCompletion() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeWaitOnAddress() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceAmprMeasureCommandSizeWaitOnCounter() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
 int APS5_VABI sceAmprAprCommandBufferMapBegin() {
  NotImplemented_nid_no_patch(__func__);
  return 0;

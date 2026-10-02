@@ -52,4 +52,17 @@ bool TranslationContext::sLoad(const RdnaInstruction& inst, bool raw) {
     return true;
 }
 
+void TranslationContext::TranslateCodeTableLoad(const RdnaInstruction& instruction, const ControlFlowGraph::CodeTableLoad& table) {
+    if (table.values.empty()) throw std::runtime_error("empty shader code table");
+    const IrU32 index = readRawU32(instruction.source1);
+    IrU32 low(ir.Constant(static_cast<std::uint32_t>(table.values.back())));
+    IrU32 high(ir.Constant(static_cast<std::uint32_t>(table.values.back() >> 32u)));
+    for (std::size_t entry = table.values.size() - 1u; entry-- > 0u;) {
+        auto& matches = ir.IEqual(index.Value(), ir.Constant(static_cast<std::uint32_t>(entry * 8u)));
+        low = IrU32(ir.Select(matches, ir.Constant(static_cast<std::uint32_t>(table.values[entry])), low.Value()));
+        high = IrU32(ir.Select(matches, ir.Constant(static_cast<std::uint32_t>(table.values[entry] >> 32u)), high.Value()));
+    }
+    writeU32Pair(instruction.destination, {low, high});
+}
+
 }

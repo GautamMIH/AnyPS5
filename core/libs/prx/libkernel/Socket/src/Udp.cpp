@@ -296,6 +296,12 @@ int APS5_VABI bind_nid_postfix(int descriptor, const void* address, std::uint32_
     if (!Address(address, length, native, size)) return -1;
     return ::bind(socket->value, reinterpret_cast<sockaddr*>(&native), size) ? Fail(NativeError()) : 0;
 }
+int APS5_VABI shutdown_nid_postfix(int descriptor, int how) {
+    const auto socket = Lookup(descriptor);
+    if (!socket) return Fail(9);
+    if (how < 0 || how > 2) return Fail(22);
+    return ::shutdown(socket->value, how) ? Fail(NativeError()) : 0;
+}
 int APS5_VABI getsockname_nid_postfix(int descriptor, void* address, std::uint32_t* length) {
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;

@@ -18,6 +18,11 @@ std::size_t DecodedInstruction::_skipPrefixesAndRex(
     while (pos < Length) {
         const std::uint8_t b = Data[pos];
 
+        if (b >= RexMin && b <= RexMax) {
+            pos += 1;
+            continue;
+        }
+
         if (b == PrefixRepne) {
             *outHasRepnePrefix = true;
             pos += 1;
@@ -49,10 +54,6 @@ std::size_t DecodedInstruction::_skipPrefixesAndRex(
         }
 
         break;
-    }
-
-    if (pos < Length && Data[pos] >= RexMin && Data[pos] <= RexMax) {
-        pos += 1;
     }
 
     return pos;

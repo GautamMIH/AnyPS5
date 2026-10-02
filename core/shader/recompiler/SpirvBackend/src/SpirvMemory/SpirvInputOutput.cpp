@@ -15,7 +15,6 @@ namespace ShaderRecompiler
 {
     namespace {
 
-        constexpr std::uint32_t PsInputOffsetMask = 0x0000001fu;
         constexpr std::uint32_t PsInputFlatShade = 0x00000400u;
         constexpr std::uint32_t PixelParameterLimit = 32u;
 
@@ -45,57 +44,22 @@ namespace ShaderRecompiler
             return StageOf(state) == IrShaderStage::Vertex || StageOf(state) == IrShaderStage::Local;
         }
 
-        std::uint32_t PixelMappedLocation(const ShaderPixelInputInfo& info, std::uint32_t input) {
-            if (input < info.inputNum) {
-                if (input >= PixelParameterLimit) {
-                    FailEmit("pixel interpolator index is out of range");
-                }
-                return info.interpolatorSettings[input] & PsInputOffsetMask;
+        std::uint32_t PixelInputLocation(const ShaderPixelInputInfo& info, std::uint32_t input) {
+            if (input >= PixelParameterLimit || input >= info.inputNum) {
+                FailEmit("pixel interpolator index is out of range");
             }
-            return input;
+            if (info.InputIsDefault(input)) {
+                FailEmit("pixel input " + std::to_string(input) + " reads a default value, not a parameter");
+            }
+            return info.InputSlot(input);
         }
 
         bool PixelInputIsCustom(const ShaderPixelInputInfo& info, std::uint32_t input) {
-            return input < PixelParameterLimit && (info.customInterpolationMask & (1u << input)) != 0u;
+            return info.InputIsCustom(input);
         }
 
         bool PixelInputIsFlat(const ShaderPixelInputInfo& info, std::uint32_t input) {
             return input < info.inputNum && input < PixelParameterLimit && (info.interpolatorSettings[input] & PsInputFlatShade) != 0u && !PixelInputIsCustom(info, input);
-        }
-
-        std::uint32_t PixelInputLocation(const ShaderPixelInputInfo& info, std::span<const std::uint32_t> activeInputs, std::uint32_t input) {
-            std::array<bool, PixelParameterLimit> usedLocations{};
-            for (const auto activeInput : activeInputs) {
-                const auto mapped = PixelMappedLocation(info, activeInput);
-                if (mapped >= usedLocations.size()) {
-                    FailEmit("pixel parameter location is out of range");
-                }
-                usedLocations[mapped] = true;
-            }
-            std::array<std::uint32_t, PixelParameterLimit * 2u> groupLocations;
-            groupLocations.fill(0xffffffffu);
-            for (const auto activeInput : activeInputs) {
-                const auto mapped = PixelMappedLocation(info, activeInput);
-                const auto group = mapped * 2u + (PixelInputIsFlat(info, activeInput) ? 1u : 0u);
-                auto& location = groupLocations[group];
-                if (location == 0xffffffffu) {
-                    location = mapped;
-                    if (groupLocations[group ^ 1u] != 0xffffffffu) {
-                        location = 0;
-                        while (location < usedLocations.size() && usedLocations[location]) {
-                            location++;
-                        }
-                        if (location >= usedLocations.size()) {
-                            FailEmit("no free pixel parameter location");
-                        }
-                    }
-                    usedLocations[location] = true;
-                }
-                if (activeInput == input) {
-                    return location;
-                }
-            }
-            return PixelMappedLocation(info, input);
         }
 
     }
@@ -103,16 +67,12 @@ namespace ShaderRecompiler
     std::vector<FragmentParameter> DescribeFragmentParameters(const IrProgram& program, const ShaderStageInputInfo& inputInfo) {
         if (inputInfo.pixel == nullptr) FailEmit("pixel input info is missing");
         const auto& pixel = *inputInfo.pixel;
-        std::vector<std::uint32_t> activeInputs;
-        for (const auto& input : program.Info().inputs) {
-            if (input.kind == StageInputKind::Parameter) activeInputs.push_back(input.location);
-        }
         std::vector<FragmentParameter> result;
         for (const auto& input : program.Info().inputs) {
             if (input.kind != StageInputKind::Parameter) continue;
-            const auto location = PixelInputLocation(pixel, activeInputs, input.location);
+            const auto location = PixelInputLocation(pixel, input.location);
             if (std::any_of(result.begin(), result.end(), [&](const auto& parameter) { return parameter.location == location; })) continue;
-            result.push_back({location, PixelMappedLocation(pixel, input.location), PixelInputIsFlat(pixel, input.location), input.perVertex});
+            result.push_back({location, location, PixelInputIsFlat(pixel, input.location), input.perVertex});
         }
         return result;
     }
@@ -121,17 +81,7 @@ namespace ShaderRecompiler
         if (StageOf(state) != IrShaderStage::Pixel) {
             return attr;
         }
-        std::array<std::uint32_t, PixelParameterLimit> activeInputs{};
-        std::uint32_t activeCount = 0;
-        for (const auto& input : state.inputs) {
-            if (input.kind == StageInputKind::Parameter) {
-                if (activeCount >= activeInputs.size()) {
-                    FailEmit("too many pixel parameters");
-                }
-                activeInputs[activeCount++] = input.location;
-            }
-        }
-        return PixelInputLocation(PixelInfo(state), std::span<const std::uint32_t>(activeInputs.data(), activeCount), attr);
+        return PixelInputLocation(PixelInfo(state), attr);
     }
 
     bool PixelParameterIsFlat(const SpirvEmitterState& state, std::uint32_t attr) {
@@ -140,6 +90,15 @@ namespace ShaderRecompiler
 
     bool PixelParameterIsCustom(const SpirvEmitterState& state, std::uint32_t attr) {
         return StageOf(state) == IrShaderStage::Pixel && PixelInputIsCustom(PixelInfo(state), attr);
+    }
+
+    bool PixelParameterIsDefault(const SpirvEmitterState& state, std::uint32_t attr) {
+        return StageOf(state) == IrShaderStage::Pixel && PixelInfo(state).InputIsDefault(attr);
+    }
+
+    bool PixelParameterIsLinear(const SpirvEmitterState& state, std::uint32_t attr) {
+        const auto& metadata = state.program.Metadata();
+        return StageOf(state) == IrShaderStage::Pixel && PixelInfo(state).InputIsLinear(attr, metadata.pixelLinearInputs, metadata.pixelPerspectiveInputs);
     }
 
     VertexInputScalarKind VertexParameterScalarKind(const SpirvEmitterState& state, std::uint32_t location) {

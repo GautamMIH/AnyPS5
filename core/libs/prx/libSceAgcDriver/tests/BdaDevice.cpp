@@ -2,11 +2,18 @@
 #include "ColorTransferTests.hpp"
 #include <fstream>
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include <SDL_loadso.h>
 #include <array>
 #include <iostream>
 #include <vector>
+
+namespace AgcDriver::Graphics {
+Recorder* Recorder::Active() { return nullptr; }
+void Recorder::Submit() { Require(false, "the device tests have no recorder"); }
+bool Recorder::Reap() { Require(false, "the device tests have no recorder"); return false; }
+}
 
 namespace {
 

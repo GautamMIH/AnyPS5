@@ -372,7 +372,12 @@ ShaderStages DecodeShaderStages(const QueueState& queue) {
         validate(groupPrimitives != 0, "geometry subgroup contains no primitives");
         const auto resources = read(queue.shader, 0x8b, "shader");
         validate(((read(queue.shader, 0x8a, "shader") >> 29u) & 3u) == 3 && ((resources >> 16u) & 3u) == 3, "unsupported geometry VGPR allocation");
-        result.mesh = ShaderRecompiler::MeshConfiguration{primitive, groupPrimitives, (groupPrimitives - 1u) * inputStep + inputSize, maxVertices, primitives * (verticesPerPrimitive - 2u), ((maxVertices + result.vertexWaveSize - 1u) / result.vertexWaveSize) * result.vertexWaveSize, ((resources >> 19u) & 0xffu) * 128u, 0};
+        // VGT_ESGS_RING_ITEMSIZE: the dwords one input vertex's ES outputs take on the ring (upstream
+        // NGG-to-mesh translation). The group runs as many threads as its widest stage needs.
+        const auto esgsItemSize = read(queue.context, 0x2ab);
+        validate(esgsItemSize != 0 && esgsItemSize * vertices <= 0xffffu, "invalid VGT_ESGS_RING_ITEMSIZE");
+        const auto threads = std::max({(groupPrimitives - 1u) * inputStep + inputSize, primitives, maxVertices, primitives * (verticesPerPrimitive - 2u)});
+        result.mesh = ShaderRecompiler::MeshConfiguration{primitive, groupPrimitives, (groupPrimitives - 1u) * inputStep + inputSize, maxVertices, primitives * (verticesPerPrimitive - 2u), ((threads + result.vertexWaveSize - 1u) / result.vertexWaveSize) * result.vertexWaveSize, ((resources >> 19u) & 0xffu) * 128u, 0, esgsItemSize};
     }
     return result;
 }
@@ -666,6 +671,11 @@ State DecodeState(const QueueState& queue) {
             state.srcAlphaBlendFactor = blendFactor(alpha & 0x1fu);
             state.dstAlphaBlendFactor = blendFactor((alpha >> 8u) & 0x1fu);
             state.alphaBlendOp = blendOp((alpha >> 5u) & 7u);
+            if ((mapping & 3u) == 3u) {
+                state.srcColorBlendFactor = state.srcAlphaBlendFactor;
+                state.dstColorBlendFactor = state.dstAlphaBlendFactor;
+                state.colorBlendOp = state.alphaBlendOp;
+            }
             for (std::uint32_t i = 0; i < 4; ++i) result.blendConstants[i] = readFloat(cx, 0x105 + i);
         }
     }

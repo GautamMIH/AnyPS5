@@ -10,6 +10,14 @@ void TranslateMemoryInstruction(IrBuilder& builder, const RdnaInstruction& instr
 
 bool TranslationContext::emitMemory(const RdnaInstruction& inst) {
     switch (inst.op) {
+    case RdnaOpcode::SGl1Inv:
+    case RdnaOpcode::SDcacheInv:
+    case RdnaOpcode::SDcacheWb:
+    case RdnaOpcode::BufferGl0Inv:
+    case RdnaOpcode::BufferGl1Inv:
+        emitControlNop();
+        return true;
+
     case RdnaOpcode::SLoadDword:
     case RdnaOpcode::SLoadDwordx2:
     case RdnaOpcode::SLoadDwordx4:

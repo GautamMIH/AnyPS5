@@ -135,7 +135,7 @@ foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
     string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
 endforeach()
 
-add_executable(agc_driver_tests EXCLUDE_FROM_ALL
+add_test_executable(agc_driver_tests EXCLUDE_FROM_ALL
         tests/Submit.cpp
 )
 
@@ -145,13 +145,14 @@ target_include_directories(agc_driver_tests PRIVATE
 
 target_link_libraries(agc_driver_tests PRIVATE
         libSceAgcDriver
+        libkernel
         libc
 )
 
 set_target_properties(agc_driver_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_tests)
 
-add_executable(agc_driver_recompiler_tests EXCLUDE_FROM_ALL
+add_test_executable(agc_driver_recompiler_tests EXCLUDE_FROM_ALL
         tests/Recompiler.cpp
 )
 
@@ -167,7 +168,7 @@ target_link_libraries(agc_driver_recompiler_tests PRIVATE
 set_target_properties(agc_driver_recompiler_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_recompiler_tests)
 
-add_executable(agc_shader_memory_tests EXCLUDE_FROM_ALL
+add_test_executable(agc_shader_memory_tests EXCLUDE_FROM_ALL
         tests/ShaderMemory.cpp
         Execution/src/ShaderMemory.cpp
         Execution/src/GuestMemory.cpp
@@ -178,17 +179,23 @@ target_link_libraries(agc_shader_memory_tests PRIVATE shader_recompiler_agc_driv
 set_target_properties(agc_shader_memory_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_shader_memory_tests)
 
-add_executable(agc_dpp_write_tests EXCLUDE_FROM_ALL tests/DppWrite.cpp)
-target_link_libraries(agc_dpp_write_tests PRIVATE shader_recompiler_agc_driver libc)
-set_target_properties(agc_dpp_write_tests PROPERTIES CXX_EXTENSIONS OFF)
-configure_windows_unwind(agc_dpp_write_tests)
-
-add_executable(agc_structurizer_tests EXCLUDE_FROM_ALL tests/Structurizer.cpp)
+add_test_executable(agc_structurizer_tests EXCLUDE_FROM_ALL tests/Structurizer.cpp)
 target_link_libraries(agc_structurizer_tests PRIVATE shader_recompiler_agc_driver libc)
 set_target_properties(agc_structurizer_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_structurizer_tests)
 
-add_executable(agc_shader_control_flow_tests EXCLUDE_FROM_ALL
+add_test_executable(agc_dpp_write_tests EXCLUDE_FROM_ALL tests/DppWrite.cpp)
+target_link_libraries(agc_dpp_write_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_dpp_write_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_dpp_write_tests)
+
+add_test_executable(agc_shader_disk_cache_tests EXCLUDE_FROM_ALL tests/ShaderDiskCache.cpp)
+target_include_directories(agc_shader_disk_cache_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(agc_shader_disk_cache_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_shader_disk_cache_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_shader_disk_cache_tests)
+
+add_test_executable(agc_shader_control_flow_tests EXCLUDE_FROM_ALL
         tests/ControlFlow.cpp
 )
 target_include_directories(agc_shader_control_flow_tests PRIVATE ${LIBS_INCLUDE_DIR})
@@ -196,7 +203,7 @@ target_link_libraries(agc_shader_control_flow_tests PRIVATE shader_recompiler_ag
 set_target_properties(agc_shader_control_flow_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_shader_control_flow_tests)
 
-add_executable(agc_driver_flip_tests EXCLUDE_FROM_ALL
+add_test_executable(agc_driver_flip_tests EXCLUDE_FROM_ALL
         tests/Flip.cpp
 )
 
@@ -228,7 +235,7 @@ target_link_libraries(agc_driver_pm4_tests PRIVATE
 set_target_properties(agc_driver_pm4_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_pm4_tests)
 
-add_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
+add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         tests/Graphics.cpp
         tests/ColorTargetLayout.cpp
         tests/BdaResources.cpp
@@ -288,7 +295,7 @@ target_link_libraries(agc_driver_graphics_tests PRIVATE
 set_target_properties(agc_driver_graphics_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_graphics_tests)
 
-add_executable(agc_driver_bda_device_tests EXCLUDE_FROM_ALL
+add_test_executable(agc_driver_bda_device_tests EXCLUDE_FROM_ALL
         tests/BdaDevice.cpp
         tests/BdaShader.cpp
         tests/BdaExecution.cpp
@@ -307,25 +314,33 @@ target_link_libraries(agc_driver_bda_device_tests PRIVATE SDL2-static libc shade
 set_target_properties(agc_driver_bda_device_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_bda_device_tests)
 
-add_executable(agc_driver_mix_precision_tests EXCLUDE_FROM_ALL
-        tests/MixPrecision.cpp
-)
-target_include_directories(agc_driver_mix_precision_tests PRIVATE
-        ${LIBS_INCLUDE_DIR}
-        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
-        ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
-)
-target_link_libraries(agc_driver_mix_precision_tests PRIVATE libSceAgcDriver SDL2-static libc)
-set_target_properties(agc_driver_mix_precision_tests PROPERTIES CXX_EXTENSIONS OFF)
-configure_windows_unwind(agc_driver_mix_precision_tests)
+# Shader execution tests: each recompiles a small program and runs it on a Vulkan device; they
+# skip (return code 77) without one.
+file(GLOB agcExecutionTestSources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/execution/*.cpp)
+set(agcExecutionTests)
+foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
+    get_filename_component(agcExecutionTestName ${agcExecutionTestSource} NAME_WE)
+    string(REGEX REPLACE "([a-z0-9])([A-Z])" "\\1_\\2" agcExecutionTestName "${agcExecutionTestName}")
+    string(TOLOWER "agc_driver_${agcExecutionTestName}_tests" agcExecutionTest)
+    add_test_executable(${agcExecutionTest} EXCLUDE_FROM_ALL ${agcExecutionTestSource})
+    target_include_directories(${agcExecutionTest} PRIVATE
+            ${LIBS_INCLUDE_DIR}
+            ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+            ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
+    )
+    target_link_libraries(${agcExecutionTest} PRIVATE libSceAgcDriver SDL2-static libc)
+    set_target_properties(${agcExecutionTest} PROPERTIES CXX_EXTENSIONS OFF)
+    configure_windows_unwind(${agcExecutionTest})
+    list(APPEND agcExecutionTests ${agcExecutionTest})
+endforeach()
 
 if(BUILD_TESTING)
-    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_mix_precision_tests)
+    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_shader_disk_cache_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests ${agcExecutionTests})
         string(REGEX REPLACE "_tests$" "" agcTestName "${agcTest}")
         set_target_properties(${agcTest} PROPERTIES EXCLUDE_FROM_ALL OFF)
         add_test(NAME ${agcTestName} COMMAND ${agcTest})
         # Tests never write a pipeline cache beside their executables.
-        set_tests_properties(${agcTestName} PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+        set_tests_properties(${agcTestName} PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77)
         if(WIN32)
             set_tests_properties(${agcTestName} PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
@@ -341,10 +356,11 @@ if(AGC_BUILD_VISUAL_TEST)
     set(visualShaders)
 
     foreach(stage IN ITEMS vert frag)
-        set(shaderOutput "${CMAKE_CURRENT_BINARY_DIR}/Triangle.${stage}.spv")
+        set(shaderOutput "${ANYPS5_TEST_OUTPUT_DIRECTORY}/Triangle.${stage}.spv")
 
         add_custom_command(
                 OUTPUT "${shaderOutput}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${ANYPS5_TEST_OUTPUT_DIRECTORY}"
                 COMMAND "$<TARGET_FILE:glslang-standalone>"
                 -V
                 --target-env vulkan1.1
@@ -359,7 +375,7 @@ if(AGC_BUILD_VISUAL_TEST)
         list(APPEND visualShaders "${shaderOutput}")
     endforeach()
 
-    add_executable(agc_driver_visual_test EXCLUDE_FROM_ALL
+    add_test_executable(agc_driver_visual_test EXCLUDE_FROM_ALL
             tests/Visual.cpp
             Execution/src/VulkanDevice.cpp
             Execution/src/SwapchainState.cpp

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace ShaderRecompiler {
 
@@ -100,6 +101,7 @@ struct ShaderMeshInputInfo: ShaderWorkgroupInputInfo {
     std::uint32_t maxVertices = 0;
     std::uint32_t maxPrimitives = 0;
     std::uint32_t provokingVertex = 0;
+    std::uint32_t esgsItemSize = 0;
 
     // Vertices of one input primitive (VGT primitive type 1 points, 2 lines, otherwise triangles).
     [[nodiscard]] std::uint32_t InputPrimitiveSize() const {
@@ -161,11 +163,13 @@ struct ShaderComputeInputInfo: ShaderWorkgroupInputInfo {
 struct ShaderPixelInputInfo {
     std::uint32_t interpolatorSettings[32] = {0};
     std::uint32_t inputNum = 0;
-    // SPI_PS_INPUT_ADDR and the loaded inputs (see ShaderPixelStageInfo::inputAddr).
-    std::uint32_t psInputAddr = 0;
-    std::uint32_t psInputLoaded = 0;
     std::uint32_t customInterpolationMask = 0;
-    std::uint32_t psPerspectiveCenterVgpr = std::numeric_limits<std::uint32_t>::max();
+    static constexpr std::uint32_t NoPixelInputVgpr = std::numeric_limits<std::uint32_t>::max();
+    std::array<std::uint32_t, 16> psInputVgpr = [] {
+        std::array<std::uint32_t, 16> vgprs{};
+        vgprs.fill(NoPixelInputVgpr);
+        return vgprs;
+    }();
     std::uint8_t targetOutputMode[8] = {};
     std::array<ShaderColorComponentMapping, 8> targetExportMapping = {};
     std::uint32_t scratchSizeDwords = 0;
@@ -186,6 +190,36 @@ struct ShaderPixelInputInfo {
 
     bool HasPositionInput() const {
         return psPosX || psPosY || psPosZ || psPosW;
+    }
+
+    [[nodiscard]] bool InputIsDefault(std::uint32_t input) const {
+        return input < inputNum && input < 32u && (interpolatorSettings[input] & 0x420u) == 0x20u;
+    }
+
+    [[nodiscard]] bool InputIsPassthrough(std::uint32_t input) const {
+        return input < inputNum && input < 32u && (interpolatorSettings[input] & 0x420u) == 0x420u;
+    }
+
+    [[nodiscard]] bool InputIsCustom(std::uint32_t input) const {
+        return input < 32u && ((customInterpolationMask & (1u << input)) != 0u || InputIsPassthrough(input));
+    }
+
+    [[nodiscard]] std::uint32_t InputSlot(std::uint32_t input) const {
+        return input < 32u ? interpolatorSettings[input] & 0x1fu : input;
+    }
+
+    [[nodiscard]] std::uint32_t InputDefaultBits(std::uint32_t input, std::uint32_t component) const {
+        const auto value = input < 32u ? (interpolatorSettings[input] >> 8u) & 0x3u : 0u;
+        const bool one = component == 3u ? (value & 0x1u) != 0u : (value & 0x2u) != 0u;
+        return one ? 0x3f800000u : 0u;
+    }
+
+    [[nodiscard]] bool InputIsLinear(std::uint32_t input, std::uint32_t linearInputs, std::uint32_t perspectiveInputs) const {
+        const auto bit = input < 32u ? 1u << input : 0u;
+        if ((linearInputs & perspectiveInputs & bit) != 0u) {
+            throw std::runtime_error("pixel input " + std::to_string(input) + " is interpolated through both a perspective and a linear I/J pair");
+        }
+        return (linearInputs & bit) != 0u || ((perspectiveInputs & bit) == 0u && psNoPerspective);
     }
 };
 

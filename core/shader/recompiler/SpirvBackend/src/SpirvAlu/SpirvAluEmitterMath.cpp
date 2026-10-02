@@ -536,9 +536,10 @@ std::uint32_t EmitReadLane(SpirvValueEmitContext& ctx, const IrValue& inst) {
 
 std::uint32_t EmitWriteLane(SpirvValueEmitContext& ctx, const IrValue& inst) {
     auto& state = ctx.state;
+    const auto lane = Binary(state, spv::OpBitwiseAnd, TypeU32(state), ctx.Arg(inst, 1), ConstantU32(state, state.program.WaveSize() - 1u));
     const auto hit = state.module.AllocateId();
-    state.module.AddFunction(spv::OpIEqual, TypeBool(state), hit, EmitSubgroupLocalInvocationId(state), ctx.Arg(inst, 2));
-    return EmitNative<spv::OpSelect, IrType::U32>(state, hit, ctx.Arg(inst, 1), ctx.Arg(inst, 0));
+    state.module.AddFunction(spv::OpIEqual, TypeBool(state), hit, EmitSubgroupLocalInvocationId(state), lane);
+    return EmitNative<spv::OpSelect, IrType::U32>(state, hit, ctx.Arg(inst, 0), ctx.Arg(inst, 2));
 }
 
 std::uint32_t EmitPermlane16U32(SpirvValueEmitContext& ctx, const IrValue& inst) {

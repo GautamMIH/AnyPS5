@@ -9,6 +9,7 @@
 #include "SDL_vulkan.h"
 #include "prx/libSceVideoOut/include/PadInput.hpp"
 #include "prx/libSceVideoOut/include/MouseInput.hpp"
+#include "prx/libSceVideoOut/include/KeyboardInput.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
@@ -57,6 +58,16 @@ public:
         return std::make_shared<RenderingWait>(cfg, index, cfg->bufferReuse[index].Capture());
     }
 
+    void WaitForFlipRoom() override {
+        std::unique_lock queueLock(queue->mutex);
+        const bool room = queue->changed.wait_for(queueLock, std::chrono::seconds(60), [&] {
+            return queue->failure || queue->stopping || cfg->shutdownToken.stop_requested() || queue->reservations.load() < VIDEO_OUT_FLIP_QUEUE_CAPACITY;
+        });
+        if (queue->failure) std::rethrow_exception(queue->failure);
+        if (queue->stopping || cfg->shutdownToken.stop_requested()) throw ProcessShutdown{};
+        require(room, "flip queue stayed full for 60 s: the presenter is not completing flips");
+    }
+
     std::shared_ptr<AgcDriver::IFlipRequest> Reserve(const AgcDriver::FlipInfo& info) override {
         // Every flip mode (VSYNC 1 through WINDOW_2 6) is presented at the next host vsync.
         require(info.mode >= VIDEO_OUT_FLIP_MODE_VSYNC && info.mode <= 6, ("unsupported flip mode " + std::to_string(info.mode) + " (index " + std::to_string(info.index) + ", argument " + std::to_string(info.argument) + ")").c_str());
@@ -73,6 +84,8 @@ public:
         require(!queue->stopping, "flip during shutdown");
         std::lock_guard lock(cfg->mutex);
         checkConfig(*cfg);
+        // Upstream's driver calls WaitForFlipRoom before reserving; ours does not, so a full queue
+        // still fails here instead of overrunning it.
         require(queue->reservations.load() < VIDEO_OUT_FLIP_QUEUE_CAPACITY, "flip queue full");
         if (info.index >= 0) {
             request->buffer = cfg->buffers[info.index];
@@ -446,6 +459,7 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
     std::shared_ptr<FlipRequest> current;
     PadInput padInput;
     MouseInput mouseInput;
+    KeyboardInput keyboardInput;
     try {
         while (!token.stop_requested()) {
             SDL_Event event;
@@ -459,7 +473,10 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                     std::_Exit(0);
                 }
                 padInput.HandleEvent(event, window);
-                if (window.Handle() != nullptr) mouseInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
+                if (window.Handle() != nullptr) {
+                    mouseInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
+                    keyboardInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
+                }
             }
             padInput.Update();
             {
@@ -487,7 +504,10 @@ void VideoOutDriver::presentLoop(std::stop_token token) {
                 }
                 current->timing->Print(current->outputHandle, current->index, current->flipArg, finished, interval);
             }
-            current.reset();
+            if (current) {
+                current.reset();
+                flipQueue->changed.notify_all();
+            }
         }
         std::list<std::shared_ptr<FlipRequest>> cancelled;
         {

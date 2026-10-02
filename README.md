@@ -22,7 +22,7 @@ Unsupported or unexpected states strictly throw `std::runtime_error`. `what()` i
 
 The [shader recompiler](core/shader/recompiler/Recompiler.cpp) successfully produces SPIR-V (validated via [Spirv-Tools](3rdparty/SPIRV-Tools) when built with `ANYPS5_ENABLE_SPIRV_TOOLS`).
 
-[Technical debt of the project](docs/dev/TechnicalDebt.md), [code style conventions](docs/dev/CONVENTIONS.md)
+[Technical debt of the project](docs/dev/TechnicalDebt.md), [code style conventions](docs/dev/CONVENTIONS.md), [contributing](CONTRIBUTING.md)
 
 ## Build
 
@@ -32,7 +32,7 @@ On Intel hosts, pass `--to-intel` to the relinker to lower supported AMD-only in
 
 [libc.prx](core/libs/prx/libc) implementations contain compiler-specific code. Linux builds work with GCC; on Windows, MinGW-w64 GCC 15.2.0 (`winlibs-gcc15`, `x86_64-ucrt-posix-seh`) is currently required.
 
-The project targets maximum compiler portability. Support for additional compilers will be addressed after the first successful game launch.
+The project targets maximum compiler portability (but now it is not implemented).
 
 ## Usage
 

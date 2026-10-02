@@ -4,6 +4,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/File/include/File.hpp"
+#include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "SceTypes.hpp"
 
@@ -79,7 +80,11 @@ static std::int64_t NativePwrite(int fd, const void* buf, std::size_t n, std::in
     errno = error;
     return result;
 }
-static int NativeClose(int fd) { return fd >= 0 && fd < 3 ? 0 : ::_close(fd); }
+static int NativeClose(int fd) {
+    if (fd >= 0 && fd < 3) return 0;
+    File::ForgetDirectoryDescriptor(fd);
+    return ::_close(fd);
+}
 static int NativeUnlink(const std::filesystem::path& p) { return ::_wunlink(p.wstring().c_str()); }
 static int NativeMkdir(const std::filesystem::path& p, int) { return ::_wmkdir(p.wstring().c_str()); }
 static int NativeRmdir(const std::filesystem::path& p) { return ::_wrmdir(p.wstring().c_str()); }
@@ -229,7 +234,14 @@ int openFile(const char* path, int flags, int mode) {
         return -1;
     }
     const auto host = ResolvePath_nid_no_patch(path);
-    const int result = NativeOpen(host, nativeFlags, mode);
+    int result = NativeOpen(host, nativeFlags, mode);
+#ifdef _WIN32
+    // Windows cannot open a directory as a file; a descriptor stands in for it (getdents, fstat).
+    if (result < 0 && errno != ENOENT) {
+        std::error_code error;
+        if (std::filesystem::is_directory(host, error)) result = File::OpenDirectoryDescriptor(host);
+    }
+#endif
     trace("open", path, host, result);
     return result;
 }

@@ -8,6 +8,7 @@
 struct BdaTestAccess {
     std::function<std::span<std::byte>(VkBuffer)> bytes;
     std::function<VkDescriptorBufferInfo(std::uint32_t)> descriptor;
+    std::function<std::span<std::byte>(VkDeviceAddress)> addressBytes;
 };
 
 void RunBdaResourceTests(const AgcDriver::Graphics::Context& context, const BdaTestAccess& access);

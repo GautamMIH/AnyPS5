@@ -4,7 +4,6 @@
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <codegen/x86/X64InstructionDecoder.hpp>
 #include <codegen/x86/X64InstructionRewriter.hpp>
-#include <codegen/x86/X64OpcodeConstants.hpp>
 #include <codegen/x86/IAmd64OnlyInstructionMatcher.hpp>
 #include <algorithm>
 #include <memory>
@@ -16,15 +15,6 @@
 namespace Codegen {
 
 namespace {
-
-bool _isPrefixRun(const std::uint8_t* data, const std::size_t length) {
-    using namespace X64OpcodeConstants;
-    return std::all_of(data, data + length, [](const std::uint8_t b) {
-        return (b >= RexMin && b <= RexMax) || b == PrefixLock || b == PrefixRepne || b == PrefixRep ||
-               b == PrefixSegCs || b == PrefixSegSs || b == PrefixSegDs || b == PrefixSegEs ||
-               b == PrefixSegFs || b == PrefixSegGs || b == PrefixOperandSize || b == PrefixAddressSize;
-    });
-}
 
 template<typename TOperation>
 auto _atFileOffset(const Domain::FileByteOffset base, const TOperation& operation) {
@@ -120,11 +110,6 @@ void Amd64OnlyConverter::_convertSegment(
     for (const auto& item : pending) {
         if (consumed.contains(item.Index))
             continue;
-        if (item.Index > 0) {
-            const auto& previous = matches[item.Index - 1];
-            if (previous.Offset + previous.Length == item.Instruction.Offset && _isPrefixRun(seg.data() + previous.Offset, previous.Length))
-                throw CodegenException("AMD-only instruction follows prefixes the decoder split from it", ph.Offset + previous.Offset);
-        }
         const auto& match = item.Instruction;
         const auto& substitution = item.Substitution;
         const auto fileOffset = static_cast<Domain::FileByteOffset>(ph.Offset + match.Offset);
@@ -157,7 +142,7 @@ void Amd64OnlyConverter::_convertSegment(
                     if (amdOnly && trailingBytes == 0) {
                         sequence.push_back(bytes);
                         consumed.insert(next);
-                    } else if (amdOnly || info.FlowKind != ControlFlowKind::Sequential || info.HasRipRelativeDisp || info.HasBranchTarget || _isPrefixRun(bytes.data(), bytes.size())) {
+                    } else if (amdOnly || info.FlowKind != ControlFlowKind::Sequential || info.HasRipRelativeDisp || info.HasBranchTarget) {
                         throw CodegenException("AMD-only instruction too short for a jump is followed by an instruction that cannot move", ph.Offset + following.Offset);
                     } else {
                         trailingBytes += following.Length;

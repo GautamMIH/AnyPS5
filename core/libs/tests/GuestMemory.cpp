@@ -1,5 +1,6 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestHeap.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
@@ -18,6 +19,8 @@ int APS5_VABI sceKernelAllocateMainDirectMemory(std::size_t, std::size_t, int, s
 int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
 int APS5_VABI sceKernelMapFlexibleMemory(void**, std::size_t, int, int);
 int32_t APS5_VABI sceKernelMapNamedFlexibleMemory(void**, std::size_t, int, int, const char*);
+int32_t APS5_VABI sceKernelMapNamedFlexibleMemoryInternal(void**, std::size_t, int, int, const char*);
+int APS5_VABI sceKernelAvailableFlexibleMemorySize(std::size_t*);
 int APS5_VABI sceKernelSetVirtualRangeName(const void*, std::uint64_t, const char*);
 int APS5_VABI sceKernelClearVirtualRangeName(const void*, std::uint64_t);
 int APS5_VABI sceKernelReserveVirtualRange(void**, std::size_t, int, std::size_t);
@@ -66,6 +69,31 @@ static void CheckNamedAndHintedMappings() {
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(hinted), length) == 0);
 #endif
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(first), length) == 0);
+}
+
+static void CheckInternalNamedFlexibleMapping() {
+    constexpr std::size_t length = 0x10000;
+    std::size_t before = 0;
+    std::size_t available = 0;
+    Require(sceKernelAvailableFlexibleMemorySize(&before) == 0);
+    void* mapped = nullptr;
+    Require(sceKernelMapNamedFlexibleMemoryInternal(&mapped, length, 3, 0, "internal mapping") == 0 && mapped != nullptr);
+    Require(std::strcmp(NameAt(mapped), "internal mapping") == 0);
+    Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available == before - length);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(mapped), length) == 0);
+    Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available == before);
+}
+
+static void CheckHeapAfterMappingReuse() {
+    constexpr std::size_t bytes = 0x30000;
+    auto* pointer = static_cast<unsigned char*>(GuestHeap::GuestHeapAllocate_nid_postfix(bytes));
+    std::memset(pointer, 0x5a, bytes);
+    Require(pointer[0] == 0x5a && pointer[bytes - 1] == 0x5a);
+    GuestHeap::GuestHeapFree_nid_postfix(pointer);
+    pointer = static_cast<unsigned char*>(GuestHeap::GuestHeapAllocate_nid_postfix(bytes));
+    std::memset(pointer, 0xa5, bytes);
+    Require(pointer[0] == 0xa5 && pointer[bytes - 1] == 0xa5);
+    GuestHeap::GuestHeapFree_nid_postfix(pointer);
 }
 
 static void CheckSingleViews() {
@@ -193,6 +221,8 @@ int main() {
     CheckSharedWatchPages();
 #endif
     CheckNamedAndHintedMappings();
+    CheckInternalNamedFlexibleMapping();
+    CheckHeapAfterMappingReuse();
     CheckSingleViews();
     CheckAccessibleRanges();
     CheckFixedVirtualReservation();

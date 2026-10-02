@@ -9,11 +9,6 @@
 #include <cstring>
 #include <stdexcept>
 
-struct SizeAlign {
- uint64_t m_size;
- size_t m_align;
-};
-
 namespace {
 
 using ShaderRegs::ShaderBinaryType;

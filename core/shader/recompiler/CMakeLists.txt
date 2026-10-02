@@ -33,6 +33,7 @@ function(add_shader_recompiler target runtimeTarget)
 
     add_library(${target} STATIC EXCLUDE_FROM_ALL
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Recompiler.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ShaderDiskCache.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/SpirvBackend/src/RectListShaders.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RdnaDecoder/src/RdnaOpcode.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RdnaDecoder/src/RdnaProgram.cpp
@@ -150,6 +151,46 @@ function(add_shader_recompiler target runtimeTarget)
     )
 
     target_compile_features(${target} PUBLIC cxx_std_20)
+
+    set(shaderCacheGeneratedDir "${CMAKE_CURRENT_BINARY_DIR}/${target}_generated")
+    set(shaderCacheVersionHeader "${shaderCacheGeneratedDir}/ShaderCacheVersion.hpp")
+    set(shaderCacheDriverDir "${PROJECT_SOURCE_DIR}/core/libs/prx/libSceAgcDriver")
+    file(GLOB_RECURSE shaderCacheSources CONFIGURE_DEPENDS
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.cpp"
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.hpp"
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.h"
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.cmake"
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/CMakeLists.txt"
+            "${shaderCacheDriverDir}/*.cpp"
+            "${shaderCacheDriverDir}/*.hpp"
+            "${shaderCacheDriverDir}/*.h"
+            "${shaderCacheDriverDir}/*.comp"
+            "${shaderCacheDriverDir}/*.cmake"
+            "${shaderCacheDriverDir}/CMakeLists.txt"
+    )
+    list(FILTER shaderCacheSources EXCLUDE REGEX "^${shaderCacheDriverDir}/(tests|tools)/")
+    if(ANYPS5_ENABLE_SPIRV_TOOLS AND EXISTS "${PROJECT_SOURCE_DIR}/3rdparty/SPIRV-Tools/CHANGES")
+        list(APPEND shaderCacheSources "${PROJECT_SOURCE_DIR}/3rdparty/SPIRV-Tools/CHANGES")
+    endif()
+    list(JOIN shaderCacheSources "\n" shaderCacheSourceList)
+    set(shaderCacheListFile "${shaderCacheGeneratedDir}/sources.txt")
+    file(CONFIGURE OUTPUT "${shaderCacheListFile}" CONTENT "${shaderCacheSourceList}\n" @ONLY)
+    set(shaderCacheExtra "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_BUILD_TYPE} spirv-tools=${ANYPS5_ENABLE_SPIRV_TOOLS} ${CMAKE_SYSTEM_PROCESSOR}")
+    add_custom_command(
+            OUTPUT "${shaderCacheVersionHeader}"
+            COMMAND ${CMAKE_COMMAND}
+            "-DROOT=${PROJECT_SOURCE_DIR}"
+            "-DLIST_FILE=${shaderCacheListFile}"
+            "-DRECOMPILER_DIR=${CMAKE_CURRENT_FUNCTION_LIST_DIR}"
+            "-DEXTRA=${shaderCacheExtra}"
+            "-DOUTPUT=${shaderCacheVersionHeader}"
+            -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ShaderCacheVersion.cmake"
+            DEPENDS ${shaderCacheSources} "${shaderCacheListFile}" "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ShaderCacheVersion.cmake"
+            COMMENT "Hashing the shader recompiler and AGC driver sources for the shader disk cache"
+            VERBATIM
+    )
+    target_sources(${target} PRIVATE "${shaderCacheVersionHeader}")
+    target_include_directories(${target} PRIVATE "${shaderCacheGeneratedDir}")
 
     set_target_properties(${target} PROPERTIES
             POSITION_INDEPENDENT_CODE ON
