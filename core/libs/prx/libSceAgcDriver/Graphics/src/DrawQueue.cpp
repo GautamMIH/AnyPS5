@@ -108,7 +108,31 @@ void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes) {
         timing.Mark("gpu_barrier");
         return;
     }
-    Wait();
+    // A CPU access waits for the batches that write the range, not the whole queue: completed
+    // batches are retired first (labels a DMA reset are usually done by the time a WAIT_REG_MEM
+    // reads them), then batches are waited for in order up to the last one writing the range.
+    Collect();
+    if (!writes.Overlaps(address, bytes)) {
+        timing.Mark("retired");
+        return;
+    }
+    const auto end = address + bytes;
+    const auto writesRange = [&](const Batch& batch) {
+        for (const auto& entry : batch.entries)
+            for (const auto& [first, last] : entry.writes)
+                if (first < end && address < last) return true;
+        return false;
+    };
+    if (recording.commands && writesRange(recording)) Flush();
+    std::size_t through = 0;
+    for (std::size_t index = 0; index < pending.size(); ++index)
+        if (writesRange(pending[index])) through = index + 1;
+    for (; through > 0; --through) {
+        pending.front().commands->Wait();
+        auto batch = std::move(pending.front());
+        pending.erase(pending.begin());
+        retire(std::move(batch));
+    }
     timing.Mark(GuestMemory::AccessSite::Current());
 }
 

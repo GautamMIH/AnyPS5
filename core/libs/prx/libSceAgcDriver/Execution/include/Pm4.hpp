@@ -12,6 +12,17 @@
 
 namespace AgcDriver::Pm4 {
 
+// A DMA_DATA between guest memory ranges: a copy, or a fill with an immediate dword (immediate).
+struct DmaCopy {
+    std::uint64_t source;
+    std::uint64_t destination;
+    std::uint64_t bytes;
+    bool immediate;
+    std::uint32_t value;
+};
+// The copy a validated DMA_DATA performs; nothing for the global data share forms.
+std::optional<DmaCopy> DecodeDmaCopy(std::span<const std::uint32_t> packet);
+
 struct DrawParameters {
     std::uint64_t indexAddress;
     std::uint32_t indexCount;

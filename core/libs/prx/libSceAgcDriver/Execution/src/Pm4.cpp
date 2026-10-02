@@ -118,6 +118,16 @@ void dmaData(std::span<const std::uint32_t> packet) {
 
 }
 
+std::optional<DmaCopy> DecodeDmaCopy(std::span<const std::uint32_t> packet) {
+    if (packet.size() < 7) return std::nullopt;
+    const auto source = dmaSource(packet);
+    const auto destination = dmaDestination(packet);
+    if (source == DmaSelectGds || destination == DmaSelectGds || !memorySelector(destination)) return std::nullopt;
+    const bool immediate = source == 2;
+    if (!immediate && !memorySelector(source)) return std::nullopt;
+    return DmaCopy{immediate ? 0 : address(packet[2], packet[3]), address(packet[4], packet[5]), packet[6] & 0x3ffffffu, immediate, packet[2]};
+}
+
 std::string Name(std::uint32_t header) {
     const auto opcode = (header >> 8u) & 0xffu;
     if (opcode == 0x10 && (header & 0xfcu) != 0) {

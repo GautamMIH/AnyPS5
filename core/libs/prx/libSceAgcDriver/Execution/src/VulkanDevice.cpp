@@ -5,6 +5,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GraphicsPipelineCache.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
+#include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
@@ -1002,6 +1004,60 @@ void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool 
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     state->drawQueue->Resolve(address, bytes);
     state->renderCache->Resolve(address, bytes, writable);
+}
+
+bool VulkanDevice::RecordDmaData(const Pm4::DmaCopy& dma) {
+    static const bool cpuOnly = std::getenv("ANYPS5_CPU_DMA") != nullptr;
+    if (cpuOnly || state->guestGpuMemory == nullptr || dma.bytes == 0) return false;
+    // vkCmdFillBuffer writes whole dwords; vkCmdCopyBuffer's regions must not overlap.
+    if (dma.immediate && ((dma.destination | dma.bytes) & 3u) != 0) return false;
+    if (!dma.immediate && dma.source < dma.destination + dma.bytes && dma.destination < dma.source + dma.bytes) return false;
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    PerformanceTimer timing("Vulkan.DmaData");
+    const auto context = graphicsContext();
+    {
+        // A GPU access: resident surfaces over the ranges are written back (or, for the
+        // destination, invalidated) ahead of it on the draw queue.
+        const GuestMemory::MemoryAccessScope memoryScope(this, [](void* owner, std::uint64_t address, std::size_t bytes, bool writable) {
+            static_cast<VulkanDevice*>(owner)->ResolveMemory(address, bytes, writable);
+        });
+        const GuestMemory::GpuAccessScope gpuAccess;
+        const GuestMemory::AccessSite accessSite("dma_data");
+        if (!dma.immediate) GuestMemory::CheckRange(reinterpret_cast<const void*>(dma.source), static_cast<std::size_t>(dma.bytes), 1);
+        GuestMemory::CheckRange(reinterpret_cast<void*>(dma.destination), static_cast<std::size_t>(dma.bytes), 1, true);
+    }
+    const auto destination = state->guestGpuMemory->Resolve(dma.destination, dma.bytes);
+    if (!destination || destination->bytes < dma.bytes) return false;
+    std::optional<Graphics::GuestGpuMemory::View> source;
+    if (!dma.immediate) {
+        source = state->guestGpuMemory->Resolve(dma.source, dma.bytes);
+        if (!source || source->bytes < dma.bytes) return false;
+    }
+    const auto commands = state->drawQueue->Begin(context);
+    const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+    if (dma.immediate) {
+        context.Function<PFN_vkCmdFillBuffer>("vkCmdFillBuffer")(commands, destination->buffer, destination->offset, dma.bytes, dma.value);
+    } else {
+        const VkBufferCopy region{source->offset, destination->offset, dma.bytes};
+        context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, source->buffer, destination->buffer, 1, &region);
+    }
+    VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+    // CPU accesses of the destination wait for the batch; the texture cache sees it as written.
+    static const auto keepAlive = std::make_shared<int>(0);
+    state->drawQueue->NoteGuestWrite(dma.destination, dma.destination + dma.bytes, keepAlive);
+    WriteTracker::NoteGpuWrite(dma.destination, dma.bytes);
+    timing.Mark("recorded", dma.bytes);
+    // Debug aid: APS5_TRACE_DMA=1 logs every DMA_DATA recorded on the GPU.
+    static const bool trace = std::getenv("APS5_TRACE_DMA") != nullptr;
+    if (trace) std::fprintf(stderr, "[dma] %s 0x%llx -> 0x%llx (%llu bytes)\n", dma.immediate ? "fill" : "copy", static_cast<unsigned long long>(dma.immediate ? dma.value : dma.source), static_cast<unsigned long long>(dma.destination), static_cast<unsigned long long>(dma.bytes));
+    return true;
 }
 
 void VulkanDevice::ResolveFastClears(const Graphics::State& graphics) {

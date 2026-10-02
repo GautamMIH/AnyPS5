@@ -987,6 +987,8 @@ private:
                     const GuestMemory::AccessSite accessSite("wait_reg_mem");
                     // The packet only waits until memory satisfies its condition: when it already
                     // does (labels are usually written by then), the GPU need not go idle first.
+                    static const bool traceDma = std::getenv("APS5_TRACE_DMA") != nullptr;
+                    if (traceDma) std::fprintf(stderr, "[wait] q%u 0x%llx func %u ref 0x%x mask 0x%x\n", static_cast<unsigned>(submission.queue), static_cast<unsigned long long>(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u)), packet[1] & 7u, packet[4], packet[5]);
                     bool satisfied = Pm4::WaitSatisfied(packet);
                     timing.Mark("memory_check");
                     if (!satisfied && !completions.empty()) {
@@ -1030,6 +1032,14 @@ private:
                     // wait for draws and pending labels below) and by guest range checks.
                     // PIXEL_PIPE_STAT_DUMP: drained like a label (every draw before it completed), then
                     // the sample count is written as the DB counters.
+                    // DMA_DATA between imported guest ranges runs on the GPU in queue order: no drain.
+                    if (opcode == 0x50 && device != nullptr) {
+                        if (const auto dma = Pm4::DecodeDmaCopy(packet); dma && device->RecordDmaData(*dma)) {
+                            timing.Mark("dma_gpu");
+                            cursor += count;
+                            continue;
+                        }
+                    }
                     const auto sampleDump = opcode == 0x46 && (packet[1] & 0x3fu) == 0x39u;
                     const auto gpuBarrier = (opcode == 0x46 && !sampleDump) || opcode == 0x58;
                     const auto waitDraws = opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || sampleDump;
@@ -1037,7 +1047,11 @@ private:
                         dumpSampleCounters(packet, device.get());
                     } else if (device != nullptr) {
                         if (gpuBarrier) device->AcquireGpuMemory();
-                        else if (waitDraws) device->WaitDraws();
+                        else if (waitDraws) {
+                            // Which packet types make the worker drain the GPU (Driver.DrainFor.<packet>).
+                            PerformanceTimer drainTiming(opcode == 0x37 ? "Driver.DrainFor.WriteData" : opcode == 0x40 ? "Driver.DrainFor.CopyData" : opcode == 0x50 ? "Driver.DrainFor.DmaData" : "Driver.DrainFor.PfpSyncMe");
+                            device->WaitDraws();
+                        }
                         else {
                             PerformanceTimer waitTiming("Driver.FlipWait");
                             device->WaitIdle();

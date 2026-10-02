@@ -19,6 +19,8 @@ public:
     }
     MemoryAccessScope(const MemoryAccessScope&) = delete;
     MemoryAccessScope& operator=(const MemoryAccessScope&) = delete;
+    // Whether a resolver is installed (the device's render cache and draw queue).
+    static bool HasResolver() { return currentResolver != nullptr; }
     static void Resolve(std::uint64_t address, std::size_t bytes, bool writable) {
         const auto resolver = currentResolver;
         const auto context = currentContext;

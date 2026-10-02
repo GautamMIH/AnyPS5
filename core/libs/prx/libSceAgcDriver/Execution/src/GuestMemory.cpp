@@ -96,10 +96,16 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     }
     require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "address range overflow");
     PerformanceTimer timing("GuestMemory.CheckRange");
+    // A GPU consumer (GpuAccessScope) is served by the render cache's resolve: it queues the
+    // surfaces' write-backs ahead of the consumer on the draw queue. The page watches (owned by the
+    // same resident surfaces) serve CPU accesses; resolving them here would wait for the queue.
+    const bool gpuConsumer = GpuAccessScope::Active() && MemoryAccessScope::HasResolver();
     MemoryAccessScope::Resolve(address, bytes, writable);
     timing.Mark("scope_resolve");
-    GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
-    timing.Mark("tracking_resolve");
+    if (!gpuConsumer) {
+        GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
+        timing.Mark("tracking_resolve");
+    }
     auto cursor = address;
     const auto end = address + bytes;
 #ifdef _WIN32
