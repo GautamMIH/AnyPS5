@@ -2,9 +2,11 @@
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -38,9 +40,11 @@ GuestGpuMemory::GuestGpuMemory(const Context& context, std::uint32_t memoryTypeM
         for (std::uint32_t heap = 0; heap < memory.memoryHeapCount; ++heap)
             if ((memory.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) mirrorBudget = std::max<std::uint64_t>(mirrorBudget, memory.memoryHeaps[heap].size / 4);
         mirrorBudget = std::min<std::uint64_t>(mirrorBudget, 1ull << 30);
-        WriteTracker::SetWriteListener(&GuestGpuMemory::invalidateWrites, this);
         std::fprintf(stderr, "[AnyPS5] GPU reads of guest memory use a device-local mirror (up to %llu MiB)\n", static_cast<unsigned long long>(mirrorBudget >> 20));
     }
+    // Mirrors and image copies follow every write the tracker learns of.
+    listening = WriteTracker::Available();
+    if (listening) WriteTracker::SetWriteListener(&GuestGpuMemory::invalidateWrites, this);
 }
 
 void GuestGpuMemory::invalidateWrites(void* self, std::uint64_t address, std::uint64_t bytes) {
@@ -48,6 +52,19 @@ void GuestGpuMemory::invalidateWrites(void* self, std::uint64_t address, std::ui
 }
 
 void GuestGpuMemory::invalidate(std::uint64_t address, std::uint64_t bytes) {
+    {
+        std::lock_guard lock(mutex);
+        const auto end = address + bytes;
+        for (auto it = imageCopies.begin(); it != imageCopies.end() && it->first < end; ++it) {
+            auto& image = it->second;
+            const auto imageEnd = it->first + image.range->bytes;
+            if (imageEnd <= address) continue;
+            const auto from = (std::max(address, it->first) - it->first) >> kMirrorPageShift;
+            const auto to = (std::min(end, imageEnd) - it->first - 1) >> kMirrorPageShift;
+            for (auto block = from; block <= to && block < image.stale.size(); ++block) image.stale[block] = true;
+        }
+    }
+    if (!mirrorEnabled) return;
     // Every view of the written bytes: a range may span segments, and imports of a chunk may overlap.
     auto cursor = address;
     const auto end = address + bytes;
@@ -131,8 +148,56 @@ std::optional<GuestGpuMemory::View> GuestGpuMemory::ResolveRead(std::uint64_t ad
     return View{import.mirror->Handle(), begin - first, import.mirror->DeviceAddress() + (begin - first), translation.bytes};
 }
 
+std::optional<GuestGpuMemory::View> GuestGpuMemory::ResolveImage(const std::shared_ptr<const GuestAllocations::Range>& range) {
+    // ANYPS5_NO_IMAGE_COPY=1 copies executable ranges for each use instead.
+    static const bool disabled = std::getenv("ANYPS5_NO_IMAGE_COPY") != nullptr;
+    if (disabled || range == nullptr || range->bytes == 0) return std::nullopt;
+    PerformanceTimer timing("Graphics.ImageCopy");
+    // Collected before the lock: collecting reports CPU writes to invalidate (which locks).
+    if (range->writable) static_cast<void>(WriteTracker::CpuCollect(range->address, range->bytes));
+    timing.Mark("collect");
+    std::lock_guard lock(mutex);
+    auto found = imageCopies.find(range->address);
+    if (found == imageCopies.end() || found->second.range != range) {
+        // New, or the registry changed the range (protection): replaces every copy it overlaps.
+        const auto end = range->address + range->bytes;
+        for (auto it = imageCopies.begin(); it != imageCopies.end();) {
+            if (it->first < end && it->first + it->second.range->bytes > range->address) it = imageCopies.erase(it);
+            else ++it;
+        }
+        ImageCopy image;
+        image.range = range;
+        try {
+            image.copy = std::make_unique<Buffer>(context, range->bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT);
+        } catch (const std::exception&) {
+            return std::nullopt;
+        }
+        image.stale.assign(static_cast<std::size_t>((range->bytes + (std::uint64_t{1} << kMirrorPageShift) - 1) >> kMirrorPageShift), true);
+        // Watched from now on: writes after the first copy below are seen by the next collection.
+        image.watched = range->writable && listening && GuestMemoryBacking::GuestWriteWatchAddHost_nid_postfix(range->address, range->bytes);
+        std::fprintf(stderr, "[AnyPS5] executable range 0x%llx+0x%llx: GPU copy kept%s\n", static_cast<unsigned long long>(range->address), static_cast<unsigned long long>(range->bytes), !range->writable ? " (read-only)" : image.watched ? ", written blocks refreshed" : ", recopied for each use (cannot watch writes)");
+        found = imageCopies.insert_or_assign(range->address, std::move(image)).first;
+    }
+    auto& image = found->second;
+    if (range->writable && !image.watched) std::fill(image.stale.begin(), image.stale.end(), true);
+    auto* destination = image.copy->Bytes().data();
+    const auto* source = reinterpret_cast<const std::byte*>(range->address);
+    const auto blockBytes = std::uint64_t{1} << kMirrorPageShift;
+    std::uint64_t copied = 0;
+    for (std::size_t block = 0; block < image.stale.size(); ++block) {
+        if (!image.stale[block]) continue;
+        image.stale[block] = false;
+        const auto offset = block * blockBytes;
+        const auto length = static_cast<std::size_t>(std::min<std::uint64_t>(blockBytes, range->bytes - offset));
+        std::memcpy(destination + offset, source + offset, length);
+        copied += length;
+    }
+    timing.Mark("copy", copied);
+    return View{image.copy->Handle(), 0, image.copy->DeviceAddress(), range->bytes};
+}
+
 GuestGpuMemory::~GuestGpuMemory() {
-    if (mirrorEnabled) WriteTracker::SetWriteListener(nullptr, nullptr);
+    if (listening) WriteTracker::SetWriteListener(nullptr, nullptr);
     for (auto& [key, import] : imports) release(import);
     for (auto& [segment, import] : retired) release(import);
 }

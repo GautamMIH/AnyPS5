@@ -91,6 +91,10 @@ bool WriteWatchAvailable() {
     return false;
 }
 
+bool WatchHost(std::uint64_t, std::size_t) {
+    return false;
+}
+
 bool CollectWrites(std::uint64_t, std::size_t, WrittenRangeVisitor, void*) {
     return false;
 }

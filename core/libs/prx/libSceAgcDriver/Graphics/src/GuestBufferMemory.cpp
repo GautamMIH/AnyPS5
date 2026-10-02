@@ -106,6 +106,7 @@ void GuestBufferMemory::Upload(bool addressable) {
                 if (region.end > previous.end) previous.snapshot.insert(previous.snapshot.end(), region.snapshot.begin() + overlap, region.snapshot.end());
             } else {
                 // Contents are read from guest memory at upload, which covers both.
+                previous.image.reset();
                 previous.writable = previous.writable || region.writable;
                 previous.live = true;
                 previous.snapshot.clear();
@@ -140,11 +141,13 @@ void GuestBufferMemory::Upload(bool addressable) {
             }
             // Read-only regions read the device-local mirror (stale pages copied first, in queue order).
             region.view = region.writable || context.drawQueue == nullptr || !context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->Resolve(region.begin, bytes) : context.guestGpuMemory->ResolveRead(region.begin, bytes, context.drawQueue->Begin(context));
+            if (!region.view && !region.writable && region.image && region.begin == region.image->address && bytes == region.image->bytes) region.view = context.guestGpuMemory->ResolveImage(region.image);
             if (region.view && region.view->bytes == bytes) {
                 // Shaders write writable regions straight into guest memory.
                 if (region.writable) WriteTracker::NoteGpuWrite(region.begin, bytes);
                 continue;
             }
+            if (traceViews) std::fprintf(stderr, "[buffer-view] 0x%llx+0x%llx copied: %s\n", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes), region.view ? "translation shorter than the region" : "not segment memory");
             region.view.reset();
         }
         const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);

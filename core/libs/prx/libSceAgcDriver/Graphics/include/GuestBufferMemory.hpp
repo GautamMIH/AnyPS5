@@ -53,6 +53,9 @@ private:
         // Contents are read at upload rather than captured (registered memory, live mirrors).
         bool live = false;
         std::optional<GuestGpuMemory::View> view;
+        // The registered range outside guest segments it is (the loaded executable), whose copy
+        // GuestGpuMemory keeps between uses.
+        std::shared_ptr<const GuestAllocations::Range> image;
     };
 
     void validate(std::uint64_t address, std::size_t bytes) const;

@@ -14,7 +14,7 @@ void GuestBufferMemory::AcquireRegistered(bool writes) {
         validate(range->address, range->bytes);
         // With a mirror, registered memory is used in place instead of captured.
         if (context.guestGpuMemory != nullptr) {
-            regions.push_back({range->address, range->address + range->bytes, range->writable && writes, {}, nullptr, true});
+            regions.push_back({range->address, range->address + range->bytes, range->writable && writes, {}, nullptr, true, std::nullopt, range->releasable ? nullptr : range});
             continue;
         }
         std::vector<std::byte> snapshot;

@@ -53,6 +53,7 @@ int Map(const char* operation, void** addr, size_t len, size_t alignment, Kind k
 // Memory outside the guest map (the main image and other loaded modules) is protected directly;
 // the main image's pages are GPU-visible registry ranges.
 int ProtectImage(const void* pointer, size_t bytes, int prot) {
+    TraceMemory("protect-image", pointer, bytes, prot, 0, 0);
     const bool writable = (prot & (GuestMemoryBacking::kProtCpuWrite | GuestMemoryBacking::kProtGpuWrite)) != 0;
     const bool readable = writable || (prot & (GuestMemoryBacking::kProtCpuRead | GuestMemoryBacking::kProtGpuRead)) != 0;
 #ifdef _WIN32

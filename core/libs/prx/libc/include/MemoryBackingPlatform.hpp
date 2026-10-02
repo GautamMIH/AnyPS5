@@ -40,6 +40,7 @@ bool WriteWatchAvailable();
 // watches those pages again. Returns false when the watch is unavailable.
 using WrittenRangeVisitor = void (*)(void* context, std::uint64_t begin, std::uint64_t end);
 bool CollectWrites(std::uint64_t address, std::size_t bytes, WrittenRangeVisitor visit, void* context);
+bool WatchHost(std::uint64_t address, std::size_t bytes);
 
 }
 

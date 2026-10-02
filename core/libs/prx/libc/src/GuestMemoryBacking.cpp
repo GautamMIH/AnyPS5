@@ -480,6 +480,10 @@ bool GuestWriteWatchCollect_nid_postfix(std::uint64_t address, std::uint64_t byt
     return true;
 }
 
+bool GuestWriteWatchAddHost_nid_postfix(std::uint64_t address, std::uint64_t bytes) {
+    return bytes != 0 && Platform::WatchHost(address, static_cast<std::size_t>(bytes));
+}
+
 bool GuestSegmentAlive_nid_postfix(std::uint64_t segment) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     return liveSegments().contains(segment);

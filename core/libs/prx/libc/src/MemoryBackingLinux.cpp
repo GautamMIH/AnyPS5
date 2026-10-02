@@ -338,6 +338,16 @@ bool WriteWatchAvailable() {
     return writeWatch().available;
 }
 
+bool WatchHost(std::uint64_t address, std::size_t bytes) {
+    auto& watch = writeWatch();
+    if (!watch.available) return false;
+    uffdio_register registration{};
+    registration.range.start = address;
+    registration.range.len = bytes;
+    registration.mode = UFFDIO_REGISTER_MODE_WP;
+    return ioctl(watch.userfault, UFFDIO_REGISTER, &registration) == 0;
+}
+
 bool CollectWrites(std::uint64_t address, std::size_t bytes, WrittenRangeVisitor visit, void* context) {
     auto& watch = writeWatch();
     if (!watch.available || visit == nullptr) return false;

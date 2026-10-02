@@ -80,6 +80,9 @@ bool GuestVirtualSingleView_nid_postfix(std::uint64_t address, std::uint64_t byt
 // again. Returns false when writes are not watched.
 bool GuestWriteWatchAvailable_nid_postfix();
 bool GuestWriteWatchCollect_nid_postfix(std::uint64_t address, std::uint64_t bytes, void (*visit)(void* context, std::uint64_t begin, std::uint64_t end), void* context);
+// Watches writes to host memory outside guest areas that stays mapped (the loaded executable).
+// False when it cannot be watched (e.g. file-backed pages); the rest of the watch is unaffected.
+bool GuestWriteWatchAddHost_nid_postfix(std::uint64_t address, std::uint64_t bytes);
 
 // libc heap chunks.
 void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::size_t alignment, int protection);

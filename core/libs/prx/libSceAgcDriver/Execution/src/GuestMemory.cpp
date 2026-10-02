@@ -6,6 +6,7 @@
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -18,7 +19,9 @@
 #include <windows.h>
 #else
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include <dlfcn.h>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <sstream>
 #include <vector>
@@ -135,9 +138,36 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
 #endif
 }
 
+#ifndef _WIN32
+// Debug aid: APS5_TRACE_READS=1 totals the bytes Read copies per caller (module+offset, for
+// addr2line) and prints the heaviest callers every 5000 reads.
+__attribute__((noinline)) void traceRead(const void* caller, std::size_t bytes) {
+    static std::mutex mutex;
+    static std::map<const void*, std::pair<std::uint64_t, std::uint64_t>> callers;
+    static std::uint64_t reads = 0;
+    std::lock_guard lock(mutex);
+    auto& total = callers[caller];
+    total.first += bytes;
+    ++total.second;
+    if (++reads % 5000 != 0) return;
+    std::vector<std::pair<const void*, std::pair<std::uint64_t, std::uint64_t>>> sorted(callers.begin(), callers.end());
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+    for (std::size_t index = 0; index < sorted.size() && index < 12; ++index) {
+        Dl_info info{};
+        const auto found = dladdr(sorted[index].first, &info) != 0 && info.dli_fname != nullptr;
+        std::fprintf(stderr, "[reads] %10.1f MB %8llu calls  %s+0x%llx\n", static_cast<double>(sorted[index].second.first) / 1048576.0, static_cast<unsigned long long>(sorted[index].second.second), found ? info.dli_fname : "?", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sorted[index].first) - (found ? reinterpret_cast<std::uintptr_t>(info.dli_fbase) : 0)));
+    }
+    callers.clear();
+}
+#endif
+
 void Read(std::uint64_t address, std::span<std::byte> destination, std::size_t alignment) {
     PerformanceTimer timing("GuestMemory.Read");
     if (destination.empty()) return;
+#ifndef _WIN32
+    static const bool traceReads = std::getenv("APS5_TRACE_READS") != nullptr;
+    if (traceReads) traceRead(__builtin_return_address(0), destination.size());
+#endif
     const auto* source = reinterpret_cast<const void*>(address);
     CheckRange(source, destination.size(), alignment);
     timing.Mark("range_check");

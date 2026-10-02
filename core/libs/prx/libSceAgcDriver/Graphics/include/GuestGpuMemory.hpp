@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include "prx/libc/include/GuestAllocations.hpp"
 #include <mutex>
 #include <optional>
 #include <utility>
@@ -44,6 +45,11 @@ public:
     std::optional<View> ResolveRead(std::uint64_t address, std::uint64_t bytes, VkCommandBuffer commands);
     // Whether ResolveRead may record copies (ANYPS5_GPU_MIRROR); otherwise it is Resolve.
     bool Mirrors() const { return mirrorEnabled; }
+    // A GPU-readable copy of a registered range outside guest segments that stays mapped (the
+    // loaded executable, which the GPU reads on the console). Kept between uses: read-only ranges
+    // are copied once, writable ones refresh the 64 KiB blocks the write watch saw written (all of
+    // them when their pages cannot be watched). The GPU must not write through it.
+    std::optional<View> ResolveImage(const std::shared_ptr<const GuestAllocations::Range>& range);
     // Releases the imports of segments that no longer exist; the GPU must not be using them.
     void Collect();
 
@@ -71,6 +77,15 @@ private:
     std::mutex mutex;
     std::map<Key, Import> imports;
     std::vector<std::pair<std::uint64_t, Import>> retired;
+    struct ImageCopy {
+        std::shared_ptr<const GuestAllocations::Range> range;
+        std::unique_ptr<Buffer> copy;
+        bool watched = false;
+        std::vector<bool> stale;
+    };
+    // Image copies by address.
+    std::map<std::uint64_t, ImageCopy> imageCopies;
+    bool listening = false;
     // Device-local bytes the mirrors may use; past it reads use guest memory in place.
     std::uint64_t mirrorBudget = 0;
     std::uint64_t mirrorBytes = 0;
