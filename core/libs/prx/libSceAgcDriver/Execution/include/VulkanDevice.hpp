@@ -40,6 +40,9 @@ public:
     void* Window() const;
     void Resize(std::uint32_t width, std::uint32_t height);
     bool Presentable() const;
+    // Flips are ordered on the GPU: the worker queues the flip behind the frame's work and goes on
+    // (ANYPS5_SYNC_FLIP=1 waits for the GPU to go idle at every flip).
+    static bool AsyncFlip();
     // VK_EXT_primitive_topology_list_restart: primitive restart also applies to list topologies.
     bool PrimitiveListRestart() const;
     void PresentClear(std::uint32_t width, std::uint32_t height, bool opaque);

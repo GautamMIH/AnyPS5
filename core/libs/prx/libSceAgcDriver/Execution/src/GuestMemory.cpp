@@ -220,8 +220,8 @@ void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t
     CheckRange(destination, source.size(), alignment, true);
     timing.Mark("range_check");
     std::memcpy(destination, source.data(), source.size());
-    // The driver's own CPU write: later texture validations must collect it.
-    WriteTracker::NextEpoch();
+    // The driver's own CPU write: later texture validations of the range must collect it.
+    WriteTracker::NoteDriverWrite(address, source.size());
     timing.Mark("copy", source.size());
 }
 

@@ -54,12 +54,21 @@ void TextureCache::trim() {
 
 // Whether the guest range of a snapshot certainly still holds the snapshot's bytes.
 bool TextureCache::unchanged(Entry& entry) {
+    PerformanceTimer timing("Graphics.TextureMemo");
     if (!WriteTracker::Available()) return false;
     const auto bytes = entry.bytes;
     // Writes through another mapping of the same memory would not mark these pages.
     const auto memoryGeneration = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
     const std::array<std::uint64_t, 4> at{WriteTracker::Epoch(), WriteTracker::GpuWriteGeneration(), WriteTracker::AliasWriteGeneration(), memoryGeneration};
-    if (entry.unchangedAt == at) return true;
+    // Read before any check: a driver write after it is seen by the next validation.
+    const auto driverSequence = WriteTracker::DriverWriteSequence();
+    timing.Mark("generations");
+    if (entry.unchangedAt == at && !WriteTracker::DriverWrittenSince(entry.address, bytes, entry.unchangedDriverSequence)) {
+        entry.unchangedDriverSequence = driverSequence;
+        timing.Mark("memo_hit");
+        return true;
+    }
+    timing.Mark("memo_miss");
     if (entry.viewGeneration != memoryGeneration) {
         entry.singleView = GuestMemoryBacking::GuestVirtualSingleView_nid_postfix(entry.address, bytes);
         entry.viewGeneration = memoryGeneration;
@@ -73,6 +82,7 @@ bool TextureCache::unchanged(Entry& entry) {
     if (entry.gpuWritten || WriteTracker::AliasWrittenSince(entry.address, bytes, entry.aliasGeneration)) return false;
     if (WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration)) return false;
     entry.unchangedAt = at;
+    entry.unchangedDriverSequence = driverSequence;
     return true;
 }
 

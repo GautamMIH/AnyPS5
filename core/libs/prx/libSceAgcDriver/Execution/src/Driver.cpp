@@ -267,7 +267,7 @@ public:
                 if (presenting->Presentable()) {
                     if (buffer != nullptr) {
                         require(buffer->width == window.width && buffer->height == window.height, "display buffer extent differs from output");
-                        presenting->WaitDraws();
+                        if (!VulkanDevice::AsyncFlip()) presenting->WaitDraws();
                         timing.Mark("draw_wait");
                         presenting->PresentDisplayBuffer(*buffer);
                         timing.Mark("present_display_buffer");
@@ -356,10 +356,14 @@ private:
         std::uint64_t serial = 0;
         int eventQueue = 0;
         std::optional<std::uint32_t> interrupt;
+        // A flip whose frame is ready on the GPU once the completion is reached (AsyncFlip).
+        std::shared_ptr<IFlipRequest> flip;
+        std::shared_ptr<FrameTiming> flipTiming;
     };
     struct Completed {
         std::vector<std::pair<int, std::uint32_t>> interrupts;
         std::vector<std::uint64_t> serials;
+        std::vector<std::pair<std::shared_ptr<IFlipRequest>, std::shared_ptr<FrameTiming>>> flips;
     };
     std::deque<Completion> completions;
     // Dwords that WRITE_DATA and small fills recorded on the GPU leave in guest memory, with the
@@ -443,6 +447,7 @@ private:
                 Pm4::Execute(next.release, unused);
                 if (TraceRelease()) std::fprintf(stderr, "[agc-release] written label=0x%llx marker=%llu\n", static_cast<unsigned long long>(next.release[3] | (static_cast<std::uint64_t>(next.release[4]) << 32u)), static_cast<unsigned long long>(next.marker));
             }
+            if (next.flip) done.flips.emplace_back(std::move(next.flip), std::move(next.flipTiming));
             if (next.interrupt) done.interrupts.emplace_back(next.eventQueue, *next.interrupt);
             if (next.serial != 0) done.serials.push_back(next.serial);
             completions.pop_front();
@@ -453,7 +458,8 @@ private:
 
     // Caller holds gpuMutex: the completions are published later, without it.
     void stashCompletions(Completed done) {
-        if (done.interrupts.empty() && done.serials.empty()) return;
+        if (done.interrupts.empty() && done.serials.empty() && done.flips.empty()) return;
+        unpublished.flips.insert(unpublished.flips.end(), done.flips.begin(), done.flips.end());
         unpublished.interrupts.insert(unpublished.interrupts.end(), done.interrupts.begin(), done.interrupts.end());
         unpublished.serials.insert(unpublished.serials.end(), done.serials.begin(), done.serials.end());
         unpublishedPending = true;
@@ -474,6 +480,8 @@ private:
     // Caller does not hold gpuMutex: raising an interrupt may wake guest threads that fault on
     // tracked memory, and serials take the queue mutex.
     void finishCompletions(const Completed& done) {
+        // A flip's frame is done on the GPU: it may be presented (in completion order).
+        for (const auto& [flip, timing] : done.flips) flip->GpuReady(timing);
         for (const auto& [queue, data] : done.interrupts) {
             if (TraceRelease()) std::fprintf(stderr, "[agc-release] interrupt queue=0x%x context=0x%x\n", static_cast<unsigned>(queue), data);
             AgcDriverTriggerEqEvent_nid_postfix(queue, data);
@@ -1031,7 +1039,6 @@ private:
                     if (!cpuWait && device != nullptr && (predictedWaitSatisfied(packet) || std::any_of(completions.begin(), completions.end(), [&](const Completion& pending) { return Pm4::ReleaseSatisfiesWait(packet, pending.release); }))) {
                         device->AcquireGpuMemory();
                         timing.Mark("gpu_wait");
-                        WriteTracker::NextEpoch();
                         cursor += count;
                         continue;
                     }
@@ -1101,13 +1108,15 @@ private:
                             PerformanceTimer drainTiming(opcode == 0x37 ? "Driver.DrainFor.WriteData" : opcode == 0x40 ? "Driver.DrainFor.CopyData" : opcode == 0x50 ? "Driver.DrainFor.DmaData" : "Driver.DrainFor.PfpSyncMe");
                             device->WaitDraws();
                         }
-                        else {
+                        else if (!VulkanDevice::AsyncFlip()) {
                             PerformanceTimer waitTiming("Driver.FlipWait");
                             device->WaitIdle();
                         }
                     }
-                    // The CPU executes these packets (or presents): labels released before them land first.
-                    if (!gpuBarrier) stashCompletions(pollCompletions(true));
+                    // The CPU executes these packets (or presents): labels released before them land
+                    // first. An asynchronous flip is itself a completion queued behind them.
+                    const bool asyncFlip = header == FlipPacketHeader && device != nullptr && VulkanDevice::AsyncFlip();
+                    if (!gpuBarrier) stashCompletions(pollCompletions(!asyncFlip));
                     timing.Mark(gpuBarrier ? "gpu_barrier" : waitDraws ? "draw_wait" : "device_idle_wait");
                 }
                 // Errors name the packet that raised them: the worker's failure is reported on
@@ -1177,7 +1186,18 @@ private:
                     if (device) device->ReportGpuTime(*frameTiming);
                 }
                 const auto completedFrame = std::exchange(frameTiming, nullptr);
-                submission.flips.at(cursor)->GpuReady(completedFrame);
+                bool queued = false;
+                if (VulkanDevice::AsyncFlip()) {
+                    std::lock_guard gpuLock(gpuMutex);
+                    if (device != nullptr) {
+                        Completion completion;
+                        completion.flip = submission.flips.at(cursor);
+                        completion.flipTiming = completedFrame;
+                        queueCompletion(std::move(completion));
+                        queued = true;
+                    }
+                }
+                if (!queued) submission.flips.at(cursor)->GpuReady(completedFrame);
             }
             cursor += count;
         }

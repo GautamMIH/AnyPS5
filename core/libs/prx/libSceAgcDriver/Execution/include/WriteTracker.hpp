@@ -25,8 +25,17 @@ bool CpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t g
 // unordered on the console too. Ordering points begin epochs: a submission starting, a satisfied
 // memory wait, a flip, and every CPU write the driver itself makes to guest memory.
 void NextEpoch();
-// The current epoch: within it, CpuWrittenSince answers the same for the same arguments.
+// The current epoch: within it, CpuWrittenSince answers the same for the same arguments, unless the
+// driver writes the range (NoteDriverWrite).
 std::uint64_t Epoch();
+
+// The driver wrote the range through the guest mapping (GuestMemory::Write: labels, CPU-executed
+// packets). Ranges it overlaps are collected again within the epoch; others keep their collection,
+// so frequent label writes do not make every range collect again.
+void NoteDriverWrite(std::uint64_t address, std::uint64_t bytes);
+// Changes with every driver write; DriverWrittenSince reports whether one overlaps the range.
+std::uint64_t DriverWriteSequence();
+bool DriverWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t sequence);
 
 // The GPU may write the range (imported guest memory bound writable); such ranges stay "written".
 void NoteGpuWrite(std::uint64_t address, std::uint64_t bytes);

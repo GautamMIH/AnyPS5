@@ -18,6 +18,8 @@ namespace {
 constexpr unsigned kBlockShift = 16;
 // Alias writes are remembered this far back; older queries answer "written".
 constexpr std::size_t kAliasHistory = 4096;
+// Driver writes likewise (older collections are collected again).
+constexpr std::size_t kDriverHistory = 4096;
 
 std::uint64_t pageSize() {
     static const auto size = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
@@ -39,7 +41,21 @@ struct State {
             return static_cast<std::size_t>((range.first * 0x9e3779b97f4a7c15ull) ^ range.second);
         }
     };
-    std::unordered_map<std::pair<std::uint64_t, std::uint64_t>, std::uint64_t, RangeHash> collected;
+    // Epoch and driver-write sequence of each range's last collection.
+    struct Collection {
+        std::uint64_t epoch;
+        std::uint64_t driverSequence;
+    };
+    std::unordered_map<std::pair<std::uint64_t, std::uint64_t>, Collection, RangeHash> collected;
+    // Driver writes (cpuMutex held), newest last.
+    struct DriverWrite {
+        std::uint64_t sequence;
+        std::uint64_t begin;
+        std::uint64_t end;
+    };
+    std::deque<DriverWrite> driverWrites;
+    std::uint64_t driverFloor = 0;
+    std::atomic<std::uint64_t> driverSequence{0};
 
     std::mutex mutex;
     std::map<std::uint64_t, std::uint64_t> gpuRanges;  // begin -> end, merged
@@ -94,14 +110,30 @@ bool collect(State& tracker, std::uint64_t address, std::uint64_t bytes) {
     return collected;
 }
 
-// collect, at most once per epoch for a range (cpuMutex held).
+// Whether a driver write after `sequence` overlaps the range (cpuMutex held).
+bool driverWrittenSince(const State& tracker, std::uint64_t address, std::uint64_t bytes, std::uint64_t sequence) {
+    if (tracker.driverSequence.load(std::memory_order_relaxed) == sequence) return false;
+    if (sequence < tracker.driverFloor) return true;
+    const auto end = address + bytes;
+    for (auto it = tracker.driverWrites.rbegin(); it != tracker.driverWrites.rend() && it->sequence > sequence; ++it)
+        if (it->begin < end && address < it->end) return true;
+    return false;
+}
+
+// collect, at most once per epoch for a range unless the driver wrote it since (cpuMutex held).
 bool collectInEpoch(State& tracker, std::uint64_t address, std::uint64_t bytes) {
     const auto epoch = tracker.epoch.load(std::memory_order_acquire);
     const auto range = std::make_pair(address, bytes);
-    if (const auto found = tracker.collected.find(range); found != tracker.collected.end() && found->second == epoch) return true;
+    const auto sequence = tracker.driverSequence.load(std::memory_order_relaxed);
+    if (const auto found = tracker.collected.find(range); found != tracker.collected.end() && found->second.epoch == epoch) {
+        if (!driverWrittenSince(tracker, address, bytes, found->second.driverSequence)) {
+            found->second.driverSequence = sequence;
+            return true;
+        }
+    }
     if (!collect(tracker, address, bytes)) return false;
     if (tracker.collected.size() >= 65536) tracker.collected.clear();
-    tracker.collected[range] = epoch;
+    tracker.collected[range] = {epoch, sequence};
     return true;
 }
 
@@ -151,6 +183,30 @@ void NextEpoch() {
 
 std::uint64_t Epoch() {
     return state().epoch.load(std::memory_order_acquire);
+}
+
+void NoteDriverWrite(std::uint64_t address, std::uint64_t bytes) {
+    auto& tracker = state();
+    if (!validRange(address, bytes)) return;
+    std::lock_guard lock(tracker.cpuMutex);
+    const auto sequence = tracker.driverSequence.load(std::memory_order_relaxed) + 1;
+    tracker.driverWrites.push_back({sequence, address, address + bytes});
+    if (tracker.driverWrites.size() > kDriverHistory) {
+        tracker.driverFloor = tracker.driverWrites.front().sequence;
+        tracker.driverWrites.pop_front();
+    }
+    tracker.driverSequence.store(sequence, std::memory_order_release);
+}
+
+std::uint64_t DriverWriteSequence() {
+    return state().driverSequence.load(std::memory_order_acquire);
+}
+
+bool DriverWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t sequence) {
+    auto& tracker = state();
+    if (tracker.driverSequence.load(std::memory_order_acquire) == sequence) return false;
+    std::lock_guard lock(tracker.cpuMutex);
+    return driverWrittenSince(tracker, address, bytes, sequence);
 }
 
 void SetWriteListener(WriteListener listener, void* context) {

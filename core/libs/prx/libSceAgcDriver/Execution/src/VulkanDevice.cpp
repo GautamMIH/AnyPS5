@@ -95,6 +95,8 @@ struct VulkanDevice::State {
     std::vector<VkSemaphore> rendered;
     std::vector<RetiredSwapchain> retiredSwapchains;
     VkCommandBuffer clearCommands = VK_NULL_HANDLE;
+    // The last presentation submission (renderFence) has not been waited for yet.
+    bool renderPending = false;
     VkPhysicalDeviceMemoryProperties memoryProperties{};
     VkBuffer uploadBuffer = VK_NULL_HANDLE;
     VkDeviceMemory uploadMemory = VK_NULL_HANDLE;
@@ -791,6 +793,11 @@ void writeFrame(const DisplayBuffer& buffer, std::span<const std::byte> bgra, st
 
 }
 
+bool VulkanDevice::AsyncFlip() {
+    static const bool async = std::getenv("ANYPS5_SYNC_FLIP") == nullptr;
+    return async;
+}
+
 void VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
     // Linear (tiling mode 1) scanout surfaces are never render-target images: present their pixels.
     if (buffer.tilingMode == 1) {
@@ -816,7 +823,11 @@ void VulkanDevice::DumpFrame(const DisplayBuffer& buffer) {
 void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaque, std::span<const std::byte> pixels, const DisplayBuffer* display) {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.Present");
-    state->drawQueue->Wait();
+    // The presentation runs after every earlier submission in queue order (its first barrier
+    // covers them): queued work is submitted, not waited for. A display buffer read from guest
+    // memory waits for its writers in ResolveMemory.
+    if (AsyncFlip()) state->drawQueue->Flush();
+    else state->drawQueue->Wait();
     timing.Mark("draw_wait");
     require(state->swapchain != VK_NULL_HANDLE, "device has no swapchain");
     require(state->extent.width != 0 && state->extent.height != 0, "output window is minimized");
@@ -847,6 +858,11 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     timing.Mark("pixel_upload");
     auto wait = state->DeviceFunction<PFN_vkWaitForFences>("vkWaitForFences");
     auto reset = state->DeviceFunction<PFN_vkResetFences>("vkResetFences");
+    // The previous presentation's commands are reused: they must be done (normally long since).
+    if (state->renderPending) {
+        check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences previous presentation");
+        state->renderPending = false;
+    }
     const std::array<VkFence, 2> fences{state->acquireFence, state->renderFence};
     check(reset(state->device, static_cast<std::uint32_t>(fences.size()), fences.data()), "vkResetFences");
     std::uint32_t index = 0;
@@ -922,7 +938,13 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
     timing.Mark("command_record_scale");
     check(state->DeviceFunction<PFN_vkQueueSubmit>("vkQueueSubmit")(state->queue, 1, &submit, state->renderFence), "vkQueueSubmit clear");
     timing.Mark("queue_submit");
-    check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences clear");
+    // The present waits for the semaphore on the GPU; the fence is waited for before the commands
+    // are reused (next presentation).
+    if (AsyncFlip()) {
+        state->renderPending = true;
+    } else {
+        check(wait(state->device, 1, &state->renderFence, VK_TRUE, std::numeric_limits<std::uint64_t>::max()), "vkWaitForFences clear");
+    }
     timing.Mark("render_fence_wait");
     VkPresentInfoKHR present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
     present.waitSemaphoreCount = 1;

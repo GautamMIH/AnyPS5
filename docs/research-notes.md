@@ -189,8 +189,18 @@ Issues that needed research, with a short answer. Check here before researching;
 - **WRITE_DATA to memory runs on the GPU** (vkCmdUpdateBuffer, up to 64 KiB), like DMA_DATA. It used to drain every queued draw (~19 ms a heavy Zorro frame). ANYPS5_CPU_DMA=1 executes both on the CPU.
 - **Draw-queue depth.** At most 64 draws stayed in flight, about 6% of a 1000-draw frame. The GPU idled in bursts while the worker waited (~12 ms a frame). It is now 256; the oldest batches are waited for first, not the whole queue. ANYPS5_DRAWS_IN_FLIGHT overrides it; 512 measured no better.
 - **SRT evaluation allocated per value.** Each materialization (two per draw whenever user data changed: per-draw constants) built a std::unordered_map node per evaluated IR value. It now uses id-indexed slots from a thread-local pool, stamped per evaluator: 16.6 -> 9.9 us per materialization.
-- **Texture validation within an epoch.** A tracked texture's "unchanged" answer is memoized on (write-tracker epoch, GPU write, alias write, mapping generations). Gains are small because every driver CPU write (GuestMemory::Write, e.g. completion labels) begins a new epoch. A range-precise notice of driver writes would make it effective.
+- **Texture validation within an epoch.**
+  - A tracked texture's "unchanged" answer is memoized on (write-tracker epoch, GPU write, alias write, mapping generations).
+  - Driver CPU writes (GuestMemory::Write, e.g. completion labels) no longer begin an epoch. They are logged by range (WriteTracker::NoteDriverWrite): only collections and memos they overlap are redone.
+  - Waits satisfied on the GPU no longer begin one either.
+  - In Zorro gameplay 84% of validations hit the memo. The rest follow a real epoch change (submission, CPU-satisfied wait, flip) and rescan their pages with a syscall (~7 us each).
 - **Duplicate range checks.** Every guest buffer was range-checked three times a draw (ShaderResources::addGuestBuffer, GuestBufferMemory::AddReadOnly/AddWritable, Upload). The second check is skipped when the first covered the range. APS5_TRACE_CHECKS=1 counts CheckRange calls per caller; APS5_TRACE_DRAW_RESOLVE=1 logs CPU accesses that wait for queued GPU writes.
+- **Asynchronous flips (implemented).**
+  - The worker used to wait for the GPU to go idle at every flip (~17 ms a heavy Zorro frame). It now queues the flip as a completion behind the frame's work; the completer releases it to VideoOut when the GPU reaches it.
+  - Present submits queued work instead of waiting for it. Its first barrier orders it after earlier submissions, and a display buffer read from guest memory waits in ResolveMemory. The swapchain fence is waited for only before its commands are reused.
+  - Hellboy: 3836 and 3817 frames in 90 s against 2396 and 2859 synchronous (median 18.6 ms against 25-36 ms). Spirit is slightly better.
+  - Zorro does not gain: it waits for each flip before submitting the next frame, so the GPU's end-of-frame tail stays on its critical path.
+  - ANYPS5_SYNC_FLIP=1 restores the synchronous flip.
 - **Heavy Zorro gameplay frames (~1000 draws), October 2026.**
   - Frame time: 174 ms -> 111 ms with the changes above; GPU busy ~40 ms.
   - Remaining per-frame CPU: draw ~79 ms, with textures ~13, SRT materialization ~11, CheckRange ~11, command recording ~9, buffers ~7, index upload ~6.

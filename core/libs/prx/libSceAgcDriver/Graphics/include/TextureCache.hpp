@@ -52,6 +52,8 @@ private:
         // The (epoch, GPU write, alias write, mapping) generations at which `unchanged` last held: it
         // holds again until one of them changes (a texture sampled by many draws is checked once).
         std::array<std::uint64_t, 4> unchangedAt{};
+        // The driver-write sequence the memo covers (WriteTracker::DriverWrittenSince).
+        std::uint64_t unchangedDriverSequence = 0;
     };
     using Entries = std::list<Entry>;
 
