@@ -25,6 +25,8 @@ bool CpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t g
 // unordered on the console too. Ordering points begin epochs: a submission starting, a satisfied
 // memory wait, a flip, and every CPU write the driver itself makes to guest memory.
 void NextEpoch();
+// The current epoch: within it, CpuWrittenSince answers the same for the same arguments.
+std::uint64_t Epoch();
 
 // The GPU may write the range (imported guest memory bound writable); such ranges stay "written".
 void NoteGpuWrite(std::uint64_t address, std::uint64_t bytes);

@@ -86,6 +86,10 @@ std::string checkMappings(const std::vector<MappingEntry>& entries, std::uintptr
 #endif
 }
 
+#ifndef _WIN32
+void traceCheck(const void* caller);
+#endif
+
 void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, bool writable) {
     require(alignment != 0, "zero guest memory alignment");
     const auto address = reinterpret_cast<std::uintptr_t>(pointer);
@@ -96,6 +100,10 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     }
     require(bytes <= std::numeric_limits<std::uintptr_t>::max() - address, "address range overflow");
     PerformanceTimer timing("GuestMemory.CheckRange");
+#ifndef _WIN32
+    static const bool traceChecks = std::getenv("APS5_TRACE_CHECKS") != nullptr;
+    if (traceChecks) traceCheck(__builtin_return_address(0));
+#endif
     // A GPU consumer (GpuAccessScope) is served by the render cache's resolve: it queues the
     // surfaces' write-backs ahead of the consumer on the draw queue. The page watches (owned by the
     // same resident surfaces) serve CPU accesses; resolving them here would wait for the queue.
@@ -167,6 +175,25 @@ __attribute__((noinline)) void traceRead(const void* caller, std::size_t bytes) 
         Dl_info info{};
         const auto found = dladdr(sorted[index].first, &info) != 0 && info.dli_fname != nullptr;
         std::fprintf(stderr, "[reads] %10.1f MB %8llu calls  %s+0x%llx\n", static_cast<double>(sorted[index].second.first) / 1048576.0, static_cast<unsigned long long>(sorted[index].second.second), found ? info.dli_fname : "?", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sorted[index].first) - (found ? reinterpret_cast<std::uintptr_t>(info.dli_fbase) : 0)));
+    }
+    callers.clear();
+}
+
+// Debug aid: APS5_TRACE_CHECKS=1 counts CheckRange calls per caller (module+offset, for addr2line)
+// and prints the most frequent callers every 50000 checks.
+__attribute__((noinline)) void traceCheck(const void* caller) {
+    static std::mutex mutex;
+    static std::map<const void*, std::uint64_t> callers;
+    static std::uint64_t checks = 0;
+    std::lock_guard lock(mutex);
+    ++callers[caller];
+    if (++checks % 50000 != 0) return;
+    std::vector<std::pair<const void*, std::uint64_t>> sorted(callers.begin(), callers.end());
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+    for (std::size_t index = 0; index < sorted.size() && index < 12; ++index) {
+        Dl_info info{};
+        const auto found = dladdr(sorted[index].first, &info) != 0 && info.dli_fname != nullptr;
+        std::fprintf(stderr, "[checks] %8llu calls  %s+0x%llx  site %s\n", static_cast<unsigned long long>(sorted[index].second), found ? info.dli_fname : "?", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(sorted[index].first) - (found ? reinterpret_cast<std::uintptr_t>(info.dli_fbase) : 0)), AccessSite::Current());
     }
     callers.clear();
 }

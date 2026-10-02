@@ -236,8 +236,9 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
         allocations.push_back({address, size, true, nullptr});
         return allocations.size() - 1;
     }
-    if (written) guestMemory.AddWritable(address, size, below);
-    else guestMemory.AddReadOnly(address, size, below);
+    // The range was checked above (writable when written).
+    if (written) guestMemory.AddWritable(address, size, below, true);
+    else guestMemory.AddReadOnly(address, size, below, true);
     allocations.push_back({address - below, size + below, true, nullptr});
     return allocations.size() - 1;
 }

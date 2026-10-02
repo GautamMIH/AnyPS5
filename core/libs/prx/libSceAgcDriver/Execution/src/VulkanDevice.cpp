@@ -1006,11 +1006,18 @@ void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool 
     state->renderCache->Resolve(address, bytes, writable);
 }
 
-bool VulkanDevice::RecordDmaData(const Pm4::DmaCopy& dma) {
+std::uint64_t VulkanDevice::LastGpuWriter(std::uint64_t address, std::size_t bytes) {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    return state->drawQueue->LastWriter(address, bytes);
+}
+
+bool VulkanDevice::RecordDmaData(const Pm4::DmaCopy& dma, std::uint64_t* serial) {
     static const bool cpuOnly = std::getenv("ANYPS5_CPU_DMA") != nullptr;
     if (cpuOnly || state->guestGpuMemory == nullptr || dma.bytes == 0) return false;
     // vkCmdFillBuffer writes whole dwords; vkCmdCopyBuffer's regions must not overlap.
-    if (dma.immediate && ((dma.destination | dma.bytes) & 3u) != 0) return false;
+    if ((dma.immediate || !dma.data.empty()) && ((dma.destination | dma.bytes) & 3u) != 0) return false;
+    // vkCmdUpdateBuffer takes at most 64 KiB.
+    if (!dma.data.empty() && dma.bytes > 65536) return false;
     if (!dma.immediate && dma.source < dma.destination + dma.bytes && dma.destination < dma.source + dma.bytes) return false;
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.DmaData");
@@ -1023,13 +1030,13 @@ bool VulkanDevice::RecordDmaData(const Pm4::DmaCopy& dma) {
         });
         const GuestMemory::GpuAccessScope gpuAccess;
         const GuestMemory::AccessSite accessSite("dma_data");
-        if (!dma.immediate) GuestMemory::CheckRange(reinterpret_cast<const void*>(dma.source), static_cast<std::size_t>(dma.bytes), 1);
+        if (!dma.immediate && dma.data.empty()) GuestMemory::CheckRange(reinterpret_cast<const void*>(dma.source), static_cast<std::size_t>(dma.bytes), 1);
         GuestMemory::CheckRange(reinterpret_cast<void*>(dma.destination), static_cast<std::size_t>(dma.bytes), 1, true);
     }
     const auto destination = state->guestGpuMemory->Resolve(dma.destination, dma.bytes);
     if (!destination || destination->bytes < dma.bytes) return false;
     std::optional<Graphics::GuestGpuMemory::View> source;
-    if (!dma.immediate) {
+    if (!dma.immediate && dma.data.empty()) {
         source = state->guestGpuMemory->Resolve(dma.source, dma.bytes);
         if (!source || source->bytes < dma.bytes) return false;
     }
@@ -1039,7 +1046,9 @@ bool VulkanDevice::RecordDmaData(const Pm4::DmaCopy& dma) {
     before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
-    if (dma.immediate) {
+    if (!dma.data.empty()) {
+        context.Function<PFN_vkCmdUpdateBuffer>("vkCmdUpdateBuffer")(commands, destination->buffer, destination->offset, dma.bytes, dma.data.data());
+    } else if (dma.immediate) {
         context.Function<PFN_vkCmdFillBuffer>("vkCmdFillBuffer")(commands, destination->buffer, destination->offset, dma.bytes, dma.value);
     } else {
         const VkBufferCopy region{source->offset, destination->offset, dma.bytes};
@@ -1051,7 +1060,8 @@ bool VulkanDevice::RecordDmaData(const Pm4::DmaCopy& dma) {
     barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
     // CPU accesses of the destination wait for the batch; the texture cache sees it as written.
     static const auto keepAlive = std::make_shared<int>(0);
-    state->drawQueue->NoteGuestWrite(dma.destination, dma.destination + dma.bytes, keepAlive);
+    const auto written = state->drawQueue->NoteGuestWrite(dma.destination, dma.destination + dma.bytes, keepAlive);
+    if (serial != nullptr) *serial = written;
     WriteTracker::NoteGpuWrite(dma.destination, dma.bytes);
     timing.Mark("recorded", dma.bytes);
     // Debug aid: APS5_TRACE_DMA=1 logs every DMA_DATA recorded on the GPU.

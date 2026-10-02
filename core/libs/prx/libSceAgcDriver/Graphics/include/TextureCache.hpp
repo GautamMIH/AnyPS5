@@ -49,6 +49,9 @@ private:
         // Tracked entries keep no snapshot (write tracking alone vouches for them); a possibly
         // written tracked entry is recreated.
         bool tracked = false;
+        // The (epoch, GPU write, alias write, mapping) generations at which `unchanged` last held: it
+        // holds again until one of them changes (a texture sampled by many draws is checked once).
+        std::array<std::uint64_t, 4> unchangedAt{};
     };
     using Entries = std::list<Entry>;
 

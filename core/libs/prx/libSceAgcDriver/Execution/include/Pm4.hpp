@@ -19,9 +19,13 @@ struct DmaCopy {
     std::uint64_t bytes;
     bool immediate;
     std::uint32_t value;
+    // WRITE_DATA: the dwords written to destination (immediate and value unused).
+    std::vector<std::uint32_t> data;
 };
 // The copy a validated DMA_DATA performs; nothing for the global data share forms.
 std::optional<DmaCopy> DecodeDmaCopy(std::span<const std::uint32_t> packet);
+// The memory write a validated WRITE_DATA performs (one address: only its last dword lands).
+std::optional<DmaCopy> DecodeWriteData(std::span<const std::uint32_t> packet);
 
 struct DrawParameters {
     std::uint64_t indexAddress;
@@ -48,6 +52,11 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue);
 bool AccessesMemory(std::uint32_t header);
 // Evaluates a memory WAIT_REG_MEM (32- or 64-bit) against current guest memory.
 bool WaitSatisfied(std::span<const std::uint32_t> packet);
+// Whether the label RELEASE_MEM `release` writes satisfies WAIT_REG_MEM `wait` (the release writes
+// an immediate value covering the waited address): without reading guest memory.
+// Whether `value` at the waited address satisfies WAIT_REG_MEM `wait`.
+bool ValueSatisfiesWait(std::span<const std::uint32_t> wait, std::uint64_t value);
+bool ReleaseSatisfiesWait(std::span<const std::uint32_t> wait, std::span<const std::uint32_t> release);
 // A conditional INDIRECT_BUFFER (14 dwords, libSceAgc CbBranch) jumps to its then buffer when
 // (*compare & mask) <function> reference holds, else (mode 2) to its else buffer; mode 1 falls
 // through. The jump does not return (KytyPS5 CpOpBranch).

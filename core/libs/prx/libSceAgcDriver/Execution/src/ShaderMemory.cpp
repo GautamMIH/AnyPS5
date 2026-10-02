@@ -149,10 +149,15 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     // The same program and context captured with other user data: its source and plan are reused.
     const auto program = programs.find(programHash);
     const bool sameProgram = program != programs.end() && program->second.owner == owner && program->second.key.size() == programWords && std::equal(program->second.key.begin(), program->second.key.end(), key.begin());
+    timing.Mark("program_lookup");
     auto capture = sameProgram ? memory.Capture(request, *program->second.capture) : memory.Capture(request);
+    timing.Mark("materialize");
     if (entries.size() >= 16384) entries.clear();
     if (programs.size() >= 4096) programs.clear();
-    entries[hash] = Entry{owner, key, capture, memory.CapturedWords(), mappingGeneration};
+    auto words = memory.CapturedWords();
+    timing.Mark("captured_words");
+    entries[hash] = Entry{owner, key, capture, std::move(words), mappingGeneration};
+    timing.Mark("store");
     if (!sameProgram) programs[programHash] = Program{owner, std::vector<std::uint64_t>(key.begin(), key.begin() + static_cast<std::ptrdiff_t>(programWords)), capture};
     timing.Mark(known ? "changed" : sameProgram ? "walk" : "miss");
     return capture;

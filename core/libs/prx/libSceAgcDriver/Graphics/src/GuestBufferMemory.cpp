@@ -48,25 +48,26 @@ void GuestBufferMemory::validate(std::uint64_t address, std::size_t bytes) const
     Require(bytes <= std::numeric_limits<std::uint64_t>::max() - address, "guest memory range overflow");
 }
 
-void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes, std::size_t leading) {
+void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes, std::size_t leading, bool checked) {
     validate(address, bytes);
     Require(leading <= address, "guest memory range underflow");
     // With imported guest memory the GPU writes the range itself (an upload fallback reads it
     // through GuestMemory::Read, which waits as a CPU access).
     std::optional<GuestMemory::GpuAccessScope> gpuAccess;
     if (context.guestGpuMemory != nullptr) gpuAccess.emplace();
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
+    if (!checked) GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
     if (leading != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), leading, 1, false);
     regions.push_back({address - leading, address + bytes, true, {}, nullptr});
     writes.emplace_back(address, address + bytes);
 }
 
-void GuestBufferMemory::AddReadOnly(std::uint64_t address, std::size_t bytes, std::size_t leading) {
+void GuestBufferMemory::AddReadOnly(std::uint64_t address, std::size_t bytes, std::size_t leading, bool checked) {
     validate(address, bytes);
     Require(leading <= address, "guest memory range underflow");
     std::optional<GuestMemory::GpuAccessScope> gpuAccess;
     if (context.guestGpuMemory != nullptr) gpuAccess.emplace();
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), bytes + leading, 1, false);
+    if (!checked) GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), bytes + leading, 1, false);
+    else if (leading != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), leading, 1, false);
     regions.push_back({address - leading, address + bytes, false, {}, nullptr, true});
 }
 

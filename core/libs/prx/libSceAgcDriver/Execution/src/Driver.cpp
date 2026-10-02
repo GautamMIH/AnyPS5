@@ -25,6 +25,7 @@
 #include <cstring>
 #include <chrono>
 #include <deque>
+#include <unordered_map>
 #include <set>
 #include <exception>
 #include <limits>
@@ -361,6 +362,37 @@ private:
         std::vector<std::uint64_t> serials;
     };
     std::deque<Completion> completions;
+    // Dwords that WRITE_DATA and small fills recorded on the GPU leave in guest memory, with the
+    // draw-queue serial of the write: valid while that write is the range's last queued writer.
+    struct PredictedDword {
+        std::uint32_t value;
+        std::uint64_t serial;
+    };
+    std::unordered_map<std::uint64_t, PredictedDword> predicted;
+    void predictWrite(const Pm4::DmaCopy& dma, std::uint64_t serial) {
+        if (dma.bytes > 64 || (!dma.immediate && dma.data.empty())) return;
+        if (predicted.size() > 4096) predicted.clear();
+        for (std::uint64_t offset = 0; offset < dma.bytes; offset += 4)
+            predicted[dma.destination + offset] = {dma.data.empty() ? dma.value : dma.data[offset / 4], serial};
+    }
+    // Whether the queued GPU writes leave a value satisfying the WAIT_REG_MEM.
+    bool predictedWaitSatisfied(std::span<const std::uint32_t> packet) {
+        const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93;
+        const auto target = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
+        const auto low = predicted.find(target);
+        if (low == predicted.end()) return false;
+        std::uint64_t value = low->second.value;
+        if (wide) {
+            const auto high = predicted.find(target + 4);
+            if (high == predicted.end() || high->second.serial != low->second.serial) return false;
+            value |= static_cast<std::uint64_t>(high->second.value) << 32u;
+        }
+        if (device->LastGpuWriter(target, wide ? 8 : 4) != low->second.serial) {
+            predicted.erase(low);
+            return false;
+        }
+        return Pm4::ValueSatisfiesWait(packet, value);
+    }
     // Finished under gpuMutex, not yet published (see publishCompletions).
     Completed unpublished;
     std::atomic<bool> unpublishedPending{false};
@@ -989,6 +1021,20 @@ private:
                     // does (labels are usually written by then), the GPU need not go idle first.
                     static const bool traceDma = std::getenv("APS5_TRACE_DMA") != nullptr;
                     if (traceDma) std::fprintf(stderr, "[wait] q%u 0x%llx func %u ref 0x%x mask 0x%x\n", static_cast<unsigned>(submission.queue), static_cast<unsigned long long>(packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u)), packet[1] & 7u, packet[4], packet[5]);
+                    // A wait on a label an earlier RELEASE_MEM writes (still pending: its GPU work is
+                    // in flight) is a GPU-side drain on the console, not a CPU stall: all GPU work
+                    // runs in one queue in submission order, so a full GPU barrier orders what
+                    // follows after the released work. The label lands with its completion, and
+                    // packets the CPU executes drain completions first. Reading the label here would
+                    // wait for the GPU. ANYPS5_CPU_WAIT_REG_MEM=1 waits on the CPU.
+                    static const bool cpuWait = std::getenv("ANYPS5_CPU_WAIT_REG_MEM") != nullptr;
+                    if (!cpuWait && device != nullptr && (predictedWaitSatisfied(packet) || std::any_of(completions.begin(), completions.end(), [&](const Completion& pending) { return Pm4::ReleaseSatisfiesWait(packet, pending.release); }))) {
+                        device->AcquireGpuMemory();
+                        timing.Mark("gpu_wait");
+                        WriteTracker::NextEpoch();
+                        cursor += count;
+                        continue;
+                    }
                     bool satisfied = Pm4::WaitSatisfied(packet);
                     timing.Mark("memory_check");
                     if (!satisfied && !completions.empty()) {
@@ -1033,8 +1079,11 @@ private:
                     // PIXEL_PIPE_STAT_DUMP: drained like a label (every draw before it completed), then
                     // the sample count is written as the DB counters.
                     // DMA_DATA between imported guest ranges runs on the GPU in queue order: no drain.
-                    if (opcode == 0x50 && device != nullptr) {
-                        if (const auto dma = Pm4::DecodeDmaCopy(packet); dma && device->RecordDmaData(*dma)) {
+                    // So does WRITE_DATA to memory (vkCmdUpdateBuffer).
+                    if ((opcode == 0x50 || opcode == 0x37) && device != nullptr) {
+                        std::uint64_t serial = 0;
+                        if (const auto dma = opcode == 0x50 ? Pm4::DecodeDmaCopy(packet) : Pm4::DecodeWriteData(packet); dma && device->RecordDmaData(*dma, &serial)) {
+                            predictWrite(*dma, serial);
                             timing.Mark("dma_gpu");
                             cursor += count;
                             continue;

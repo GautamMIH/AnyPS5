@@ -149,6 +149,10 @@ void NextEpoch() {
     state().epoch.fetch_add(1, std::memory_order_acq_rel);
 }
 
+std::uint64_t Epoch() {
+    return state().epoch.load(std::memory_order_acquire);
+}
+
 void SetWriteListener(WriteListener listener, void* context) {
     auto& tracker = state();
     tracker.listenerContext.store(context, std::memory_order_release);

@@ -58,6 +58,8 @@ bool TextureCache::unchanged(Entry& entry) {
     const auto bytes = entry.bytes;
     // Writes through another mapping of the same memory would not mark these pages.
     const auto memoryGeneration = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
+    const std::array<std::uint64_t, 4> at{WriteTracker::Epoch(), WriteTracker::GpuWriteGeneration(), WriteTracker::AliasWriteGeneration(), memoryGeneration};
+    if (entry.unchangedAt == at) return true;
     if (entry.viewGeneration != memoryGeneration) {
         entry.singleView = GuestMemoryBacking::GuestVirtualSingleView_nid_postfix(entry.address, bytes);
         entry.viewGeneration = memoryGeneration;
@@ -69,7 +71,9 @@ bool TextureCache::unchanged(Entry& entry) {
         entry.gpuGeneration = gpuGeneration;
     }
     if (entry.gpuWritten || WriteTracker::AliasWrittenSince(entry.address, bytes, entry.aliasGeneration)) return false;
-    return !WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration);
+    if (WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration)) return false;
+    entry.unchangedAt = at;
+    return true;
 }
 
 std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool depthCompare) {

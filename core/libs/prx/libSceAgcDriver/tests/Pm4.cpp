@@ -478,6 +478,24 @@ void testMemoryWaits() {
     const auto wide = makePacket(0x93, {0x13, low(labels.data() + 2), high(labels.data() + 2), 1, 2, 0xffffffff, 0xffffffff, 10});
     check(AgcDriver::Pm4::WaitSatisfied(wide), "64-bit wait failed");
 
+    // Predicted label values (waits elided as GPU-side drains): no memory is read.
+    check(AgcDriver::Pm4::ValueSatisfiesWait(wait(3, 1, 0xffffffff), 1) && !AgcDriver::Pm4::ValueSatisfiesWait(wait(3, 1, 0xffffffff), 0), "predicted equality wait mismatch");
+    check(AgcDriver::Pm4::ValueSatisfiesWait(wait(3, 5, 0xf), 0x15) && AgcDriver::Pm4::ValueSatisfiesWait(wait(3, 1, 0xffffffff), 0x2'00000001ull), "predicted wait ignored mask or upper half");
+    check(AgcDriver::Pm4::ValueSatisfiesWait(wide, 0x2'00000001ull) && !AgcDriver::Pm4::ValueSatisfiesWait(wide, 1), "predicted 64-bit wait mismatch");
+    const auto release = [&](std::uint32_t select, const std::uint32_t* label, std::uint32_t low32, std::uint32_t high32) {
+        return makePacket(0x49, {0x500, select << 29u, low(label), high(label), low32, high32, 0});
+    };
+    check(AgcDriver::Pm4::ReleaseSatisfiesWait(wait(3, 1, 0xffffffff), release(1, labels.data(), 1, 0)), "32-bit release does not satisfy its wait");
+    check(!AgcDriver::Pm4::ReleaseSatisfiesWait(wait(3, 1, 0xffffffff), release(1, labels.data() + 2, 1, 0)), "release of another label satisfied the wait");
+    check(!AgcDriver::Pm4::ReleaseSatisfiesWait(wait(3, 1, 0xffffffff), release(3, labels.data(), 1, 0)), "clock release value was predicted");
+    check(!AgcDriver::Pm4::ReleaseSatisfiesWait(wide, release(1, labels.data() + 2, 1, 2)), "32-bit release satisfied a 64-bit wait");
+    check(AgcDriver::Pm4::ReleaseSatisfiesWait(wide, release(2, labels.data() + 2, 1, 2)), "64-bit release does not satisfy its wait");
+    const auto write = AgcDriver::Pm4::DecodeWriteData(makePacket(0x37, {0x500, low(labels.data()), high(labels.data()), 1, 2}));
+    check(write && write->destination == reinterpret_cast<std::uintptr_t>(labels.data()) && write->bytes == 8 && write->data == std::vector<std::uint32_t>{1, 2}, "WRITE_DATA decode mismatch");
+    const auto single = AgcDriver::Pm4::DecodeWriteData(makePacket(0x37, {0x10500, low(labels.data()), high(labels.data()), 1, 2}));
+    check(single && single->bytes == 4 && single->data == std::vector<std::uint32_t>{2}, "one-address WRITE_DATA keeps only its last dword");
+    check(!AgcDriver::Pm4::DecodeWriteData(makePacket(0x37, {0x000, 0x10, 0, 1})), "register WRITE_DATA decoded as memory");
+
     // A compute queue waiting on a label written by a later graphics submission must not deadlock
     // the worker, and work queued behind the wait on the same queue must stay ordered after it.
     labels = {0, 0, 0, 0};

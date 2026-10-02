@@ -33,7 +33,9 @@ public:
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
     // Records a DMA_DATA copy or fill into the draw queue, in order after earlier GPU work, when both
     // ranges are imported guest memory (no CPU wait); false when the CPU must perform it.
-    bool RecordDmaData(const Pm4::DmaCopy& dma);
+    // serial (when given) receives the write's draw-queue serial (DrawQueue::LastWriter).
+    bool RecordDmaData(const Pm4::DmaCopy& dma, std::uint64_t* serial = nullptr);
+    std::uint64_t LastGpuWriter(std::uint64_t address, std::size_t bytes);
     void ResolveFastClears(const Graphics::State& graphics);
     void* Window() const;
     void Resize(std::uint32_t width, std::uint32_t height);

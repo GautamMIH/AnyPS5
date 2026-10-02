@@ -1,7 +1,9 @@
+#include <cstdio>
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
+#include <cstdlib>
 
 namespace AgcDriver::Graphics {
 
@@ -33,7 +35,25 @@ VkCommandBuffer DrawQueue::Begin(const Context& context) {
     EndPass();
     if (pipelineBarrier == nullptr) pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     Collect();
-    if (drawCount >= 64) Wait();
+    // Back-pressure: at most this many queued draws (256: deep enough that
+    // a ~1000-draw frame keeps the GPU fed) keep their resources alive. The oldest batches
+    // are waited for until the count drops, not the whole queue: the GPU keeps the rest in flight.
+    // ANYPS5_DRAWS_IN_FLIGHT overrides it.
+    static const std::size_t inFlight = [] {
+        const auto* value = std::getenv("ANYPS5_DRAWS_IN_FLIGHT");
+        return value != nullptr ? std::max<std::size_t>(8, std::strtoull(value, nullptr, 10)) : std::size_t{256};
+    }();
+    if (drawCount >= inFlight) {
+        PerformanceTimer timing("Graphics.DrawQueue.Throttle");
+        while (drawCount >= inFlight && !pending.empty()) {
+            pending.front().commands->Wait();
+            auto batch = std::move(pending.front());
+            pending.erase(pending.begin());
+            retire(std::move(batch));
+        }
+        if (drawCount >= inFlight) Wait();
+        timing.Mark("oldest_batches");
+    }
     if (!recording.commands) {
         // Every query is in flight with a pending batch: retire them first.
         if (samples && samples->free.empty()) Wait();
@@ -92,7 +112,7 @@ bool DrawQueue::WriteIndex::Overlaps(std::uint64_t address, std::size_t bytes) c
 
 void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage) {
     Require(recording.commands != nullptr && resources != nullptr && storage != nullptr, "draw batch is incomplete");
-    Entry entry{std::move(storage), std::move(resources), {}};
+    Entry entry{std::move(storage), std::move(resources), {}, nextEntrySerial++};
     entry.resources->AppendWrites(entry.writes);
     for (const auto& [begin, end] : entry.writes) writes.Add(begin, end);
     recording.entries.push_back(std::move(entry));
@@ -100,12 +120,29 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
     if (recording.entries.size() >= 8) Flush();
 }
 
-void DrawQueue::NoteGuestWrite(std::uint64_t begin, std::uint64_t end, std::shared_ptr<void> storage) {
+std::uint64_t DrawQueue::NoteGuestWrite(std::uint64_t begin, std::uint64_t end, std::shared_ptr<void> storage) {
     Require(recording.commands != nullptr && storage != nullptr && begin < end, "guest write is not recorded in a draw batch");
-    Entry entry{std::move(storage), nullptr, {{begin, end}}};
+    const auto serial = nextEntrySerial++;
+    Entry entry{std::move(storage), nullptr, {{begin, end}}, serial};
     writes.Add(begin, end);
     recording.entries.push_back(std::move(entry));
     ++drawCount;
+    return serial;
+}
+
+std::uint64_t DrawQueue::LastWriter(std::uint64_t address, std::size_t bytes) const {
+    if (!writes.Overlaps(address, bytes)) return 0;
+    const auto end = address + bytes;
+    const auto last = [&](const Batch& batch) -> std::uint64_t {
+        for (auto entry = batch.entries.rbegin(); entry != batch.entries.rend(); ++entry)
+            for (const auto& [first, limit] : entry->writes)
+                if (first < end && address < limit) return entry->serial;
+        return 0;
+    };
+    if (const auto serial = last(recording)) return serial;
+    for (auto batch = pending.rbegin(); batch != pending.rend(); ++batch)
+        if (const auto serial = last(*batch)) return serial;
+    return 0;
 }
 
 void DrawQueue::Flush() {
@@ -150,6 +187,20 @@ void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes) {
                 if (first < end && address < last) return true;
         return false;
     };
+    // Debug aid: APS5_TRACE_DRAW_RESOLVE=1 logs CPU accesses that wait for queued GPU writes.
+    static const bool trace = std::getenv("APS5_TRACE_DRAW_RESOLVE") != nullptr;
+    if (trace) {
+        const auto report = [&](const Batch& batch, const char* where) {
+            for (const auto& entry : batch.entries)
+                for (const auto& [first, last] : entry.writes)
+                    if (first < end && address < last) {
+                        std::fprintf(stderr, "[draw-resolve] %s 0x%llx+0x%zx waits for %s write 0x%llx-0x%llx\n", GuestMemory::AccessSite::Current(), static_cast<unsigned long long>(address), bytes, where, static_cast<unsigned long long>(first), static_cast<unsigned long long>(last));
+                        return;
+                    }
+        };
+        if (recording.commands) report(recording, "recording");
+        for (const auto& batch : pending) report(batch, "pending");
+    }
     if (recording.commands && writesRange(recording)) Flush();
     std::size_t through = 0;
     for (std::size_t index = 0; index < pending.size(); ++index)

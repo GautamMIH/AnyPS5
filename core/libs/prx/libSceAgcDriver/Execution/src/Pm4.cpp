@@ -128,6 +128,17 @@ std::optional<DmaCopy> DecodeDmaCopy(std::span<const std::uint32_t> packet) {
     return DmaCopy{immediate ? 0 : address(packet[2], packet[3]), address(packet[4], packet[5]), packet[6] & 0x3ffffffu, immediate, packet[2]};
 }
 
+std::optional<DmaCopy> DecodeWriteData(std::span<const std::uint32_t> packet) {
+    if (packet.size() < 5) return std::nullopt;
+    const auto selector = (packet[1] >> 8u) & 0xfu;
+    if (selector != 1 && selector != 2 && selector != 5) return std::nullopt;
+    DmaCopy write{0, address(packet[2], packet[3]), 0, false, 0, {}};
+    if ((packet[1] & 0x10000u) != 0) write.data.push_back(packet.back());
+    else write.data.assign(packet.begin() + 4, packet.end());
+    write.bytes = write.data.size() * 4;
+    return write;
+}
+
 std::string Name(std::uint32_t header) {
     const auto opcode = (header >> 8u) & 0xffu;
     if (opcode == 0x10 && (header & 0xfcu) != 0) {
@@ -459,6 +470,32 @@ bool WaitSatisfied(std::span<const std::uint32_t> packet) {
     const auto mask = wide ? address(packet[6], packet[7]) : packet[5];
     const auto masked = value & mask;
     switch (packet[1] & 7u) {
+        case 0: return true;
+        case 1: return masked < reference;
+        case 2: return masked <= reference;
+        case 3: return masked == reference;
+        case 4: return masked != reference;
+        case 5: return masked >= reference;
+        default: return masked > reference;
+    }
+}
+
+bool ReleaseSatisfiesWait(std::span<const std::uint32_t> wait, std::span<const std::uint32_t> release) {
+    if (wait.size() < 6 || release.size() != 8) return false;
+    const auto dataSelect = release[2] >> 29u;
+    if (dataSelect != 1 && dataSelect != 2) return false;
+    const auto wide = ((wait[0] >> 8u) & 0xffu) == 0x93;
+    if (wide && (wait.size() < 9 || dataSelect != 2)) return false;
+    if (address(wait[2], wait[3]) != address(release[3], release[4])) return false;
+    return ValueSatisfiesWait(wait, dataSelect == 1 ? release[5] : address(release[5], release[6]));
+}
+
+bool ValueSatisfiesWait(std::span<const std::uint32_t> wait, std::uint64_t value) {
+    const auto wide = ((wait[0] >> 8u) & 0xffu) == 0x93;
+    const auto reference = wide ? address(wait[4], wait[5]) : wait[4];
+    const auto mask = wide ? address(wait[6], wait[7]) : wait[5];
+    const auto masked = (wide ? value : value & 0xffffffffu) & mask;
+    switch (wait[1] & 7u) {
         case 0: return true;
         case 1: return masked < reference;
         case 2: return masked <= reference;
