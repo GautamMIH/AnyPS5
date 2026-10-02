@@ -91,8 +91,13 @@ struct Port {
     SDL_AudioSpec spec = {};
 };
 
+// g_mutex guards the port table and is held only briefly. Output waits (pacing sleeps, SDL queue
+// back-pressure) hold the port's own output mutex instead: they block that port alone, not every
+// caller of the library (a game polling sceAudioOutGetPortState on its main thread stalled behind
+// the audio thread's wait). Lock order: output mutex, then g_mutex.
 static std::mutex g_mutex;
 static Port g_ports[PORTS_MAX];
+static std::mutex g_outputMutex[PORTS_MAX];
 static bool g_sdlInitialized = false;
 
 static bool ensureSdlAudio() {
@@ -341,6 +346,9 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
 }
 
 int APS5_VABI sceAudioOutClose(int handle) {
+    const int index = handle - 1;
+    if (index < 0 || index >= PORTS_MAX) return -2144993277;
+    std::lock_guard<std::mutex> output(g_outputMutex[index]);
     std::lock_guard<std::mutex> lock(g_mutex);
     Port* port = getPort(handle);
     if (port == nullptr) {
@@ -352,16 +360,23 @@ int APS5_VABI sceAudioOutClose(int handle) {
 }
 
 int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    Port* port = getPort(handle);
-    if (port == nullptr) {
-        return -2144993277;
+    const int index = handle - 1;
+    if (index < 0 || index >= PORTS_MAX) return -2144993277;
+    std::lock_guard<std::mutex> output(g_outputMutex[index]);
+    Port port;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        Port* current = getPort(handle);
+        if (current == nullptr) {
+            return -2144993277;
+        }
+        port = *current;
     }
 
-    const std::uint64_t blockUs = (1000000ULL * port->samplesNum) / port->freq;
+    const std::uint64_t blockUs = (1000000ULL * port.samplesNum) / port.freq;
     const std::uint64_t now = sceKernelGetProcessTime();
-    const std::uint64_t next = port->lastOutputTime + blockUs;
-    if (next > now && port->device == 0) {
+    const std::uint64_t next = port.lastOutputTime + blockUs;
+    if (next > now && port.device == 0) {
         const std::uint64_t waitUs = next - now;
         struct timespec req{};
         req.tv_sec = static_cast<time_t>(waitUs / 1000000ULL);
@@ -369,9 +384,13 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
         nanosleep(&req, nullptr);
     }
 
-    queueAudio(*port, ptr);
-    port->lastOutputTime = sceKernelGetProcessTime();
-    return static_cast<int>(port->samplesNum);
+    queueAudio(port, ptr);
+    const std::uint64_t done = sceKernelGetProcessTime();
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (Port* current = getPort(handle)) current->lastOutputTime = done;
+    }
+    return static_cast<int>(port.samplesNum);
 }
 
 int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) {
@@ -379,34 +398,40 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
         return -2144993276;
     }
 
-    std::lock_guard<std::mutex> lock(g_mutex);
-
+    // The ports' output mutexes in index order (a port may appear twice).
+    std::vector<int> indices;
     for (std::uint32_t i = 0; i < num; i++) {
-        if (getPort(param[i].handle) == nullptr) {
-            return -2144993277;
+        const int index = param[i].handle - 1;
+        if (index < 0 || index >= PORTS_MAX) return -2144993277;
+        indices.push_back(index);
+    }
+    std::sort(indices.begin(), indices.end());
+    indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
+    std::vector<std::unique_lock<std::mutex>> outputs;
+    for (const int index : indices) outputs.emplace_back(g_outputMutex[index]);
+
+    std::vector<Port> ports(num);
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (std::uint32_t i = 0; i < num; i++) {
+            Port* current = getPort(param[i].handle);
+            if (current == nullptr) {
+                return -2144993277;
+            }
+            ports[i] = *current;
         }
     }
 
-    Port& first = *getPort(param[0].handle);
+    const Port& first = ports[0];
     const std::uint64_t blockUs = (1000000ULL * first.samplesNum) / first.freq;
     const std::uint64_t now = sceKernelGetProcessTime();
 
     std::uint64_t maxWait = 0;
-    for (std::uint32_t i = 0; i < num; i++) {
-        Port& p = *getPort(param[i].handle);
-        const std::uint64_t next = p.lastOutputTime + blockUs;
-        const std::uint64_t wait = next > now ? next - now : 0;
-        if (wait > maxWait) {
-            maxWait = wait;
-        }
-    }
-
     bool anyDevice = false;
-    for (std::uint32_t i = 0; i < num; i++) {
-        if (getPort(param[i].handle)->device != 0) {
-            anyDevice = true;
-            break;
-        }
+    for (const auto& p : ports) {
+        const std::uint64_t next = p.lastOutputTime + blockUs;
+        maxWait = std::max(maxWait, next > now ? next - now : 0);
+        anyDevice = anyDevice || p.device != 0;
     }
 
     if (maxWait != 0 && !anyDevice) {
@@ -416,13 +441,14 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
         nanosleep(&req, nullptr);
     }
 
-    for (std::uint32_t i = 0; i < num; i++) {
-        if (auto* port = getPort(param[i].handle)) queueAudio(*port, param[i].ptr);
-    }
+    for (std::uint32_t i = 0; i < num; i++) queueAudio(ports[i], param[i].ptr);
 
     const std::uint64_t done = sceKernelGetProcessTime();
-    for (std::uint32_t i = 0; i < num; i++) {
-        if (auto* port = getPort(param[i].handle)) port->lastOutputTime = done;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        for (std::uint32_t i = 0; i < num; i++) {
+            if (Port* current = getPort(param[i].handle)) current->lastOutputTime = done;
+        }
     }
 
     return static_cast<int>(first.samplesNum);
