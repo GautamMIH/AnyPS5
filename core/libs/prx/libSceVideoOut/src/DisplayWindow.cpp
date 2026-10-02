@@ -46,11 +46,14 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     const auto initialSize = AgcDriver::ComputeContainSize_nid_postfix(sourceWidth, sourceHeight, boundsWidth, boundsHeight, true);
     require(initialSize.width >= DisplayWindowMinimumWidth && initialSize.height >= DisplayWindowMinimumHeight, "initial window extent is smaller than the minimum");
     const auto title = GetAppTitle_nid_postfix();
-    // ANYPS5_BACKGROUND_WINDOW=1 shows the window without activating it, so a test run opens
-    // behind the windows in use instead of taking focus.
-    if (std::getenv("ANYPS5_BACKGROUND_WINDOW") != nullptr) SDL_SetHint(SDL_HINT_WINDOW_NO_ACTIVATION_WHEN_SHOWN, "1");
-    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    // ANYPS5_BACKGROUND_WINDOW=1 creates the window hidden (never mapped), so a test run never
+    // appears in front of or takes focus from the windows in use; compositors such as KWin ignore
+    // SDL's no-activation hint, and minimizing is asynchronous on X11. A hidden window presents
+    // nothing (its drawable reads as empty); frame dumps (ANYPS5_DUMP_FRAMES) still work.
+    const bool background = std::getenv("ANYPS5_BACKGROUND_WINDOW") != nullptr;
+    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), (background ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN) | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     require(window != nullptr, SDL_GetError());
+    if (background) std::fprintf(stderr, "[AnyPS5] ANYPS5_BACKGROUND_WINDOW: the game window is hidden\n");
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
     installSubclass();
 }
