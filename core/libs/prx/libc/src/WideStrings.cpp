@@ -345,9 +345,13 @@ GuestWchar* APS5_VABI wcsrchr_nid_postfix(const GuestWchar* text, GuestWchar val
 GuestWchar* APS5_VABI wcsstr_nid_postfix(const GuestWchar* text, const GuestWchar* pattern) {
     const std::size_t patternLength = guestLength(pattern);
     if (patternLength == 0) return const_cast<GuestWchar*>(text);
-    for (; *text != 0; ++text)
-        if (std::memcmp(text, pattern, patternLength * sizeof(GuestWchar)) == 0 && guestLength(text) >= patternLength)
-            return const_cast<GuestWchar*>(text);
+    // Compared one character at a time: a mismatch (the text's terminator included) stops before
+    // reading past the end of the text, which may be the end of its mapping.
+    for (; *text != 0; ++text) {
+        std::size_t matched = 0;
+        while (matched < patternLength && text[matched] == pattern[matched]) ++matched;
+        if (matched == patternLength) return const_cast<GuestWchar*>(text);
+    }
     return nullptr;
 }
 

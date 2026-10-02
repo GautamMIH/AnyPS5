@@ -54,6 +54,11 @@ target_include_directories(libc PRIVATE
 )
 
 if(BUILD_TESTING)
+    add_test_executable(guest_wide_search_tests ${LIBS_INCLUDE_DIR}/tests/GuestWideSearch.cpp)
+    target_include_directories(guest_wide_search_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_wide_search_tests PRIVATE libc)
+    configure_windows_unwind(guest_wide_search_tests)
+    add_test(NAME guest_wide_search COMMAND guest_wide_search_tests)
     add_test_executable(guest_character_tests ${LIBS_INCLUDE_DIR}/tests/GuestCharacter.cpp)
     target_include_directories(guest_character_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_character_tests PRIVATE libc)
