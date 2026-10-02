@@ -108,6 +108,17 @@ Pipeline::Pipeline(const Context& context, const State& state, std::span<const R
         passInfo.pAttachments = attachments.empty() ? nullptr : attachments.data();
         passInfo.subpassCount = 1;
         passInfo.pSubpasses = &subpass;
+        // Earlier passes' attachment writes (and reads) complete before this pass touches the same
+        // attachments: the write-after-write order between draws, without draining other stages.
+        VkSubpassDependency external{};
+        external.srcSubpass = VK_SUBPASS_EXTERNAL;
+        external.dstSubpass = 0;
+        external.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        external.dstStageMask = external.srcStageMask;
+        external.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        external.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        passInfo.dependencyCount = 1;
+        passInfo.pDependencies = &external;
         Check(context.Function<PFN_vkCreateRenderPass>("vkCreateRenderPass")(context.device, &passInfo, nullptr, &renderPass), "vkCreateRenderPass");
         VkFramebufferCreateInfo framebufferInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         framebufferInfo.renderPass = renderPass;
@@ -122,6 +133,10 @@ Pipeline::Pipeline(const Context& context, const State& state, std::span<const R
         }
         if (state.hasDepthTarget || layers == std::numeric_limits<std::uint32_t>::max()) layers = 1;
         framebufferInfo.layers = layers;
+        passKey = {state.renderExtent.width, state.renderExtent.height, layers, slots};
+        for (std::uint32_t slot = 0; slot < slots; ++slot) passKey.push_back(targets[slot] != nullptr ? static_cast<std::uint64_t>(state.colors[slot].format) : ~0ull);
+        passKey.push_back(state.hasDepthTarget ? static_cast<std::uint64_t>(state.depth.format) | (state.depth.hasStencil ? 1ull << 32u : 0u) : ~0ull);
+        for (const auto view : views) passKey.push_back(reinterpret_cast<std::uint64_t>(view));
         Check(context.Function<PFN_vkCreateFramebuffer>("vkCreateFramebuffer")(context.device, &framebufferInfo, nullptr, &framebuffer), "vkCreateFramebuffer");
         VkPipelineVertexInputStateCreateInfo input{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
         const auto vertexInput = BuildVertexInputLayout(context, shaders.front().program->vertexAttributes);
@@ -221,6 +236,10 @@ void Pipeline::Begin(VkCommandBuffer commands, VkExtent2D extent) const {
     begin.framebuffer = framebuffer;
     begin.renderArea = {{0, 0}, extent};
     context.Function<PFN_vkCmdBeginRenderPass>("vkCmdBeginRenderPass")(commands, &begin, VK_SUBPASS_CONTENTS_INLINE);
+    context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+}
+
+void Pipeline::Bind(VkCommandBuffer commands) const {
     context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 }
 

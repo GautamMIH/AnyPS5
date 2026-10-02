@@ -10,6 +10,10 @@
 namespace AgcDriver::Graphics {
 
 void ResidentColor::Transition(VkCommandBuffer commands, VkImageLayout next) {
+    // Staying an attachment needs no barrier: render passes order attachment accesses between
+    // themselves (Pipeline's external subpass dependency). ANYPS5_ATTACHMENT_BARRIERS=1 restores them.
+    static const bool always = std::getenv("ANYPS5_ATTACHMENT_BARRIERS") != nullptr;
+    if (!always && layout == next && next == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) return;
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcAccessMask = layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0u : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -182,6 +186,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode && previous.elementBytes == color.elementBytes && previous.tail == color.tail && previous.layers == color.layers && previous.baseLayer == color.baseLayer && previous.surfaceSlices == color.surfaceSlices) return it->second;
         if (TraceRenderTargets()) std::fprintf(stderr, "[rt] replace color@0x%llx+0x%llx %ux%u fmt%d tile%u eb%u dirty=%d -> color@0x%llx+0x%llx %ux%u fmt%d tile%u eb%u\n", static_cast<unsigned long long>(previous.address), static_cast<unsigned long long>(previous.bytes), previous.extent.width, previous.extent.height, static_cast<int>(previous.format), static_cast<unsigned>(previous.tileMode), static_cast<unsigned>(previous.elementBytes), it->second->Dirty() ? 1 : 0, static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.bytes), color.extent.width, color.extent.height, static_cast<int>(color.format), static_cast<unsigned>(color.tileMode), static_cast<unsigned>(color.elementBytes));
         // The new target is uploaded on the GPU after this, so the old one can be written back there.
+        const GuestMemory::AccessSite replaceSite("rt_replace");
         Resolve(previous.address, previous.bytes, true, true);
         it->second->ReleaseMemory();
         it = entries.erase(it);
@@ -192,6 +197,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
             continue;
         }
         const auto& previous = (*it)->Description();
+        const GuestMemory::AccessSite replaceSite("rt_replace");
         if (previous.depthBytes != 0) Resolve(previous.depthAddress, previous.depthBytes, true);
         if (previous.stencilBytes != 0) Resolve(previous.stencilAddress, previous.stencilBytes, true);
         (*it)->ReleaseMemory();

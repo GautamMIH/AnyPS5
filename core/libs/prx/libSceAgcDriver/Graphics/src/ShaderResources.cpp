@@ -346,6 +346,13 @@ void ShaderResources::RecordUploads(VkCommandBuffer commands) const {
     for (const auto& image : storageImages) image->RecordUpload(commands);
 }
 
+bool ShaderResources::RecordsOutsidePass() const {
+    if (!storageImages.empty()) return true;
+    for (const auto& texture : textures)
+        if (texture->Direct()) return true;
+    return false;
+}
+
 void ShaderResources::RecordDownloads(VkCommandBuffer commands) const {
     for (const auto& image : storageImages) image->RecordDownload(commands);
 }

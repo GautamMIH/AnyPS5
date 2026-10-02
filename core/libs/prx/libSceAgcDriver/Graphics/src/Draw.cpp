@@ -169,7 +169,16 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     storage->pipeline = context.graphicsPipelines->Get(state, storage->colors, storage->depth, *resources, shaders);
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
-    const auto commands = context.drawQueue->Begin(context);
+    // Render-pass merging: a draw whose targets are resident attachments and that records nothing
+    // outside a pass continues the pass the previous draw left open on the same attachments.
+    // ANYPS5_NO_PASS_MERGE=1 begins a pass per draw. (The GPU draw profiler resets queries, which a
+    // pass forbids: it disables merging.)
+    static const bool noMerge = std::getenv("ANYPS5_NO_PASS_MERGE") != nullptr;
+    bool mergeable = !noMerge && !context.drawProfiler && !resources->RecordsOutsidePass();
+    for (const auto& color : storage->colors) mergeable = mergeable && (!color || !color->BeginRecords());
+    mergeable = mergeable && (!storage->depth || !storage->depth->BeginRecords());
+    const auto continued = mergeable ? context.drawQueue->ContinuePass(pipeline.PassKey()) : VkCommandBuffer{VK_NULL_HANDLE};
+    const auto commands = continued != VK_NULL_HANDLE ? continued : context.drawQueue->Begin(context);
     std::uint32_t profile = UINT32_MAX;
     if (context.drawProfiler) {
         std::string key = "draw";
@@ -182,17 +191,28 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         key += part;
         profile = context.drawProfiler->Begin(context, commands, std::move(key));
     }
-    VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
-    upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
-    resources->RecordUploads(commands);
-    for (const auto& color : storage->colors) {
-        if (color) color->Begin(commands);
+    if (continued != VK_NULL_HANDLE) {
+        // Begin records nothing here (BeginRecords): it only marks the targets rendered.
+        for (const auto& color : storage->colors) {
+            if (color) color->Begin(commands);
+        }
+        if (storage->depth) storage->depth->Begin(commands);
+        pipeline.Bind(commands);
+    } else {
+        // Host writes made before the batch is submitted are visible to it (submission orders them);
+        // this barrier covers the transfer stages of the uploads below.
+        VkMemoryBarrier upload{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        upload.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+        upload.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | shaderStages, 0, 1, &upload, 0, nullptr, 0, nullptr);
+        resources->RecordUploads(commands);
+        for (const auto& color : storage->colors) {
+            if (color) color->Begin(commands);
+        }
+        if (storage->depth) storage->depth->Begin(commands);
+        if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 1);
+        pipeline.Begin(commands, state.renderExtent);
     }
-    if (storage->depth) storage->depth->Begin(commands);
-    if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 1);
-    pipeline.Begin(commands, state.renderExtent);
     if (depthFastClear) {
         // An HTILE fast clear stands for the whole surface holding the clear values.
         VkClearAttachment clear{};
@@ -230,14 +250,15 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             context.Function<PFN_vkCmdDraw>("vkCmdDraw")(commands, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);
         }
     }
-    context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass")(commands);
-    if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 2);
-    resources->RecordDownloads(commands);
-    VkMemoryBarrier download{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    download.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    download.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT | shaderStages, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &download, 0, nullptr, 0, nullptr);
-    if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 3);
+    // The pass stays open for the next draw on the same attachments; the batch's end makes the
+    // writes visible to the host (DrawQueue::Flush).
+    context.drawQueue->KeepPassOpen(context, pipeline.PassKey());
+    if (!mergeable) {
+        context.drawQueue->EndPass();
+        if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 2);
+        resources->RecordDownloads(commands);
+        if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 3);
+    }
     timing.Mark("command_record");
     context.drawQueue->Enqueue(std::move(resources), std::move(storage));
     timing.Mark("enqueue");

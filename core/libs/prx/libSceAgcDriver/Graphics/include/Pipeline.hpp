@@ -14,6 +14,10 @@ public:
     Pipeline& operator=(const Pipeline&) = delete;
     VkPipelineLayout Layout() const;
     void Begin(VkCommandBuffer commands, VkExtent2D extent) const;
+    // Binds the pipeline inside a render pass another pipeline with the same PassKey began: the
+    // render passes are compatible (same attachment formats) and the framebuffers hold the same views.
+    void Bind(VkCommandBuffer commands) const;
+    const std::vector<std::uint64_t>& PassKey() const { return passKey; }
     void PushConstants(VkCommandBuffer commands, std::span<const CompiledShader> shaders) const;
 
 private:
@@ -24,6 +28,7 @@ private:
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
+    std::vector<std::uint64_t> passKey;
 };
 
 void ValidateShaderPair(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment);

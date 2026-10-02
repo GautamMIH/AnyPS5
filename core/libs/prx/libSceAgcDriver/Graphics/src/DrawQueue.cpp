@@ -11,7 +11,27 @@ DrawQueue::~DrawQueue() {
     markers.clear();
 }
 
+VkCommandBuffer DrawQueue::ContinuePass(const std::vector<std::uint64_t>& key) {
+    if (!passOpen || barrierRequested || !recording.commands || key != openPassKey) return VK_NULL_HANDLE;
+    return recording.commands->Handle();
+}
+
+void DrawQueue::KeepPassOpen(const Context& context, const std::vector<std::uint64_t>& key) {
+    Require(recording.commands != nullptr, "an open render pass needs a recording batch");
+    if (endRenderPass == nullptr) endRenderPass = context.Function<PFN_vkCmdEndRenderPass>("vkCmdEndRenderPass");
+    passOpen = true;
+    openPassKey = key;
+}
+
+void DrawQueue::EndPass() {
+    if (!passOpen) return;
+    passOpen = false;
+    if (recording.commands) endRenderPass(recording.commands->Handle());
+}
+
 VkCommandBuffer DrawQueue::Begin(const Context& context) {
+    EndPass();
+    if (pipelineBarrier == nullptr) pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     Collect();
     if (drawCount >= 64) Wait();
     if (!recording.commands) {
@@ -92,6 +112,13 @@ void DrawQueue::Flush() {
     // A batch may hold only commands recorded ahead of draws that did not follow (mirror copies,
     // write-backs): it is submitted all the same.
     if (!recording.commands) return;
+    EndPass();
+    // The CPU reads what the batch wrote only after its fence: one barrier at the end makes every
+    // write visible to the host (draws record none of their own).
+    VkMemoryBarrier host{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    host.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+    host.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    pipelineBarrier(recording.commands->Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &host, 0, nullptr, 0, nullptr);
     if (recording.query >= 0) samples->context.Function<PFN_vkCmdEndQuery>("vkCmdEndQuery")(recording.commands->Handle(), samples->pool, static_cast<std::uint32_t>(recording.query));
     pending.push_back(std::move(recording));
     recording = Batch{};

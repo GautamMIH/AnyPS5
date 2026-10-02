@@ -173,6 +173,8 @@ create:
         throw std::runtime_error("AGC graphics: comparison sampling of a resident depth plane that cannot be viewed directly (being rendered, or ANYPS5_NO_DIRECT_DEPTH) is not implemented");
     }
     if (depthSource) {
+        // Why a depth texture is copied rather than viewed (frame profile).
+        if (!directDepth) timing.Mark(depthSource->Description().depthAddress == renderedDepth ? "depth_copy_rendered" : !depthSource->Sampleable() ? "depth_copy_unsampleable" : "depth_copy_format");
         auto texture = directDepth ? std::make_shared<Texture>(context, depthSource, components, Texture::DirectView{}) : std::make_shared<Texture>(context, depthSource, resource, components);
         timing.Mark("depth_texture");
         Entry entry{key, {}, texture, {}, depthSource->Generation()};

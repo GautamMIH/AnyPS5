@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <cstdio>
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
@@ -127,6 +128,7 @@ bool ResidentDepth::WriteBackOnGpu() {
     if (!dirty) return true;
     if (!prepareGpu()) return false;
     PerformanceTimer timing("Graphics.ResidentDepth.GpuWriteBack");
+    if (TraceRenderTargets()) std::fprintf(stderr, "[rt] writeback depth@0x%llx+0x%llx site=%s\n", static_cast<unsigned long long>(depth.depthAddress), static_cast<unsigned long long>(depth.depthBytes + depth.stencilBytes), GuestMemory::AccessSite::Current());
     const auto commands = context.drawQueue->Begin(context);
     const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     transition(commands, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -166,6 +168,8 @@ void ResidentDepth::protect(GuestMemoryTracking::Protection protection) {
 }
 
 void ResidentDepth::transition(VkCommandBuffer commands, VkImageLayout next) {
+    static const bool always = std::getenv("ANYPS5_ATTACHMENT_BARRIERS") != nullptr;
+    if (!always && layout == next && next == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) return;
     VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     barrier.srcAccessMask = layout == VK_IMAGE_LAYOUT_UNDEFINED ? 0u : VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -371,7 +375,8 @@ std::shared_ptr<ResidentDepth> RenderCache::GetDepth(const DepthTarget& depth) {
         }
         if (previous.depthAddress == depth.depthAddress && previous.stencilAddress == depth.stencilAddress && previous.extent.width == depth.extent.width && previous.extent.height == depth.extent.height && previous.depthElementBytes == depth.depthElementBytes && previous.hasStencil == depth.hasStencil) return *it;
         if ((*it)->Dirty()) {
-            if (previous.depthBytes != 0) Resolve(previous.depthAddress, previous.depthBytes, true);
+            const GuestMemory::AccessSite replaceSite("rt_replace");
+        if (previous.depthBytes != 0) Resolve(previous.depthAddress, previous.depthBytes, true);
             if (previous.stencilBytes != 0) Resolve(previous.stencilAddress, previous.stencilBytes, true);
         }
         (*it)->ReleaseMemory();
@@ -384,6 +389,7 @@ std::shared_ptr<ResidentDepth> RenderCache::GetDepth(const DepthTarget& depth) {
             ++it;
             continue;
         }
+        const GuestMemory::AccessSite replaceSite("rt_replace");
         Resolve(it->second->Description().address, it->second->Description().bytes, true);
         it->second->ReleaseMemory();
         it = entries.erase(it);

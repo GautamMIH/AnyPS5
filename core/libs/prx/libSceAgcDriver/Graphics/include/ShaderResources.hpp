@@ -28,6 +28,8 @@ public:
     // Storage images move between guest memory and host images around the draw or dispatch:
     // uploads are recorded before it (outside any render pass) and downloads after it.
     void RecordUploads(VkCommandBuffer commands) const;
+    // Whether RecordUploads or RecordDownloads record commands (storage images, direct depth views).
+    bool RecordsOutsidePass() const;
     void RecordDownloads(VkCommandBuffer commands) const;
     void WriteBack();
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;

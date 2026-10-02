@@ -22,6 +22,13 @@ public:
     void WaitGpu();
     void Collect();
     void RecordMemoryBarrier(const Context& context);
+    // Render-pass merging: the last draw leaves its pass open (KeepPassOpen); a following draw with
+    // the same pass key that records nothing outside a pass continues it (ContinuePass returns the
+    // batch's commands, or null). Every other recording (Begin), Flush and the end of the batch
+    // close it first, so work outside the pass stays in order.
+    VkCommandBuffer ContinuePass(const std::vector<std::uint64_t>& key);
+    void KeepPassOpen(const Context& context, const std::vector<std::uint64_t>& key);
+    void EndPass();
     // Completion markers: SubmitMarker submits everything queued, then an empty batch whose fence
     // signals once all earlier GPU work on the queue finished (one queue, in order). Marker serials
     // increase; MarkerReached and WaitMarker retire the draws completed by then (their writes reach
@@ -73,6 +80,10 @@ private:
     std::unique_ptr<SampleCounter> samples;
     std::uint64_t samplesPassed = 0;
     void retire(Batch batch);
+    bool passOpen = false;
+    std::vector<std::uint64_t> openPassKey;
+    PFN_vkCmdEndRenderPass endRenderPass = nullptr;
+    PFN_vkCmdPipelineBarrier pipelineBarrier = nullptr;
     Batch recording;
     std::vector<Batch> pending;
     std::vector<std::unique_ptr<CommandBatch>> available;
