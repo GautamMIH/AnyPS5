@@ -372,6 +372,7 @@ constexpr VopcOpcodeInfo vopcOpcodes[] = {
 };
 
 constexpr VectorOpcodeInfo vop3Opcodes[] = {
+    {0x140u, RdnaOpcode::VMadLegacyF32},
     {0x141u, RdnaOpcode::VMadF32},
     {0x142u, RdnaOpcode::VMadI32I24},
     {0x143u, RdnaOpcode::VMadU32U24},
@@ -385,6 +386,7 @@ constexpr VectorOpcodeInfo vop3Opcodes[] = {
     {0x149u, RdnaOpcode::VBfeI32},
     {0x14au, RdnaOpcode::VBfiB32},
     {0x14eu, RdnaOpcode::VAlignbitB32},
+    {0x150u, RdnaOpcode::VMullitF32},
     {0x151u, RdnaOpcode::VMin3F32},
     {0x152u, RdnaOpcode::VMin3I32},
     {0x153u, RdnaOpcode::VMin3U32},
@@ -403,7 +405,11 @@ constexpr VectorOpcodeInfo vop3Opcodes[] = {
     {0x357u, RdnaOpcode::VMed3F16},
     {0x358u, RdnaOpcode::VMed3I16},
     {0x359u, RdnaOpcode::VMed3U16},
+    {0x15au, RdnaOpcode::VSadU8},
+    {0x15bu, RdnaOpcode::VSadHiU8},
+    {0x15cu, RdnaOpcode::VSadU16},
     {0x15du, RdnaOpcode::VSadU32},
+    {0x171u, RdnaOpcode::VMsadU8},
     {0x15eu, RdnaOpcode::VCvtPkU8F32},
     {0x178u, RdnaOpcode::VXor3B32},
     {0x12fu, RdnaOpcode::VCvtPkrtzF16F32},
@@ -437,6 +443,7 @@ constexpr VectorOpcodeInfo vop3Opcodes[] = {
     {0x314u, RdnaOpcode::VLshlrevB16},
     {0x319u, RdnaOpcode::VSubrevI32},
     {0x344u, RdnaOpcode::VPermB32},
+    {0x14du, RdnaOpcode::VLerpU8},
     {0x345u, RdnaOpcode::VXadU32},
     {0x346u, RdnaOpcode::VLshlAddU32},
     {0x347u, RdnaOpcode::VAddLshlU32},
@@ -913,6 +920,9 @@ void validateVop1Sdwa(const RdnaInstruction& instruction, std::uint32_t destinat
 }
 
 void decodeVop1Sdwa(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t vdst, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOP1 SDWA instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto src0 = modifier & 0xffu;
     const auto dstSel = (modifier >> 8u) & 0x7u;
@@ -957,6 +967,9 @@ void applyDppModifier(RdnaOperand& operand, std::uint32_t modifier) {
 }
 
 void decodeVop1Dpp(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t vdst, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOP1 DPP instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto src0 = modifier & 0xffu;
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1120,6 +1133,9 @@ void finalizeVop2Instruction(std::span<const std::uint32_t> code, std::uint32_t 
 }
 
 void decodeVop2Sdwa(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t opcode, std::uint32_t vdst, std::uint32_t vsrc1, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOP2 SDWA instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto fields = decodeVop2SdwaFields(modifier);
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1145,6 +1161,9 @@ void decodeVop2Sdwa(std::uint32_t programCounter, std::span<const std::uint32_t>
 }
 
 void decodeVop2Dpp(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t opcode, std::uint32_t vdst, std::uint32_t vsrc1, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOP2 DPP instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto src0 = modifier & 0xffu;
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1286,6 +1305,9 @@ bool isVopcCompareExec(RdnaOpcode opcode) {
 }
 
 void decodeVopcSdwa(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t vsrc1, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOPC SDWA instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto fields = decodeVopcSdwaFields(modifier);
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1315,6 +1337,9 @@ void decodeVopcSdwa(std::uint32_t programCounter, std::span<const std::uint32_t>
 }
 
 void decodeVopcDpp(std::uint32_t programCounter, std::span<const std::uint32_t> code, std::uint32_t wordIndex, std::uint32_t opcode, std::uint32_t vsrc1, RdnaInstruction& instruction) {
+    if (static_cast<std::size_t>(wordIndex) + 1u >= code.size()) {
+        throw std::out_of_range("truncated VOPC DPP instruction");
+    }
     const auto modifier = code[wordIndex + 1u];
     const auto src0 = modifier & 0xffu;
     SetRdnaRawWords(instruction, code, wordIndex, 2);
@@ -1557,7 +1582,8 @@ void checkNativeVop3Modifiers(RdnaOpcode opcode, bool permlane, bool carryInOut,
         return;
     }
     if (carryInOut || scalarDst) {
-        if (clamp != 0u || omod != 0u || neg != 0u) {
+        const bool floatCompare = scalarDst && isVopcFloatCompareOpcode(opcode);
+        if (clamp != 0u || omod != 0u || (neg != 0u && !floatCompare)) {
             throw std::invalid_argument("VOP3 source modifiers are not implemented");
         }
         return;

@@ -275,6 +275,15 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         }
         return true;
     }
+    case RdnaOpcode::SBcnt0I32B64: {
+        const std::array<IrU32, 2> source = extractU64(readU64(sourceAt(inst, 0u)));
+        auto& low = ir.Emit(IrOpcode::BitCount32, IrType::U32, {&ir.BitwiseNot(source[0].Value())});
+        auto& high = ir.Emit(IrOpcode::BitCount32, IrType::U32, {&ir.BitwiseNot(source[1].Value())});
+        auto& result = ir.IAdd(low, high);
+        writeOperand(inst.destination, &result);
+        ir.SetScc(ir.INotEqual(result, ir.Constant(0u)));
+        return true;
+    }
     case RdnaOpcode::SBcnt1I32B32:
         return simpleInteger(inst, IrOpcode::BitCount32, IrType::U32, false, false, true);
     case RdnaOpcode::SBcnt1I32B64:
@@ -303,12 +312,18 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         return composedIntegerBinary(inst, IrOpcode::BitwiseOr32, false, true, true);
     case RdnaOpcode::SXnorB32:
         return composedIntegerBinary(inst, IrOpcode::BitwiseXor32, false, true, true);
+    case RdnaOpcode::SFf0I32B64:
+        return sFfI32B64(inst, true);
     case RdnaOpcode::SFf1I32B64:
-        return sFf1I32B64(inst);
+        return sFfI32B64(inst, false);
     case RdnaOpcode::SFlbitI32B32:
         return vFfbh32(inst, false);
+    case RdnaOpcode::SFlbitI32:
+        return vFfbh32(inst, true);
     case RdnaOpcode::SFlbitI32B64:
-        return sFlbitI32B64(inst);
+        return sFlbitI32B64(inst, false);
+    case RdnaOpcode::SFlbitI32I64:
+        return sFlbitI32B64(inst, true);
     case RdnaOpcode::SBitset0B32:
         return sBitsetB32(inst, false);
     case RdnaOpcode::SBitset1B32:
@@ -319,8 +334,10 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         return sBitsetB64(inst, true);
     case RdnaOpcode::SBitreplicateB64B32:
         return sBitreplicateB64B32(inst);
+    case RdnaOpcode::SQuadmaskB32:
+        return sQuadmask(inst, false);
     case RdnaOpcode::SQuadmaskB64:
-        return sQuadmaskB64(inst);
+        return sQuadmask(inst, true);
     case RdnaOpcode::SBfmB32:
         return bfmB32(inst);
     case RdnaOpcode::SBfmB64:

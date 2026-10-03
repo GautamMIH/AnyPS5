@@ -245,4 +245,16 @@ int APS5_VABI sceHttpSetChunkedTransferEnabled(int id, int enable) {
     return 0;
 }
 
+
+APS5_EXPORT("i9mhafzkEi8", sceHttpUnknown00);
+int APS5_VABI sceHttpUnknown00(void) {
+    NotImplemented_nid_no_patch("i9mhafzkEi8");
+    return 0;
+}
+
+APS5_EXPORT("vO4B-42ef-k", sceHttpUnknown01);
+int APS5_VABI sceHttpUnknown01(void) {
+    NotImplemented_nid_no_patch("vO4B-42ef-k");
+    return 0;
+}
 }

@@ -57,4 +57,10 @@ int APS5_VABI sceMsgDialogUpdateStatus(void) {
     return g_status.load();
 }
 
+APS5_EXPORT("CWVW78Qc3fI", sceMsgDialogUnknown00);
+int APS5_VABI sceMsgDialogUnknown00(void) {
+    NotImplemented_nid_no_patch("CWVW78Qc3fI");
+    return 0;
+}
+
 }

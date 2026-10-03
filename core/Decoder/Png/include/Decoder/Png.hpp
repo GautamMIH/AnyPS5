@@ -35,8 +35,13 @@ std::optional<Header> ParseHeader(std::span<const std::uint8_t> png);
 
 std::optional<Image> Decode(std::span<const std::uint8_t> png);
 
+struct EncodeOptions {
+    int compressionLevel = 8;
+    int filter = -1;
+};
+
 std::vector<std::uint8_t> Encode(std::span<const std::uint8_t> pixels, std::uint32_t width, std::uint32_t height,
-                                 std::uint32_t channels);
+                                 std::uint32_t channels, EncodeOptions options = {});
 
 }  // namespace Decoder::Png
 

@@ -2,6 +2,7 @@
 #include "Translation/TranslationContext.hpp"
 #include <array>
 #include <stdexcept>
+#include <utility>
 
 namespace ShaderRecompiler {
 
@@ -41,7 +42,7 @@ void TranslationContext::emitInteger16Compare(const RdnaInstruction& inst, IrOpc
     emitCompareResult(inst, IrU1(ir.Emit(opcode, IrType::U1, {&lhs.Value(), &rhs.Value()})), false, cmpx);
 }
 
-void TranslationContext::emitFloatCompare(const RdnaInstruction& inst, IrOpcode opcode, bool half, bool cmpx) {
+void TranslationContext::emitFloatCompare(const RdnaInstruction& inst, IrOpcode opcode, bool half, bool cmpx, bool swap) {
     IrValue* lhs = nullptr;
     IrValue* rhs = nullptr;
     if (half) {
@@ -51,6 +52,7 @@ void TranslationContext::emitFloatCompare(const RdnaInstruction& inst, IrOpcode 
         lhs = readOperand(sourceAt(inst, 0u), IrType::F32);
         rhs = readOperand(sourceAt(inst, 1u), IrType::F32);
     }
+    if (swap) std::swap(lhs, rhs);
     emitCompareResult(inst, IrU1(ir.Emit(opcode, IrType::U1, {lhs, rhs})), false, cmpx);
 }
 

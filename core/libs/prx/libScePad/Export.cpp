@@ -199,10 +199,9 @@ int APS5_VABI scePadSetMotionSensorState(int handle, bool enable) {
 }
 
 int APS5_VABI scePadSetTiltCorrectionState(int handle, bool enabled) {
- (void)handle;
- (void)enabled;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ Pad::SetTiltCorrection(enabled);
+ return PAD_OK;
 }
 
 // Adaptive trigger commands (one 56-byte command per trigger after an 8-byte header) are forwarded

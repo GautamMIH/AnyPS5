@@ -25,6 +25,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "SaveData.hpp"
+#include "prx/libSceSaveData/SaveDataFile.hpp"
 
 static constexpr char SAVE_DIR[] = "_sd";
 
@@ -73,28 +74,7 @@ bool file_size_of(const std::string& path, std::size_t* out) {
 // Writes to a temporary file, then renames it over the target, so a kill mid-write never leaves a
 // torn save behind.
 bool write_file_replace(const std::string& path, const std::vector<char>& data) {
-    const std::string tmp = path + ".tmp";
-    {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        if (!f) {
-            return false;
-        }
-        if (!data.empty()) {
-            f.write(data.data(), static_cast<std::streamsize>(data.size()));
-        }
-        f.flush();
-        if (!f) {
-            return false;
-        }
-    }
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::filesystem::remove(path, ec);
-        ec.clear();
-        std::filesystem::rename(tmp, path, ec);
-    }
-    return !ec;
+    return savedata::replace_file(path, data.data(), data.size());
 }
 
 bool read_file_all(const std::string& path, std::vector<char>& out) {
@@ -634,8 +614,8 @@ static int setupSaveDataMemory2(const SaveDataMemorySetup2* setup_param, SaveDat
         std::error_code ec;
         std::filesystem::create_directories(std::filesystem::path(path).parent_path(), ec);
         std::vector<char> data;
-        if (have) {
-            read_file_all(path, data);
+        if (have && !read_file_all(path, data)) {
+            return SAVE_DATA_ERROR_INTERNAL;
         }
         data.resize(setup_param->memory_size, 0);
         if (!write_file_replace(path, data)) {
@@ -721,4 +701,16 @@ int APS5_VABI sceSaveDataUmount2(uint32_t mode, const SaveDataMountPoint* mount_
     return rc;
 }
 
+
+APS5_EXPORT("RjMlsR8EXrw", sceSaveDataUnknown00);
+int APS5_VABI sceSaveDataUnknown00(void) {
+    NotImplemented_nid_no_patch("RjMlsR8EXrw");
+    return 0;
+}
+
+APS5_EXPORT("X4MYzukPc3g", sceSaveDataUnknown01);
+int APS5_VABI sceSaveDataUnknown01(void) {
+    NotImplemented_nid_no_patch("X4MYzukPc3g");
+    return 0;
+}
 }

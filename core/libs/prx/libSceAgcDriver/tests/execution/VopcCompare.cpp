@@ -228,6 +228,15 @@ int main() {
         FillInput();
         Run(*device);
         Check();
+        for (std::uint32_t pairBase = 0; pairBase < HalfEdges.size() * HalfEdges.size(); pairBase += Threads) {
+            for (std::uint32_t tid = 0; tid < Threads; ++tid) {
+                const auto pair = (pairBase + tid) % (HalfEdges.size() * HalfEdges.size());
+                Input[tid * Inputs + 6u] = 0xabcd0000u | HalfEdges[pair / HalfEdges.size()];
+                Input[tid * Inputs + 7u] = 0x12340000u | HalfEdges[pair % HalfEdges.size()];
+            }
+            Run(*device);
+            Check();
+        }
         std::puts("vopc compare tests passed");
         return 0;
     } catch (const std::exception& error) {

@@ -4,6 +4,7 @@
 #include <array>
 #include <climits>
 #include <cstddef>
+#include <mutex>
 #include <stdexcept>
 
 #define STB_IMAGE_WRITE_STATIC
@@ -102,8 +103,11 @@ std::optional<Image> Decode(std::span<const std::uint8_t> png) {
 }
 
 std::vector<std::uint8_t> Encode(std::span<const std::uint8_t> pixels, std::uint32_t width, std::uint32_t height,
-                                 std::uint32_t channels) {
+                                 std::uint32_t channels, EncodeOptions options) {
     if (channels < 1 || channels > 4) throw std::invalid_argument("Png::Encode: channels must be 1-4");
+    if (options.compressionLevel < 0 || options.compressionLevel > 9 || options.filter < -1 || options.filter > 4) {
+        throw std::invalid_argument("Png::Encode: unsupported options");
+    }
     if (width == 0 || height == 0 || static_cast<std::uint64_t>(width) * channels > INT_MAX || height > INT_MAX) {
         throw std::invalid_argument("Png::Encode: unsupported image size");
     }
@@ -113,6 +117,10 @@ std::vector<std::uint8_t> Encode(std::span<const std::uint8_t> pixels, std::uint
 
     std::vector<std::uint8_t> output;
     const int stride = static_cast<int>(width * channels);
+    static std::mutex optionsMutex;
+    std::lock_guard lock(optionsMutex);
+    stbi_write_png_compression_level = options.compressionLevel;
+    stbi_write_force_png_filter = options.filter;
     const int written = stbi_write_png_to_func(appendBytes, &output, static_cast<int>(width), static_cast<int>(height),
                                                static_cast<int>(channels), pixels.data(), stride);
     if (written == 0) throw std::runtime_error("Png::Encode: encoding failed");

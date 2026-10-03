@@ -352,6 +352,7 @@ struct FragmentParameter {
     std::uint32_t sourceLocation;
     bool flat;
     bool perVertex;
+    bool custom = false;
 };
 
 // Compiled SPIR-V shared between a cached variant and every result materialized from it: results

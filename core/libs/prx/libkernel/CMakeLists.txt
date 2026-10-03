@@ -7,6 +7,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/Open.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/Stdio.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Semaphore/src/Semaphore.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/SyncOnAddress/src/SyncOnAddress.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/DirectMemory/Export.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/DirectMemory/DirectMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/DirectMemory/PosixMemory.cpp
@@ -169,6 +170,16 @@ if(BUILD_TESTING)
         set_tests_properties(guest_signals PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test_executable(guest_sync_on_address_tests ${LIBS_INCLUDE_DIR}/tests/GuestSyncOnAddress.cpp)
+    target_include_directories(guest_sync_on_address_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_sync_on_address_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_sync_on_address_tests)
+    add_test(NAME guest_sync_on_address COMMAND guest_sync_on_address_tests)
+    set_tests_properties(guest_sync_on_address PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_sync_on_address PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     add_test_executable(guest_kernel_error_tests ${LIBS_INCLUDE_DIR}/tests/GuestKernelErrors.cpp)
     target_include_directories(guest_kernel_error_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_kernel_error_tests PRIVATE libkernel libc)
@@ -226,10 +237,30 @@ if(BUILD_TESTING)
         set_tests_properties(guest_memory PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    if(WIN32)
+        add_test_executable(guest_directory_buffer_tests ${LIBS_INCLUDE_DIR}/tests/GuestDirectoryBuffer.cpp)
+        target_include_directories(guest_directory_buffer_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_directory_buffer_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_directory_buffer_tests)
+        add_test(NAME guest_directory_buffer COMMAND guest_directory_buffer_tests)
+        set_tests_properties(guest_directory_buffer PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     if(NOT WIN32)
         add_test_executable(guest_directory_entry_tests ${LIBS_INCLUDE_DIR}/tests/GuestDirectoryEntries.cpp)
         target_include_directories(guest_directory_entry_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(guest_directory_entry_tests PRIVATE libkernel libc)
         add_test(NAME guest_directory_entries COMMAND guest_directory_entry_tests)
+    else()
+        add_test_executable(guest_directory_close_tests ${LIBS_INCLUDE_DIR}/tests/GuestDirectoryClose.cpp)
+        target_include_directories(guest_directory_close_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_directory_close_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_directory_close_tests)
+        add_test(NAME guest_directory_close COMMAND guest_directory_close_tests)
+        set_tests_properties(guest_directory_close PROPERTIES TIMEOUT 15 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        if(MINGW)
+            target_compile_options(guest_directory_close_tests PRIVATE -fasynchronous-unwind-tables)
+        endif()
     endif()
 endif()

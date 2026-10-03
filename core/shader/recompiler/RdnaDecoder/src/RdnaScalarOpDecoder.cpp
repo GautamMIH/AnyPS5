@@ -20,13 +20,17 @@ RdnaOpcode decodeSop1Opcode(std::uint32_t opcode) {
         case 0x0bu: return RdnaOpcode::SBrevB32;
         case 0x0cu: return RdnaOpcode::SBrevB64;
         case 0x0du: return RdnaOpcode::SBcnt0I32B32;
+        case 0x0eu: return RdnaOpcode::SBcnt0I32B64;
         case 0x0fu: return RdnaOpcode::SBcnt1I32B32;
         case 0x10u: return RdnaOpcode::SBcnt1I32B64;
         case 0x11u: return RdnaOpcode::SFf0I32B32;
+        case 0x12u: return RdnaOpcode::SFf0I32B64;
         case 0x13u: return RdnaOpcode::SFf1I32B32;
         case 0x14u: return RdnaOpcode::SFf1I32B64;
         case 0x15u: return RdnaOpcode::SFlbitI32B32;
         case 0x16u: return RdnaOpcode::SFlbitI32B64;
+        case 0x17u: return RdnaOpcode::SFlbitI32;
+        case 0x18u: return RdnaOpcode::SFlbitI32I64;
         case 0x19u: return RdnaOpcode::SSextI32I8;
         case 0x1au: return RdnaOpcode::SSextI32I16;
         case 0x1bu: return RdnaOpcode::SBitset0B32;
@@ -43,6 +47,7 @@ RdnaOpcode decodeSop1Opcode(std::uint32_t opcode) {
         case 0x29u: return RdnaOpcode::SNandSaveexecB64;
         case 0x2au: return RdnaOpcode::SNorSaveexecB64;
         case 0x2bu: return RdnaOpcode::SXnorSaveexecB64;
+        case 0x2cu: return RdnaOpcode::SQuadmaskB32;
         case 0x2du: return RdnaOpcode::SQuadmaskB64;
         case 0x34u: return RdnaOpcode::SAbsI32;
         case 0x37u: return RdnaOpcode::SAndn1SaveexecB64;

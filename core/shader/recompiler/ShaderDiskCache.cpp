@@ -292,6 +292,7 @@ void encodeResult(Writer& writer, const RecompileResult& result) {
         out.Value(parameter.sourceLocation);
         out.Value(parameter.flat);
         out.Value(parameter.perVertex);
+        out.Value(parameter.custom);
     });
 }
 
@@ -322,6 +323,7 @@ void decodeResult(Reader& reader, RecompileResult& result) {
         in.Value(parameter.sourceLocation);
         in.Value(parameter.flat);
         in.Value(parameter.perVertex);
+        in.Value(parameter.custom);
     });
     result.cacheHit = false;
     result.variantId = 0;

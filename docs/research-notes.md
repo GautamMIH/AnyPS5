@@ -205,6 +205,15 @@ Issues that needed research, with a short answer. Check here before researching;
   - Frame time: 174 ms -> 111 ms with the changes above; GPU busy ~40 ms.
   - Remaining per-frame CPU: draw ~79 ms, with textures ~13, SRT materialization ~11, CheckRange ~11, command recording ~9, buffers ~7, index upload ~6.
   - 60 fps needs per-draw work cut ~5x more: reuse of whole draws' resources and descriptor sets when their inputs are unchanged, and cheaper validation.
+- **Upstream merge of 7d40a57d (October 2026).**
+  - Kept ours:
+    - the driver (upstream's draw-snapshot reuse lives in its Recorder, which we do not use: our buffers bind imported guest memory in place);
+    - kernel file I/O (upstream's GuestArena host writes; we resolve page tracking before system calls);
+    - rect-list custom interpolation (upstream still rejects it).
+  - Took the rest: shader instructions, savedata fixes, AvPlayer, PNG encoding, PlayGo dialog, pad tilt correction, and `sceKernelGetModuleInfoForUnwind` (ported into our Module.cpp).
+  - upstream's `wcsrtombs` in Strings.cpp forwarded to the host's 4-byte wchar_t; ours (WideStrings.cpp, 2-byte guest wchar) stays.
+  - Upstream's savedata tests now use our native memory-save layout (`_sd/savedatamemory/<user>_<slot>.bin`).
+  - Upstream's index/vertex copy reuse is worth porting into our Draw: index and vertex uploads cost ~8 ms a heavy Zorro frame.
 - **Libraries need $ORIGIN runpaths.** The NID patcher rebuilt .dynstr with DT_NEEDED and DT_SONAME strings only, leaving an empty DT_RUNPATH. Libraries found only those dependencies the game had already loaded. libSceVideoOut's new libSceKeyboard dependency (games rarely import it) then failed to load ("libSceKeyboard.prx: cannot open shared object file"). Every prx is now built with runpath $ORIGIN, and the patcher keeps DT_RPATH/DT_RUNPATH strings.
 - **Same-named game modules and AnyPS5 libraries.** Upstream added partial stand-ins (libSceNpCppWebApi, libfmod, libfmodstudio, libcohtml, libRenoirCore). If an AnyPS5 library always wins, it shadows complete game copies: Smurfs then calls missing FMOD functions. The relinker now decides by provenance and import coverage (see README).
 - **Indexed indirect draws (DRAW_INDEX_INDIRECT 0x25, _MULTI 0x38).** The hardware encoding uses draw-initiator source select 0 (DMA) and, for _MULTI, the draw-index SGPR location in DW4 bits 0-15 (0x280 = none). Only the non-indexed forms use source select 2.

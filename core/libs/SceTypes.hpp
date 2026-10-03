@@ -553,6 +553,15 @@ struct AvPlayerFrameInfo {
     std::uint64_t timestamp;
     AvPlayerStreamDetails details;
 };
+static_assert(sizeof(AvPlayerFrameInfo) == 40 && offsetof(AvPlayerFrameInfo, timestamp) == 16);
+
+struct AvPlayerStreamInfo {
+    std::uint32_t type;
+    std::uint8_t reserved[4];
+    AvPlayerStreamDetails details;
+    std::uint64_t duration;
+};
+static_assert(sizeof(AvPlayerStreamInfo) == 32);
 
 struct AvPlayerAudioEx {
     std::uint16_t channel_count;
@@ -579,6 +588,8 @@ struct AvPlayerVideoEx {
     bool video_full_range_flag;
     std::uint8_t reserved1[37];
 };
+static_assert(sizeof(AvPlayerVideoEx) == 80);
+static_assert(offsetof(AvPlayerVideoEx, crop_left_offset) == 20 && offsetof(AvPlayerVideoEx, pitch) == 36);
 
 struct AvPlayerTimedTextEx {
     std::uint8_t language_code[4];
@@ -599,11 +610,22 @@ struct AvPlayerFrameInfoEx {
     std::uint64_t timestamp;
     AvPlayerStreamDetailsEx details;
 };
+static_assert(sizeof(AvPlayerFrameInfoEx) == 104 && offsetof(AvPlayerFrameInfoEx, details) == 24);
 
-using AvPlayerAllocate = void* (*)(void*, std::uint32_t, std::uint32_t);
-using AvPlayerDeallocate = void (*)(void*, void*);
-using AvPlayerAllocateTexture = void* (*)(void*, std::uint32_t, std::uint32_t);
-using AvPlayerDeallocateTexture = void (*)(void*, void*);
+struct AvPlayerStreamInfoEx {
+    std::uint64_t this_size;
+    std::uint32_t type;
+    std::uint8_t reserved[4];
+    AvPlayerStreamDetailsEx details;
+    std::uint64_t duration;
+};
+static_assert(sizeof(AvPlayerStreamInfoEx) == 104);
+static_assert(offsetof(AvPlayerStreamInfoEx, details) == 16 && offsetof(AvPlayerStreamInfoEx, duration) == 96);
+
+using AvPlayerAllocate = void* (APS5_VABI*)(void*, std::uint32_t, std::uint32_t);
+using AvPlayerDeallocate = void (APS5_VABI*)(void*, void*);
+using AvPlayerAllocateTexture = void* (APS5_VABI*)(void*, std::uint32_t, std::uint32_t);
+using AvPlayerDeallocateTexture = void (APS5_VABI*)(void*, void*);
 
 struct AvPlayerMemAllocator {
     void* object_ptr;
@@ -613,10 +635,10 @@ struct AvPlayerMemAllocator {
     AvPlayerDeallocateTexture deallocate_texture;
 };
 
-using AvPlayerOpenFile = std::int32_t (*)(void*, const char*);
-using AvPlayerCloseFile = std::int32_t (*)(void*);
-using AvPlayerReadOffsetFile = std::int32_t (*)(void*, std::uint8_t*, std::uint64_t, std::uint32_t);
-using AvPlayerSizeFile = std::uint64_t (*)(void*);
+using AvPlayerOpenFile = std::int32_t (APS5_VABI*)(void*, const char*);
+using AvPlayerCloseFile = std::int32_t (APS5_VABI*)(void*);
+using AvPlayerReadOffsetFile = std::int32_t (APS5_VABI*)(void*, std::uint8_t*, std::uint64_t, std::uint32_t);
+using AvPlayerSizeFile = std::uint64_t (APS5_VABI*)(void*);
 
 struct AvPlayerFileReplacement {
     void* object_ptr;
@@ -626,7 +648,7 @@ struct AvPlayerFileReplacement {
     AvPlayerSizeFile size;
 };
 
-using AvPlayerEventCallback = void (*)(void*, std::int32_t, std::int32_t, void*);
+using AvPlayerEventCallback = void (APS5_VABI*)(void*, std::int32_t, std::int32_t, void*);
 
 struct AvPlayerEventReplacement {
     void* object_ptr;
@@ -643,6 +665,60 @@ struct AvPlayerInitData {
     bool auto_start;
     std::uint8_t reserved[3];
     const char* default_language;
+};
+
+struct AvPlayerInitDataEx {
+    std::size_t this_size;
+    AvPlayerMemAllocator memory_replacement;
+    AvPlayerFileReplacement file_replacement;
+    AvPlayerEventReplacement event_replacement;
+    const char* default_language;
+    std::int32_t debug_level;
+    std::uint32_t audio_decoder_priority;
+    std::uint32_t audio_decoder_affinity;
+    std::uint32_t video_decoder_priority;
+    std::uint32_t video_decoder_affinity;
+    std::uint32_t demuxer_priority;
+    std::uint32_t demuxer_affinity;
+    std::uint32_t controller_priority;
+    std::uint32_t controller_affinity;
+    std::uint32_t http_streaming_priority;
+    std::uint32_t http_streaming_affinity;
+    std::uint32_t file_streaming_priority;
+    std::uint32_t file_streaming_affinity;
+    std::int32_t num_output_video_framebuffers;
+    bool auto_start;
+    std::uint8_t reserved[3];
+};
+
+struct AvPlayerUri {
+    const char* name;
+    std::uint32_t length;
+};
+
+struct AvPlayerSourceDetails {
+    AvPlayerUri uri;
+    std::uint8_t reserved1[64];
+    std::uint32_t source_type;
+    std::uint8_t reserved2[44];
+};
+
+struct AvPlayerDecoderInit {
+    std::uint8_t decoder_type[4];
+    std::uint8_t decoder_params[28];
+};
+
+struct AvPlayerHttpContext {
+    std::uint32_t http_context_id;
+    std::uint32_t ssl_context_id;
+};
+
+struct AvPlayerPostInitData {
+    std::uint32_t demux_video_buffer_size;
+    AvPlayerDecoderInit video_decoder_init;
+    AvPlayerDecoderInit audio_decoder_init;
+    AvPlayerHttpContext http_context;
+    std::uint8_t reserved[56];
 };
 
 struct AvPlayerInternal {};
@@ -1406,6 +1482,34 @@ struct ContentExportInitParam2 {
 
 struct ContentSearchInitParam { std::size_t memory_size; };
 
+struct PngEncCreateParam {
+    std::uint32_t this_size;
+    std::uint32_t attribute;
+    std::uint32_t max_image_width;
+    std::uint32_t max_filter_number;
+};
+
+struct PngEncEncodeParam {
+    const std::uint8_t* image_mem_addr;
+    std::uint8_t* png_mem_addr;
+    std::uint32_t image_mem_size;
+    std::uint32_t png_mem_size;
+    std::uint32_t image_width;
+    std::uint32_t image_height;
+    std::uint32_t image_pitch;
+    std::uint16_t pixel_format;
+    std::uint16_t color_space;
+    std::uint16_t bit_depth;
+    std::uint16_t clut_number;
+    std::uint16_t filter_type;
+    std::uint16_t compression_level;
+};
+
+struct PngEncOutputInfo {
+    std::uint32_t data_size;
+    std::uint32_t processed_height;
+};
+
 struct ContentDeleteInitParam {
     char reserved1[4];
     std::size_t heap_size;
@@ -1518,6 +1622,11 @@ union PlayGoOptionalChunk {
     std::uint64_t bitmask;
     std::uint64_t languages;
     std::uint64_t scenarios;
+};
+
+struct PlayGoDialogResult {
+    std::int32_t result;
+    std::int32_t reserved[9];
 };
 
 using RudpEventHandler = void (*)(int ctx_id, int event_id, int error_code, void* arg);

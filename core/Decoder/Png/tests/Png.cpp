@@ -140,6 +140,19 @@ int main() {
     Require(ThrowsInvalidArgument([&] { Decoder::Png::Encode(pixels, 4, 4, 5); }));
     Require(ThrowsInvalidArgument([&] { Decoder::Png::Encode(pixels, 0, 4, 4); }));
     Require(ThrowsInvalidArgument([&] { Decoder::Png::Encode(pixels, 4, 5, 4); }));
+    Require(ThrowsInvalidArgument([&] { Decoder::Png::Encode(pixels, 4, 4, 4, {10, -1}); }));
+    Require(ThrowsInvalidArgument([&] { Decoder::Png::Encode(pixels, 4, 4, 4, {8, 5}); }));
+
+    std::vector<std::uint8_t> gradient(64 * 64 * 3);
+    for (std::size_t i = 0; i < gradient.size(); ++i) gradient[i] = static_cast<std::uint8_t>(i / 3 % 64 * 4);
+    const auto stored = Decoder::Png::Encode(gradient, 64, 64, 3, {0, 0});
+    const auto compressed = Decoder::Png::Encode(gradient, 64, 64, 3, {9, 1});
+    Require(compressed.size() < stored.size());
+    for (const auto& png : {stored, compressed}) {
+        const auto image = Decoder::Png::Decode(png);
+        Require(image.has_value() && image->width == 64 && image->height == 64);
+        for (std::size_t pixel = 0; pixel < 64 * 64; ++pixel) Require(image->pixels[pixel * 4] == gradient[pixel * 3]);
+    }
 
     return 0;
 }

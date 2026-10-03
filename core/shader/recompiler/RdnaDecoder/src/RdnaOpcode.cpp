@@ -46,14 +46,19 @@ bool IsScalarAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::SSextI32I8:
         case RdnaOpcode::SSextI32I16:
         case RdnaOpcode::SBcnt0I32B32:
+        case RdnaOpcode::SBcnt0I32B64:
         case RdnaOpcode::SBcnt1I32B32:
         case RdnaOpcode::SBcnt1I32B64:
         case RdnaOpcode::SFf0I32B32:
+        case RdnaOpcode::SFf0I32B64:
         case RdnaOpcode::SFf1I32B32:
         case RdnaOpcode::SFf1I32B64:
         case RdnaOpcode::SFlbitI32B32:
         case RdnaOpcode::SFlbitI32B64:
+        case RdnaOpcode::SFlbitI32:
+        case RdnaOpcode::SFlbitI32I64:
         case RdnaOpcode::SBitreplicateB64B32:
+        case RdnaOpcode::SQuadmaskB32:
         case RdnaOpcode::SQuadmaskB64:
         case RdnaOpcode::SAndSaveexecB32:
         case RdnaOpcode::SOrSaveexecB32:
@@ -151,6 +156,8 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VSubF32:
         case RdnaOpcode::VMulF32:
         case RdnaOpcode::VMadF32:
+        case RdnaOpcode::VMadLegacyF32:
+        case RdnaOpcode::VMullitF32:
         case RdnaOpcode::VFmaF32:
         case RdnaOpcode::VAddI32:
         case RdnaOpcode::VSubI32:
@@ -158,6 +165,10 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VMulHiU32:
         case RdnaOpcode::VMadU64U32:
         case RdnaOpcode::VSadU32:
+        case RdnaOpcode::VSadU8:
+        case RdnaOpcode::VSadHiU8:
+        case RdnaOpcode::VSadU16:
+        case RdnaOpcode::VMsadU8:
         case RdnaOpcode::VAndB32:
         case RdnaOpcode::VOrB32:
         case RdnaOpcode::VXorB32:
@@ -284,6 +295,7 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VLshlAddU32:
         case RdnaOpcode::VAddLshlU32:
         case RdnaOpcode::VPermB32:
+        case RdnaOpcode::VLerpU8:
         case RdnaOpcode::VXadU32:
         case RdnaOpcode::VLshlOrB32:
         case RdnaOpcode::VAndOrB32:
@@ -601,6 +613,31 @@ bool IsImageOpcode(RdnaOpcode opcode) {
     requireClassifiableOpcode(opcode);
     switch (opcode) {
         case RdnaOpcode::ImageSample:
+        case RdnaOpcode::ImageSampleBCl:
+        case RdnaOpcode::ImageSampleBClO:
+        case RdnaOpcode::ImageSampleBO:
+        case RdnaOpcode::ImageSampleC:
+        case RdnaOpcode::ImageSampleCB:
+        case RdnaOpcode::ImageSampleCBCl:
+        case RdnaOpcode::ImageSampleCBClO:
+        case RdnaOpcode::ImageSampleCBO:
+        case RdnaOpcode::ImageSampleCCl:
+        case RdnaOpcode::ImageSampleCClO:
+        case RdnaOpcode::ImageSampleCD:
+        case RdnaOpcode::ImageSampleCDCl:
+        case RdnaOpcode::ImageSampleCDClO:
+        case RdnaOpcode::ImageSampleCDO:
+        case RdnaOpcode::ImageSampleCL:
+        case RdnaOpcode::ImageSampleCLzO:
+        case RdnaOpcode::ImageSampleCLO:
+        case RdnaOpcode::ImageSampleCO:
+        case RdnaOpcode::ImageSampleCl:
+        case RdnaOpcode::ImageSampleClO:
+        case RdnaOpcode::ImageSampleD:
+        case RdnaOpcode::ImageSampleDCl:
+        case RdnaOpcode::ImageSampleDO:
+        case RdnaOpcode::ImageSampleLzO:
+        case RdnaOpcode::ImageSampleO:
         case RdnaOpcode::ImageSampleLz:
         case RdnaOpcode::ImageLoad:
         case RdnaOpcode::ImageStore:
@@ -622,6 +659,24 @@ bool IsImageOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::ImageGather4CO:
         case RdnaOpcode::ImageGather4CLzO:
         case RdnaOpcode::ImageGather4h:
+        case RdnaOpcode::ImageGather4:
+        case RdnaOpcode::ImageGather4B:
+        case RdnaOpcode::ImageGather4BCl:
+        case RdnaOpcode::ImageGather4BClO:
+        case RdnaOpcode::ImageGather4BO:
+        case RdnaOpcode::ImageGather4Cl:
+        case RdnaOpcode::ImageGather4ClO:
+        case RdnaOpcode::ImageGather4CB:
+        case RdnaOpcode::ImageGather4CBCl:
+        case RdnaOpcode::ImageGather4CBClO:
+        case RdnaOpcode::ImageGather4CBO:
+        case RdnaOpcode::ImageGather4CCl:
+        case RdnaOpcode::ImageGather4CClO:
+        case RdnaOpcode::ImageGather4CL:
+        case RdnaOpcode::ImageGather4CLO:
+        case RdnaOpcode::ImageGather4L:
+        case RdnaOpcode::ImageGather4LO:
+        case RdnaOpcode::ImageGather4O:
         case RdnaOpcode::ImageBvhIntersectRay:
             return true;
         default:
