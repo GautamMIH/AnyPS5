@@ -359,6 +359,9 @@ private:
         // A flip whose frame is ready on the GPU once the completion is reached (AsyncFlip).
         std::shared_ptr<IFlipRequest> flip;
         std::shared_ptr<FrameTiming> flipTiming;
+        // PIXEL_PIPE_STAT_DUMP: the sample counters written at this address once the GPU work before
+        // the dump completed.
+        std::uint64_t sampleDump = 0;
     };
     struct Completed {
         std::vector<std::pair<int, std::uint32_t>> interrupts;
@@ -446,6 +449,13 @@ private:
                 QueueState unused;
                 Pm4::Execute(next.release, unused);
                 if (TraceRelease()) std::fprintf(stderr, "[agc-release] written label=0x%llx marker=%llu\n", static_cast<unsigned long long>(next.release[3] | (static_cast<std::uint64_t>(next.release[4]) << 32u)), static_cast<unsigned long long>(next.marker));
+            }
+            if (next.sampleDump != 0) {
+                const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+                    if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+                });
+                const GuestMemory::AccessSite accessSite("completion_samples");
+                writeSampleCounters(next.sampleDump, device != nullptr ? device->CompletedSamples() : 0u);
             }
             if (next.flip) done.flips.emplace_back(std::move(next.flip), std::move(next.flipTiming));
             if (next.interrupt) done.interrupts.emplace_back(next.eventQueue, *next.interrupt);
@@ -610,9 +620,25 @@ private:
     // first of each pair, its end dump the second). The count goes to the first DB, the others stay
     // zero, all with bit 63 marking the result ready. Counting starts at the first dump; the device
     // waits for the queued draws first. Kyty and SharpEmu write a fixed "visible" result instead.
-    static void dumpSampleCounters(std::span<const std::uint32_t> packet, VulkanDevice* device) {
+    // The occlusion counters of a PIXEL_PIPE_STAT_DUMP: on the console the GPU writes them when it
+    // reaches the packet. Queued as a completion behind the work before it (the worker goes on);
+    // ANYPS5_SYNC_SAMPLES=1 waits for the GPU and writes them at once.
+    // Returns whether the counters were queued (not yet written).
+    bool dumpSampleCounters(std::span<const std::uint32_t> packet, VulkanDevice* device) {
         const auto address = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
-        const std::uint64_t samples = device != nullptr ? device->CountSamples() : 0u;
+        static const bool sync = std::getenv("ANYPS5_SYNC_SAMPLES") != nullptr;
+        if (!sync && device != nullptr) {
+            device->EnableSampleCounting();
+            Completion completion;
+            completion.sampleDump = address;
+            queueCompletion(std::move(completion));
+            return true;
+        }
+        writeSampleCounters(address, device != nullptr ? device->CountSamples() : 0u);
+        return false;
+    }
+
+    static void writeSampleCounters(std::uint64_t address, std::uint64_t samples) {
         constexpr std::uint64_t ready = 1ull << 63u;
         for (std::uint64_t db = 0; db < 16; ++db) {
             const std::uint64_t value = ready | (db == 0 ? samples : 0u);
@@ -1099,8 +1125,9 @@ private:
                     const auto sampleDump = opcode == 0x46 && (packet[1] & 0x3fu) == 0x39u;
                     const auto gpuBarrier = (opcode == 0x46 && !sampleDump) || opcode == 0x58;
                     const auto waitDraws = opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || sampleDump;
+                    bool queuedDump = false;
                     if (sampleDump) {
-                        dumpSampleCounters(packet, device.get());
+                        queuedDump = dumpSampleCounters(packet, device.get());
                     } else if (device != nullptr) {
                         if (gpuBarrier) device->AcquireGpuMemory();
                         else if (waitDraws) {
@@ -1116,7 +1143,7 @@ private:
                     // The CPU executes these packets (or presents): labels released before them land
                     // first. An asynchronous flip is itself a completion queued behind them.
                     const bool asyncFlip = header == FlipPacketHeader && device != nullptr && VulkanDevice::AsyncFlip();
-                    if (!gpuBarrier) stashCompletions(pollCompletions(!asyncFlip));
+                    if (!gpuBarrier) stashCompletions(pollCompletions(!asyncFlip && !queuedDump));
                     timing.Mark(gpuBarrier ? "gpu_barrier" : waitDraws ? "draw_wait" : "device_idle_wait");
                 }
                 // Errors name the packet that raised them: the worker's failure is reported on

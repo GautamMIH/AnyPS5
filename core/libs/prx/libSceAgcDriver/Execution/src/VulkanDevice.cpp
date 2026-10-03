@@ -680,6 +680,16 @@ void VulkanDevice::WaitDraws() {
     state->drawQueue->Wait();
 }
 
+void VulkanDevice::EnableSampleCounting() {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    state->drawQueue->EnableSampleCounting(graphicsContext(), state->occlusionQueryPrecise);
+}
+
+std::uint64_t VulkanDevice::CompletedSamples() {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    return state->drawQueue->CompletedSamples();
+}
+
 std::uint64_t VulkanDevice::CountSamples() {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.CountSamples");

@@ -214,6 +214,17 @@ std::optional<GuestGpuMemory::View> GuestGpuMemory::Resolve(std::uint64_t addres
     return View{import.buffer, begin - first, import.address + (begin - first), translation.bytes};
 }
 
+std::vector<GuestGpuMemory::View> GuestGpuMemory::ResolvePieces(std::uint64_t address, std::uint64_t bytes) {
+    std::vector<View> pieces;
+    for (std::uint64_t done = 0; done < bytes;) {
+        const auto view = Resolve(address + done, bytes - done);
+        if (!view || view->bytes == 0) return {};
+        pieces.push_back(*view);
+        done += view->bytes;
+    }
+    return pieces;
+}
+
 const GuestGpuMemory::Import& GuestGpuMemory::importRange(std::uint64_t segment, void* alias, std::uint64_t segmentBytes, std::uint64_t first, std::uint64_t last) {
     const auto found = imports.find({segment, first});
     if (found != imports.end() && found->second.end >= last) return found->second;

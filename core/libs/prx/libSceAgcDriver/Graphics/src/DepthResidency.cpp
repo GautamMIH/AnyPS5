@@ -363,17 +363,28 @@ void ResidentDepth::resolveCpuAccess(GuestMemoryTracking::Access access) {
 }
 
 std::shared_ptr<ResidentDepth> RenderCache::GetDepth(const DepthTarget& depth) {
-    if (context.drawQueue) {
+    // As for color targets: a barrier, and a CPU wait only before a CPU upload.
+    const auto resolvePlanes = [&] {
         if (depth.depthBytes != 0) context.drawQueue->Resolve(depth.depthAddress, depth.depthBytes);
         if (depth.stencilBytes != 0) context.drawQueue->Resolve(depth.stencilAddress, depth.stencilBytes);
+    };
+    static const bool cpuTargetWait = std::getenv("ANYPS5_CPU_TARGET_WAIT") != nullptr;
+    if (context.drawQueue) {
+        std::optional<GuestMemory::GpuAccessScope> gpuAccess;
+        if (!cpuTargetWait) gpuAccess.emplace();
+        resolvePlanes();
     }
+    const auto cpuResolve = [&](const std::shared_ptr<ResidentDepth>& resident) {
+        if (context.drawQueue && resident->NeedsCpuUpload()) resolvePlanes();
+        return resident;
+    };
     for (auto it = depthEntries.begin(); it != depthEntries.end();) {
         const auto& previous = (*it)->Description();
         if (!(*it)->Overlaps(depth)) {
             ++it;
             continue;
         }
-        if (previous.depthAddress == depth.depthAddress && previous.stencilAddress == depth.stencilAddress && previous.extent.width == depth.extent.width && previous.extent.height == depth.extent.height && previous.depthElementBytes == depth.depthElementBytes && previous.hasStencil == depth.hasStencil) return *it;
+        if (previous.depthAddress == depth.depthAddress && previous.stencilAddress == depth.stencilAddress && previous.extent.width == depth.extent.width && previous.extent.height == depth.extent.height && previous.depthElementBytes == depth.depthElementBytes && previous.hasStencil == depth.hasStencil) return cpuResolve(*it);
         if ((*it)->Dirty()) {
             const GuestMemory::AccessSite replaceSite("rt_replace");
         if (previous.depthBytes != 0) Resolve(previous.depthAddress, previous.depthBytes, true);
@@ -401,7 +412,7 @@ std::shared_ptr<ResidentDepth> RenderCache::GetDepth(const DepthTarget& depth) {
     }
     auto entry = std::make_shared<ResidentDepth>(context, depth);
     depthEntries.push_back(entry);
-    return entry;
+    return cpuResolve(entry);
 }
 
 }

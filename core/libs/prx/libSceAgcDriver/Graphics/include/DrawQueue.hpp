@@ -45,6 +45,9 @@ public:
     // sample count when the batch is retired. SamplesPassed covers the retired batches.
     void EnableSampleCounting(const Context& context, bool precise);
     std::uint64_t SamplesPassed() const { return samplesPassed; }
+    // The samples of every completed batch, counted without retiring any (nothing is released, so
+    // it may run where batches must not be retired).
+    std::uint64_t CompletedSamples();
 
 private:
     struct Entry {
@@ -74,6 +77,8 @@ private:
         bool hasBarrier = false;
         // The occlusion query around the batch, or -1.
         std::int32_t query = -1;
+        // Its result was added to samplesPassed before the batch retired (CompletedSamples).
+        bool counted = false;
     };
     struct SampleCounter {
         explicit SampleCounter(const Context& context, bool precise);

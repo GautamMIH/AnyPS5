@@ -59,7 +59,7 @@ PipelineCache::PipelineCache(const Context& context, const VkPhysicalDevicePrope
     }
     Check(result, "vkCreatePipelineCache");
     // Games are usually stopped rather than torn down, so the cache is also saved while it grows.
-    if (!path.empty()) saver = std::thread([this] { run(); });
+    if (!path.empty() && std::getenv("APS5_TEST_NO_CACHE_SAVER") == nullptr) saver = std::thread([this] { run(); });
 }
 
 PipelineCache::~PipelineCache() {

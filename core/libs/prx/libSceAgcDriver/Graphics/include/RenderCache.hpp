@@ -28,6 +28,9 @@ public:
     void Begin(VkCommandBuffer commands);
     // Whether Begin records commands (an upload or a layout change): a merged draw records none.
     bool BeginRecords() const { return !valid || layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; }
+    // Whether Begin uploads the target from guest memory on the CPU (it must wait for pending GPU
+    // writes of the range first); a GPU upload is ordered by a barrier instead.
+    bool NeedsCpuUpload() const;
     void Download(VkCommandBuffer commands);
     void Commit();
     // With guest memory imported, records the write-back on the draw queue instead: the image is
@@ -75,6 +78,7 @@ public:
     ~ResidentDepth();
     void Begin(VkCommandBuffer commands);
     bool BeginRecords() const { return !valid || layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL; }
+    bool NeedsCpuUpload() { return !valid && !prepareGpu(); }
     void Download(VkCommandBuffer commands);
     void Commit();
     // As ResidentColor::WriteBackOnGpu: the planes are tiled on the GPU straight into imported

@@ -78,6 +78,12 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
     memoryWatch->Protect(GuestMemoryTracking::Protection::None);
 }
 
+bool ResidentColor::NeedsCpuUpload() const {
+    if (valid) return false;
+    if (layered) return !layered->PrepareGpu();
+    return !guestView();
+}
+
 std::optional<GuestGpuMemory::View> ResidentColor::guestView() const {
     if (context.guestGpuMemory == nullptr || layered) return std::nullopt;
     const ColorTargetLayout layout(color.extent.width, color.extent.height, color.tileMode, color.elementBytes, color.tail);
@@ -171,7 +177,19 @@ void ResidentColor::Commit() {
 
 std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool blending) {
     Require(color.address != 0 && color.bytes != 0 && color.bytes <= std::numeric_limits<std::uint64_t>::max() - color.address, "invalid resident color range");
-    if (context.drawQueue) context.drawQueue->Resolve(color.address, color.bytes);
+    // Pending GPU writes of the range are ordered before the target's use by a barrier; only an upload
+    // the CPU makes (NeedsCpuUpload) waits for them (cpuResolve below).
+    // ANYPS5_CPU_TARGET_WAIT=1 always waits (on the CPU).
+    static const bool cpuTargetWait = std::getenv("ANYPS5_CPU_TARGET_WAIT") != nullptr;
+    if (context.drawQueue) {
+        std::optional<GuestMemory::GpuAccessScope> gpuAccess;
+        if (!cpuTargetWait) gpuAccess.emplace();
+        context.drawQueue->Resolve(color.address, color.bytes);
+    }
+    const auto cpuResolve = [&](const std::shared_ptr<ResidentColor>& resident) {
+        if (context.drawQueue && resident->NeedsCpuUpload()) context.drawQueue->Resolve(color.address, color.bytes);
+        return resident;
+    };
     if (blending) {
         VkFormatProperties properties{};
         context.formatProperties(context.physical, color.format, &properties);
@@ -183,7 +201,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
             ++it;
             continue;
         }
-        if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode && previous.elementBytes == color.elementBytes && previous.tail == color.tail && previous.layers == color.layers && previous.baseLayer == color.baseLayer && previous.surfaceSlices == color.surfaceSlices) return it->second;
+        if (previous.address == color.address && previous.bytes == color.bytes && previous.extent.width == color.extent.width && previous.extent.height == color.extent.height && previous.format == color.format && previous.tileMode == color.tileMode && previous.elementBytes == color.elementBytes && previous.tail == color.tail && previous.layers == color.layers && previous.baseLayer == color.baseLayer && previous.surfaceSlices == color.surfaceSlices) return cpuResolve(it->second);
         if (TraceRenderTargets()) std::fprintf(stderr, "[rt] replace color@0x%llx+0x%llx %ux%u fmt%d tile%u eb%u dirty=%d -> color@0x%llx+0x%llx %ux%u fmt%d tile%u eb%u\n", static_cast<unsigned long long>(previous.address), static_cast<unsigned long long>(previous.bytes), previous.extent.width, previous.extent.height, static_cast<int>(previous.format), static_cast<unsigned>(previous.tileMode), static_cast<unsigned>(previous.elementBytes), it->second->Dirty() ? 1 : 0, static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.bytes), color.extent.width, color.extent.height, static_cast<int>(color.format), static_cast<unsigned>(color.tileMode), static_cast<unsigned>(color.elementBytes));
         // The new target is uploaded on the GPU after this, so the old one can be written back there.
         const GuestMemory::AccessSite replaceSite("rt_replace");
@@ -211,7 +229,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
     auto entry = std::make_shared<ResidentColor>(context, color);
     entries.emplace(color.address, entry);
     largestColor = std::max<std::uint64_t>(largestColor, color.bytes);
-    return entry;
+    return cpuResolve(entry);
 }
 
 std::shared_ptr<ResidentColor> RenderCache::Find(std::uint64_t address) const {

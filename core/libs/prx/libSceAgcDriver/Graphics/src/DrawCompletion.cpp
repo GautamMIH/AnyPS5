@@ -1,3 +1,7 @@
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include <dlfcn.h>
+#include <cstdio>
+#include <cstdlib>
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -14,10 +18,12 @@ void DrawQueue::retire(Batch batch) {
     timing.Mark("resources_writeback");
     if (batch.query >= 0) {
         // The batch completed, so its query result is available.
-        std::uint64_t passed = 0;
         const auto query = static_cast<std::uint32_t>(batch.query);
-        Check(samples->context.Function<PFN_vkGetQueryPoolResults>("vkGetQueryPoolResults")(samples->context.device, samples->pool, query, 1, sizeof(passed), &passed, sizeof(passed), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT), "vkGetQueryPoolResults");
-        samplesPassed += passed;
+        if (!batch.counted) {
+            std::uint64_t passed = 0;
+            Check(samples->context.Function<PFN_vkGetQueryPoolResults>("vkGetQueryPoolResults")(samples->context.device, samples->pool, query, 1, sizeof(passed), &passed, sizeof(passed), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT), "vkGetQueryPoolResults");
+            samplesPassed += passed;
+        }
         samples->free.push_back(query);
         timing.Mark("sample_count");
     }
@@ -27,6 +33,18 @@ void DrawQueue::retire(Batch batch) {
     batch.entries.clear();
     available.push_back(std::move(batch.commands));
     timing.Mark("resources_release");
+}
+
+std::uint64_t DrawQueue::CompletedSamples() {
+    for (auto& batch : pending) {
+        if (!batch.commands->IsComplete()) break;
+        if (batch.query < 0 || batch.counted) continue;
+        std::uint64_t passed = 0;
+        Check(samples->context.Function<PFN_vkGetQueryPoolResults>("vkGetQueryPoolResults")(samples->context.device, samples->pool, static_cast<std::uint32_t>(batch.query), 1, sizeof(passed), &passed, sizeof(passed), VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT), "vkGetQueryPoolResults");
+        samplesPassed += passed;
+        batch.counted = true;
+    }
+    return samplesPassed;
 }
 
 void DrawQueue::Collect() {
@@ -45,6 +63,15 @@ void DrawQueue::WaitGpu() {
 void DrawQueue::Wait() {
     if (pending.empty() && !recording.commands) return;
     PerformanceTimer timing("Graphics.DrawQueue.Wait");
+    // Debug aid: APS5_TRACE_QUEUE_WAIT=1 logs each full wait's caller (module+offset, for addr2line)
+    // and access site.
+    static const bool traceWait = std::getenv("APS5_TRACE_QUEUE_WAIT") != nullptr;
+    if (traceWait) {
+        Dl_info info{};
+        const auto* caller = __builtin_return_address(0);
+        const auto found = dladdr(caller, &info) != 0 && info.dli_fname != nullptr;
+        std::fprintf(stderr, "[queue-wait] %zu batches caller %s+0x%llx site %s\n", pending.size() + (recording.commands ? 1 : 0), found ? info.dli_fname : "?", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(caller) - (found ? reinterpret_cast<std::uintptr_t>(info.dli_fbase) : 0)), GuestMemory::AccessSite::Current());
+    }
     Flush();
     timing.Mark("submit");
     while (!pending.empty()) {

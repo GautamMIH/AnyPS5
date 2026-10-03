@@ -38,6 +38,9 @@ public:
 
     // The GPU view of guest memory starting at address, or nothing when it is not segment memory.
     std::optional<View> Resolve(std::uint64_t address, std::uint64_t bytes);
+    // Views of a range that crosses backing segments, one per segment in address order (each
+    // covering view.bytes); empty when some part is not guest memory.
+    std::vector<View> ResolvePieces(std::uint64_t address, std::uint64_t bytes);
     // A view for GPU reads only, in device-local memory when the mirror applies: pages written since
     // they were last copied (by the CPU, the GPU through Resolve's view, or the driver) are copied
     // from guest memory first, recorded into commands in queue order. Falls back to Resolve's view.

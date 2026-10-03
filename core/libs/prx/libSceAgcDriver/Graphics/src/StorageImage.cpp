@@ -57,13 +57,33 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
         const GuestMemory::GpuAccessScope gpuAccess;
         GuestMemory::CheckRange(reinterpret_cast<const void*>(guestBase), static_cast<std::size_t>(guestBytes), 1, true);
     }
+    const char* cpuReason = context.guestGpuMemory == nullptr ? "no import" : context.detiler == nullptr ? "no detiler" : thick ? "thick" : "";
     // Thick volumes interleave slices within blocks, which the GPU tiler does not model.
     if (context.guestGpuMemory != nullptr && context.detiler != nullptr && !thick) {
         guest = context.guestGpuMemory->Resolve(guestBase, guestBytes);
-        if (guest && guest->bytes != guestBytes) guest.reset();
+        if (!guest) cpuReason = "not imported";
+        else if (guest->bytes != guestBytes) cpuReason = "partly imported";
+        if (guest && guest->bytes != guestBytes) {
+            guest.reset();
+            // Split across backing segments (contiguous guest addresses, separate memory): tiled on
+            // the GPU through a gathered copy. ANYPS5_NO_STORAGE_GATHER=1 tiles it on the CPU.
+            static const bool noGather = std::getenv("ANYPS5_NO_STORAGE_GATHER") != nullptr;
+            static const bool testNoMode5 = std::getenv("APS5_TEST_GATHER_NO_MODE5") != nullptr;
+            if (!noGather && !(testNoMode5 && static_cast<int>(resource.tileMode) == 5)) pieces = context.guestGpuMemory->ResolvePieces(guestBase, guestBytes);
+            if (pieces.size() > 1) {
+                gathered = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+                guest = GuestGpuMemory::View{gathered->Handle(), 0, 0, guestBytes};
+                cpuReason = "";
+            } else {
+                pieces.clear();
+            }
+        }
         // The GPU writes the image's texels into guest memory without passing the guest mappings.
         if (guest) WriteTracker::NoteGpuWrite(guestBase, guestBytes);
     }
+    // Debug aid: APS5_TRACE_STORAGE=1 logs every storage image: its shape and whether the GPU tiles it.
+    static const bool traceStorage = std::getenv("APS5_TRACE_STORAGE") != nullptr;
+    if (traceStorage) std::fprintf(stderr, "[storage] 0x%llx %ux%ux%u mode %d bpe %u %s%s bytes 0x%llx -> %s %s\n", static_cast<unsigned long long>(guestBase), mip.width, mip.height, layers, static_cast<int>(resource.tileMode), elementBytes, volume ? "volume" : "2d", thick ? " thick" : "", static_cast<unsigned long long>(guestBytes), guest ? "gpu" : "cpu", guest ? "" : cpuReason);
     if (guest) {
         const auto deviceUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         tiledStaging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -158,8 +178,41 @@ std::vector<VkBufferImageCopy> StorageImage::imageCopies() const {
     return copies;
 }
 
+// Pieces -> gathered (whole range), or gathered -> pieces (only this mip's tiled bytes of each
+// layer, so other mips sharing the surface keep what others wrote).
+void StorageImage::recordGather(VkCommandBuffer commands, bool scatter) {
+    const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
+    const auto copy = context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer");
+    VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    before.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+    std::uint64_t start = 0;
+    for (const auto& piece : pieces) {
+        const auto end = start + piece.bytes;
+        if (!scatter) {
+            const VkBufferCopy region{piece.offset, start, piece.bytes};
+            copy(commands, piece.buffer, gathered->Handle(), 1, &region);
+        } else {
+            std::vector<VkBufferCopy> regions;
+            for (std::uint32_t layer = 0; layer < layers; ++layer) {
+                const auto first = std::max<std::uint64_t>(start, layer * sliceBytes + mip.tiledOffset);
+                const auto last = std::min<std::uint64_t>(end, layer * sliceBytes + mip.tiledOffset + mip.tiledSize);
+                if (first < last) regions.push_back({first, piece.offset + (first - start), last - first});
+            }
+            if (!regions.empty()) copy(commands, gathered->Handle(), piece.buffer, static_cast<std::uint32_t>(regions.size()), regions.data());
+        }
+        start = end;
+    }
+    VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+    barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+}
+
 // Guest tiled bytes -> detile per layer -> image.
 void StorageImage::recordGpuUpload(VkCommandBuffer commands) {
+    if (!pieces.empty()) recordGather(commands, false);
     const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     VkMemoryBarrier earlier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     earlier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -232,6 +285,7 @@ void StorageImage::recordGpuDownload(VkCommandBuffer commands) {
     merged.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     merged.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
     barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &merged, 0, nullptr, 0, nullptr);
+    if (!pieces.empty()) recordGather(commands, true);
 }
 
 void StorageImage::RecordUpload(VkCommandBuffer commands) {

@@ -25,6 +25,10 @@ public:
     // The samples that passed the depth and stencil tests in every draw recorded since the first
     // call (which turns counting on), after waiting for the queued draws (PIXEL_PIPE_STAT_DUMP).
     std::uint64_t CountSamples();
+    // Without waiting: enables sample counting for later draws, and the samples of every batch that
+    // has completed (all those before a reached marker).
+    void EnableSampleCounting();
+    std::uint64_t CompletedSamples();
     void AcquireGpuMemory();
     // GPU completion markers (see Graphics::DrawQueue::SubmitMarker).
     std::uint64_t SubmitMarker();

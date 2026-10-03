@@ -49,6 +49,11 @@ private:
     // cover (write-back replaces only those, so images sharing a mip tail keep each other's
     // texels), an all-ones linear image for tiling the mask, and the passes' descriptor sets.
     std::optional<GuestGpuMemory::View> guest;
+    // A guest range split across backing segments: its pieces are gathered into `gathered` (which
+    // `guest` then views) before the upload and the mip's bytes scattered back after the download.
+    std::vector<GuestGpuMemory::View> pieces;
+    std::unique_ptr<Buffer> gathered;
+    void recordGather(VkCommandBuffer commands, bool scatter);
     std::uint64_t guestBytes = 0;
     std::unique_ptr<Buffer> tiledStaging;
     std::unique_ptr<Buffer> tiledMask;
