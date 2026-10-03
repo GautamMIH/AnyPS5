@@ -131,6 +131,14 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
         }
         Require(storageBuffers <= context.limits.maxDescriptorSetStorageBuffers, "pipeline descriptors exceed device limits");
         timing.Mark("bindings");
+        // Storage images note their GPU writes while bindings are made, maybe after a texture over the
+        // same memory was validated for this work.
+        if (context.textureCache) {
+            for (const auto& image : storageImages) {
+                const auto [begin, end] = image->Range();
+                context.textureCache->NoteDrawWrites(begin, end);
+            }
+        }
         guestMemory.Upload(usesBda);
         if (usesBda) bda = std::make_unique<BdaResources>(context, guestMemory);
         else if (usesFaultBuffer) bda = std::make_unique<BdaResources>(context);

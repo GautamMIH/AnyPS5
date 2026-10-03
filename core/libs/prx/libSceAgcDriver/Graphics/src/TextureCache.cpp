@@ -53,9 +53,31 @@ void TextureCache::trim() {
 }
 
 // Whether the guest range of a snapshot certainly still holds the snapshot's bytes.
+namespace {
+// Debug aid: APS5_TRACE_TEXMEMO=1 counts why tracked validation fails (the texture is then compared
+// or recreated) and prints the totals every 2000 failures.
+void noteUnchangedFailure(int reason, std::uint64_t bytes) {
+    static const bool trace = std::getenv("APS5_TRACE_TEXMEMO") != nullptr;
+    if (!trace) return;
+    static std::array<std::uint64_t, 5> counts{};
+    static std::array<std::uint64_t, 5> totals{};
+    ++counts[reason];
+    totals[reason] += bytes;
+    static std::uint64_t failures = 0;
+    if (++failures % 2000 != 0) return;
+    static constexpr const char* names[] = {"untracked", "views", "gpu", "alias", "cpu"};
+    std::string line;
+    for (int i = 0; i < 5; ++i) line += std::string(" ") + names[i] + "=" + std::to_string(counts[i]) + "/" + std::to_string(totals[i] >> 20) + "MiB";
+    std::fprintf(stderr, "[texmemo]%s\n", line.c_str());
+}
+}
+
 bool TextureCache::unchanged(Entry& entry) {
     PerformanceTimer timing("Graphics.TextureMemo");
-    if (!WriteTracker::Available()) return false;
+    if (!WriteTracker::Available()) {
+        noteUnchangedFailure(0, entry.bytes);
+        return false;
+    }
     const auto bytes = entry.bytes;
     // Writes through another mapping of the same memory would not mark these pages.
     const auto memoryGeneration = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
@@ -73,17 +95,37 @@ bool TextureCache::unchanged(Entry& entry) {
         entry.singleView = GuestMemoryBacking::GuestVirtualSingleView_nid_postfix(entry.address, bytes);
         entry.viewGeneration = memoryGeneration;
     }
-    if (!entry.singleView) return false;
-    const auto gpuGeneration = WriteTracker::GpuWriteGeneration();
-    if (entry.gpuGeneration != gpuGeneration) {
-        entry.gpuWritten = WriteTracker::GpuWritten(entry.address, bytes);
-        entry.gpuGeneration = gpuGeneration;
+    if (!entry.singleView) {
+        noteUnchangedFailure(1, bytes);
+        return false;
     }
-    if (entry.gpuWritten || WriteTracker::AliasWrittenSince(entry.address, bytes, entry.aliasGeneration)) return false;
-    if (WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration)) return false;
+    // Written by the GPU since it was validated (shadPS4 keeps a dirty flag per image for this; an
+    // "ever written" mark made every texture in such memory compare on each use).
+    // ANYPS5_STICKY_GPU_WRITES=1: any GPU write ever made to the range counts (the former rule).
+    static const bool sticky = std::getenv("ANYPS5_STICKY_GPU_WRITES") != nullptr;
+    if (sticky ? WriteTracker::GpuWritten(entry.address, bytes) : WriteTracker::GpuWrittenSince(entry.address, bytes, entry.gpuSequence)) {
+        noteUnchangedFailure(2, bytes);
+        return false;
+    }
+    if (WriteTracker::AliasWrittenSince(entry.address, bytes, entry.aliasGeneration)) {
+        noteUnchangedFailure(3, bytes);
+        return false;
+    }
+    if (WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration)) {
+        noteUnchangedFailure(4, bytes);
+        return false;
+    }
     entry.unchangedAt = at;
     entry.unchangedDriverSequence = driverSequence;
     return true;
+}
+
+void TextureCache::NoteDrawWrites(std::uint64_t begin, std::uint64_t end) {
+    for (auto& entry : entries) {
+        if (entry.bytes == 0 || !(entry.address < end && begin < entry.address + entry.bytes)) continue;
+        entry.gpuSequence = 0;
+        entry.unchangedAt = {};
+    }
 }
 
 std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool depthCompare) {
@@ -152,8 +194,21 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
             timing.Mark("range_check");
             if (unchanged(*it)) {
                 timing.Mark("validate_tracked");
+                // Debug aid: APS5_VERIFY_TEXTURE_TRACKING=1 keeps every snapshot and compares it with
+                // guest memory whenever write tracking vouches for the entry (a mismatch is a missed write).
+                static const bool verify = std::getenv("APS5_VERIFY_TEXTURE_TRACKING") != nullptr;
+                if (verify && !it->snapshot.empty()) {
+                    static std::uint64_t checks = 0;
+                    static std::uint64_t mismatches = 0;
+                    ++checks;
+                    if (std::memcmp(reinterpret_cast<const void*>(resource.baseAddress), it->snapshot.data(), it->snapshot.size()) != 0) {
+                        ++mismatches;
+                        std::fprintf(stderr, "[verify-texture] MISSED WRITE at 0x%llx+0x%zx\n", static_cast<unsigned long long>(resource.baseAddress), it->snapshot.size());
+                    }
+                    if (checks % 2000 == 0) std::fprintf(stderr, "[verify-texture] %llu checks, %llu mismatches\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(mismatches));
+                }
                 // Write tracking vouches for the entry from now on, so it keeps no snapshot.
-                if (!it->tracked) {
+                if (!it->tracked && !verify) {
                     retainedBytes -= it->snapshot.size();
                     std::vector<std::byte>().swap(it->snapshot);
                     it->tracked = true;
@@ -168,11 +223,13 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
                 goto create;
             }
             const auto aliasGeneration = WriteTracker::AliasWriteGeneration();
+            const auto gpuSequence = WriteTracker::GpuWriteSequence();
             const auto cpuGeneration = WriteTracker::CpuMark(resource.baseAddress, it->snapshot.size());
             const bool same = std::memcmp(reinterpret_cast<const void*>(resource.baseAddress), it->snapshot.data(), it->snapshot.size()) == 0;
             timing.Mark("validate_compare", it->snapshot.size());
             if (same) {
                 it->aliasGeneration = aliasGeneration;
+                it->gpuSequence = gpuSequence;
                 it->cpuGeneration = cpuGeneration;
                 auto result = it->texture;
                 entries.splice(entries.end(), entries, it);
@@ -213,6 +270,7 @@ create:
     Require(bytes != 0 && bytes <= std::numeric_limits<std::size_t>::max(), "texture cache surface size overflow");
     std::vector<std::byte> snapshot(static_cast<std::size_t>(bytes));
     const auto aliasGeneration = WriteTracker::AliasWriteGeneration();
+    const auto gpuSequence = WriteTracker::GpuWriteSequence();
     const auto cpuGeneration = WriteTracker::CpuMark(resource.baseAddress, bytes);
     {
         const GuestMemory::AccessSite site("cpu_wait_texture_miss");
@@ -243,6 +301,7 @@ create:
     entry.address = resource.baseAddress;
     entry.bytes = bytes;
     entry.aliasGeneration = aliasGeneration;
+    entry.gpuSequence = gpuSequence;
     entry.cpuGeneration = cpuGeneration;
     entries.push_back(std::move(entry));
     index[key] = std::prev(entries.end());

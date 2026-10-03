@@ -18,6 +18,8 @@ namespace {
 constexpr unsigned kBlockShift = 16;
 // Alias writes are remembered this far back; older queries answer "written".
 constexpr std::size_t kAliasHistory = 4096;
+// GPU writes likewise.
+constexpr std::size_t kGpuHistory = 16384;
 // Driver writes likewise (older collections are collected again).
 constexpr std::size_t kDriverHistory = 4096;
 
@@ -60,6 +62,14 @@ struct State {
     std::mutex mutex;
     std::map<std::uint64_t, std::uint64_t> gpuRanges;  // begin -> end, merged
     std::atomic<std::uint64_t> gpuGeneration{0};
+    struct GpuWrite {
+        std::uint64_t sequence;
+        std::uint64_t begin;
+        std::uint64_t end;
+    };
+    std::deque<GpuWrite> gpuWrites;
+    std::uint64_t gpuFloor = 0;
+    std::atomic<std::uint64_t> gpuSequence{0};
 
     struct AliasWrite {
         std::uint64_t generation;
@@ -223,6 +233,13 @@ void NoteGpuWrite(std::uint64_t address, std::uint64_t bytes) {
     auto begin = address / size * size;
     auto end = (address + bytes + size - 1) / size * size;
     std::lock_guard lock(tracker.mutex);
+    const auto sequence = tracker.gpuSequence.load(std::memory_order_relaxed) + 1;
+    tracker.gpuWrites.push_back({sequence, begin, end});
+    if (tracker.gpuWrites.size() > kGpuHistory) {
+        tracker.gpuFloor = tracker.gpuWrites.front().sequence;
+        tracker.gpuWrites.pop_front();
+    }
+    tracker.gpuSequence.store(sequence, std::memory_order_release);
     auto& ranges = tracker.gpuRanges;
     auto it = ranges.upper_bound(begin);
     if (it != ranges.begin() && std::prev(it)->second >= begin) --it;
@@ -234,6 +251,21 @@ void NoteGpuWrite(std::uint64_t address, std::uint64_t bytes) {
     }
     ranges.emplace(begin, end);
     tracker.gpuGeneration.fetch_add(1, std::memory_order_acq_rel);
+}
+
+std::uint64_t GpuWriteSequence() {
+    return state().gpuSequence.load(std::memory_order_acquire);
+}
+
+bool GpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t sequence) {
+    auto& tracker = state();
+    if (tracker.gpuSequence.load(std::memory_order_acquire) == sequence) return false;
+    std::lock_guard lock(tracker.mutex);
+    if (sequence < tracker.gpuFloor) return true;
+    const auto end = address + bytes;
+    for (auto it = tracker.gpuWrites.rbegin(); it != tracker.gpuWrites.rend() && it->sequence > sequence; ++it)
+        if (it->begin < end && address < it->end) return true;
+    return false;
 }
 
 bool GpuWritten(std::uint64_t address, std::uint64_t bytes) {

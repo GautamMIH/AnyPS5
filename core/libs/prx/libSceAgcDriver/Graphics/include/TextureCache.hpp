@@ -21,6 +21,9 @@ public:
     // The depth plane the work being set up renders to (0: none): textures over it are copies,
     // since sampling an attachment while rendering to it is a feedback loop.
     void SetRenderedDepth(std::uint64_t address) { renderedDepth = address; }
+    // The work being set up writes [begin, end) on the GPU (storage images). It may have validated a
+    // texture over that range before noting the write: such textures are compared again next time.
+    void NoteDrawWrites(std::uint64_t begin, std::uint64_t end);
 
 private:
     // Descriptor words plus the view dimension, which the shader's image shape may change.
@@ -42,9 +45,9 @@ private:
         std::uint64_t bytes = 0;
         std::uint64_t aliasGeneration = 0;
         std::uint64_t cpuGeneration = 0;
-        std::uint64_t gpuGeneration = ~0ull;
+        // The GPU-write sequence when the entry was last read or compared (WriteTracker::GpuWrittenSince).
+        std::uint64_t gpuSequence = 0;
         std::uint64_t viewGeneration = ~0ull;
-        bool gpuWritten = true;
         bool singleView = false;
         // Tracked entries keep no snapshot (write tracking alone vouches for them); a possibly
         // written tracked entry is recreated.
