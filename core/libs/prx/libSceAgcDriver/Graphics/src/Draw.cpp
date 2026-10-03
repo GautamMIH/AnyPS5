@@ -94,24 +94,49 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     auto storage = std::make_shared<DrawStorage>();
     auto& indices = storage->indices;
     std::uint32_t maxIndex = draw.indexed ? 0u : draw.firstVertex + draw.indexCount - 1u;
+    VkBuffer indexHandle = VK_NULL_HANDLE;
+    VkDeviceSize indexOffset = 0;
     if (draw.indexed) {
-        indices = std::make_unique<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
-        {
-            const GuestMemory::AccessSite site("cpu_wait_index");
-            GuestMemory::Read(draw.indexAddress, indices->Bytes(), draw.indexSize);
-        }
-        for (std::size_t offset = 0; offset < indexBytes; offset += draw.indexSize) {
-            std::uint32_t index = 0;
-            if (draw.indexSize == 2) {
-                std::uint16_t value = 0;
-                std::memcpy(&value, indices->Bytes().data() + offset, sizeof(value));
-                index = value;
-            } else {
-                std::memcpy(&index, indices->Bytes().data() + offset, sizeof(index));
+        // The indices are scanned where they are (the range check above made pending writes land).
+        // With imported guest memory the GPU reads them in place too, as it does vertices; otherwise
+        // they are copied. ANYPS5_COPY_INDICES=1 always copies.
+        static const bool copyIndices = std::getenv("ANYPS5_COPY_INDICES") != nullptr;
+        std::span<const std::byte> source;
+        if (!copyIndices && context.guestGpuMemory != nullptr) {
+            {
+                const GuestMemory::GpuAccessScope gpuAccess;
+                GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
             }
-            Require(index <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
-            maxIndex = std::max(maxIndex, index);
+            const auto view = context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->ResolveRead(draw.indexAddress, indexBytes, context.drawQueue->Begin(context)) : context.guestGpuMemory->Resolve(draw.indexAddress, indexBytes);
+            if (view && view->bytes >= indexBytes && view->offset % draw.indexSize == 0) {
+                indexHandle = view->buffer;
+                indexOffset = view->offset;
+                source = std::span(reinterpret_cast<const std::byte*>(draw.indexAddress), static_cast<std::size_t>(indexBytes));
+            }
         }
+        if (indexHandle == VK_NULL_HANDLE) {
+            indices = std::make_unique<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+            {
+                const GuestMemory::AccessSite site("cpu_wait_index");
+                GuestMemory::Read(draw.indexAddress, indices->Bytes(), draw.indexSize);
+            }
+            indexHandle = indices->Handle();
+            source = indices->Bytes();
+        }
+        if (draw.indexSize == 2) {
+            for (std::size_t offset = 0; offset < indexBytes; offset += 2) {
+                std::uint16_t value = 0;
+                std::memcpy(&value, source.data() + offset, sizeof(value));
+                maxIndex = std::max<std::uint32_t>(maxIndex, value);
+            }
+        } else {
+            for (std::size_t offset = 0; offset < indexBytes; offset += 4) {
+                std::uint32_t value = 0;
+                std::memcpy(&value, source.data() + offset, sizeof(value));
+                maxIndex = std::max(maxIndex, value);
+            }
+        }
+        Require(maxIndex <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
         const auto highest = static_cast<std::int64_t>(maxIndex) + static_cast<std::int32_t>(draw.firstVertex);
         Require(highest >= 0 && highest <= std::numeric_limits<std::uint32_t>::max(), "base vertex moves indices out of range");
         maxIndex = static_cast<std::uint32_t>(highest);
@@ -244,7 +269,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     } else {
         if (!vertexHandles.empty()) context.Function<PFN_vkCmdBindVertexBuffers>("vkCmdBindVertexBuffers")(commands, 0, static_cast<std::uint32_t>(vertexHandles.size()), vertexHandles.data(), vertexOffsets.data());
         if (draw.indexed) {
-            context.Function<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer")(commands, indices->Handle(), 0, draw.indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
+            context.Function<PFN_vkCmdBindIndexBuffer>("vkCmdBindIndexBuffer")(commands, indexHandle, indexOffset, draw.indexSize == 2 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32);
             context.Function<PFN_vkCmdDrawIndexed>("vkCmdDrawIndexed")(commands, draw.indexCount, draw.instanceCount, 0, static_cast<std::int32_t>(draw.firstVertex), draw.firstInstance);
         } else {
             context.Function<PFN_vkCmdDraw>("vkCmdDraw")(commands, draw.indexCount, draw.instanceCount, draw.firstVertex, draw.firstInstance);
