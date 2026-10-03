@@ -202,6 +202,7 @@ struct SpirvTarget {
     // of it is bound from the aligned address below (BufferViewMisalignment), and the shader adds
     // the difference; 0 or 1 binds every buffer at its base.
     std::uint32_t storageBufferOffsetAlignment = 0;
+    bool nonConstantImageOffsets = false;
 };
 
 // The bytes a guest buffer view starts before its V# base so that its descriptor offset meets the

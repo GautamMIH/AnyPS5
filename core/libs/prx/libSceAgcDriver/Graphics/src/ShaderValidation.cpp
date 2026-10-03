@@ -132,7 +132,7 @@ struct Module {
             position = true;
         } else {
             const bool depthOutput = storage == spv::StorageClassOutput && value == spv::BuiltInFragDepth && signature == "f32";
-            Require(depthOutput || (storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || (value == spv::BuiltInFrontFacing && signature == "bool") || (value == spv::BuiltInLayer && (signature == "u32" || signature == "i32")))), "unsupported fragment built-in");
+            Require(depthOutput || (storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || ((value == spv::BuiltInFrontFacing || value == spv::BuiltInHelperInvocation) && signature == "bool") || (value == spv::BuiltInLayer && (signature == "u32" || signature == "i32")))), "unsupported fragment built-in");
         }
     }
 };

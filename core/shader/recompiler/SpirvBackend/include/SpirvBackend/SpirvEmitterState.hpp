@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -81,7 +82,17 @@ struct SpirvEmitterState {
 
     SpirvRequirements requirements;
     std::uint32_t laneCount = 1;
+    std::unordered_set<const IrValue*> sharedLaneValues;
     std::uint32_t laneHalf = 0;
+    // The target's SPIR-V version and what the device accepts, for capabilities an emitter adds
+    // only when needed (bindless image tables: see TableImageIndex).
+    std::uint32_t spirvVersion = 0x00010300u;
+    std::span<const std::uint32_t> supportedCapabilities;
+    std::span<const std::string_view> supportedExtensions;
+    bool nonConstantImageOffsets = false;
+    // A bindless table's runtime slot is wave-uniform; it is uniform over the invocation group
+    // only for a single-wave compute workgroup, elsewhere it needs the NonUniform decoration.
+    bool tableIndexNonUniform = true;
     std::uint32_t storageBufferVariable = 0;
     std::uint32_t storageBufferU64Variable = 0;
     std::array<std::uint32_t, ShaderInfo::MaxBuffers> memoryByteOffsets {};

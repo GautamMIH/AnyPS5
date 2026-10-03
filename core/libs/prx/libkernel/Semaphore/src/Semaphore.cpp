@@ -1,4 +1,3 @@
-#include "prx/libkernel/Time/include/StallWatch.hpp"
 #include "prx/libkernel/Semaphore/include/Semaphore.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include <chrono>
@@ -8,7 +7,7 @@
 #include <utility>
 
 KernelSemaPrivate::KernelSemaPrivate(std::int32_t initCount, std::int32_t maxCount, std::string name, bool isFifo)
- : name(std::move(name)), initCount(initCount), tokenCount(initCount), maxCount(maxCount), isFifo(isFifo) {
+ : name(std::move(name)), tokenCount(initCount), initCount(initCount), maxCount(maxCount), isFifo(isFifo) {
 }
 
 extern "C" {
@@ -51,31 +50,47 @@ int APS5_VABI sceKernelSignalSema(KernelSema sem, int count) {
 }
 
 int APS5_VABI sceKernelWaitSema(KernelSema sem, int need, KernelUseconds* time) {
- APS5_STALL_WATCH("sema", reinterpret_cast<const void*>(sem));
  if (sem == nullptr || need <= 0) {
   APS5_INVALID_ARG_EX;
  }
 
  std::unique_lock<std::mutex> lock(sem->mutex);
- if (need > sem->maxCount) {
-  return SCE_KERNEL_ERROR_EINVAL;
- }
- const auto generation = sem->cancelGeneration;
- const auto ready = [&] { return sem->deleted || sem->cancelGeneration != generation || sem->tokenCount >= need; };
- ++sem->waiters;
+ const std::uint64_t generation = sem->cancelGeneration;
+ ++sem->waiterCount;
+ ++sem->cancelableCount;
+ struct WaiterGuard {
+  KernelSemaPrivate* sem;
+  std::uint64_t generation;
+  ~WaiterGuard() {
+   --sem->waiterCount;
+   if (sem->cancelGeneration == generation) {
+    --sem->cancelableCount;
+   }
+   sem->condition.NotifyAll();
+  }
+ } waiterGuard{sem, generation};
+
  const auto waitStart = std::chrono::steady_clock::now();
- bool acquired = true;
+ const auto traceWait = [&](bool timedOut) {
+  KernelTraceWait_nid_postfix("sema", __builtin_return_address(0), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count()), timedOut);
+ };
+ const auto released = [&] { return sem->tokenCount >= need || sem->deleted || sem->cancelGeneration != generation; };
  if (time == nullptr) {
-  sem->condition.Wait(lock, ready);
- } else {
-  acquired = sem->condition.WaitUntil(lock, TimedWait::DeadlineNanos(*time), ready);
-  const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - waitStart).count();
-  *time = elapsed >= static_cast<std::int64_t>(*time) ? 0 : static_cast<KernelUseconds>(*time - elapsed);
+  sem->condition.Wait(lock, released);
+  traceWait(false);
+  if (sem->deleted) {
+   return SCE_KERNEL_ERROR_EACCES;
+  }
+  if (sem->cancelGeneration != generation) {
+   return SCE_KERNEL_ERROR_ECANCELED;
+  }
+  sem->tokenCount -= need;
+  return KERNEL_SEMA_OK;
  }
- KernelTraceWait_nid_postfix("sema", __builtin_return_address(0), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count()), !acquired);
- --sem->waiters;
+
+ const bool acquired = sem->condition.WaitUntil(lock, TimedWait::DeadlineNanos(*time), released);
+ traceWait(!acquired);
  if (sem->deleted) {
-  sem->condition.NotifyAll();
   return SCE_KERNEL_ERROR_EACCES;
  }
  if (sem->cancelGeneration != generation) {
@@ -98,9 +113,10 @@ int APS5_VABI sceKernelCancelSema(KernelSema sem, int count, int* threads) {
   return SCE_KERNEL_ERROR_EINVAL;
  }
  if (threads != nullptr) {
-  *threads = sem->waiters;
+  *threads = sem->cancelableCount;
  }
  sem->tokenCount = count < 0 ? sem->initCount : count;
+ sem->cancelableCount = 0;
  ++sem->cancelGeneration;
  sem->condition.NotifyAll();
  return KERNEL_SEMA_OK;
@@ -111,12 +127,11 @@ int APS5_VABI sceKernelDeleteSema(KernelSema sem) {
   APS5_INVALID_ARG_EX;
  }
 
- {
-  std::unique_lock<std::mutex> lock(sem->mutex);
-  sem->deleted = true;
-  sem->condition.NotifyAll();
-  sem->condition.Wait(lock, [&] { return sem->waiters == 0; });
- }
+ std::unique_lock<std::mutex> lock(sem->mutex);
+ sem->deleted = true;
+ sem->condition.NotifyAll();
+ sem->condition.Wait(lock, [&] { return sem->waiterCount == 0; });
+ lock.unlock();
  delete sem;
  return KERNEL_SEMA_OK;
 }

@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -30,16 +31,31 @@ static int validateOutputConfig(int handle, uint64_t mode, const VideoOutOutputO
     return 0;
 }
 
+static void validateOpenParam(const void* param) {
+    if (param == nullptr) return;
+    VideoOutOpenParam openParam{};
+    std::memcpy(&openParam, param, offsetof(VideoOutOpenParam, affinity));
+    if (openParam.firstWord != VIDEO_OUT_OPEN_PARAM_FIRST_WORD) {
+        throw std::runtime_error(std::string(__func__) + ": unsupported first word");
+    }
+    if (openParam.setPriority > 1 || openParam.setAffinity > 1) {
+        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
+    }
+    if (openParam.setPriority == 1 && (openParam.priority < VIDEO_OUT_SERVICE_THREAD_PRIORITY_HIGHEST || openParam.priority > VIDEO_OUT_SERVICE_THREAD_PRIORITY_LOWEST)) {
+        throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
+    }
+    if (openParam.setAffinity == 1) {
+        std::memcpy(&openParam.affinity, static_cast<const std::byte*>(param) + offsetof(VideoOutOpenParam, affinity), sizeof(openParam.affinity));
+        if (openParam.affinity == 0 || (openParam.affinity & ~VIDEO_OUT_SERVICE_THREAD_AFFINITY_ALL) != 0) {
+            throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
+        }
+    }
+}
+
 extern "C" {
 
 int APS5_VABI sceVideoOutOpen(int userId, int busType, int index, const void* param) try {
-    if (param != nullptr) {
-        std::uint32_t size = 0;
-        std::memcpy(&size, param, sizeof(size));
-        if (size != VIDEO_OUT_OPEN_PARAM_SIZE) {
-            throw std::runtime_error(std::string(__func__) + ": unsupported open parameter size " + std::to_string(size));
-        }
-    }
+    validateOpenParam(param);
     if (userId != 255 && userId != 0) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_VALUE");
     }

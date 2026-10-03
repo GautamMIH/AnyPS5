@@ -113,6 +113,10 @@ struct VulkanDevice::State {
     bool primitiveListRestart = false;
     bool occlusionQueryPrecise = false;
     bool imageViewMinLod = false;
+    // VK_KHR_maintenance8: sampling takes a non-constant texel Offset (upstream 301f3b16).
+    bool maintenance8 = false;
+    // VK_KHR_shader_clock (s_memtime, upstream 1043f90d).
+    bool shaderClock = false;
     bool depthRangeUnrestricted = false;
     bool externalMemoryHost = false;
     std::unique_ptr<Graphics::GuestGpuMemory> guestGpuMemory;
@@ -445,12 +449,26 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
         state->fragmentShaderBarycentric = barycentricFeatures.fragmentShaderBarycentric == VK_TRUE;
     }
+    VkPhysicalDeviceShaderClockFeaturesKHR clockFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR};
+    if (hasExtension(VK_KHR_SHADER_CLOCK_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &clockFeatures};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        // Opt-in (ANYPS5_SHADER_CLOCK=1): with VK_KHR_shader_clock enabled, NVIDIA 615.71.09 crashed in
+        // a driver thread (libnvidia-glcore+0xe83ded) early in ~1 of 6 Smurfs runs, never without it
+        // (0 of 26). Shaders reading the clock (s_memtime) fail to compile without it.
+        state->shaderClock = clockFeatures.shaderSubgroupClock == VK_TRUE && clockFeatures.shaderDeviceClock == VK_TRUE && std::getenv("ANYPS5_SHADER_CLOCK") != nullptr;
+    }
     std::vector<const char*> deviceExtensions;
     if (window != nullptr) deviceExtensions.assign(presentationExtensions.begin(), presentationExtensions.end());
     if (state->fragmentShaderBarycentric) {
         deviceExtensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
         state->capabilities.push_back(spv::CapabilityFragmentBarycentricKHR);
         state->spirvExtensions.push_back("SPV_KHR_fragment_shader_barycentric");
+    }
+    if (state->shaderClock) {
+        deviceExtensions.push_back(VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
+        state->capabilities.push_back(spv::CapabilityShaderClockKHR);
+        state->spirvExtensions.push_back("SPV_KHR_shader_clock");
     }
     deviceExtensions.push_back(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
     state->capabilities.push_back(spv::CapabilitySignedZeroInfNanPreserve);
@@ -493,6 +511,15 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     }
     minLodFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT};
     minLodFeatures.minLod = state->imageViewMinLod ? VK_TRUE : VK_FALSE;
+    VkPhysicalDeviceMaintenance8FeaturesKHR maintenance8Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR};
+    if (hasExtension(VK_KHR_MAINTENANCE_8_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &maintenance8Features};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        state->maintenance8 = maintenance8Features.maintenance8 == VK_TRUE;
+        if (state->maintenance8) deviceExtensions.push_back(VK_KHR_MAINTENANCE_8_EXTENSION_NAME);
+    }
+    maintenance8Features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR};
+    maintenance8Features.maintenance8 = VK_TRUE;
     listRestartFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT};
     listRestartFeatures.primitiveTopologyListRestart = state->primitiveListRestart ? VK_TRUE : VK_FALSE;
     if (state->meshShader) {
@@ -543,6 +570,9 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->independentBlend = enabled.independentBlend == VK_TRUE;
     enabled.shaderImageGatherExtended = available.shaderImageGatherExtended;
     state->imageGatherExtended = enabled.shaderImageGatherExtended == VK_TRUE;
+    // Shaders may then declare ImageGatherExtended (a non-constant gather or, with maintenance8,
+    // sample offset).
+    if (state->imageGatherExtended) state->capabilities.push_back(spv::CapabilityImageGatherExtended);
     enabled.shaderResourceMinLod = available.shaderResourceMinLod;
     enabled.occlusionQueryPrecise = available.occlusionQueryPrecise;
     state->occlusionQueryPrecise = enabled.occlusionQueryPrecise == VK_TRUE;
@@ -572,10 +602,18 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         minLodFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &minLodFeatures;
     }
+    if (state->maintenance8) {
+        maintenance8Features.pNext = const_cast<void*>(deviceInfo.pNext);
+        deviceInfo.pNext = &maintenance8Features;
+    }
     byteFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
     if (state->fragmentShaderBarycentric) {
         barycentricFeatures.pNext = byteFeatures.pNext;
         byteFeatures.pNext = &barycentricFeatures;
+    }
+    if (state->shaderClock) {
+        clockFeatures.pNext = byteFeatures.pNext;
+        byteFeatures.pNext = &clockFeatures;
     }
     bdaFeatures.pNext = &byteFeatures;
     deviceInfo.pNext = &bdaFeatures;
@@ -960,6 +998,7 @@ ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
     const auto& limits = state->properties.limits;
     ShaderRecompiler::SpirvTarget target{VK_API_VERSION_1_1, state->meshShader ? 0x00010400u : 0x00010300u, state->subgroup.subgroupSize, ShaderRecompiler::BdaAbi::Version, state->capabilities, state->spirvExtensions, state->fragmentShaderBarycentric, {limits.maxComputeWorkGroupSize[0], limits.maxComputeWorkGroupSize[1], limits.maxComputeWorkGroupSize[2]}, limits.maxComputeWorkGroupInvocations, limits.maxComputeSharedMemorySize, {}, {}};
     target.storageBufferOffsetAlignment = static_cast<std::uint32_t>(limits.minStorageBufferOffsetAlignment);
+    target.nonConstantImageOffsets = state->maintenance8;
     if (state->meshShader) {
         const auto& mesh = state->meshLimits;
         target.mesh = ShaderRecompiler::MeshTargetLimits{{mesh.maxMeshWorkGroupSize[0], mesh.maxMeshWorkGroupSize[1], mesh.maxMeshWorkGroupSize[2]}, mesh.maxMeshWorkGroupInvocations, std::min(mesh.maxMeshSharedMemorySize, mesh.maxMeshPayloadAndSharedMemorySize), mesh.maxMeshOutputVertices, mesh.maxMeshOutputPrimitives, mesh.maxMeshOutputComponents, std::min(mesh.maxMeshOutputMemorySize, mesh.maxMeshPayloadAndOutputMemorySize), mesh.meshOutputPerVertexGranularity, mesh.meshOutputPerPrimitiveGranularity};

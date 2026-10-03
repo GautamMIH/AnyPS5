@@ -243,8 +243,21 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     ValidateBdaTarget(program, target);
     SpirvEmitterState state(program, inputInfo);
     state.module.RequireVersion(target.spirvVersion);
+    state.spirvVersion = target.spirvVersion;
+    state.supportedCapabilities = target.supportedCapabilities;
+    state.supportedExtensions = target.supportedExtensions;
+    state.nonConstantImageOffsets = target.nonConstantImageOffsets;
     const auto* workgroup = ShaderWorkgroupInputFor(state);
     state.laneCount = workgroup != nullptr && program.WaveSize() == 64u && workgroup->hostSubgroupSize == 32u ? 2u : 1u;
+    if (state.laneCount == 2u) state.sharedLaneValues = WaveUniformValues(program);
+    if (program.Resources().stage == IrShaderStage::Compute && workgroup != nullptr) {
+        // The key comes from a subgroup ballot (ReadFirstLane), so the slot is uniform over the
+        // workgroup only when the workgroup is one wave held by one host subgroup; a wave64 program
+        // kept at one lane per invocation spans two subgroups (see WaveLdsScope).
+        const auto threads = std::max(workgroup->threadsNum[0], 1u) * std::max(workgroup->threadsNum[1], 1u) * std::max(workgroup->threadsNum[2], 1u);
+        const bool oneSubgroup = state.laneCount == 2u || (program.WaveSize() == workgroup->hostSubgroupSize && workgroup->hostSubgroupSize <= 32u);
+        state.tableIndexNonUniform = threads > program.WaveSize() || !oneSubgroup;
+    }
     state.waveLdsScope = WaveLdsScope(program, workgroup, state.laneCount);
     if (const char* guard = std::getenv("APS5_LOOP_GUARD")) state.loopGuardLimit = static_cast<std::uint32_t>(std::strtoul(guard, nullptr, 0));
     // Stopped invocations would leave the wave LDS barriers incomplete.

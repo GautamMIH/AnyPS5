@@ -37,6 +37,7 @@ enum class StageInputKind {
     // (IrBindingLayout::DispatchThreadLimitDword).
     DispatchThreadLimit,
     Parameter,
+    HelperInvocation,
 };
 
 enum class StageOutputKind {

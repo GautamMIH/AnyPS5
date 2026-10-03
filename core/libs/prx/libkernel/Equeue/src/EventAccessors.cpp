@@ -11,7 +11,7 @@ namespace {
 constexpr std::uint16_t kEventError = 0x4000;
 
 const KernelEvent& require(const KernelEvent* ev, const char* function) {
-    if (ev == nullptr) throw std::invalid_argument(std::string(function) + ": null event");
+    if (ev == nullptr) throw std::runtime_error(std::string(function) + ": null event");
     return *ev;
 }
 

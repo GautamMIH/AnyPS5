@@ -189,6 +189,11 @@ target_link_libraries(agc_dpp_write_tests PRIVATE shader_recompiler_agc_driver l
 set_target_properties(agc_dpp_write_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_dpp_write_tests)
 
+add_test_executable(agc_vop1_control_decode_tests EXCLUDE_FROM_ALL tests/Vop1ControlDecode.cpp)
+target_link_libraries(agc_vop1_control_decode_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_vop1_control_decode_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_vop1_control_decode_tests)
+
 add_test_executable(agc_shader_disk_cache_tests EXCLUDE_FROM_ALL tests/ShaderDiskCache.cpp)
 target_include_directories(agc_shader_disk_cache_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(agc_shader_disk_cache_tests PRIVATE shader_recompiler_agc_driver libc)
@@ -317,6 +322,9 @@ configure_windows_unwind(agc_driver_bda_device_tests)
 # Shader execution tests: each recompiles a small program and runs it on a Vulkan device; they
 # skip (return code 77) without one.
 file(GLOB agcExecutionTestSources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/execution/*.cpp)
+# Upstream's image tests place their images in host arrays; this driver resolves images only in guest
+# memory (StorageImage, render targets), so they need a guest-memory harness first.
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ImageAtomics|PixelHelperLanes)\\.cpp$")
 set(agcExecutionTests)
 foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
     get_filename_component(agcExecutionTestName ${agcExecutionTestSource} NAME_WE)
@@ -335,12 +343,16 @@ foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
 endforeach()
 
 if(BUILD_TESTING)
-    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_shader_disk_cache_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests ${agcExecutionTests})
+    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_vop1_control_decode_tests agc_shader_disk_cache_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests ${agcExecutionTests})
         string(REGEX REPLACE "_tests$" "" agcTestName "${agcTest}")
         set_target_properties(${agcTest} PROPERTIES EXCLUDE_FROM_ALL OFF)
         add_test(NAME ${agcTestName} COMMAND ${agcTest})
         # Tests never write a pipeline cache beside their executables.
         set_tests_properties(${agcTestName} PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" SKIP_RETURN_CODE 77)
+        # The shader clock is opt-in on the device (see VulkanDevice); its test turns it on.
+        if(agcTestName STREQUAL "agc_driver_shader_clock")
+            set_tests_properties(${agcTestName} PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;ANYPS5_SHADER_CLOCK=1")
+        endif()
         if(WIN32)
             set_tests_properties(${agcTestName} PROPERTIES ENVIRONMENT_MODIFICATION
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
@@ -472,7 +484,7 @@ endif()
 include(PostCompile.cmake)
     if(BUILD_TESTING)
         # Upstream's recompiler tests (registered in its driver CMakeLists).
-        foreach(recompilerTest IN ITEMS RayTracingMiss:ray_tracing_miss VectorMinMaxMed16:vector_min_max_med16 VectorMadLegacy:vector_mad_legacy ScalarSaveexec:scalar_saveexec ImageSampleGather:image_sample_gather)
+        foreach(recompilerTest IN ITEMS ScalarBitCount64:scalar_bitcount64 VectorCompareConst:vector_compare_const RayTracingMiss:ray_tracing_miss VectorMinMaxMed16:vector_min_max_med16 VectorMadLegacy:vector_mad_legacy ScalarSaveexec:scalar_saveexec ImageSampleGather:image_sample_gather)
             string(REPLACE ":" ";" recompilerTestParts ${recompilerTest})
             list(GET recompilerTestParts 0 recompilerTestSource)
             list(GET recompilerTestParts 1 recompilerTestName)
