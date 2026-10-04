@@ -1,3 +1,4 @@
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <optional>
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
@@ -7,6 +8,7 @@
 #include "prx/libc/include/General.hpp"
 #include "Optimization/include/Optimization/ShaderStageInputInfo.hpp"
 #include <array>
+#include <unordered_set>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -82,6 +84,67 @@ ShaderResources::ShaderResources(const Context& context, const CompiledShader& c
     build(std::span<const CompiledShader>(&compute, 1), {}, 0, 0);
 }
 
+namespace {
+// Debug aid: APS5_TRACE_TEMPLATES=1 measures how often a draw's resources could be reused: whether
+// its exact inputs (programs, descriptor words, targets, index range) or only its structure (data
+// words and read-only buffer bases left out) were seen before, and whether it is eligible (writes
+// nothing on the GPU). Prints totals every 5000 builds.
+void traceTemplate(std::span<const CompiledShader> shaders, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes, bool eligible) {
+    static const bool trace = std::getenv("APS5_TRACE_TEMPLATES") != nullptr;
+    if (!trace) return;
+    std::uint64_t exact = 0xcbf29ce484222325ull;
+    std::uint64_t structure = exact;
+    const auto mix = [](std::uint64_t& hash, std::uint64_t value) { hash = (hash ^ value) * 0x100000001b3ull; };
+    for (const auto& shader : shaders) {
+        const auto& spirv = shader.program->spirv;
+        // The compiled words are shared between copies of a result: their address names the variant.
+        const auto id = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(spirv.data()));
+        mix(exact, id);
+        mix(structure, id);
+        for (const auto& binding : shader.program->bindings) {
+            const std::uint64_t head = static_cast<std::uint64_t>(binding.kind) | (static_cast<std::uint64_t>(binding.role) << 8u) | (static_cast<std::uint64_t>(binding.binding) << 16u) | (static_cast<std::uint64_t>(binding.count) << 32u);
+            mix(exact, head);
+            mix(structure, head);
+            const bool data = binding.role == ShaderRecompiler::DescriptorRole::ShaderData || binding.role == ShaderRecompiler::DescriptorRole::FlattenedSrt;
+            for (std::size_t index = 0; index < binding.guestDescriptor.size(); ++index) {
+                const auto word = binding.guestDescriptor[index];
+                mix(exact, word);
+                if (data) continue;
+                if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
+                    const auto element = index / 4;
+                    const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
+                    if (!written && index % 4 == 0) continue;
+                    if (!written && index % 4 == 1) {
+                        mix(structure, word & 0xffff0000u);
+                        continue;
+                    }
+                }
+                mix(structure, word);
+            }
+            if (data) mix(structure, binding.guestDescriptor.size());
+        }
+    }
+    for (const auto& target : targets) {
+        mix(exact, target.address);
+        mix(structure, target.address);
+    }
+    mix(exact, indexAddress ^ (static_cast<std::uint64_t>(indexBytes) << 48u));
+    static std::unordered_set<std::uint64_t> exactSeen;
+    static std::unordered_set<std::uint64_t> structureSeen;
+    static std::uint64_t builds = 0, eligibleBuilds = 0, exactHits = 0, structureHits = 0;
+    ++builds;
+    if (eligible) {
+        ++eligibleBuilds;
+        if (!exactSeen.insert(exact).second) ++exactHits;
+        else if (!structureSeen.insert(structure).second) ++structureHits;
+        else structureSeen.insert(structure);
+    }
+    if (exactSeen.size() > 200000) exactSeen.clear();
+    if (structureSeen.size() > 200000) structureSeen.clear();
+    if (builds % 5000 == 0) std::fprintf(stderr, "[templates] builds %llu eligible %llu exact-hit %llu structure-only-hit %llu\n", static_cast<unsigned long long>(builds), static_cast<unsigned long long>(eligibleBuilds), static_cast<unsigned long long>(exactHits), static_cast<unsigned long long>(structureHits));
+}
+}
+
 void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes) {
     PerformanceTimer timing("Graphics.ShaderResources");
     try {
@@ -131,6 +194,11 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
         }
         Require(storageBuffers <= context.limits.maxDescriptorSetStorageBuffers, "pipeline descriptors exceed device limits");
         timing.Mark("bindings");
+        {
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
+            guestMemory.AppendWrites(writes);
+            traceTemplate(shaders, targets, indexAddress, indexBytes, storageImages.empty() && writes.empty() && !usesBda && !usesFaultBuffer);
+        }
         // Storage images note their GPU writes while bindings are made, maybe after a texture over the
         // same memory was validated for this work.
         if (context.textureCache) {
@@ -196,6 +264,45 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
         }
         if (!writes.empty()) context.Function<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets")(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
         timing.Mark("descriptor_update");
+        // Reuse: nothing written on the GPU, guest memory bound in place.
+        {
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> written;
+            guestMemory.AppendWrites(written);
+            reusable = storageImages.empty() && written.empty() && !usesBda && !usesFaultBuffer && guestMemory.InPlace();
+            static const bool traceReuse = std::getenv("APS5_TRACE_TEMPLATES") != nullptr;
+            if (traceReuse) {
+                static std::array<std::uint64_t, 6> counts{};
+                ++counts[!storageImages.empty() ? 1 : !written.empty() ? 2 : usesBda ? 3 : usesFaultBuffer ? 4 : !guestMemory.InPlace() ? 5 : 0];
+                if ((counts[0] + counts[1] + counts[2] + counts[3] + counts[4] + counts[5]) % 5000 == 0) std::fprintf(stderr, "[template-reuse] reusable %llu storage %llu written %llu bda %llu fault %llu copied %llu\n", (unsigned long long)counts[0], (unsigned long long)counts[1], (unsigned long long)counts[2], (unsigned long long)counts[3], (unsigned long long)counts[4], (unsigned long long)counts[5]);
+            }
+            mappingGeneration = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
+        }
+        // The bindings as written, for APS5_VERIFY_TEMPLATES: data buffers by content (a fresh build
+        // makes new ones), the rest by handle.
+        static const bool verifyTemplates = std::getenv("APS5_VERIFY_TEMPLATES") != nullptr;
+        if (verifyTemplates) {
+            for (const auto& binding : bindings) {
+                summary.push_back(binding.layout.binding);
+                for (const auto index : binding.allocations) {
+                    const auto& allocation = allocations[index];
+                    if (!allocation.guest && allocation.buffer) {
+                        std::uint64_t hash = 0xcbf29ce484222325ull;
+                        for (const auto byte : allocation.buffer->Bytes().first(allocation.size)) hash = (hash ^ static_cast<std::uint8_t>(byte)) * 0x100000001b3ull;
+                        summary.push_back(hash);
+                        summary.push_back(allocation.size);
+                        continue;
+                    }
+                    const auto info = descriptor(allocation);
+                    summary.push_back(reinterpret_cast<std::uint64_t>(info.buffer));
+                    summary.push_back(info.offset);
+                    summary.push_back(info.range);
+                }
+                for (const auto index : binding.imageAllocations) {
+                    if (binding.layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE) summary.push_back(reinterpret_cast<std::uint64_t>(textures[index]->View()));
+                    else if (binding.layout.descriptorType == VK_DESCRIPTOR_TYPE_SAMPLER) summary.push_back(reinterpret_cast<std::uint64_t>(samplers[index]->Handle()));
+                }
+            }
+        }
     } catch (...) {
         release();
         throw;
@@ -310,6 +417,9 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             const bool depthCompare = element < binding.imageDepthCompare.size() && binding.imageDepthCompare[element];
             textures.push_back(context.textureCache->Get(words, resource, components, depthCompare));
+            TextureLookup lookup{{}, resource, components, depthCompare};
+            std::copy(words.begin(), words.end(), lookup.words.begin());
+            textureLookups.push_back(lookup);
             item.imageAllocations.push_back(textures.size() - 1);
         }
         Require(textures.size() <= context.limits.maxDescriptorSetSampledImages, "pipeline sampled-image descriptors exceed device limits");
@@ -366,7 +476,53 @@ void ShaderResources::RecordDownloads(VkCommandBuffer commands) const {
     for (const auto& image : storageImages) image->RecordDownload(commands);
 }
 
+bool ShaderResources::TemplateKey(std::span<const CompiledShader> shaders, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes, std::uint64_t renderedDepth, std::vector<std::uint64_t>& key) {
+    key.clear();
+    for (const auto& shader : shaders) {
+        if (shader.program == nullptr) return false;
+        // The compiled words are shared between copies of a result: their address names the variant.
+        key.push_back(static_cast<std::uint64_t>(shader.stage));
+        key.push_back(reinterpret_cast<std::uint64_t>(shader.program->spirv.data()));
+        key.push_back(shader.program->spirv.size());
+        for (const auto& binding : shader.program->bindings) {
+            // Address tables bind captured memory snapshots and registered memory: not reusable.
+            if (binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer) return false;
+            key.push_back(static_cast<std::uint64_t>(binding.kind) | (static_cast<std::uint64_t>(binding.role) << 8u) | (static_cast<std::uint64_t>(binding.binding) << 16u) | (static_cast<std::uint64_t>(binding.count) << 32u));
+            key.push_back(binding.guestDescriptor.size());
+            for (std::size_t index = 0; index + 1 < binding.guestDescriptor.size(); index += 2) key.push_back(binding.guestDescriptor[index] | (static_cast<std::uint64_t>(binding.guestDescriptor[index + 1]) << 32u));
+            if (binding.guestDescriptor.size() % 2 != 0) key.push_back(binding.guestDescriptor.back());
+        }
+    }
+    for (const auto& target : targets) {
+        key.push_back(target.address);
+        key.push_back(target.bytes);
+    }
+    key.push_back(indexAddress);
+    key.push_back(indexBytes);
+    key.push_back(renderedDepth);
+    return true;
+}
+
+bool ShaderResources::Revalidate() {
+    PerformanceTimer timing("Graphics.ResourceTemplate.Revalidate");
+    if (!reusable || GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix() != mappingGeneration) return false;
+    guestMemory.CheckRegionsAgain();
+    timing.Mark("regions");
+    for (std::size_t index = 0; index < textures.size(); ++index) {
+        const auto& lookup = textureLookups[index];
+        if (context.textureCache->Get(lookup.words, lookup.resource, lookup.components, lookup.depthCompare) != textures[index]) return false;
+    }
+    timing.Mark("textures");
+    return true;
+}
+
+std::vector<std::uint64_t> ShaderResources::BindingSummary() const {
+    return summary;
+}
+
 void ShaderResources::WriteBack() {
+    // A reusable binding writes nothing and is retired once per draw that used it.
+    if (reusable) return;
     if (bda) bda->CheckFault();
     guestMemory.WriteBack();
     for (const auto& image : storageImages) image->WriteBack();

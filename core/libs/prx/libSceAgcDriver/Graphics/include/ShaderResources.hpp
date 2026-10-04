@@ -37,6 +37,20 @@ public:
     void AppendWrites(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const;
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
 
+    // Reuse (ResourceTemplates). The exact inputs of a draw's resources, or false when they cannot be
+    // reused (address tables: BDA programs bind captured memory snapshots).
+    static bool TemplateKey(std::span<const CompiledShader> shaders, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes, std::uint64_t renderedDepth, std::vector<std::uint64_t>& key);
+    // Writes nothing on the GPU and binds guest memory only in place: the same inputs give the same
+    // bindings while Revalidate holds.
+    bool Reusable() const { return reusable; }
+    // For a reuse: the mapping is unchanged, the guest ranges' GPU-access checks are made again and
+    // every texture lookup returns the same texture. False when the resources must be rebuilt.
+    bool Revalidate();
+    // What the descriptor set binds (buffer views, data contents, image views, samplers), to compare a
+    // reuse with a fresh build (APS5_VERIFY_TEMPLATES).
+    std::vector<std::uint64_t> BindingSummary() const;
+    const std::vector<std::shared_ptr<Texture>>& Textures() const { return textures; }
+
 private:
     struct Allocation {
         std::uint64_t address;
@@ -72,6 +86,17 @@ private:
     std::vector<std::shared_ptr<Texture>> textures;
     std::vector<std::shared_ptr<Sampler>> samplers;
     std::vector<std::unique_ptr<StorageImage>> storageImages;
+    // The inputs of each texture lookup, in textures order (Revalidate repeats them).
+    struct TextureLookup {
+        std::array<std::uint32_t, 8> words;
+        GuestTextureResource resource;
+        VkComponentMapping components;
+        bool depthCompare;
+    };
+    std::vector<TextureLookup> textureLookups;
+    bool reusable = false;
+    std::uint64_t mappingGeneration = 0;
+    std::vector<std::uint64_t> summary;
 };
 
 }

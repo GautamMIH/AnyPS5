@@ -44,6 +44,12 @@ public:
     bool WritesOverlap(std::uint64_t address, std::size_t bytes) const;
     // Appends every range the work may write, as [begin, end).
     void AppendWrites(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const;
+    // After Upload: every region is read in place from its host import (no copy, no detached view,
+    // no mirror, no executable-image copy), so the bound views stay valid while the mapping does.
+    bool InPlace() const { return inPlace; }
+    // The GPU-access checks Upload made for the regions (resident targets over them reach guest
+    // memory first; earlier GPU writes get a barrier), made again for a reuse of the binding.
+    void CheckRegionsAgain() const;
 
 private:
     struct Region {
@@ -69,6 +75,7 @@ private:
     std::vector<Region> detached;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> writes;
     bool uploaded = false;
+    bool inPlace = true;
     bool committed = false;
 };
 

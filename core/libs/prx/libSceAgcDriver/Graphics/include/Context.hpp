@@ -27,6 +27,7 @@ class DrawQueue;
 class GraphicsPipelineCache;
 class DescriptorCache;
 class SamplerCache;
+class ResourceTemplates;
 class GuestGpuMemory;
 class ImageMemory;
 class GpuTimestamps;
@@ -74,6 +75,7 @@ struct Context {
     GraphicsPipelineCache* graphicsPipelines = nullptr;
     mutable std::shared_ptr<DescriptorCache> descriptorCache;
     mutable std::shared_ptr<SamplerCache> samplerCache;
+    ResourceTemplates* resourceTemplates = nullptr;
     bool depthBounds = false;
     bool depthBiasClamp = false;
     bool independentBlend = false;

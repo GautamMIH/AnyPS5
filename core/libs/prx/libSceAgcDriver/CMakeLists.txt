@@ -82,6 +82,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Resources.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderInputState.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderResources.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ResourceTemplates.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/StorageImage.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureAddressing.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderAddressResources.cpp
@@ -260,6 +261,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/ColorTargetTransfer.cpp
         Graphics/src/Resources.cpp
         Graphics/src/ShaderResources.cpp
+        Graphics/src/ResourceTemplates.cpp
         Graphics/src/StorageImage.cpp
         Graphics/src/TextureAddressing.cpp
         Graphics/src/ShaderAddressResources.cpp
@@ -406,6 +408,7 @@ if(AGC_BUILD_VISUAL_TEST)
             Graphics/src/PipelineCache.cpp
             Graphics/src/Resources.cpp
             Graphics/src/ShaderResources.cpp
+            Graphics/src/ResourceTemplates.cpp
             Graphics/src/StorageImage.cpp
             Graphics/src/TextureAddressing.cpp
             Graphics/src/ShaderAddressResources.cpp

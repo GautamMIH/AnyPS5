@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Graphics/include/ResourceTemplates.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
@@ -32,6 +33,7 @@ TextureCache::TextureCache(const Context& context) : context(context) {
 TextureCache::~TextureCache() = default;
 
 void TextureCache::erase(Entries::iterator it) {
+    if (context.resourceTemplates) context.resourceTemplates->DropTexture(it->texture.get());
     retainedBytes -= it->snapshot.size() + it->texture->AllocationBytes();
     if (it->texture.use_count() == 1 && !it->texture->UploadComplete()) retiring.push_back(std::move(it->texture));
     index.erase(it->descriptor);

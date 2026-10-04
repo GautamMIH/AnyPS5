@@ -141,8 +141,13 @@ void GuestBufferMemory::Upload(bool addressable) {
                 GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(bytes), 1, region.writable);
             }
             // Read-only regions read the device-local mirror (stale pages copied first, in queue order).
-            region.view = region.writable || context.drawQueue == nullptr || !context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->Resolve(region.begin, bytes) : context.guestGpuMemory->ResolveRead(region.begin, bytes, context.drawQueue->Begin(context));
-            if (!region.view && !region.writable && region.image && region.begin == region.image->address && bytes == region.image->bytes) region.view = context.guestGpuMemory->ResolveImage(region.image);
+            const bool mirrored = !region.writable && context.drawQueue != nullptr && context.guestGpuMemory->Mirrors();
+            region.view = !mirrored ? context.guestGpuMemory->Resolve(region.begin, bytes) : context.guestGpuMemory->ResolveRead(region.begin, bytes, context.drawQueue->Begin(context));
+            if (mirrored) inPlace = false;
+            if (!region.view && !region.writable && region.image && region.begin == region.image->address && bytes == region.image->bytes) {
+                region.view = context.guestGpuMemory->ResolveImage(region.image);
+                inPlace = false;
+            }
             if (region.view && region.view->bytes == bytes) {
                 // Shaders write writable regions straight into guest memory.
                 if (region.writable) WriteTracker::NoteGpuWrite(region.begin, bytes);
@@ -151,6 +156,7 @@ void GuestBufferMemory::Upload(bool addressable) {
             if (traceViews) std::fprintf(stderr, "[buffer-view] 0x%llx+0x%llx copied: %s\n", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes), region.view ? "translation shorter than the region" : "not segment memory");
             region.view.reset();
         }
+        inPlace = false;
         const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
         region.buffer = std::make_unique<Buffer>(context, static_cast<std::size_t>(bytes), usage);
         if (region.writable || region.live) {
@@ -167,12 +173,18 @@ void GuestBufferMemory::Upload(bool addressable) {
         }
         region.snapshot.clear();
     }
+    if (!detached.empty()) inPlace = false;
     for (auto& region : detached) {
         const auto bytes = static_cast<std::size_t>(region.end - region.begin);
         region.buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
         GuestMemory::Read(region.begin, region.buffer->Bytes());
         region.snapshot.assign(region.buffer->Bytes().begin(), region.buffer->Bytes().end());
     }
+}
+
+void GuestBufferMemory::CheckRegionsAgain() const {
+    const GuestMemory::GpuAccessScope gpuAccess;
+    for (const auto& region : regions) GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(region.end - region.begin), 1, region.writable);
 }
 
 VkDescriptorBufferInfo GuestBufferMemory::Descriptor(std::uint64_t address, std::size_t bytes) const {

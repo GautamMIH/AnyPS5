@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Graphics/include/ResourceTemplates.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/RenderCache.hpp"
@@ -144,6 +145,7 @@ struct VulkanDevice::State {
     std::shared_ptr<Graphics::DescriptorCache> descriptorCache;
     std::shared_ptr<Graphics::SamplerCache> samplerCache;
     std::unique_ptr<Graphics::TextureCache> textureCache;
+    std::unique_ptr<Graphics::ResourceTemplates> resourceTemplates;
     std::unique_ptr<Graphics::PipelineCache> pipelineCache;
     std::unique_ptr<Graphics::DrawQueue> drawQueue;
     std::unique_ptr<Graphics::RenderCache> renderCache;
@@ -645,6 +647,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->drawQueue = std::make_unique<Graphics::DrawQueue>();
     state->renderCache = std::make_unique<Graphics::RenderCache>(graphicsContext());
     state->graphicsPipelines = std::make_unique<Graphics::GraphicsPipelineCache>(graphicsContext());
+    // Before the texture cache: its context carries the templates it evicts textures from.
+    state->resourceTemplates = std::make_unique<Graphics::ResourceTemplates>();
     state->textureCache = std::make_unique<Graphics::TextureCache>(graphicsContext());
     state->colorTransfer = std::make_unique<Graphics::GpuColorTransfer>(graphicsContext());
     if (window != nullptr) {
@@ -1042,6 +1046,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
         state->descriptorCache,
         state->samplerCache
     };
+    context.resourceTemplates = state->resourceTemplates.get();
     context.depthBounds = state->depthBounds;
     context.depthBiasClamp = state->depthBiasClamp;
     context.independentBlend = state->independentBlend;

@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Graphics/include/ResourceTemplates.hpp"
 #include <algorithm>
 #include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
@@ -175,8 +176,46 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         vertexBuffers.push_back(std::move(buffer));
     }
     timing.Mark("vertex_upload");
-    if (context.textureCache) context.textureCache->SetRenderedDepth(state.hasDepthTarget && state.depth.depthBytes != 0 ? state.depth.depthAddress : 0);
-    auto resources = std::make_shared<ShaderResources>(context, shaders, colorTargets, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+    const auto renderedDepth = state.hasDepthTarget && state.depth.depthBytes != 0 ? state.depth.depthAddress : 0;
+    if (context.textureCache) context.textureCache->SetRenderedDepth(renderedDepth);
+    // A draw whose resources were built from exactly the same inputs reuses them when they write
+    // nothing on the GPU and still revalidate (ResourceTemplates). ANYPS5_NO_RESOURCE_TEMPLATES=1
+    // builds every draw's; APS5_VERIFY_TEMPLATES=1 also builds them for each reuse and compares.
+    static const bool noTemplates = std::getenv("ANYPS5_NO_RESOURCE_TEMPLATES") != nullptr;
+    static const bool verifyTemplates = std::getenv("APS5_VERIFY_TEMPLATES") != nullptr;
+    std::shared_ptr<ShaderResources> resources;
+    std::vector<std::uint64_t> templateKey;
+    std::uint64_t templateHash = 0;
+    const bool templated = !noTemplates && context.resourceTemplates != nullptr && ShaderResources::TemplateKey(shaders, colorTargets, draw.indexAddress, static_cast<std::size_t>(indexBytes), renderedDepth, templateKey);
+    if (templated) {
+        templateHash = ResourceTemplates::Hash(templateKey);
+        if (auto found = context.resourceTemplates->Find(templateKey, templateHash)) {
+            if (found->Revalidate()) resources = std::move(found);
+            else context.resourceTemplates->Erase(templateKey, templateHash);
+        }
+    }
+    timing.Mark(resources ? "template_hit" : "template_lookup");
+    if (resources && verifyTemplates) {
+        const ShaderResources fresh(context, shaders, colorTargets, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+        static std::uint64_t checks = 0;
+        static std::uint64_t mismatches = 0;
+        ++checks;
+        if (fresh.BindingSummary() != resources->BindingSummary()) {
+            ++mismatches;
+            const auto a = resources->BindingSummary();
+            const auto b = fresh.BindingSummary();
+            std::size_t at = 0;
+            while (at < a.size() && at < b.size() && a[at] == b[at]) ++at;
+            std::fprintf(stderr, "[verify-templates] MISMATCH at entry %zu of %zu/%zu: reused 0x%llx fresh 0x%llx (next reused 0x%llx fresh 0x%llx)\n", at, a.size(), b.size(), at < a.size() ? static_cast<unsigned long long>(a[at]) : 0ull, at < b.size() ? static_cast<unsigned long long>(b[at]) : 0ull, at + 1 < a.size() ? static_cast<unsigned long long>(a[at + 1]) : 0ull, at + 1 < b.size() ? static_cast<unsigned long long>(b[at + 1]) : 0ull);
+        }
+        if (checks % 2000 == 0) std::fprintf(stderr, "[verify-templates] %llu reuses checked, %llu mismatches\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(mismatches));
+    }
+    if (!resources) {
+        resources = std::make_shared<ShaderResources>(context, shaders, colorTargets, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+        timing.Mark("resources_build");
+        if (templated && resources->Reusable()) context.resourceTemplates->Store(std::move(templateKey), templateHash, resources);
+        timing.Mark("template_store");
+    }
     if (context.textureCache) context.textureCache->SetRenderedDepth(0);
     timing.Mark("shader_resources");
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
