@@ -1,5 +1,6 @@
 #include <elfpatcher/windows/WindowsElfPatcher.hpp>
 #include <elfpatcher/windows/WindowsEntryStubBuilder.hpp>
+#include <elfpatcher/windows/WindowsIconResourceBuilder.hpp>
 #include <elfpatcher/windows/WindowsLoadImage.hpp>
 #include <elfpatcher/windows/WindowsPeWriter.hpp>
 #include <elfpatcher/windows/WindowsRelocationBuilder.hpp>
@@ -42,7 +43,7 @@ void writeGotStub(std::vector<PeSection>& sections, const std::uint32_t targetRv
 
 }
 
-WindowsPePatcher::WindowsPePatcher(const bool windowsGui) : _windowsGui(windowsGui) {
+WindowsPePatcher::WindowsPePatcher(const bool windowsGui, std::filesystem::path iconPath) : _windowsGui(windowsGui), _iconPath(std::move(iconPath)) {
 }
 
 std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t>& sourceElf, const std::vector<Domain::ProgramHeader>& originalHeaders, const Domain::SysVDynamicSection& dynamicSection, const std::uint64_t originalPltGotVaddr, const std::string& runPath, const bool lazyBinding, const bool dependencyDiagnostics, const std::vector<Codegen::TrampolineSite>& trampolines, const Domain::ModuleLinkInfo& linkInfo) {
@@ -108,6 +109,7 @@ std::vector<std::uint8_t> WindowsPePatcher::Patch(const std::vector<std::uint8_t
         sections.push_back({".reloc", nextRva, SectionRead | 0x02000040u, std::move(relocationData)});
         nextRva = AlignRva(nextRva + sections.back().Data.size());
     }
+    directories[2] = WindowsIconResourceBuilder().Build(_iconPath, sections, nextRva);
     return WindowsPeWriter().Write(sections, entryRva, directories, _windowsGui);
 }
 

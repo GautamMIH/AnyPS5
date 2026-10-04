@@ -288,6 +288,7 @@ int APS5_VABI sceRtcParseRFC3339(RtcTick* utc, const char* date_time) {
         const int sign = *cursor++ == '-' ? -1 : 1;
         int offsetHours = 0, offsetMinute = 0;
         if (!parseDigits(cursor, 2, offsetHours) || *cursor++ != ':' || !parseDigits(cursor, 2, offsetMinute)) return SCE_RTC_ERROR_BAD_PARSE;
+        if (offsetHours > 23 || offsetMinute > 59) return SCE_RTC_ERROR_BAD_PARSE;
         offsetMinutes = sign * (offsetHours * 60 + offsetMinute);
     } else {
         return SCE_RTC_ERROR_BAD_PARSE;

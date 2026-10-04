@@ -7,6 +7,7 @@
 #include <relinker/analysis/SyscallScanner.hpp>
 #include <relinker/guest/GuestImage.hpp>
 #include <codegen/IAmd64OnlyConverter.hpp>
+#include <map>
 #include <codegen/CodegenException.hpp>
 #include <filesystem>
 #include <iostream>
@@ -42,9 +43,18 @@ int main(const int argc, char* argv[]) {
             auto converted = Codegen::MakeAmd64OnlyConverter()->Convert(std::move(sourceBytes), codeSegments);
             inputBytes = std::move(converted.Bytes);
             trampolines = std::move(converted.Trampolines);
-            for (const auto& report : converted.Reports)
-                std::cout << "Intel substitution: " << report.InstructionName << " at 0x" << std::hex << report.Offset << std::dec << " (" << report.OriginalLength << " bytes) -> " << (report.Lowering == Codegen::Amd64OnlyLowering::InPlace ? "in place " : "stub ") << report.ReplacementLength << " bytes\n";
-            std::cout << "Intel conversion: " << converted.ReplacedCount << " in place, " << trampolines.size() << " stubs\n";
+            std::map<std::string, std::size_t> stubsByName;
+            for (const auto& report : converted.Reports) {
+                if (report.Lowering == Codegen::Amd64OnlyLowering::Kept)
+                    std::cout << "Intel substitution: " << report.InstructionName << " at 0x" << std::hex << report.Offset << std::dec << " (" << report.OriginalLength << " bytes) kept: no room for a jump\n";
+                else if (report.InstructionName == "VRSQRTPS" || report.InstructionName == "VRCPPS")
+                    ++stubsByName[report.InstructionName];
+                else
+                    std::cout << "Intel substitution: " << report.InstructionName << " at 0x" << std::hex << report.Offset << std::dec << " (" << report.OriginalLength << " bytes) -> " << (report.Lowering == Codegen::Amd64OnlyLowering::InPlace ? "in place " : "stub ") << report.ReplacementLength << " bytes\n";
+            }
+            for (const auto& [name, count] : stubsByName)
+                std::cout << "Intel substitution: " << name << " -> stub at " << count << " sites\n";
+            std::cout << "Intel conversion: " << converted.ReplacedCount << " in place, " << trampolines.size() << " stubs, " << converted.KeptCount << " kept\n";
         }
 
         // A single executable: modules shipped beside it (sce_module/) are relinked as guest

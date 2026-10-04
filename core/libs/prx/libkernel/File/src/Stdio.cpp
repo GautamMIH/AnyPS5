@@ -127,6 +127,8 @@ int APS5_VABI _close_nid_postfix(int descriptor) {
     return close_nid_postfix(descriptor);
 }
 
+extern "C" int APS5_VABI open_nid_postfix(const char* path, int flags, int mode);
+
 int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
     std::uint16_t mode = 0;
     if (flags & SCE_KERNEL_O_CREAT) {
@@ -142,7 +144,8 @@ int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
         va_end(arguments);
 #endif
     }
-    return sceKernelOpen(path, flags, mode);
+    // POSIX: -1 with errno, not an SCE error code (upstream).
+    return open_nid_postfix(path, flags, mode);
 }
 
 std::int64_t APS5_VABI _read_nid_postfix(int descriptor, void* buffer, std::size_t count) {

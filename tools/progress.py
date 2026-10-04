@@ -27,12 +27,24 @@ OPCODE_ALIASES = {
 }
 OPCODE_VARIANTS = {
     "SAddI32": ("S_ADDK_I32",),
-    "SCmpLeU32": ("S_CMPK_LE_U32",),
+    "SCmpEqI32": ("S_CMPK_EQ_I32",),
+    "SCmpLgI32": ("S_CMPK_LG_I32",),
+    "SCmpGtI32": ("S_CMPK_GT_I32",),
+    "SCmpGeI32": ("S_CMPK_GE_I32",),
     "SCmpLtI32": ("S_CMPK_LT_I32",),
+    "SCmpLeI32": ("S_CMPK_LE_I32",),
+    "SCmpEqU32": ("S_CMPK_EQ_U32",),
+    "SCmpLgU32": ("S_CMPK_LG_U32",),
+    "SCmpGtU32": ("S_CMPK_GT_U32",),
+    "SCmpGeU32": ("S_CMPK_GE_U32",),
+    "SCmpLtU32": ("S_CMPK_LT_U32",),
+    "SCmpLeU32": ("S_CMPK_LE_U32",),
     "SWaitcnt": ("S_WAITCNT_VSCNT",),
+    "STtracedata": ("S_TTRACEDATA_IMM",),
+    "SCbranchCdbg": ("S_CBRANCH_CDBGSYS", "S_CBRANCH_CDBGUSER", "S_CBRANCH_CDBGSYS_OR_USER", "S_CBRANCH_CDBGSYS_AND_USER"),
     "VAddI32": ("V_ADD_CO_U32",),
     "VSubrevI32": ("V_SUBREV_CO_U32",),
-    "ImageSample": ("IMAGE_SAMPLE_L", "IMAGE_SAMPLE_B", "IMAGE_SAMPLE_C_LZ", "IMAGE_SAMPLE_L_O"),
+    "ImageSample": ("IMAGE_SAMPLE_L", "IMAGE_SAMPLE_B", "IMAGE_SAMPLE_C_LZ", "IMAGE_SAMPLE_L_O", "IMAGE_SAMPLE_D_CL_O"),
 }
 REPORT_ROWS = 100
 PANEL_WIDTH, GAP, MAP_HEIGHT, HEADER = 495, 10, 280, 30

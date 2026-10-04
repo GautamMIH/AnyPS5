@@ -13,41 +13,6 @@
 
 namespace ShaderRecompiler::Detail {
 
-namespace {
-
-struct SlotPool {
-    std::vector<std::unique_ptr<std::vector<Evaluator::Slot>>> free;
-    std::uint32_t stamp = 0;
-};
-
-SlotPool& slotPool() {
-    thread_local SlotPool pool;
-    return pool;
-}
-
-}
-
-Evaluator::Evaluator(const IrResourcePlan& program, const SrtRuntime& runtime, std::span<const std::uint8_t> cleanFlatSlots, Evaluator* cleanEvaluator, IrValue* activeMask) : _program(program), _runtime(runtime), _cleanFlatSlots(cleanFlatSlots), _cleanEvaluator(cleanEvaluator), _activeMask(activeMask != nullptr ? activeMask->Resolve() : nullptr) {
-    auto& pool = slotPool();
-    if (pool.free.empty()) {
-        _slots = new std::vector<Slot>();
-    } else {
-        _slots = pool.free.back().release();
-        pool.free.pop_back();
-    }
-    if (++pool.stamp == 0) {
-        // The stamp wrapped: no slot may claim validity for a new evaluator.
-        for (auto& slots : pool.free) std::fill(slots->begin(), slots->end(), Slot{});
-        std::fill(_slots->begin(), _slots->end(), Slot{});
-        pool.stamp = 1;
-    }
-    _stamp = pool.stamp;
-}
-
-Evaluator::~Evaluator() {
-    slotPool().free.emplace_back(_slots);
-}
-
 bool Evaluator::Evaluate(IrValue* value, std::uint32_t& result) {
     std::uint64_t wide = 0;
     if (!EvaluateWide(value, wide)) {
@@ -77,18 +42,8 @@ bool Evaluator::EvaluateWide(IrValue* raw, std::uint64_t& result) {
     if (_activeMask != nullptr && IsRuntimeSelect(inst->Opcode()) && inst->ArgumentCount() == 3 && inst->Argument(0)->Resolve() == _activeMask) {
         return EvaluateWide(inst->Argument(1), result);
     }
-    const auto id = inst->Id();
-    if (id < (1u << 20u) && id >= _slots->size()) _slots->resize(std::max<std::size_t>(id + 1u, _slots->size() * 2u));
-    Slot* slot = id < _slots->size() ? &(*_slots)[id] : nullptr;
-    if (slot != nullptr && slot->stamp == _stamp && slot->value == inst) {
-        result = slot->result;
+    if (_cache.Find(inst, result)) {
         return true;
-    }
-    if (!_cache.empty()) {
-        if (const auto found = _cache.find(inst); found != _cache.end()) {
-            result = found->second;
-            return true;
-        }
     }
     if (std::find(_visiting.begin(), _visiting.end(), inst) != _visiting.end()) {
         return false;
@@ -102,10 +57,7 @@ bool Evaluator::EvaluateWide(IrValue* raw, std::uint64_t& result) {
         if (debug) std::fprintf(stderr, "[srt] cannot evaluate %s (%zu arguments)\n", std::string(IrOpcodeName(inst->Opcode())).c_str(), inst->ArgumentCount());
         return false;
     }
-    // The slot may have grown away while evaluating the arguments.
-    slot = id < _slots->size() ? &(*_slots)[id] : nullptr;
-    if (slot != nullptr && slot->stamp != _stamp) *slot = Slot{inst, out, _stamp};
-    else _cache.emplace(inst, out);
+    _cache.Insert(inst, out);
     result = out;
     return true;
 }

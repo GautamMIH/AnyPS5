@@ -531,8 +531,14 @@ std::uint32_t EmitBallot(SpirvValueEmitContext& ctx, const IrValue* predicate) {
 }
 
 std::uint32_t EmitReadFirstLane(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    auto& state = ctx.state;
     const auto ballot = ctx.Ballot(inst.Argument(1));
-    return ctx.Shuffle(inst, 0, ctx.FirstLane(ballot));
+    const auto low = state.module.AllocateId();
+    const auto high = state.module.AllocateId();
+    state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, ballot, 0u);
+    state.module.AddFunction(spv::OpCompositeExtract, TypeU32(state), high, ballot, 1u);
+    const auto any = Binary(state, spv::OpINotEqual, TypeBool(state), Binary(state, spv::OpBitwiseOr, TypeU32(state), low, high), ConstantU32(state, 0u));
+    return ctx.Shuffle(inst, 0, Select(state, TypeU32(state), any, ctx.FirstLane(ballot), ConstantU32(state, 0u)));
 }
 
 std::uint32_t EmitReadLane(SpirvValueEmitContext& ctx, const IrValue& inst) {
@@ -595,6 +601,24 @@ std::uint32_t EmitBpermuteU32(SpirvValueEmitContext& ctx, const IrValue& inst) {
     const auto base = Binary(state, spv::OpBitwiseAnd, TypeU32(state), EmitSubgroupLocalInvocationId(state), ConstantU32(state, ~31u));
     const auto target = Binary(state, spv::OpBitwiseOr, TypeU32(state), base, index);
     return EmitDsMaskedLaneRead(state, source, target, ctx.Arg(inst, 2));
+}
+
+std::uint32_t EmitPermuteU32(SpirvValueEmitContext& ctx, const IrValue& inst) {
+    auto& state = ctx.state;
+    const auto lane = EmitSubgroupLocalInvocationId(state);
+    const auto base = Binary(state, spv::OpBitwiseAnd, TypeU32(state), lane, ConstantU32(state, ~31u));
+    const auto own = Binary(state, spv::OpBitwiseAnd, TypeU32(state), lane, ConstantU32(state, 31u));
+    auto result = ConstantU32(state, 0u);
+    for (std::uint32_t source = 0; source < 32u; ++source) {
+        const auto from = Binary(state, spv::OpBitwiseOr, TypeU32(state), base, ConstantU32(state, source));
+        const auto value = ctx.Shuffle(inst, 0, from);
+        const auto address = ctx.Shuffle(inst, 1, from);
+        const auto active = ctx.Shuffle(inst, 2, from);
+        const auto target = Binary(state, spv::OpBitwiseAnd, TypeU32(state), Binary(state, spv::OpShiftRightLogical, TypeU32(state), address, ConstantU32(state, 2u)), ConstantU32(state, 31u));
+        const auto hit = Binary(state, spv::OpLogicalAnd, TypeBool(state), active, Binary(state, spv::OpIEqual, TypeBool(state), target, own));
+        result = Select(state, TypeU32(state), hit, value, result);
+    }
+    return result;
 }
 
 std::uint32_t EmitSwizzleU32(SpirvValueEmitContext& ctx, const IrValue& inst) {

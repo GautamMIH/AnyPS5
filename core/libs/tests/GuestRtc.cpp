@@ -100,6 +100,27 @@ int main() {
     Require(sceRtcParseRFC3339(&tick, "2023-02-29T00:00:00Z") == invalidDay);
     Require(sceRtcParseRFC3339(&tick, "2024-02-29T12:34:56") == badParse);
     Require(sceRtcParseRFC3339(&tick, "2024-02-29T12:34:56Zjunk") == badParse);
+    const char* invalidOffsets[] = {
+        "2024-02-29T12:34:56.789+00:99",
+        "2024-02-29T12:34:56.789-00:99",
+        "2024-02-29T12:34:56.789+00:60",
+        "2024-02-29T12:34:56.789-00:60",
+        "2024-02-29T12:34:56.789+24:00",
+        "2024-02-29T12:34:56.789-24:00",
+        "2024-02-29T12:34:56.789+99:59",
+        "2024-02-29T12:34:56.789-99:59",
+    };
+    for (const char* text : invalidOffsets) {
+        tick.tick = 123;
+        Require(sceRtcParseRFC3339(&tick, text) == badParse);
+        Require(tick.tick == 123);
+    }
+    Require(sceRtcParseRFC3339(&tick, "2024-02-29T12:34:56.789+00:00") == 0 && tick.tick == leapDayTick);
+    Require(sceRtcParseRFC3339(&tick, "2024-02-29T12:34:56.789-00:00") == 0 && tick.tick == leapDayTick);
+    Require(sceRtcParseRFC3339(&tick, "2024-02-29T12:34:56.789+00:59") == 0 && tick.tick == leapDayTick - 3540000000ull);
+    Require(sceRtcParseRFC3339(&tick, "2024-02-29T12:34:56.789-00:59") == 0 && tick.tick == leapDayTick + 3540000000ull);
+    Require(sceRtcParseRFC3339(&tick, "2024-02-29T12:34:56.789+23:59") == 0 && tick.tick == leapDayTick - 86340000000ull);
+    Require(sceRtcParseRFC3339(&tick, "2024-02-29T12:34:56.789-23:59") == 0 && tick.tick == leapDayTick + 86340000000ull);
     Require(sceRtcParseRFC3339(nullptr, "1970-01-01T00:00:00Z") == invalidPointer);
 
     RtcTick source{leapDayTick};

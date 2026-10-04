@@ -208,21 +208,25 @@ struct SourceEntry {
     // points into a registration the driver may replace while the entry lives on.
     std::vector<std::uint32_t> code;
     std::shared_ptr<const IrResourcePlan> plan;
+    // A plan build that threw (an unsupported resource chain or control flow) is remembered and
+    // rethrown: the front end ran every pass before failing, ~13 ms per dispatch of a shader the
+    // title issues every frame (0x1048947300 at the intro video). APS5_NO_FAILURE_MEMO=1 rebuilds.
+    std::exception_ptr planFailure;
+    std::unique_ptr<IrProgram> program;
     std::vector<std::shared_ptr<const CompiledVariant>> variants;
 };
 
 namespace {
 
 struct ResourceProgram {
-    explicit ResourceProgram(const RecompileRequest& request) : program(PrepareResourceProgram(request)), plan(ResourceMaterializer{}.ExtractPlan(program)) {}
+    explicit ResourceProgram(const RecompileRequest& request) : program(std::make_unique<IrProgram>(PrepareResourceProgram(request))), plan(std::make_shared<const IrResourcePlan>(ResourceMaterializer{}.ExtractPlan(*program))) {}
 
-    IrProgram program;
-    IrResourcePlan plan;
+    std::unique_ptr<IrProgram> program;
+    std::shared_ptr<const IrResourcePlan> plan;
 };
 
 std::shared_ptr<const IrResourcePlan> makeResourcePlan(const RecompileRequest& request) {
-    const auto resource = std::make_shared<ResourceProgram>(request);
-    return std::shared_ptr<const IrResourcePlan>(resource, &resource->plan);
+    return ResourceProgram(request).plan;
 }
 
 struct SourceKeyHash {
@@ -277,7 +281,16 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     {
         std::lock_guard lock(source->mutex);
         if (source->plan == nullptr) {
-            source->plan = makeResourcePlan(request);
+            static const bool memoFailures = std::getenv("APS5_NO_FAILURE_MEMO") == nullptr;
+            if (memoFailures && source->planFailure) std::rethrow_exception(source->planFailure);
+            try {
+                ResourceProgram resource(request);
+                source->plan = std::move(resource.plan);
+                source->program = std::move(resource.program);
+            } catch (...) {
+                if (memoFailures) source->planFailure = std::current_exception();
+                throw;
+            }
         }
     }
     return source;
@@ -348,6 +361,7 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
     result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
     result.bdaWrites = program.Info().bdaWrites;
     result.memoryOffsetDword = bindings.layout.memoryOffsetDword;
+    result.hostSubgroupSize = HostSubgroupSize(request);
     result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
     result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;
     for (const auto& output : program.Info().outputs) {
@@ -413,10 +427,12 @@ std::shared_ptr<const CompiledVariant> findOrCompileVariant(SourceEntry& source,
         }
     }
     if (variant == nullptr) {
-        auto program = PrepareResourceProgram(request);
+        auto program = source.program != nullptr ? std::move(*source.program) : PrepareResourceProgram(request);
+        source.program.reset();
         variant = std::make_shared<const CompiledVariant>(compileVariant(request, std::move(program), snapshot, specialization));
         if (disk) ShaderDiskCache::Store(std::move(diskKey), variant);
     }
+    source.program.reset();
     source.variants.push_back(variant);
     return variant;
 }

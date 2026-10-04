@@ -114,7 +114,8 @@ ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOut
     auto byteWriter = std::make_shared<Io::ByteWriter>();
     std::shared_ptr<Elfpatcher::IElfPatcher> patcher;
     if (args.toWindows) {
-        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui);
+        // The game's icon (sce_sys/icon0.png beside the input) becomes the executable's icon (upstream).
+        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui, std::filesystem::path(args.inputPath).parent_path() / "sce_sys" / "icon0.png");
     } else {
         patcher = std::make_shared<Elfpatcher::Linux::LinuxElfPatcher>(
             std::make_shared<Elfpatcher::EntryStubBuilder>(),

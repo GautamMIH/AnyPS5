@@ -13,6 +13,9 @@
 #include <random>
 #include <thread>
 
+#include "prx/libc/include/FileStream.hpp"
+#include "prx/libc/include/ApplicationHeap.hpp"
+#include "prx/libc/include/General.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/General.hpp"

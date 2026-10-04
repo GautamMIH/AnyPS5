@@ -5,31 +5,73 @@
 #include "Optimization/SrtWalker.hpp"
 
 #include <cstdint>
-#include <memory>
 #include <span>
-#include <unordered_map>
 #include <vector>
 
 namespace ShaderRecompiler::Detail {
 
+class EvaluatedValues {
+public:
+    bool Find(const IrValue* key, std::uint64_t& value) const {
+        if (_slots.empty()) {
+            return false;
+        }
+        for (std::size_t index = Home(key);; index = (index + 1u) & (_slots.size() - 1u)) {
+            const auto& slot = _slots[index];
+            if (slot.key == key) {
+                value = slot.value;
+                return true;
+            }
+            if (slot.key == nullptr) {
+                return false;
+            }
+        }
+    }
+    void Insert(const IrValue* key, std::uint64_t value) {
+        if ((_count + 1u) * 2u > _slots.size()) {
+            Grow();
+        }
+        for (std::size_t index = Home(key);; index = (index + 1u) & (_slots.size() - 1u)) {
+            auto& slot = _slots[index];
+            if (slot.key == key) {
+                return;
+            }
+            if (slot.key == nullptr) {
+                slot = {key, value};
+                ++_count;
+                return;
+            }
+        }
+    }
+
+private:
+    struct Slot {
+        const IrValue* key = nullptr;
+        std::uint64_t value = 0;
+    };
+    std::size_t Home(const IrValue* key) const {
+        return static_cast<std::size_t>((reinterpret_cast<std::uintptr_t>(key) >> 4u) * 0x9e3779b97f4a7c15ull >> 32u) & (_slots.size() - 1u);
+    }
+    void Grow() {
+        std::vector<Slot> previous(_slots.empty() ? 64u : _slots.size() * 2u);
+        previous.swap(_slots);
+        _count = 0;
+        for (const auto& slot : previous) {
+            if (slot.key != nullptr) {
+                Insert(slot.key, slot.value);
+            }
+        }
+    }
+    std::vector<Slot> _slots;
+    std::size_t _count = 0;
+};
+
 class Evaluator {
 public:
-    Evaluator(const IrResourcePlan& program, const SrtRuntime& runtime, std::span<const std::uint8_t> cleanFlatSlots = {}, Evaluator* cleanEvaluator = nullptr, IrValue* activeMask = nullptr);
-    ~Evaluator();
-    Evaluator(const Evaluator&) = delete;
-    Evaluator& operator=(const Evaluator&) = delete;
+    Evaluator(const IrResourcePlan& program, const SrtRuntime& runtime, std::span<const std::uint8_t> cleanFlatSlots = {}, Evaluator* cleanEvaluator = nullptr, IrValue* activeMask = nullptr) : _program(program), _runtime(runtime), _cleanFlatSlots(cleanFlatSlots), _cleanEvaluator(cleanEvaluator), _activeMask(activeMask != nullptr ? activeMask->Resolve() : nullptr) {}
 
     bool Evaluate(IrValue* value, std::uint32_t& result);
     bool EvaluateWide(IrValue* raw, std::uint64_t& result);
-
-    // Evaluated values (materialization runs per draw): slots indexed by value id, from a
-    // thread-local pool and valid for this evaluator's stamp, so nothing is allocated or cleared per
-    // evaluation. A value whose slot another value holds goes to the map.
-    struct Slot {
-        IrValue* value = nullptr;
-        std::uint64_t result = 0;
-        std::uint32_t stamp = 0;
-    };
 
 private:
     static float Float32(std::uint64_t bits);
@@ -46,9 +88,7 @@ private:
     std::span<const std::uint8_t> _cleanFlatSlots;
     Evaluator* _cleanEvaluator = nullptr;
     IrValue* _activeMask = nullptr;
-    std::vector<Slot>* _slots = nullptr;
-    std::uint32_t _stamp = 0;
-    std::unordered_map<IrValue*, std::uint64_t> _cache;
+    EvaluatedValues _cache;
     std::vector<IrValue*> _visiting;
 };
 

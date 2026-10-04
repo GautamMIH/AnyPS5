@@ -169,11 +169,15 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VMulLoU32:
         case RdnaOpcode::VMulHiU32:
         case RdnaOpcode::VMadU64U32:
+        case RdnaOpcode::VMadI64I32:
         case RdnaOpcode::VSadU32:
         case RdnaOpcode::VSadU8:
         case RdnaOpcode::VSadHiU8:
         case RdnaOpcode::VSadU16:
         case RdnaOpcode::VMsadU8:
+        case RdnaOpcode::VQsadPkU16U8:
+        case RdnaOpcode::VMqsadPkU16U8:
+        case RdnaOpcode::VMqsadU32U8:
         case RdnaOpcode::VAndB32:
         case RdnaOpcode::VOrB32:
         case RdnaOpcode::VXorB32:
@@ -212,6 +216,10 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VPipeflush:
         case RdnaOpcode::VClrexcp:
         case RdnaOpcode::VMovrelsB32:
+        case RdnaOpcode::VMovrelsdB32:
+        case RdnaOpcode::VMovrelsd2B32:
+        case RdnaOpcode::VSwapB32:
+        case RdnaOpcode::VSwaprelB32:
         case RdnaOpcode::VPermlane16B32:
         case RdnaOpcode::VPermlanex16B32:
         case RdnaOpcode::VCubeidF32:
@@ -219,6 +227,13 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VCubetcF32:
         case RdnaOpcode::VCubemaF32:
         case RdnaOpcode::VDot2cF32F16:
+        case RdnaOpcode::VDot4cI32I8:
+        case RdnaOpcode::VDot2I32I16:
+        case RdnaOpcode::VDot2U32U16:
+        case RdnaOpcode::VDot4I32I8:
+        case RdnaOpcode::VDot4U32U8:
+        case RdnaOpcode::VDot8I32I4:
+        case RdnaOpcode::VDot8U32U4:
         case RdnaOpcode::VCvtF16U16:
         case RdnaOpcode::VCvtU16F16:
         case RdnaOpcode::VCvtF16I16:
@@ -298,6 +313,7 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VMed3F16:
         case RdnaOpcode::VMed3I16:
         case RdnaOpcode::VMed3U16:
+        case RdnaOpcode::VDivFixupF16:
         case RdnaOpcode::VAdd3U32:
         case RdnaOpcode::VLshlAddU32:
         case RdnaOpcode::VAddLshlU32:
@@ -323,6 +339,25 @@ bool IsVectorAluOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::VSatPkU8I16:
         case RdnaOpcode::VMulLegacyF32:
         case RdnaOpcode::VMacLegacyF32:
+        case RdnaOpcode::VFmaF64:
+        case RdnaOpcode::VAddF64:
+        case RdnaOpcode::VMulF64:
+        case RdnaOpcode::VMinF64:
+        case RdnaOpcode::VMaxF64:
+        case RdnaOpcode::VLdexpF64:
+        case RdnaOpcode::VCvtI32F64:
+        case RdnaOpcode::VCvtF64I32:
+        case RdnaOpcode::VCvtF32F64:
+        case RdnaOpcode::VCvtF64F32:
+        case RdnaOpcode::VCvtU32F64:
+        case RdnaOpcode::VCvtF64U32:
+        case RdnaOpcode::VTruncF64:
+        case RdnaOpcode::VCeilF64:
+        case RdnaOpcode::VRndneF64:
+        case RdnaOpcode::VFloorF64:
+        case RdnaOpcode::VFrexpExpI32F64:
+        case RdnaOpcode::VFrexpMantF64:
+        case RdnaOpcode::VFractF64:
         case RdnaOpcode::VCvtPknormI16F32:
         case RdnaOpcode::VCvtPknormU16F32:
         case RdnaOpcode::VCvtPkU16U32:
@@ -631,6 +666,14 @@ bool IsBufferMemoryOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::BufferLoadDwordx3:
         case RdnaOpcode::BufferStoreByte:
         case RdnaOpcode::BufferStoreShort:
+        case RdnaOpcode::BufferLoadUbyteD16:
+        case RdnaOpcode::BufferLoadUbyteD16Hi:
+        case RdnaOpcode::BufferLoadSbyteD16:
+        case RdnaOpcode::BufferLoadSbyteD16Hi:
+        case RdnaOpcode::BufferLoadShortD16:
+        case RdnaOpcode::BufferLoadShortD16Hi:
+        case RdnaOpcode::BufferStoreByteD16Hi:
+        case RdnaOpcode::BufferStoreShortD16Hi:
         case RdnaOpcode::BufferStoreDwordx2:
         case RdnaOpcode::BufferStoreDwordx3:
         case RdnaOpcode::BufferAtomicSwap:
@@ -652,6 +695,24 @@ bool IsBufferMemoryOpcode(RdnaOpcode opcode) {
         case RdnaOpcode::TbufferLoadFormatXy:
         case RdnaOpcode::TbufferLoadFormatXyz:
         case RdnaOpcode::TbufferLoadFormatXyzw:
+        case RdnaOpcode::TbufferLoadFormatD16X:
+        case RdnaOpcode::TbufferLoadFormatD16Xy:
+        case RdnaOpcode::TbufferLoadFormatD16Xyz:
+        case RdnaOpcode::TbufferLoadFormatD16Xyzw:
+        case RdnaOpcode::BufferLoadFormatD16X:
+        case RdnaOpcode::BufferLoadFormatD16Xy:
+        case RdnaOpcode::BufferLoadFormatD16Xyz:
+        case RdnaOpcode::BufferLoadFormatD16Xyzw:
+        case RdnaOpcode::BufferLoadFormatD16HiX:
+        case RdnaOpcode::TbufferStoreFormatD16X:
+        case RdnaOpcode::TbufferStoreFormatD16Xy:
+        case RdnaOpcode::TbufferStoreFormatD16Xyz:
+        case RdnaOpcode::TbufferStoreFormatD16Xyzw:
+        case RdnaOpcode::BufferStoreFormatD16X:
+        case RdnaOpcode::BufferStoreFormatD16Xy:
+        case RdnaOpcode::BufferStoreFormatD16Xyz:
+        case RdnaOpcode::BufferStoreFormatD16Xyzw:
+        case RdnaOpcode::BufferStoreFormatD16HiX:
         case RdnaOpcode::TbufferStoreFormatX:
         case RdnaOpcode::TbufferStoreFormatXy:
         case RdnaOpcode::TbufferStoreFormatXyz:

@@ -1,3 +1,4 @@
+#include <string_view>
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
@@ -50,7 +51,9 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     // appears in front of or takes focus from the windows in use; compositors such as KWin ignore
     // SDL's no-activation hint, and minimizing is asynchronous on X11. A hidden window presents
     // nothing (its drawable reads as empty); frame dumps (ANYPS5_DUMP_FRAMES) still work.
-    const bool background = std::getenv("ANYPS5_BACKGROUND_WINDOW") != nullptr;
+    // "0" (or empty) means a visible window, like the variable being unset.
+    const char* backgroundValue = std::getenv("ANYPS5_BACKGROUND_WINDOW");
+    const bool background = backgroundValue != nullptr && backgroundValue[0] != '\0' && std::string_view(backgroundValue) != "0";
     window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), (background ? SDL_WINDOW_HIDDEN : SDL_WINDOW_SHOWN) | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     require(window != nullptr, SDL_GetError());
     if (background) std::fprintf(stderr, "[AnyPS5] ANYPS5_BACKGROUND_WINDOW: the game window is hidden\n");

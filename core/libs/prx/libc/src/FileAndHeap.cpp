@@ -108,6 +108,7 @@ int APS5_VABI fseek_nid_postfix(FileStream* stream, std::int64_t offset, int ori
 
 std::int64_t APS5_VABI ftell_nid_postfix(FileStream* stream) { return ftello_nid_postfix(stream); }
 
+
 int APS5_VABI fputs_nid_postfix(const char* str, FileStream* stream) {
     if (!str) throw std::runtime_error("fputs: null string");
     const int result = std::fputs(str, GetNativeStream(stream));

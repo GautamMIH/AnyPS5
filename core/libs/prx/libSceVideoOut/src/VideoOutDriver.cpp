@@ -164,6 +164,13 @@ void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameT
         ready = true;
     }
     queue->changed.notify_all();
+    // The worker is done once the request is queued: hardware does not stall the command processor
+    // on a flip, and the title observes completion through flipPendingNum, which processFlip drops
+    // once the frame's GPU work and its presentation have completed (see Driver::Present). A
+    // presentation failure reaches the worker through ReportFailure at its next packet. Debug aid:
+    // APS5_SYNC_FLIP=1 parks the worker until the presenter is done, as before.
+    static const bool syncFlip = std::getenv("APS5_SYNC_FLIP") != nullptr;
+    if (!syncFlip) return;
     std::unique_lock lock(cfg->mutex);
     cfg->vblankCond.wait(lock, [&] { return gpuComplete || cfg->failure || cfg->closing; });
     checkConfig(*cfg);

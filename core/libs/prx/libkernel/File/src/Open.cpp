@@ -186,6 +186,8 @@ namespace {
 
 constexpr int kErrorInvalid = 22;
 constexpr int kErrorFault = 14;
+// POSIX: an empty path names no file (it would otherwise resolve to the working directory).
+constexpr int kErrorNoEntry = 2;
 
 // ANYPS5_TRACE_FILES=1 logs every guest path lookup with its host path and outcome.
 bool traceFiles() {
@@ -228,6 +230,10 @@ int openFile(const char* path, int flags, int mode) {
         errno = EFAULT;
         return -1;
     }
+    if (*path == '\0') {
+        errno = ENOENT;
+        return -1;
+    }
     const int nativeFlags = MapFlags(flags);
     if (nativeFlags < 0) {
         errno = EINVAL;
@@ -267,6 +273,11 @@ int statPath(const char* path, FileStat* sb) {
         errno = EFAULT;
         return -1;
     }
+    // POSIX: an empty path names no file (it would otherwise resolve to the working directory).
+    if (*path == '\0') {
+        errno = ENOENT;
+        return -1;
+    }
     const auto host = ResolvePath_nid_no_patch(path);
     const int error = File::FillFileStat(host, sb);
     if (error != 0) {
@@ -294,6 +305,10 @@ int statDescriptor(int d, FileStat* sb) {
 int renamePath(const char* from, const char* to) {
     if (from == nullptr || to == nullptr) {
         errno = EFAULT;
+        return -1;
+    }
+    if (*from == '\0' || *to == '\0') {
+        errno = ENOENT;
         return -1;
     }
     return NativeRename(ResolvePath_nid_no_patch(from), ResolvePath_nid_no_patch(to));
@@ -434,16 +449,19 @@ int APS5_VABI ftruncate_nid_postfix(int d, int64_t length) {
 
 int APS5_VABI mkdir_nid_postfix(const char* path, uint16_t mode) {
     if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
+    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
     return posixResult(NativeMkdir(ResolvePath_nid_no_patch(path), mode));
 }
 
 int APS5_VABI rmdir_nid_postfix(const char* path) {
     if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
+    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
     return posixResult(NativeRmdir(ResolvePath_nid_no_patch(path)));
 }
 
 int APS5_VABI unlink_nid_postfix(const char* path) {
     if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
+    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
     return posixResult(NativeUnlink(ResolvePath_nid_no_patch(path)));
 }
 
@@ -453,6 +471,7 @@ int APS5_VABI rename_nid_postfix(const char* from, const char* to) {
 
 int APS5_VABI chmod_nid_postfix(const char* path, int mode) {
     if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
+    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
     return posixResult(NativeChmod(ResolvePath_nid_no_patch(path), mode));
 }
 
@@ -466,6 +485,7 @@ int APS5_VABI flock_nid_postfix(int d, int operation) {
 
 int APS5_VABI utimes_nid_postfix(const char* path, const KernelTimeval* times) {
     if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
+    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
     return posixResult(NativeUtimes(ResolvePath_nid_no_patch(path), times));
 }
 

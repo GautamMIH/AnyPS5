@@ -12,6 +12,7 @@ void* APS5_VABI _Znwm_nid_postfix(std::size_t);
 void* APS5_VABI _ZnamRKSt9nothrow_t_nid_postfix(std::size_t, const void*);
 void APS5_VABI _ZdlPv_nid_postfix(void*);
 void APS5_VABI _ZdaPv_nid_postfix(void*);
+void APS5_VABI _ZdlPvSt11align_val_t_nid_postfix(void*, std::size_t);
 void* ApplicationHeapRealign_nid_no_patch(void*, std::size_t, std::size_t);
 }
 
@@ -127,7 +128,7 @@ int main(int argc, char** argv) {
         for (std::size_t alignment : {16, 64, 4096}) {
             auto* aligned = ApplicationHeapAlign_nid_no_patch(alignment, 37);
             require(reinterpret_cast<std::uintptr_t>(aligned) % alignment == 0);
-            ApplicationHeapFree_nid_no_patch(aligned);
+            _ZdlPvSt11align_val_t_nid_postfix(aligned, alignment);
         }
         void* aligned = nullptr;
         require(ApplicationHeapPosixAlign_nid_no_patch(&aligned, 256, 99) == 0);
@@ -174,6 +175,11 @@ int main(int argc, char** argv) {
     require(frees == 4);
     require(ApplicationHeapRealign_nid_no_patch(storage.data(), 48, 32) == storage.data() && lastSize == 48 && lastAlignment == 32);
     reject([] { ApplicationHeapRealign_nid_no_patch(storage.data(), 16, 4096); });
+    pointer = ApplicationHeapAlign_nid_no_patch(64, 37);
+    _ZdlPvSt11align_val_t_nid_postfix(pointer, 64);
+    require(frees == 5);
+    _ZdlPvSt11align_val_t_nid_postfix(nullptr, 64);
+    require(frees == 5);
     fail = true;
 #ifdef _WIN32
     // operator new throws a guest std::bad_alloc. Only on Windows does libc.prx own the process-wide

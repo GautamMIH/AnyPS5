@@ -189,6 +189,7 @@ RdnaOpcode decodeSoppOpcode(std::uint32_t opcode) {
         case 0x00u: return RdnaOpcode::SNop;
         case 0x01u: return RdnaOpcode::SEndpgm;
         case 0x02u: return RdnaOpcode::SBranch;
+        case 0x03u: return RdnaOpcode::SWakeup;
         case 0x04u: return RdnaOpcode::SCbranchScc0;
         case 0x05u: return RdnaOpcode::SCbranchScc1;
         case 0x06u: return RdnaOpcode::SCbranchVccz;

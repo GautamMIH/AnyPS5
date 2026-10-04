@@ -1,8 +1,14 @@
 #include "SceTypes.hpp"
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
+#include <stdexcept>
 
 extern "C" {
+int APS5_VABI sceKernelCreateSema(KernelSema*, const char*, std::uint32_t, int, int, void*);
+int APS5_VABI sceKernelDeleteSema(KernelSema);
+int APS5_VABI sceKernelSignalSema(KernelSema, int);
+int APS5_VABI sceKernelPollSema(KernelSema, int);
 int APS5_VABI sceKernelCreateEqueue(KernelEqueue* eq, const char* name);
 int APS5_VABI sceKernelDeleteEqueue(KernelEqueue eq);
 int APS5_VABI sceKernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int* out, const KernelUseconds* timo);
@@ -32,6 +38,22 @@ static constexpr int PRIO_PROTECT = 2;
 static void Require(bool value) { if (!value) std::abort(); }
 
 int main() {
+    constexpr int maximum = std::numeric_limits<int>::max();
+    KernelSema semaphore = nullptr;
+    Require(sceKernelCreateSema(&semaphore, "overflow", 1, maximum - 1, maximum, nullptr) == SCE_OK);
+    Require(sceKernelSignalSema(semaphore, 2) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelSignalSema(semaphore, maximum) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelPollSema(semaphore, maximum - 1) == SCE_OK);
+    Require(sceKernelSignalSema(semaphore, maximum) == SCE_OK);
+    Require(sceKernelSignalSema(semaphore, 1) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelPollSema(semaphore, maximum) == SCE_OK);
+    Require(sceKernelDeleteSema(semaphore) == SCE_OK);
+    Require(sceKernelCreateSema(&semaphore, "limit", 1, 1, 3, nullptr) == SCE_OK);
+    Require(sceKernelSignalSema(semaphore, 3) == SCE_KERNEL_ERROR_EINVAL);
+    Require(sceKernelSignalSema(semaphore, 2) == SCE_OK);
+    Require(sceKernelPollSema(semaphore, 3) == SCE_OK);
+    Require(sceKernelDeleteSema(semaphore) == SCE_OK);
+
     KernelEqueue eq = 0;
     Require(sceKernelCreateEqueue(&eq, "errors") == SCE_OK);
     KernelEvent event{};

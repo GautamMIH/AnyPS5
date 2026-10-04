@@ -260,6 +260,10 @@ struct TessellationConfiguration {
 
 inline constexpr std::uint32_t MeshDrawPushOffsetBytes = 104;
 inline constexpr std::uint32_t MeshDrawPushBytes = 24;
+inline constexpr std::uint32_t MeshArgumentAddressDword = 4;
+inline constexpr std::uint32_t MeshArgumentIndexCountDword = 3;
+inline constexpr std::uint32_t MeshArgumentFirstIndexDword = 4;
+inline constexpr std::uint32_t MeshArgumentBytes = 20;
 inline constexpr std::uint32_t MeshIndexBufferUserWord = 4;
 
 struct GraphicsDrawParameters {
@@ -414,6 +418,13 @@ struct RecompileResult {
     std::vector<VertexAttribute> vertexAttributes;
     std::int32_t vertexOffsetSgpr = -1;
     std::int32_t instanceOffsetSgpr = -1;
+    // The offset SGPR is also read elsewhere in the program (so a value folded into the draw's
+    // first vertex / instance cannot stand in for it), or two SGPRs were added (the SGPR is -1).
+    bool vertexOffsetShared = false;
+    bool instanceOffsetShared = false;
+    bool vertexOffsetConflict = false;
+    bool instanceOffsetConflict = false;
+    std::uint32_t hostSubgroupSize = 0;
     std::vector<std::uint32_t> parameterExports;
     std::vector<FragmentParameter> fragmentParameters;
     bool cacheHit = false;

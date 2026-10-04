@@ -158,7 +158,17 @@ std::uint32_t decodedDstSize(const RdnaInstruction& inst) {
 }
 
 std::uint32_t embeddedFetchDstSize(const RdnaInstruction& inst) {
-    return inst.op == RdnaOpcode::VMadU64U32 ? 2u : decodedDstSize(inst);
+    switch (inst.op) {
+    case RdnaOpcode::VMadU64U32:
+    case RdnaOpcode::VMadI64I32:
+    case RdnaOpcode::VQsadPkU16U8:
+    case RdnaOpcode::VMqsadPkU16U8:
+        return 2u;
+    case RdnaOpcode::VMqsadU32U8:
+        return 4u;
+    default:
+        return decodedDstSize(inst);
+    }
 }
 
 }
@@ -367,8 +377,11 @@ EmbeddedFetchPlan EmbeddedVertexFetchAnalyzer::Analyze(const RdnaProgram& progra
             }
             break;
         }
-        if (inst.op == RdnaOpcode::VMovreldB32) {
+        if (inst.op == RdnaOpcode::VMovreldB32 || inst.op == RdnaOpcode::VMovrelsdB32 || inst.op == RdnaOpcode::VMovrelsd2B32 || inst.op == RdnaOpcode::VSwaprelB32) {
             vectorLanes.clear();
+        } else if (inst.op == RdnaOpcode::VSwapB32) {
+            clearVectorLanes(vectorLanes, inst.destination.reg);
+            clearVectorLanes(vectorLanes, inst.source0.reg);
         } else if (inst.op != RdnaOpcode::VWritelaneB32 && isVectorOperand(inst.destination)) {
             for (std::uint32_t i = 0u; i < embeddedFetchDstSize(inst) && inst.destination.reg + i < vgprIsIndex.size(); i++) {
                 clearVectorLanes(vectorLanes, inst.destination.reg + i);

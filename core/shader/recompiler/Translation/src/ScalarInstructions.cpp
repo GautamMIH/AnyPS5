@@ -370,6 +370,7 @@ bool TranslationContext::emitScalar(const RdnaInstruction& inst) {
         return packB16(inst, true, true);
     case RdnaOpcode::SNop:
     case RdnaOpcode::SSleep:
+    case RdnaOpcode::SWakeup:
     case RdnaOpcode::SSetprio:
     case RdnaOpcode::STrap:
     case RdnaOpcode::SClause:

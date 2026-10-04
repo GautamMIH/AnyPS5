@@ -8,6 +8,7 @@
 #include <cwchar>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 #include <cstdarg>
 
@@ -150,6 +151,24 @@ void appendFormatted(std::string& output, const std::string& specification, auto
     output.append(buffer.data(), static_cast<std::size_t>(length));
 }
 
+// The longest prefix of UTF-8 text that writes at most `limit` UTF-16 units (a character above
+// U+FFFF takes two), and the units it writes.
+std::pair<std::string, std::size_t> utf8PrefixByUnits(const char* text, std::size_t limit) {
+    std::size_t units = 0;
+    std::size_t index = 0;
+    while (text[index] != '\0') {
+        const auto lead = static_cast<unsigned char>(text[index]);
+        const std::size_t length = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+        std::size_t available = 1;
+        while (available < length && text[index + available] != '\0') ++available;
+        const std::size_t needed = length == 4 && available == 4 ? 2 : 1;
+        if (limit - units < needed) break;
+        units += needed;
+        index += available;
+    }
+    return {std::string(text, index), units};
+}
+
 int formatWide(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list arguments) {
     if (destination == nullptr || format == nullptr || count == 0) {
         errno = kErrorInvalid;
@@ -242,8 +261,20 @@ int formatWide(GuestWchar* destination, std::size_t count, const GuestWchar* for
                 const std::string converted = text == nullptr ? std::string("(null)") : utf8FromGuest(text, hasPrecision ? static_cast<std::size_t>(std::stoul(precision.empty() ? "0" : precision)) : SIZE_MAX);
                 appendFormatted(output, "%" + flags + width + "s", converted.c_str());
             } else {
+                // A narrow string's precision and width count the UTF-16 units written, not its bytes
+                // (upstream 7b64e262): the text is cut at whole characters and padded here.
                 const char* text = va_arg(arguments, const char*);
-                appendFormatted(output, prefix + "s", text == nullptr ? "(null)" : text);
+                const long precisionValue = hasPrecision && !precision.empty() ? std::stol(precision) : hasPrecision ? 0 : -1;
+                const auto [kept, units] = utf8PrefixByUnits(text == nullptr ? "(null)" : text, precisionValue < 0 ? SIZE_MAX : static_cast<std::size_t>(precisionValue));
+                long widthValue = width.empty() ? 0 : std::stol(width);
+                bool left = flags.find('-') != std::string::npos;
+                if (widthValue < 0) {
+                    left = true;
+                    widthValue = -widthValue;
+                }
+                const std::string padding(static_cast<std::size_t>(widthValue) > units ? static_cast<std::size_t>(widthValue) - units : 0, ' ');
+                const std::string padded = left ? kept + padding : padding + kept;
+                appendFormatted(output, "%s", padded.c_str());
             }
             break;
         case u'S': {

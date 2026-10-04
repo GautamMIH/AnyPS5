@@ -17,6 +17,7 @@ bool UniformSource(const IrValue& value) {
     case IrOpcode::ReadConst:
     case IrOpcode::ReadConstBuffer:
     case IrOpcode::MeshDrawParameter:
+    case IrOpcode::MeshArgument:
     case IrOpcode::GetSrtResource:
     case IrOpcode::GetBufferResource:
     case IrOpcode::GetAddressResource:
@@ -38,6 +39,7 @@ bool LaneSource(const IrProgram& program, const IrValue& value) {
     case IrOpcode::DppMoveU32:
     case IrOpcode::DppUpdateU32:
     case IrOpcode::Permlane16U32:
+    case IrOpcode::PermuteU32:
     case IrOpcode::BpermuteU32:
     case IrOpcode::SwizzleU32:
     case IrOpcode::WriteLane:
@@ -68,6 +70,9 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
         for (const IrValue* inst : block->Instructions()) {
             if (BufferAccessOf(inst->Opcode()) == BufferAccess::Atomic && inst->Type() == IrType::U64) {
                 requirements.bufferInt64Atomics = true;
+            }
+            if (IsFloat64Opcode(inst->Opcode())) {
+                requirements.float64 = true;
             }
             const auto addressAccess = AddressOpcodeInfoOf(inst->Opcode()).access;
             if (addressAccess != AddressAccess::None) {
@@ -155,6 +160,7 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
                 break;
             }
             case IrOpcode::SwizzleU32:
+            case IrOpcode::PermuteU32:
             case IrOpcode::BpermuteU32: {
                 requirements.subgroupBallot = true;
                 requirements.subgroupShuffle = true;

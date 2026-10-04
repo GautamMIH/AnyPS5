@@ -41,7 +41,7 @@ int APS5_VABI sceKernelSignalSema(KernelSema sem, int count) {
  }
 
  std::lock_guard<std::mutex> lock(sem->mutex);
- if (sem->tokenCount + count > sem->maxCount) {
+ if (count > sem->maxCount - sem->tokenCount) {
   return SCE_KERNEL_ERROR_EINVAL;
  }
  sem->tokenCount += count;
