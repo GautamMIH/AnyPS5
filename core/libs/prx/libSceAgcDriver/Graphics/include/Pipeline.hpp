@@ -10,7 +10,10 @@ namespace AgcDriver::Graphics {
 // target sets of those formats (and every pipeline made for it).
 class RenderPass {
 public:
-    RenderPass(const Context& context, const State& state);
+    // readOnlyDepth: the subpass uses the depth attachment in its read-only depth layout (the depth
+    // plane is sampled by the work; stencil stays writable), entered from and returned to the
+    // attachment layout by the pass. Layouts do not affect compatibility: pipelines are shared.
+    RenderPass(const Context& context, const State& state, bool readOnlyDepth = false);
     ~RenderPass();
     RenderPass(const RenderPass&) = delete;
     RenderPass& operator=(const RenderPass&) = delete;
@@ -27,7 +30,7 @@ private:
 class Framebuffer {
 public:
     // targets holds one entry per colour slot up to State::ColorSlotCount(); unwritten slots are null.
-    Framebuffer(const Context& context, const State& state, std::shared_ptr<const RenderPass> renderPass, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget);
+    Framebuffer(const Context& context, const State& state, std::shared_ptr<const RenderPass> renderPass, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget, bool readOnlyDepth = false);
     ~Framebuffer();
     Framebuffer(const Framebuffer&) = delete;
     Framebuffer& operator=(const Framebuffer&) = delete;
@@ -35,7 +38,7 @@ public:
     const std::vector<std::uint64_t>& PassKey() const { return passKey; }
     void Begin(VkCommandBuffer commands, VkExtent2D extent) const;
     // The key of the framebuffer a draw with these targets uses.
-    static std::vector<std::uint64_t> Key(const State& state, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget);
+    static std::vector<std::uint64_t> Key(const State& state, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget, bool readOnlyDepth = false);
 
 private:
     Context context;

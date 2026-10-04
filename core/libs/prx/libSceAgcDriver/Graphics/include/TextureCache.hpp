@@ -20,7 +20,14 @@ public:
     std::shared_ptr<Texture> Get(std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, bool depthCompare = false);
     // The depth plane the work being set up renders to (0: none): textures over it are copies,
     // since sampling an attachment while rendering to it is a feedback loop.
-    void SetRenderedDepth(std::uint64_t address) { renderedDepth = address; }
+    // readOnly: the work does not write the depth plane (no depth writes or depth clears), so it may
+    // sample it inside its pass (Texture::FeedbackView) instead of a copy.
+    void SetRenderedDepth(std::uint64_t address, bool readOnly = false) {
+        renderedDepth = address;
+        renderedDepthReadOnly = readOnly;
+    }
+    // Copies made of the depth plane being rendered (the work samples its own depth target).
+    std::uint64_t RenderedDepthCopies() const { return renderedDepthCopies; }
     // The work being set up writes [begin, end) on the GPU (storage images). It may have validated a
     // texture over that range before noting the write: such textures are compared again next time.
     void NoteDrawWrites(std::uint64_t begin, std::uint64_t end);
@@ -73,6 +80,8 @@ private:
     std::vector<std::shared_ptr<Texture>> uploading;
     std::uint64_t retainedBytes = 0;
     std::uint64_t renderedDepth = 0;
+    std::uint64_t renderedDepthCopies = 0;
+    bool renderedDepthReadOnly = false;
     static constexpr std::uint64_t budget = 1024ull * 1024 * 1024;
     static constexpr std::size_t maxEntries = 8192;
 };

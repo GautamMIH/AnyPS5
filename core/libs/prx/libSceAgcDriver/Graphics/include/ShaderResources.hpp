@@ -36,6 +36,14 @@ public:
     // Appends every guest range the work may write, as [begin, end).
     void AppendWrites(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const;
     const std::vector<std::uint32_t>& LayoutKey() const { return layoutKey; }
+    // A texture views the depth target the work renders to (Texture::FeedbackView): the work's render
+    // pass uses the depth attachment read-only.
+    bool DepthFeedback() const {
+        for (const auto& texture : textures) {
+            if (texture->DepthFeedback()) return true;
+        }
+        return false;
+    }
 
 private:
     struct Allocation {

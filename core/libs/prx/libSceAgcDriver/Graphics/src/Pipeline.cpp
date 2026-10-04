@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -15,7 +16,7 @@ std::vector<std::uint64_t> RenderPass::FormatKey(const State& state) {
     return key;
 }
 
-RenderPass::RenderPass(const Context& context, const State& state) : context(context) {
+RenderPass::RenderPass(const Context& context, const State& state, bool readOnlyDepth) : context(context) {
     const auto slots = state.ColorSlotCount();
     Require(slots <= context.limits.maxColorAttachments, "color targets exceed the device's attachment limit");
     VkAttachmentDescription color{};
@@ -43,7 +44,7 @@ RenderPass::RenderPass(const Context& context, const State& state) : context(con
         color.format = state.colors[slot].format;
         attachments.push_back(color);
     }
-    const VkAttachmentReference depthReference{static_cast<std::uint32_t>(attachments.size()), VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    const VkAttachmentReference depthReference{static_cast<std::uint32_t>(attachments.size()), readOnlyDepth ? ReadOnlyDepthLayout(state.depth.hasStencil) : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
     if (state.hasDepthTarget) attachments.push_back(depth);
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
@@ -64,8 +65,22 @@ RenderPass::RenderPass(const Context& context, const State& state) : context(con
     external.dstStageMask = external.srcStageMask;
     external.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     external.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
-    passInfo.dependencyCount = 1;
-    passInfo.pDependencies = &external;
+    std::array<VkSubpassDependency, 2> dependencies{external, external};
+    if (readOnlyDepth) {
+        // The entry transition precedes shader reads of the depth; the exit transition (back to the
+        // attachment layout) follows them and precedes later attachment and shader access.
+        constexpr VkPipelineStageFlags shaders = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependencies[0].dstStageMask |= shaders;
+        dependencies[0].dstAccessMask |= VK_ACCESS_SHADER_READ_BIT;
+        dependencies[1].srcSubpass = 0;
+        dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        dependencies[1].srcStageMask = external.srcStageMask | shaders;
+        dependencies[1].dstStageMask = external.dstStageMask | shaders;
+        dependencies[1].srcAccessMask = external.srcAccessMask;
+        dependencies[1].dstAccessMask = external.dstAccessMask | VK_ACCESS_SHADER_READ_BIT;
+    }
+    passInfo.dependencyCount = readOnlyDepth ? 2u : 1u;
+    passInfo.pDependencies = dependencies.data();
     Check(context.Function<PFN_vkCreateRenderPass>("vkCreateRenderPass")(context.device, &passInfo, nullptr, &renderPass), "vkCreateRenderPass");
 }
 
@@ -87,8 +102,10 @@ std::uint32_t framebufferLayers(const State& state, std::span<const RenderTarget
 
 }
 
-std::vector<std::uint64_t> Framebuffer::Key(const State& state, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget) {
-    std::vector<std::uint64_t> key{state.renderExtent.width, state.renderExtent.height, framebufferLayers(state, targets)};
+std::vector<std::uint64_t> Framebuffer::Key(const State& state, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget, bool readOnlyDepth) {
+    // The read-only depth variant begins another render pass: draws on the same views in the two
+    // variants never share an open pass.
+    std::vector<std::uint64_t> key{state.renderExtent.width, state.renderExtent.height, framebufferLayers(state, targets), readOnlyDepth ? 1u : 0u};
     const auto formats = RenderPass::FormatKey(state);
     key.insert(key.end(), formats.begin(), formats.end());
     for (const auto* target : targets) {
@@ -98,7 +115,7 @@ std::vector<std::uint64_t> Framebuffer::Key(const State& state, std::span<const 
     return key;
 }
 
-Framebuffer::Framebuffer(const Context& context, const State& state, std::shared_ptr<const RenderPass> pass, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget) : context(context), renderPass(std::move(pass)) {
+Framebuffer::Framebuffer(const Context& context, const State& state, std::shared_ptr<const RenderPass> pass, std::span<const RenderTarget* const> targets, const RenderTarget* depthTarget, bool readOnlyDepth) : context(context), renderPass(std::move(pass)) {
     const auto slots = state.ColorSlotCount();
     Require(targets.size() == slots, "render targets do not match decoded color state");
     for (std::uint32_t slot = 0; slot < slots; ++slot) Require((targets[slot] != nullptr) == ((state.colorTargetMask & (1u << slot)) != 0), "render target does not match decoded color state");
@@ -117,7 +134,7 @@ Framebuffer::Framebuffer(const Context& context, const State& state, std::shared
     framebufferInfo.width = state.renderExtent.width;
     framebufferInfo.height = state.renderExtent.height;
     framebufferInfo.layers = framebufferLayers(state, targets);
-    passKey = Key(state, targets, depthTarget);
+    passKey = Key(state, targets, depthTarget, readOnlyDepth);
     Check(context.Function<PFN_vkCreateFramebuffer>("vkCreateFramebuffer")(context.device, &framebufferInfo, nullptr, &framebuffer), "vkCreateFramebuffer");
 }
 

@@ -175,8 +175,18 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         vertexBuffers.push_back(std::move(buffer));
     }
     timing.Mark("vertex_upload");
-    if (context.textureCache) context.textureCache->SetRenderedDepth(state.hasDepthTarget && state.depth.depthBytes != 0 ? state.depth.depthAddress : 0);
+    // The work leaves the depth plane unwritten (no depth writes, depth clears or fast clear): it may
+    // sample it in its pass (TextureCache, Texture::FeedbackView).
+    const bool depthReadOnly = state.hasDepthTarget && !state.depthState.depthWrite && !state.depthState.clearDepth && !depthFastClear;
+    if (context.textureCache) context.textureCache->SetRenderedDepth(state.hasDepthTarget && state.depth.depthBytes != 0 ? state.depth.depthAddress : 0, depthReadOnly);
+    const auto renderedCopiesBefore = context.textureCache ? context.textureCache->RenderedDepthCopies() : 0;
     auto resources = std::make_shared<ShaderResources>(context, shaders, colorTargets, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
+    // Debug aid: APS5_TRACE_DEPTH_FEEDBACK=1 logs the state of draws that sample their own depth target.
+    static const bool traceFeedback = std::getenv("APS5_TRACE_DEPTH_FEEDBACK") != nullptr;
+    if (traceFeedback && context.textureCache && context.textureCache->RenderedDepthCopies() != renderedCopiesBefore) {
+        const auto& depthState = state.depthState;
+        std::fprintf(stderr, "[depth-feedback] depth 0x%llx test=%d write=%d compare=%d stencil=%d stencilWrite=%x/%x clearDepth=%d clearStencil=%d colors=%x\n", static_cast<unsigned long long>(state.depth.depthAddress), depthState.depthTest, depthState.depthWrite, static_cast<int>(depthState.depthCompare), depthState.stencilTest, depthState.front.writeMask, depthState.back.writeMask, depthState.clearDepth, depthState.clearStencil, state.colorTargetMask);
+    }
     if (context.textureCache) context.textureCache->SetRenderedDepth(0);
     timing.Mark("shader_resources");
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
@@ -191,7 +201,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     }
     if (state.hasDepthTarget) storage->depth = context.renderCache->GetDepth(state.depth);
     timing.Mark("render_target_cache");
-    storage->pipeline = context.graphicsPipelines->Get(state, storage->colors, storage->depth, *resources, shaders);
+    storage->pipeline = context.graphicsPipelines->Get(state, storage->colors, storage->depth, *resources, shaders, resources->DepthFeedback());
     auto& pipeline = *storage->pipeline;
     timing.Mark("pipeline_cache");
     // Render-pass merging: a draw whose targets are resident attachments and that records nothing

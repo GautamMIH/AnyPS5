@@ -183,7 +183,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
                     write.pImageInfo = images.data() + imageOffset;
                     break;
                 case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
-                    for (const auto index : binding.imageAllocations) images.push_back({VK_NULL_HANDLE, textures[index]->View(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+                    for (const auto index : binding.imageAllocations) images.push_back({VK_NULL_HANDLE, textures[index]->View(), textures[index]->SampledLayout()});
                     write.pImageInfo = images.data() + imageOffset;
                     break;
                 case VK_DESCRIPTOR_TYPE_SAMPLER:

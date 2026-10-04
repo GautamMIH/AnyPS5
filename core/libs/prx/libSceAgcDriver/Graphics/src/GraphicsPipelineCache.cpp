@@ -124,10 +124,10 @@ std::string makeKey(const Context& context, const State& state, const ShaderReso
 
 }
 
-std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const std::array<std::shared_ptr<ResidentColor>, MaxColorTargets>& targets, const std::shared_ptr<ResidentDepth>& depth, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
+std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const std::array<std::shared_ptr<ResidentColor>, MaxColorTargets>& targets, const std::shared_ptr<ResidentDepth>& depth, const ShaderResources& resources, std::span<const CompiledShader> shaders, bool readOnlyDepth) {
     PerformanceTimer timing("Graphics.PipelineCache");
     ValidateDynamicState(context, state);
-    auto target = framebuffer(state, targets, depth);
+    auto target = framebuffer(state, targets, depth, readOnlyDepth && depth != nullptr);
     timing.Mark("framebuffer");
     auto key = makeKey(context, state, resources, shaders);
     timing.Mark("key");
@@ -175,29 +175,30 @@ std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const s
     return std::make_shared<Pipeline>(std::move(pipeline), std::move(target));
 }
 
-std::shared_ptr<const RenderPass> GraphicsPipelineCache::renderPass(const State& state) {
+std::shared_ptr<const RenderPass> GraphicsPipelineCache::renderPass(const State& state, bool readOnlyDepth) {
     auto key = RenderPass::FormatKey(state);
+    key.push_back(readOnlyDepth ? 1u : 0u);
     const auto found = renderPasses.find(key);
     if (found != renderPasses.end()) return found->second;
-    auto pass = std::make_shared<const RenderPass>(context, state);
+    auto pass = std::make_shared<const RenderPass>(context, state, readOnlyDepth);
     renderPasses.emplace(std::move(key), pass);
     return pass;
 }
 
-std::shared_ptr<const Framebuffer> GraphicsPipelineCache::framebuffer(const State& state, const std::array<std::shared_ptr<ResidentColor>, MaxColorTargets>& targets, const std::shared_ptr<ResidentDepth>& depth) {
+std::shared_ptr<const Framebuffer> GraphicsPipelineCache::framebuffer(const State& state, const std::array<std::shared_ptr<ResidentColor>, MaxColorTargets>& targets, const std::shared_ptr<ResidentDepth>& depth, bool readOnlyDepth) {
     std::vector<const RenderTarget*> views(state.ColorSlotCount(), nullptr);
     for (std::size_t slot = 0; slot < views.size(); ++slot) {
         if (targets[slot]) views[slot] = &targets[slot]->Target();
     }
     const auto* depthView = depth ? &depth->Target() : nullptr;
-    auto key = Framebuffer::Key(state, views, depthView);
+    auto key = Framebuffer::Key(state, views, depthView, readOnlyDepth);
     const auto found = framebufferLookup.find(key);
     if (found != framebufferLookup.end()) {
         const auto it = found->second;
         framebuffers.splice(framebuffers.end(), framebuffers, it);
         return it->framebuffer;
     }
-    auto created = std::make_shared<const Framebuffer>(context, state, renderPass(state), views, depthView);
+    auto created = std::make_shared<const Framebuffer>(context, state, renderPass(state, readOnlyDepth), views, depthView, readOnlyDepth);
     framebuffers.push_back({key, targets, depth, created});
     framebufferLookup.emplace(std::move(key), std::prev(framebuffers.end()));
     while (framebuffers.size() > MaxFramebuffers) {

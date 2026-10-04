@@ -101,8 +101,16 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& d
     Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView direct depth");
 }
 
+Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& depthSource, VkComponentMapping components, FeedbackView) : Texture(context, depthSource, components, DirectView{}) {
+    feedback = true;
+}
+
+VkImageLayout Texture::SampledLayout() const {
+    return feedback ? ReadOnlyDepthLayout(depthSource->Description().hasStencil) : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
 void Texture::PrepareSampling(VkCommandBuffer commands) {
-    if (direct) depthSource->PrepareSampling(commands);
+    if (direct && !feedback) depthSource->PrepareSampling(commands);
 }
 
 void Texture::Refresh() {

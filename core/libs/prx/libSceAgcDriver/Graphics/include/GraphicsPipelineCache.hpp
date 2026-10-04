@@ -13,7 +13,8 @@ class GraphicsPipelineCache {
 public:
     explicit GraphicsPipelineCache(const Context& context) : context(context) {}
     // targets holds one entry per colour slot; unwritten slots are null.
-    std::shared_ptr<Pipeline> Get(const State& state, const std::array<std::shared_ptr<ResidentColor>, MaxColorTargets>& targets, const std::shared_ptr<ResidentDepth>& depth, const ShaderResources& resources, std::span<const CompiledShader> shaders);
+    // readOnlyDepth: the work samples its depth target (ShaderResources::DepthFeedback).
+    std::shared_ptr<Pipeline> Get(const State& state, const std::array<std::shared_ptr<ResidentColor>, MaxColorTargets>& targets, const std::shared_ptr<ResidentDepth>& depth, const ShaderResources& resources, std::span<const CompiledShader> shaders, bool readOnlyDepth = false);
 
 private:
     // Pipelines are keyed by their shaders, layout and fixed state with the attachment formats (not
@@ -29,8 +30,8 @@ private:
         std::shared_ptr<ResidentDepth> depth;
         std::shared_ptr<const Framebuffer> framebuffer;
     };
-    std::shared_ptr<const Framebuffer> framebuffer(const State& state, const std::array<std::shared_ptr<ResidentColor>, MaxColorTargets>& targets, const std::shared_ptr<ResidentDepth>& depth);
-    std::shared_ptr<const RenderPass> renderPass(const State& state);
+    std::shared_ptr<const Framebuffer> framebuffer(const State& state, const std::array<std::shared_ptr<ResidentColor>, MaxColorTargets>& targets, const std::shared_ptr<ResidentDepth>& depth, bool readOnlyDepth);
+    std::shared_ptr<const RenderPass> renderPass(const State& state, bool readOnlyDepth = false);
     static constexpr std::size_t MaxPipelines = 4096;
     static constexpr std::size_t MaxFramebuffers = 128;
     Context context;
