@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DEVICETHREAD_HPP
 
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include <algorithm>
 #include <array>
 #include <condition_variable>
 #include <cstdio>
@@ -11,6 +12,9 @@
 #include <exception>
 #include <functional>
 #include <mutex>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 #include <thread>
 #include <utility>
 #include <vector>
@@ -46,6 +50,15 @@ public:
     // Queues a job. writes: the guest ranges it may write (render targets, writable buffers);
     // anyWrite: it may write elsewhere too (storage images, address-table stores).
     void Post(std::function<void()> job, Ranges writes, bool anyWrite) {
+        // Sorted and merged: reads check them by binary search (address-table stores list every
+        // writable registered range).
+        std::sort(writes.begin(), writes.end());
+        Ranges merged;
+        for (const auto& range : writes) {
+            if (!merged.empty() && range.first <= merged.back().second) merged.back().second = std::max(merged.back().second, range.second);
+            else merged.push_back(range);
+        }
+        writes = std::move(merged);
         {
             std::lock_guard lock(mutex);
             rethrow();
@@ -86,6 +99,11 @@ public:
                 if (first < end && address < last) return true;
             return false;
         };
+        // Job writes are sorted and disjoint.
+        const auto overlapsSorted = [&](const Ranges& ranges) {
+            auto it = std::upper_bound(ranges.begin(), ranges.end(), address, [](std::uint64_t value, const auto& range) { return value < range.second; });
+            return it != ranges.end() && it->first < end;
+        };
         std::lock_guard lock(mutex);
         // Debug aid: APS5_TRACE_PIPELINE=1 counts why reads take the slow path.
         static const bool trace = std::getenv("APS5_TRACE_PIPELINE") != nullptr;
@@ -103,11 +121,16 @@ public:
         }
         std::uint64_t last = 0;
         bool queued = false;
-        if (running && (runningJob.anyWrite || overlaps(runningJob.writes))) last = runningJob.serial;
+        if (running && (runningJob.anyWrite || overlapsSorted(runningJob.writes))) last = runningJob.serial;
         for (const auto& job : jobs) {
-            if (job.anyWrite || overlaps(job.writes)) {
+            if (job.anyWrite || overlapsSorted(job.writes)) {
                 last = job.serial;
                 queued = true;
+                static int logged = 0;
+                if (trace && logged < 30) {
+                    ++logged;
+                    std::fprintf(stderr, "[pipeline] wait read 0x%llx+0x%zx anyWrite %d ranges %zu\n", static_cast<unsigned long long>(address), bytes, job.anyWrite, job.writes.size());
+                }
             }
         }
         if (last != 0) {
@@ -148,6 +171,9 @@ private:
     }
 
     void run() {
+#ifndef _WIN32
+        pthread_setname_np(pthread_self(), "AgcDevice");
+#endif
         for (;;) {
             {
                 std::unique_lock lock(mutex);

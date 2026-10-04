@@ -16,6 +16,8 @@
 #include "prx/libSceAgcDriver/Execution/include/DeviceThread.hpp"
 #include "Optimization/include/Optimization/ShaderStageInputInfo.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
+#include "prx/libc/include/GuestAllocations.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <cstdio>
 #include <bit>
 #include <algorithm>
@@ -40,6 +42,10 @@
 #include <string>
 #include <thread>
 #include <vector>
+#ifndef _WIN32
+#include <dlfcn.h>
+#include <pthread.h>
+#endif
 
 namespace AgcDriver {
 
@@ -82,6 +88,15 @@ struct Submission {
     FrameTiming::Clock::time_point enqueued;
     FrameTiming::Clock::time_point dequeued;
 };
+
+// Names the calling thread for profilers and /proc (Linux limits names to 15 characters).
+void NameThread(const char* name) {
+#ifndef _WIN32
+    pthread_setname_np(pthread_self(), name);
+#else
+    static_cast<void>(name);
+#endif
+}
 
 std::uint32_t readRegister(const Registers& registers, std::uint32_t offset) {
     const auto it = registers.find(offset);
@@ -358,6 +373,7 @@ private:
         return std::make_unique<DeviceThread>([this](const std::function<void()>& job) {
             std::lock_guard gpuLock(gpuMutex);
             job();
+            refreshRegistered();
             return device != nullptr ? device->DirtyRanges() : DeviceThread::Ranges{};
         });
     }
@@ -367,10 +383,34 @@ private:
     std::unique_lock<std::recursive_mutex> lockDevice() {
         if (pipeline) {
             PerformanceTimer timing("Driver.PipelineDrain");
+            const auto started = std::chrono::steady_clock::now();
             pipeline->Drain();
+            noteDrain(__builtin_return_address(0), started);
             timing.Mark("device_call");
         }
         return std::unique_lock(gpuMutex);
+    }
+
+    // Debug aid: APS5_TRACE_DRAINS=1 totals the worker's waits for the device thread per caller
+    // (module+offset, for addr2line) and prints them every 2000 frames' worth of calls.
+    static void noteDrain(const void* caller, std::chrono::steady_clock::time_point started) {
+        static const bool trace = std::getenv("APS5_TRACE_DRAINS") != nullptr;
+        if (!trace) return;
+        static std::mutex mutex;
+        static std::map<const void*, std::pair<std::uint64_t, double>> callers;
+        static std::uint64_t calls = 0;
+        const auto waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+        std::lock_guard lock(mutex);
+        auto& total = callers[caller];
+        ++total.first;
+        total.second += waited;
+        if (++calls % 50000 != 0) return;
+        for (const auto& [site, value] : callers) {
+            Dl_info info{};
+            const auto found = dladdr(site, &info) != 0 && info.dli_fname != nullptr;
+            std::fprintf(stderr, "[drains] %8llu calls %9.1f ms  +0x%llx\n", static_cast<unsigned long long>(value.first), value.second, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(site) - (found ? reinterpret_cast<std::uintptr_t>(info.dli_fbase) : 0)));
+        }
+        callers.clear();
     }
 
     static void resolveForDevice(void* context, std::uint64_t address, std::size_t bytes, bool writable) {
@@ -406,8 +446,11 @@ private:
         }
         if (need.kind == DeviceThread::Need::Drain || need.kind == DeviceThread::Need::Wait) {
             PerformanceTimer timing("Driver.PipelineDrain");
+            const auto started = std::chrono::steady_clock::now();
             if (need.kind == DeviceThread::Need::Drain) self.pipeline->Drain();
             else self.pipeline->WaitFor(need.serial);
+            // Reads: attributed to two pseudo-callers (1: full drain, 2: wait for a writer).
+            noteDrain(reinterpret_cast<const void*>(need.kind == DeviceThread::Need::Drain ? 1 : 2), started);
             timing.Mark(need.kind == DeviceThread::Need::Drain ? "read_drain" : "read_wait");
         }
         // Later queued jobs do not write the range: the device's present state is the one to resolve.
@@ -577,6 +620,7 @@ private:
     // The completer: finishes completions while nothing else does (the worker may be idle or
     // blocked), polling every 200 us while some are pending.
     void complete() noexcept {
+        NameThread("AgcCompleter");
         try {
             while (!completerStop) {
                 if (!completionsPending) {
@@ -1031,6 +1075,8 @@ private:
             for (const auto& binding : result.bindings) {
                 if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) anyWrite = true;
                 if (binding.kind != ShaderRecompiler::DescriptorKind::StorageBuffer || binding.readOnly) continue;
+                // The address table and fault buffer are the driver's own buffers, not guest memory.
+                if (binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer) continue;
                 // Writable buffers write within their descriptors' ranges (as ShaderResources binds them).
                 for (std::size_t element = 0; element < binding.count; ++element) {
                     if ((element + 1u) * 4u > binding.guestDescriptor.size()) {
@@ -1048,7 +1094,24 @@ private:
                 if (binding.kind == ShaderRecompiler::DescriptorKind::StorageTexelBuffer && !binding.readOnly) anyWrite = true;
             }
         }
-        anyWrite = anyWrite || addressStores;
+        // Address-table stores reach writable registered memory only.
+        if (addressStores && !appendWritableRegistered(writes)) anyWrite = true;
+        // Debug aid: APS5_TRACE_ANYWRITE=1 counts why draws may write anywhere.
+        static const bool traceAny = std::getenv("APS5_TRACE_ANYWRITE") != nullptr;
+        if (traceAny) {
+            static std::uint64_t draws = 0, images = 0, texels = 0, stores = 0;
+            bool image = false, texel = false;
+            for (const auto& result : results)
+                for (const auto& binding : result.bindings) {
+                    image = image || binding.kind == ShaderRecompiler::DescriptorKind::StorageImage;
+                    texel = texel || (binding.kind == ShaderRecompiler::DescriptorKind::StorageTexelBuffer && !binding.readOnly);
+                }
+            ++draws;
+            images += image;
+            texels += texel;
+            stores += addressStores;
+            if (draws % 100000 == 0) std::fprintf(stderr, "[anywrite] draws %llu: storage images %llu, writable texel buffers %llu, address-table stores %llu\n", static_cast<unsigned long long>(draws), static_cast<unsigned long long>(images), static_cast<unsigned long long>(texels), static_cast<unsigned long long>(stores));
+        }
         struct Job {
             std::shared_ptr<VulkanDevice> device;
             Graphics::State graphics;
@@ -1068,6 +1131,43 @@ private:
             // Writes noted at recording are in the write tracker; ones that land at completion are not.
             if (WriteTracker::DeferredGpuWrites() != deferred) pipeline->NoteUnknownGpuWrites();
         }, std::move(writes), anyWrite);
+    }
+
+    // The writable registered guest ranges (what address-table stores can reach). The registry is
+    // read under the tracking mutex only (some of its changes rely on that mutex), so the device
+    // thread snapshots it after a job when the registry or the guest mappings changed; the worker
+    // uses the snapshot while neither generation moved since (false: no current snapshot).
+    struct RegisteredSnapshot {
+        DeviceThread::Ranges writable;
+        std::uint64_t allocations = ~0ull;
+        std::uint64_t mappings = ~0ull;
+    };
+    std::mutex registeredMutex;
+    RegisteredSnapshot registered;
+
+    // Device thread, tracking mutex held.
+    void refreshRegistered() {
+        const auto allocations = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+        const auto mappings = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
+        {
+            std::lock_guard lock(registeredMutex);
+            if (registered.allocations == allocations && registered.mappings == mappings) return;
+        }
+        RegisteredSnapshot snapshot{{}, allocations, mappings};
+        for (const auto& range : GuestAllocations::GuestAllocationsAcquire_nid_postfix()) {
+            if (range->writable) snapshot.writable.emplace_back(range->address, range->address + range->bytes);
+        }
+        std::lock_guard lock(registeredMutex);
+        registered = std::move(snapshot);
+    }
+
+    bool appendWritableRegistered(DeviceThread::Ranges& writes) {
+        const auto allocations = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+        const auto mappings = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
+        std::lock_guard lock(registeredMutex);
+        if (registered.allocations != allocations || registered.mappings != mappings) return false;
+        writes.insert(writes.end(), registered.writable.begin(), registered.writable.end());
+        return true;
     }
 
     void includeSubmission(const Submission& submission, bool firstSegment) {
@@ -1376,6 +1476,7 @@ private:
     }
 
     void run() noexcept {
+        NameThread("AgcWorker");
         // Memory waits normally resolve within microseconds; one that stays blocked this long with no
         // other work able to run is a synchronization the emulation cannot satisfy.
         constexpr auto stallLimit = std::chrono::seconds(10);
