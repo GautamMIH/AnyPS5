@@ -17,7 +17,7 @@
 
 namespace AgcDriver {
 
-// The second stage of the pipelined driver (ANYPS5_PIPELINED_DRIVER=1): device work (recording
+// The second stage of the pipelined driver (the default; ANYPS5_PIPELINED_DRIVER=0 turns it off): device work (recording
 // draws, GPU barriers) runs in order on its own thread, under the tracking mutex, while the worker
 // decodes the next packets and captures their shaders. The worker drains it before any other device
 // call. Its own guest reads ask Check what they need: nothing (no queued job, dirty surface or

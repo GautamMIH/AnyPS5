@@ -346,13 +346,14 @@ private:
     bool resetGraphics = false;
     std::shared_ptr<FrameTiming> frameTiming;
     std::uint64_t frameSerial = 0;
-    // The pipelined driver's device thread (ANYPS5_PIPELINED_DRIVER=1), or null: device work runs
+    // The pipelined driver's device thread (ANYPS5_PIPELINED_DRIVER=0 turns it off), or null: device work runs
     // on the worker.
     std::unique_ptr<DeviceThread> pipeline = makePipeline();
     std::thread worker;
 
     std::unique_ptr<DeviceThread> makePipeline() {
-        static const bool pipelined = std::getenv("ANYPS5_PIPELINED_DRIVER") != nullptr && std::string(std::getenv("ANYPS5_PIPELINED_DRIVER")) != "0";
+        const char* setting = std::getenv("ANYPS5_PIPELINED_DRIVER");
+        static const bool pipelined = setting == nullptr || std::string(setting) != "0";
         if (!pipelined) return nullptr;
         return std::make_unique<DeviceThread>([this](const std::function<void()>& job) {
             std::lock_guard gpuLock(gpuMutex);
