@@ -4,6 +4,11 @@
 #include <type_traits>
 #include <algorithm>
 #include <iterator>
+#include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <set>
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -135,8 +140,22 @@ std::shared_ptr<Pipeline> GraphicsPipelineCache::Get(const State& state, const s
         return std::make_shared<Pipeline>(std::move(pipeline), std::move(target));
     }
     timing.Mark("miss");
+    const auto traceStarted = std::chrono::steady_clock::now();
     auto pipeline = std::make_shared<const GraphicsPipeline>(context, state, *renderPass(state), resources, shaders);
     timing.Mark("create");
+    static const bool traceCreates = std::getenv("APS5_TRACE_PIPELINE_CREATES") != nullptr;
+    if (traceCreates) {
+        // Whether every stage was compiled into an earlier pipeline (fast linking would cover it).
+        static std::set<std::pair<int, std::uintptr_t>> seen;
+        static std::array<double, 2> ms{};
+        static std::array<std::uint64_t, 2> counts{};
+        bool known = true;
+        for (const auto& shader : shaders) known = known && seen.count({static_cast<int>(shader.stage), reinterpret_cast<std::uintptr_t>(shader.program->spirv.data())}) != 0;
+        for (const auto& shader : shaders) seen.insert({static_cast<int>(shader.stage), reinterpret_cast<std::uintptr_t>(shader.program->spirv.data())});
+        ++counts[known];
+        ms[known] += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - traceStarted).count();
+        std::fprintf(stderr, "[pipeline-creates] new-shaders %llu (%.0f ms) known-shaders %llu (%.0f ms)\n", static_cast<unsigned long long>(counts[0]), ms[0], static_cast<unsigned long long>(counts[1]), ms[1]);
+    }
     entries.push_back({std::move(key), pipeline});
     try {
         const auto it = std::prev(entries.end());
