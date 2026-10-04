@@ -42,8 +42,8 @@ void NoteGpuWrite(std::uint64_t address, std::uint64_t bytes);
 bool GpuWritten(std::uint64_t address, std::uint64_t bytes);
 // Changes whenever a GPU-written range is added.
 std::uint64_t GpuWriteGeneration();
-// Every GPU write is also logged with a sequence number: GpuWrittenSince reports whether one noted
-// after `sequence` overlaps the range (true as well when the log no longer reaches back that far).
+// Every GPU write also gets a sequence number, kept as the last write of each page: GpuWrittenSince
+// reports whether a write noted after `sequence` overlaps the range.
 // A write noted before a CPU check of the range that waited for queued GPU writes has landed by then.
 std::uint64_t GpuWriteSequence();
 bool GpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t sequence);

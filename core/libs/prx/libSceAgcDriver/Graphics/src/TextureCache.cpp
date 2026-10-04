@@ -99,6 +99,7 @@ bool TextureCache::unchanged(Entry& entry) {
         noteUnchangedFailure(1, bytes);
         return false;
     }
+    timing.Mark("single_view");
     // Written by the GPU since it was validated (shadPS4 keeps a dirty flag per image for this; an
     // "ever written" mark made every texture in such memory compare on each use).
     // ANYPS5_STICKY_GPU_WRITES=1: any GPU write ever made to the range counts (the former rule).
@@ -107,14 +108,17 @@ bool TextureCache::unchanged(Entry& entry) {
         noteUnchangedFailure(2, bytes);
         return false;
     }
+    timing.Mark("gpu_check");
     if (WriteTracker::AliasWrittenSince(entry.address, bytes, entry.aliasGeneration)) {
         noteUnchangedFailure(3, bytes);
         return false;
     }
+    timing.Mark("alias_check");
     if (WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration)) {
         noteUnchangedFailure(4, bytes);
         return false;
     }
+    timing.Mark("cpu_check");
     entry.unchangedAt = at;
     entry.unchangedDriverSequence = driverSequence;
     return true;

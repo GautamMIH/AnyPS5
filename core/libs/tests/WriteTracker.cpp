@@ -135,9 +135,33 @@ void CheckReportedWrites() {
     Require(AliasWrittenSince(0x200000000ull, 0x1000, alias));
     Require(!AliasWrittenSince(0x200001000ull, 0x1000, alias));
     Require(!AliasWrittenSince(0x200000000ull, 0x1000, AliasWriteGeneration()));
-    // Queries older than the remembered history answer "written".
+    // Each range keeps its last write, however many writes elsewhere followed.
     for (int index = 0; index < 5000; ++index) NoteAliasWrite(0x300000000ull, 16);
-    Require(AliasWrittenSince(0x200001000ull, 0x1000, alias));
+    Require(!AliasWrittenSince(0x200001000ull, 0x1000, alias));
+    Require(AliasWrittenSince(0x200000000ull, 0x1000, alias));
+
+    // GPU writes are page-granular; a newer write replaces only the part of older ones it covers.
+    const auto before = GpuWriteSequence();
+    NoteGpuWrite(0x400000000ull, 0x4000);
+    const auto first = GpuWriteSequence();
+    NoteGpuWrite(0x400001000ull, 0x1000);
+    const auto second = GpuWriteSequence();
+    Require(GpuWrittenSince(0x400000000ull, 0x1000, before));
+    Require(!GpuWrittenSince(0x400000000ull, 0x1000, first));
+    Require(GpuWrittenSince(0x400001800ull, 0x10, first));
+    Require(!GpuWrittenSince(0x400001000ull, 0x1000, second));
+    Require(!GpuWrittenSince(0x400002000ull, 0x2000, first));
+    Require(!GpuWrittenSince(0x400004000ull, 0x1000, before));
+    // A write over several older ones, and one inside a single older one.
+    NoteGpuWrite(0x400000800ull, 0x3000);
+    const auto third = GpuWriteSequence();
+    Require(GpuWrittenSince(0x400003000ull, 0x1000, second));
+    Require(!GpuWrittenSince(0x400000000ull, 0x4000, third));
+    NoteGpuWrite(0x400010000ull, 0x10000);
+    const auto wide = GpuWriteSequence();
+    NoteGpuWrite(0x400014000ull, 0x1000);
+    Require(GpuWrittenSince(0x400014000ull, 0x1000, wide));
+    Require(!GpuWrittenSince(0x400010000ull, 0x4000, wide) && !GpuWrittenSince(0x400015000ull, 0xb000, wide));
 }
 
 }
