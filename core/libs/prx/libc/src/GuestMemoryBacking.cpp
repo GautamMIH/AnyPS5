@@ -3,6 +3,7 @@
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/MemoryBackingPlatform.hpp"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdio>
 #include <cstring>
@@ -307,6 +308,8 @@ Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_
         if (!claimGaps(target, last)) return Status::NoMemory;
         GuestAllocations::GuestAllocationsRequireUnpinned_nid_postfix(nullptr, reinterpret_cast<const void*>(target), bytes);
         GuestMemoryTracking::GuestMemoryTrackingInvalidate_nid_postfix(target, bytes);
+        // The generation moves before any area changes (GuestVirtualAccessible's per-thread cache).
+        mappingGeneration.fetch_add(1, std::memory_order_acq_rel);
         carve(target, last);
     } else {
         // The address is a search hint.
@@ -411,6 +414,25 @@ bool GuestVirtualQuery_nid_postfix(const void* pointer, bool findNext, Area* are
 
 bool GuestVirtualAccessible_nid_postfix(std::uint64_t address, std::uint64_t bytes, bool writable) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    // Areas this thread recently found accessible, valid while the mapping generation stands: every
+    // change of the area map moves it before editing. The driver checks guest ranges tens of
+    // thousands of times a frame from two threads; the shared lock's cache line bounced between them.
+    struct Confirmed {
+        std::uint64_t begin = 0;
+        std::uint64_t end = 0;
+        bool writable = false;
+    };
+    thread_local std::array<Confirmed, 8> confirmed{};
+    thread_local std::uint64_t confirmedGeneration = std::numeric_limits<std::uint64_t>::max();
+    thread_local std::size_t nextConfirmed = 0;
+    const auto generation = mappingGeneration.load(std::memory_order_acquire);
+    if (generation == confirmedGeneration) {
+        for (const auto& area : confirmed)
+            if (area.begin <= address && address + bytes <= area.end && (!writable || area.writable)) return true;
+    } else {
+        confirmed = {};
+        confirmedGeneration = generation;
+    }
     // Only the area map: guest range checks call this constantly, also from threads that must not
     // wait for the tracking mutex (the driver's command thread while its device thread holds it).
     const AreaRead areaRead;
@@ -419,11 +441,17 @@ bool GuestVirtualAccessible_nid_postfix(std::uint64_t address, std::uint64_t byt
     if (it == map.begin()) return false;
     --it;
     const auto end = address + bytes;
+    const auto first = it;
     for (auto cursor = address; cursor < end; ++it) {
         if (it == map.end() || it->first > cursor || it->second.end <= cursor) return false;
         const auto& record = it->second;
         if (!committed(record.kind) || !hostReadable(record.protection) || (writable && !hostWritable(record.protection))) return false;
         cursor = record.end;
+    }
+    // A range within one area remembers the area.
+    if (end <= first->second.end) {
+        confirmed[nextConfirmed] = {first->first, first->second.end, hostWritable(first->second.protection)};
+        nextConfirmed = (nextConfirmed + 1) % confirmed.size();
     }
     return true;
 }
