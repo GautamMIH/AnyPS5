@@ -1,3 +1,4 @@
+#include <unordered_set>
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
@@ -586,7 +587,59 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
 
 }
 
+namespace {
+void validateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, const ShaderDeviceFeatures& features);
+}
+
+// Every draw validates its stages; a combination that passed (the compiled variants and the state
+// and device properties validation reads) passes again, so it is remembered. Variants without an id
+// are always validated (their code is keyed by address only).
 void ValidateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, const ShaderDeviceFeatures& features) {
+    std::vector<std::uint64_t> key;
+    key.reserve(48);
+    bool memo = true;
+    for (const auto& shader : shaders) {
+        if (shader.program == nullptr || shader.program->variantId == 0) {
+            memo = false;
+            break;
+        }
+        key.push_back(static_cast<std::uint64_t>(shader.stage));
+        key.push_back(shader.program->variantId);
+    }
+    if (!memo) {
+        validateShaders(shaders, state, subgroup, fragmentShaderBarycentric, features);
+        return;
+    }
+    key.push_back(shaders.size());
+    key.push_back(state.colorTargetMask | (static_cast<std::uint64_t>(state.cullMode) << 32u));
+    key.push_back(static_cast<std::uint64_t>(state.hasFragmentShader) | (static_cast<std::uint64_t>(state.rectList) << 1u) | (static_cast<std::uint64_t>(state.stages.path) << 8u) | (static_cast<std::uint64_t>(state.topology) << 32u));
+    key.push_back(state.stages.vertexWaveSize | (static_cast<std::uint64_t>(state.stages.fragmentWaveSize) << 32u));
+    key.push_back(state.stages.mesh.has_value() | (static_cast<std::uint64_t>(state.stages.tessellation.has_value()) << 1u));
+    if (const auto& mesh = state.stages.mesh) {
+        for (const auto value : {mesh->inputPrimitive, mesh->primitivesPerGroup, mesh->verticesPerGroup, mesh->maxVertices, mesh->maxPrimitives, mesh->threadsPerGroup, mesh->ldsSizeDwords, mesh->provokingVertex, mesh->esgsItemSize}) key.push_back(value);
+    }
+    if (const auto& tessellation = state.stages.tessellation) {
+        for (const auto value : {tessellation->inputControlPoints, tessellation->outputControlPoints, tessellation->domain, tessellation->partitioning, tessellation->outputTopology}) key.push_back(value);
+    }
+    key.push_back(subgroup.subgroupSize | (static_cast<std::uint64_t>(subgroup.supportedStages) << 32u));
+    key.push_back(subgroup.supportedOperations | (static_cast<std::uint64_t>(subgroup.quadOperationsInAllStages) << 32u));
+    key.push_back(static_cast<std::uint64_t>(fragmentShaderBarycentric) | (static_cast<std::uint64_t>(features.imageGatherExtended) << 1u) | (static_cast<std::uint64_t>(features.storageImageReadWithoutFormat) << 2u) | (static_cast<std::uint64_t>(features.storageImageWriteWithoutFormat) << 3u) | (static_cast<std::uint64_t>(features.geometryShader) << 4u) | (static_cast<std::uint64_t>(features.minLod) << 5u) | (static_cast<std::uint64_t>(features.clipDistance) << 6u) | (static_cast<std::uint64_t>(features.cullDistance) << 7u));
+    struct KeyHash {
+        std::size_t operator()(const std::vector<std::uint64_t>& value) const {
+            std::uint64_t hash = 0xcbf29ce484222325ull;
+            for (const auto word : value) hash = (hash ^ word) * 0x100000001b3ull;
+            return static_cast<std::size_t>(hash);
+        }
+    };
+    static thread_local std::unordered_set<std::vector<std::uint64_t>, KeyHash> validated;
+    if (validated.contains(key)) return;
+    validateShaders(shaders, state, subgroup, fragmentShaderBarycentric, features);
+    if (validated.size() >= 65536) validated.clear();
+    validated.insert(std::move(key));
+}
+
+namespace {
+void validateShaders(std::span<const CompiledShader> shaders, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, const ShaderDeviceFeatures& features) {
     using Stage = ShaderRecompiler::ShaderStage;
     const bool tessellation = state.stages.path == ShaderPath::Tessellation;
     const bool mesh = state.stages.path == ShaderPath::Geometry;
@@ -626,6 +679,8 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
             Require(output != previous->outputs.end() && output->second == "vertex:f32x4", "fragment shader must export a float4 color for color target " + std::to_string(slot));
         }
     }
+}
+
 }
 
 void ValidateShaderPair(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment) {
