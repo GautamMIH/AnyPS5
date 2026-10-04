@@ -64,6 +64,8 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
         // The GPU writes the image's texels into guest memory without passing the guest mappings.
         if (guest) WriteTracker::NoteGpuWrite(guestBase, guestBytes);
     }
+    // Without a view of guest memory the texels are written back when the work completes.
+    if (!guest) WriteTracker::NoteDeferredGpuWrite();
     if (guest) {
         const auto deviceUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
         tiledStaging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);

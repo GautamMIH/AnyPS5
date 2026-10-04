@@ -8,6 +8,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <shared_mutex>
 #include <map>
 #include <memory>
 #include <set>
@@ -52,6 +53,39 @@ std::map<std::uint64_t, Record>& areas() {
     static auto* value = new std::map<std::uint64_t, Record>;
     return *value;
 }
+
+// The area map has its own reader-writer lock: everything that holds the tracking mutex in this
+// file also holds it exclusively (so every change of the map does), while GuestVirtualAccessible
+// only reads under it shared. A thread already holding it (nested calls) does not lock again.
+std::shared_mutex& areaMutex() {
+    static auto* value = new std::shared_mutex;
+    return *value;
+}
+
+thread_local int areaDepth = 0;
+
+struct AreaWrite {
+    AreaWrite() {
+        if (areaDepth++ == 0) areaMutex().lock();
+    }
+    ~AreaWrite() {
+        if (--areaDepth == 0) areaMutex().unlock();
+    }
+    AreaWrite(const AreaWrite&) = delete;
+    AreaWrite& operator=(const AreaWrite&) = delete;
+};
+
+struct AreaRead {
+    AreaRead() : locked(areaDepth == 0) {
+        if (locked) areaMutex().lock_shared();
+    }
+    ~AreaRead() {
+        if (locked) areaMutex().unlock_shared();
+    }
+    AreaRead(const AreaRead&) = delete;
+    AreaRead& operator=(const AreaRead&) = delete;
+    bool locked;
+};
 
 std::atomic<std::uint64_t> mappingGeneration{0};
 
@@ -259,6 +293,7 @@ Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_
     if ((kind == Kind::Direct || kind == Kind::Flexible) && (protection & kProtCpuExec) != 0) return Status::Access;
     if (kind == Kind::Direct && (physical < 0 || static_cast<std::uint64_t>(physical) % kPageBytes != 0 || static_cast<std::uint64_t>(physical) >= kPhysicalBytes || bytes > kPhysicalBytes - static_cast<std::uint64_t>(physical))) return Status::Invalid;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     auto target = reinterpret_cast<std::uint64_t>(*address);
     const bool fixed = (flags & kMapFixed) != 0;
     if (fixed) {
@@ -301,6 +336,7 @@ Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_
 
 Status GuestVirtualUnmap_nid_postfix(void* address, std::size_t bytes) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     return unmapRange(reinterpret_cast<std::uint64_t>(address), bytes, false);
 }
 
@@ -308,6 +344,7 @@ Status GuestVirtualProtect_nid_postfix(const void* pointer, std::size_t bytes, i
     const auto address = reinterpret_cast<std::uint64_t>(pointer);
     if (!validRange(address, bytes) || (protection & ~0x3f7) != 0) return Status::Invalid;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     const auto last = address + bytes;
     if (!anyOverlap(address, last)) return Status::Invalid;
     GuestAllocations::GuestAllocationsRequireUnpinned_nid_postfix(nullptr, pointer, bytes);
@@ -332,6 +369,7 @@ Status GuestVirtualReleasePhysical_nid_postfix(std::int64_t physical, std::size_
     const auto first = static_cast<std::uint64_t>(physical);
     const auto last = first + bytes;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> views;
     for (const auto& [begin, record] : areas()) {
         if (record.kind != Kind::Direct) continue;
@@ -352,6 +390,7 @@ bool GuestVirtualQuery_nid_postfix(const void* pointer, bool findNext, Area* are
     if (area == nullptr) return false;
     const auto address = reinterpret_cast<std::uint64_t>(pointer);
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     auto& map = areas();
     auto it = map.upper_bound(address);
     if (it != map.begin() && std::prev(it)->second.end > address) --it;
@@ -372,7 +411,9 @@ bool GuestVirtualQuery_nid_postfix(const void* pointer, bool findNext, Area* are
 
 bool GuestVirtualAccessible_nid_postfix(std::uint64_t address, std::uint64_t bytes, bool writable) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
-    std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    // Only the area map: guest range checks call this constantly, also from threads that must not
+    // wait for the tracking mutex (the driver's command thread while its device thread holds it).
+    const AreaRead areaRead;
     auto& map = areas();
     auto it = map.upper_bound(address);
     if (it == map.begin()) return false;
@@ -390,6 +431,7 @@ bool GuestVirtualAccessible_nid_postfix(std::uint64_t address, std::uint64_t byt
 bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t bytes, Translation* translation) {
     if (translation == nullptr || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     auto& map = areas();
     auto it = map.upper_bound(address);
     if (it == map.begin()) return false;
@@ -410,6 +452,7 @@ bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t byte
 bool GuestVirtualSingleView_nid_postfix(std::uint64_t address, std::uint64_t bytes) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     auto& map = areas();
     const auto last = address + bytes;
     auto it = map.upper_bound(address);
@@ -445,6 +488,7 @@ bool GuestWriteWatchCollect_nid_postfix(std::uint64_t address, std::uint64_t byt
     std::vector<DirectView> group;
     {
         std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
         group = aliasGroup(address, address + bytes);
     }
     // No lock while scanning: the kernel orders scans with mapping changes, and a newly mapped
@@ -486,6 +530,7 @@ bool GuestWriteWatchAddHost_nid_postfix(std::uint64_t address, std::uint64_t byt
 
 bool GuestSegmentAlive_nid_postfix(std::uint64_t segment) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     return liveSegments().contains(segment);
 }
 
@@ -498,6 +543,7 @@ void* GuestMemoryBackingMap_nid_postfix(void* address, std::size_t bytes, std::s
 
 void GuestMemoryBackingUnmap_nid_postfix(void* address, std::size_t bytes) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     if (unmapRange(reinterpret_cast<std::uint64_t>(address), bytes, true) != Status::Ok) throw std::invalid_argument("invalid guest heap unmap");
 }
 
@@ -511,12 +557,14 @@ void GuestMemoryBackingNoteChange_nid_postfix() {
 
 void GuestMemoryBackingRequire_nid_postfix(std::uint64_t address, std::size_t bytes) {
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     forEachPiece(address, bytes, [](std::uint64_t, const Record&, std::uint64_t, std::uint64_t) {});
 }
 
 void GuestMemoryBackingWrite_nid_postfix(std::uint64_t address, const void* source, std::size_t bytes) {
     if (source == nullptr) throw std::invalid_argument("missing guest backing write source");
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    const AreaWrite areaWrite;
     forEachPiece(address, bytes, [&](std::uint64_t areaBegin, const Record& record, std::uint64_t begin, std::uint64_t end) {
         auto* destination = static_cast<std::byte*>(record.segment->segment.alias) + record.offset + (begin - areaBegin);
         std::memcpy(destination, static_cast<const std::byte*>(source) + (begin - address), static_cast<std::size_t>(end - begin));

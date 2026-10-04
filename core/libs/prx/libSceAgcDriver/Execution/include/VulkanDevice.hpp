@@ -31,6 +31,9 @@ public:
     bool MarkerReached(std::uint64_t marker);
     void WaitMarker(std::uint64_t marker);
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
+    // The guest ranges ResolveMemory and the resident surfaces' page watches can act on for a read
+    // (besides queued GPU writes, which the write tracker records): the dirty surfaces'.
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> DirtyRanges();
     // Records a DMA_DATA copy or fill into the draw queue, in order after earlier GPU work, when both
     // ranges are imported guest memory (no CPU wait); false when the CPU must perform it.
     // serial (when given) receives the write's draw-queue serial (DrawQueue::LastWriter).

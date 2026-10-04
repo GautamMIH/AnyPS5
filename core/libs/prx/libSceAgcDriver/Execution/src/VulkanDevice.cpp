@@ -707,10 +707,14 @@ VulkanDevice::~VulkanDevice() = default;
 void VulkanDevice::WaitIdle() {
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.WaitIdle");
+    // Every GPU write noted so far is recorded (nothing records while the mutex is held): it has
+    // landed once the device is idle.
+    const auto gpuWrites = WriteTracker::GpuWriteSequence();
     state->drawQueue->Wait();
     timing.Mark("draw_wait");
     check(state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(state->device), "vkDeviceWaitIdle");
     timing.Mark("device_wait");
+    WriteTracker::NoteGpuIdle(gpuWrites);
     // With the GPU idle, imports of freed guest memory can go.
     if (state->guestGpuMemory) state->guestGpuMemory->Collect();
 }
@@ -1068,6 +1072,13 @@ void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool 
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     state->drawQueue->Resolve(address, bytes);
     state->renderCache->Resolve(address, bytes, writable);
+}
+
+std::vector<std::pair<std::uint64_t, std::uint64_t>> VulkanDevice::DirtyRanges() {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    if (state->renderCache) state->renderCache->DirtyRanges(ranges);
+    return ranges;
 }
 
 std::uint64_t VulkanDevice::LastGpuWriter(std::uint64_t address, std::size_t bytes) {

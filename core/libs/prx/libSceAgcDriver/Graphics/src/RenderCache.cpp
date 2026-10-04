@@ -226,6 +226,18 @@ std::shared_ptr<ResidentDepth> RenderCache::FindDepth(std::uint64_t address) con
     return nullptr;
 }
 
+void RenderCache::DirtyRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
+    for (const auto& [base, entry] : entries) {
+        if (entry->Dirty()) ranges.emplace_back(base, base + entry->Description().bytes);
+    }
+    for (const auto& entry : depthEntries) {
+        if (!entry->Dirty()) continue;
+        const auto& depth = entry->Description();
+        if (depth.depthBytes != 0) ranges.emplace_back(depth.depthAddress, depth.depthAddress + depth.depthBytes);
+        if (depth.stencilBytes != 0) ranges.emplace_back(depth.stencilAddress, depth.stencilAddress + depth.stencilBytes);
+    }
+}
+
 void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writable, bool gpuConsumer) {
     std::vector<std::shared_ptr<ResidentColor>> affected;
     // Entries beginning before the end of the range and at most largestColor bytes before it.

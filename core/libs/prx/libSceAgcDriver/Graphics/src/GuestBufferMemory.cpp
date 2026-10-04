@@ -151,6 +151,8 @@ void GuestBufferMemory::Upload(bool addressable) {
             if (traceViews) std::fprintf(stderr, "[buffer-view] 0x%llx+0x%llx copied: %s\n", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes), region.view ? "translation shorter than the region" : "not segment memory");
             region.view.reset();
         }
+        // A copied writable region reaches guest memory when the work completes (WriteBack).
+        if (region.writable) WriteTracker::NoteDeferredGpuWrite();
         const auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | (addressable ? VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT : 0u);
         region.buffer = std::make_unique<Buffer>(context, static_cast<std::size_t>(bytes), usage);
         if (region.writable || region.live) {

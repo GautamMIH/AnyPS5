@@ -1,0 +1,204 @@
+#ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DEVICETHREAD_HPP
+#define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DEVICETHREAD_HPP
+
+#include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include <array>
+#include <condition_variable>
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <deque>
+#include <exception>
+#include <functional>
+#include <mutex>
+#include <thread>
+#include <utility>
+#include <vector>
+
+namespace AgcDriver {
+
+// The second stage of the pipelined driver (ANYPS5_PIPELINED_DRIVER=1): device work (recording
+// draws, GPU barriers) runs in order on its own thread, under the tracking mutex, while the worker
+// decodes the next packets and captures their shaders. The worker drains it before any other device
+// call. Its own guest reads ask Check what they need: nothing (no queued job, dirty surface or
+// recent GPU write concerns the range), a resolve against the device's current state, a wait for
+// the last queued job that writes the range, or (unknown writes) a full drain.
+class DeviceThread {
+public:
+    using Ranges = std::vector<std::pair<std::uint64_t, std::uint64_t>>;
+
+    // runJob runs one job on the device thread (it takes the locks and scopes the job needs) and
+    // returns the device's resident ranges afterwards, published for MayAffect.
+    explicit DeviceThread(std::function<Ranges(const std::function<void()>&)> runJob) : runJob(std::move(runJob)), thread([this] { run(); }) {}
+
+    ~DeviceThread() {
+        {
+            std::lock_guard lock(mutex);
+            stopping = true;
+        }
+        wake.notify_all();
+        thread.join();
+    }
+
+    DeviceThread(const DeviceThread&) = delete;
+    DeviceThread& operator=(const DeviceThread&) = delete;
+
+    // Queues a job. writes: the guest ranges it may write (render targets, writable buffers);
+    // anyWrite: it may write elsewhere too (storage images, address-table stores).
+    void Post(std::function<void()> job, Ranges writes, bool anyWrite) {
+        {
+            std::lock_guard lock(mutex);
+            rethrow();
+            jobs.push_back({std::move(job), std::move(writes), anyWrite, ++posted});
+        }
+        wake.notify_all();
+    }
+
+    // Waits until the job with this serial (and every earlier one) ran.
+    void WaitFor(std::uint64_t serial) {
+        std::unique_lock lock(mutex);
+        idle.wait(lock, [&] { return completed >= serial || failure != nullptr; });
+        rethrow();
+    }
+
+    // Waits until every queued job ran; rethrows a job's failure. The caller must not hold the
+    // tracking mutex (jobs take it).
+    void Drain() {
+        std::unique_lock lock(mutex);
+        idle.wait(lock, [&] { return (jobs.empty() && !running) || failure != nullptr; });
+        rethrow();
+    }
+
+    // What a read of [address, address + bytes) by the worker needs before the device's resolve:
+    // None: no queued job writes it (or may write anywhere), no dirty surface covers it and the GPU
+    // has not written it since it was last known idle, so no queued GPU write, surface or page
+    // watch involves it (no resolve at all). Resolve: only state the device already holds does (the
+    // resolve runs now, under the tracking mutex). Wait: queued job `serial` is the last that may
+    // write it (wait for it, then resolve). Drain: unknown writes are pending.
+    struct Need {
+        enum Kind { None, Resolve, Wait, Drain } kind = None;
+        std::uint64_t serial = 0;
+    };
+    Need Check(std::uint64_t address, std::size_t bytes) {
+        const auto end = address + bytes;
+        const auto overlaps = [&](const Ranges& ranges) {
+            for (const auto& [first, last] : ranges)
+                if (first < end && address < last) return true;
+            return false;
+        };
+        std::lock_guard lock(mutex);
+        // Debug aid: APS5_TRACE_PIPELINE=1 counts why reads take the slow path.
+        static const bool trace = std::getenv("APS5_TRACE_PIPELINE") != nullptr;
+        const auto because = [&](int reason) {
+            if (trace) {
+                static std::array<std::uint64_t, 6> counts{};
+                ++counts[reason];
+                if (++traceCalls % 200000 == 0) std::fprintf(stderr, "[pipeline] reads %llu: fast %llu unknown %llu queued %llu running %llu resident %llu gpu-written %llu\n", static_cast<unsigned long long>(traceCalls), static_cast<unsigned long long>(counts[0]), static_cast<unsigned long long>(counts[1]), static_cast<unsigned long long>(counts[2]), static_cast<unsigned long long>(counts[3]), static_cast<unsigned long long>(counts[4]), static_cast<unsigned long long>(counts[5]));
+            }
+            return reason != 0;
+        };
+        if (unknownGpuWrites && WriteTracker::GpuIdleCount() <= unknownIdleCount) {
+            because(1);
+            return {Need::Drain};
+        }
+        std::uint64_t last = 0;
+        bool queued = false;
+        if (running && (runningJob.anyWrite || overlaps(runningJob.writes))) last = runningJob.serial;
+        for (const auto& job : jobs) {
+            if (job.anyWrite || overlaps(job.writes)) {
+                last = job.serial;
+                queued = true;
+            }
+        }
+        if (last != 0) {
+            because(queued ? 2 : 3);
+            return {Need::Wait, last};
+        }
+        if (overlaps(resident)) {
+            because(4);
+            return {Need::Resolve};
+        }
+        if (WriteTracker::GpuWrittenSince(address, bytes, WriteTracker::GpuIdleSequence())) {
+            because(5);
+            return {Need::Resolve};
+        }
+        because(0);
+        return {Need::None};
+    }
+
+    // Work that reports its GPU writes only once they landed (address-table stores) was recorded
+    // (called by the job, under the tracking mutex): every range may concern the device until the GPU
+    // is next idle (VulkanDevice::WaitIdle holds the mutex too, so a later idle point follows it).
+    void NoteUnknownGpuWrites() {
+        std::lock_guard lock(mutex);
+        unknownGpuWrites = true;
+        unknownIdleCount = WriteTracker::GpuIdleCount();
+    }
+
+private:
+    struct Job {
+        std::function<void()> run;
+        Ranges writes;
+        bool anyWrite = false;
+        std::uint64_t serial = 0;
+    };
+
+    void rethrow() {
+        if (failure) std::rethrow_exception(failure);
+    }
+
+    void run() {
+        for (;;) {
+            {
+                std::unique_lock lock(mutex);
+                wake.wait(lock, [&] { return stopping || !jobs.empty(); });
+                if (jobs.empty()) return;
+                runningJob = std::move(jobs.front());
+                jobs.pop_front();
+                running = true;
+            }
+            Ranges published;
+            std::exception_ptr error;
+            try {
+                published = runJob(runningJob.run);
+            } catch (...) {
+                error = std::current_exception();
+            }
+            {
+                std::lock_guard lock(mutex);
+                // The job's effects are in the published state (and the write tracker) before it
+                // stops counting as running.
+                if (!error) resident = std::move(published);
+                else if (!failure) {
+                    failure = error;
+                    jobs.clear();
+                }
+                completed = runningJob.serial;
+                runningJob = {};
+                running = false;
+            }
+            idle.notify_all();
+        }
+    }
+
+    std::function<Ranges(const std::function<void()>&)> runJob;
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::condition_variable idle;
+    std::deque<Job> jobs;
+    Job runningJob;
+    bool running = false;
+    bool stopping = false;
+    std::uint64_t posted = 0;
+    std::uint64_t completed = 0;
+    std::exception_ptr failure;
+    Ranges resident;
+    bool unknownGpuWrites = false;
+    std::uint64_t unknownIdleCount = 0;
+    std::uint64_t traceCalls = 0;
+    std::thread thread;
+};
+
+}
+
+#endif

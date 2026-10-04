@@ -148,6 +148,10 @@ public:
     // Writes resident surfaces overlapping the range back to guest memory (and invalidates them
     // when writable). For a GPU consumer, colour targets are written back on the GPU in queue order.
     void Resolve(std::uint64_t address, std::size_t bytes, bool writable, bool gpuConsumer = false);
+    // The guest ranges of the dirty resident surfaces (colour, depth and stencil planes): for a read,
+    // Resolve and the page watches act on nothing else (clean surfaces match guest memory and their
+    // pages are readable).
+    void DirtyRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const;
     void Flush();
 
 private:

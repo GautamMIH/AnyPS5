@@ -265,6 +265,34 @@ bool GpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t s
     return tracker.gpuWrites.Since(address, address + bytes, sequence);
 }
 
+namespace {
+std::atomic<std::uint64_t> gpuIdleSequence{0};
+std::atomic<std::uint64_t> gpuIdleCount{0};
+std::atomic<std::uint64_t> deferredGpuWrites{0};
+}
+
+void NoteDeferredGpuWrite() {
+    deferredGpuWrites.fetch_add(1, std::memory_order_acq_rel);
+}
+
+std::uint64_t DeferredGpuWrites() {
+    return deferredGpuWrites.load(std::memory_order_acquire);
+}
+
+void NoteGpuIdle(std::uint64_t sequence) {
+    auto previous = gpuIdleSequence.load(std::memory_order_relaxed);
+    while (previous < sequence && !gpuIdleSequence.compare_exchange_weak(previous, sequence, std::memory_order_acq_rel)) {}
+    gpuIdleCount.fetch_add(1, std::memory_order_acq_rel);
+}
+
+std::uint64_t GpuIdleSequence() {
+    return gpuIdleSequence.load(std::memory_order_acquire);
+}
+
+std::uint64_t GpuIdleCount() {
+    return gpuIdleCount.load(std::memory_order_acquire);
+}
+
 bool GpuWritten(std::uint64_t address, std::uint64_t bytes) {
     auto& tracker = state();
     std::lock_guard lock(tracker.mutex);

@@ -47,6 +47,17 @@ std::uint64_t GpuWriteGeneration();
 // A write noted before a CPU check of the range that waited for queued GPU writes has landed by then.
 std::uint64_t GpuWriteSequence();
 bool GpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t sequence);
+// The GPU went idle: every GPU write noted up to `sequence` (read before the wait began, with no
+// work recorded meanwhile) has landed. GpuIdleSequence is the latest such sequence; GpuIdleCount
+// counts the idle points.
+void NoteGpuIdle(std::uint64_t sequence);
+// Work was recorded whose writes reach guest memory only when it completes (copied writable buffers
+// and storage images, written back then): until the GPU is next idle, any range may be affected.
+// DeferredGpuWrites counts such recordings.
+void NoteDeferredGpuWrite();
+std::uint64_t DeferredGpuWrites();
+std::uint64_t GpuIdleSequence();
+std::uint64_t GpuIdleCount();
 
 // A listener told of every write the tracker learns of, as it learns of it: CPU writes when a
 // collection finds them, GPU and alias writes when they are noted. Copies of guest memory that must

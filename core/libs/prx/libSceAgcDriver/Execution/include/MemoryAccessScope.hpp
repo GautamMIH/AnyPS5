@@ -9,14 +9,20 @@ namespace AgcDriver::GuestMemory {
 class MemoryAccessScope {
 public:
     using Resolver = void (*)(void*, std::uint64_t, std::size_t, bool);
-    MemoryAccessScope(void* context, Resolver resolver) : previousContext(currentContext), previousResolver(currentResolver) {
+    // resolvesTracking: the resolver also resolves the page watches (GuestMemoryTrackingResolve)
+    // when they need it, so range checks do not (the pipelined driver's worker: its fast path must
+    // not take the tracking mutex the device thread holds).
+    MemoryAccessScope(void* context, Resolver resolver, bool resolvesTracking = false) : previousContext(currentContext), previousResolver(currentResolver), previousResolvesTracking(currentResolvesTracking) {
         currentContext = context;
         currentResolver = resolver;
+        currentResolvesTracking = resolvesTracking;
     }
     ~MemoryAccessScope() {
         currentContext = previousContext;
         currentResolver = previousResolver;
+        currentResolvesTracking = previousResolvesTracking;
     }
+    static bool ResolvesTracking() { return currentResolver != nullptr && currentResolvesTracking; }
     MemoryAccessScope(const MemoryAccessScope&) = delete;
     MemoryAccessScope& operator=(const MemoryAccessScope&) = delete;
     // Whether a resolver is installed (the device's render cache and draw queue).
@@ -32,8 +38,10 @@ public:
 private:
     inline static thread_local void* currentContext = nullptr;
     inline static thread_local Resolver currentResolver = nullptr;
+    inline static thread_local bool currentResolvesTracking = false;
     void* previousContext;
     Resolver previousResolver;
+    bool previousResolvesTracking;
 };
 
 // Profiling: names the access a guest memory check is made for (a static timing mark name).

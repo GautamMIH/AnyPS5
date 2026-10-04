@@ -108,9 +108,10 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     // surfaces' write-backs ahead of the consumer on the draw queue. The page watches (owned by the
     // same resident surfaces) serve CPU accesses; resolving them here would wait for the queue.
     const bool gpuConsumer = GpuAccessScope::Active() && MemoryAccessScope::HasResolver();
+    const bool trackingResolved = MemoryAccessScope::ResolvesTracking();
     MemoryAccessScope::Resolve(address, bytes, writable);
     timing.Mark("scope_resolve");
-    if (!gpuConsumer) {
+    if (!gpuConsumer && !trackingResolved) {
         GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
         timing.Mark("tracking_resolve");
     }
