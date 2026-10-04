@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <cstdlib>
 #include <unordered_map>
 #include <utility>
 
@@ -173,7 +174,7 @@ private:
 
 class PerformanceTimer {
 public:
-    explicit PerformanceTimer(const char* scope) : frame(PerformanceContext::Current()), scope(scope) {
+    explicit PerformanceTimer(const char* scope) : frame(Enabled() ? PerformanceContext::Current() : nullptr), scope(scope) {
         if (frame != nullptr) {
             total = frame->Get(scope, "total");
         }
@@ -197,6 +198,14 @@ public:
         frame->Add(scope, stage, now - previous, bytes);
         marked = true;
         previous = now;
+    }
+
+    // Profiling aid: APS5_TIMERS=1 records the timers into the frame statistics. They run on hot
+    // paths (tens of millions of guest range checks a minute), where their locks and clock reads
+    // cost 15 ms of a heavy Zorro frame, so they are off by default.
+    static bool Enabled() {
+        static const bool enabled = std::getenv("APS5_TIMERS") != nullptr;
+        return enabled;
     }
 
 private:
