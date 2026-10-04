@@ -25,6 +25,9 @@ public:
     [[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint32_t>> CapturedWords() const;
     // Adds a guest dword known to hold value (an input of a reused capture) as if it had been read.
     void Insert(std::uint64_t address, std::uint32_t value);
+    // Adjacent words (ascending, each a dword after the previous) as one region; words a region
+    // already holds keep its bytes.
+    void InsertRun(std::span<const std::pair<std::uint64_t, std::uint32_t>> words);
 
 private:
     static bool read(void* context, std::uint64_t address, std::uint32_t* value);

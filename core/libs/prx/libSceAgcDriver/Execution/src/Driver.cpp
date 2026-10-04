@@ -443,7 +443,12 @@ private:
                     if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
                 });
                 const GuestMemory::AccessSite accessSite("completion_release");
-                QueueState unused;
+                // Release packets only write memory: their register state is discarded. The scratch
+                // state is reset from a pristine copy (copy-assignment reuses the register maps'
+                // nodes; building a fresh state allocated a 350-entry map every release).
+                static const QueueState pristine;
+                static thread_local QueueState unused;
+                unused = pristine;
                 Pm4::Execute(next.release, unused);
                 if (TraceRelease()) std::fprintf(stderr, "[agc-release] written label=0x%llx marker=%llu\n", static_cast<unsigned long long>(next.release[3] | (static_cast<std::uint64_t>(next.release[4]) << 32u)), static_cast<unsigned long long>(next.marker));
             }

@@ -123,6 +123,22 @@ void ShaderMemory::Insert(std::uint64_t address, std::uint32_t value) {
     regions.emplace(address, std::move(bytes));
 }
 
+void ShaderMemory::InsertRun(std::span<const std::pair<std::uint64_t, std::uint32_t>> words) {
+    if (words.empty()) return;
+    const auto begin = words.front().first;
+    const auto end = words.back().first + sizeof(std::uint32_t);
+    const auto next = regions.upper_bound(begin);
+    const bool overlapsPrevious = next != regions.begin() && std::prev(next)->first + std::prev(next)->second.size() > begin;
+    const bool overlapsNext = next != regions.end() && next->first < end;
+    if (overlapsPrevious || overlapsNext) {
+        for (const auto& [address, value] : words) Insert(address, value);
+        return;
+    }
+    std::vector<std::byte> bytes(static_cast<std::size_t>(end - begin));
+    for (const auto& [address, value] : words) std::memcpy(bytes.data() + (address - begin), &value, sizeof(value));
+    regions.emplace_hint(next, begin, std::move(bytes));
+}
+
 std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request, ShaderMemory& memory) {
     if (owner == nullptr) return memory.Capture(request);
     key.clear();
@@ -181,7 +197,13 @@ bool CaptureMemo::reusable(const Entry& entry, ShaderMemory& memory) const {
         }
         first = last;
     }
-    for (const auto& [address, value] : words) memory.Insert(address, value);
+    // Runs of adjacent words become one region each (a node and a buffer per word made hits slow).
+    for (std::size_t first = 0; first < words.size();) {
+        auto last = first + 1;
+        while (last < words.size() && words[last].first == words[last - 1].first + sizeof(std::uint32_t)) ++last;
+        memory.InsertRun(std::span(words).subspan(first, last - first));
+        first = last;
+    }
     return true;
 }
 

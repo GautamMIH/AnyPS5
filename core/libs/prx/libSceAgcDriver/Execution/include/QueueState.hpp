@@ -12,7 +12,7 @@ namespace AgcDriver {
 
 using Registers = std::map<std::uint32_t, std::uint32_t>;
 
-inline Registers InitialContextRegisters() {
+inline Registers buildInitialContextRegisters() {
     Registers result{
         {0x200, 0}, {0x201, 0}, {0x202, 0xcc0010}, {0x203, 0},
         {0x204, 0}, {0x205, 0}, {0x206, 1087}, {0x207, 0},
@@ -49,9 +49,19 @@ inline Registers InitialContextRegisters() {
     return result;
 }
 
+// Built once: the map has ~350 entries (CLEAR_STATE and every new queue state copy it).
+inline const Registers& InitialContext() {
+    static const Registers initial = buildInitialContextRegisters();
+    return initial;
+}
+
+inline Registers InitialContextRegisters() {
+    return InitialContext();
+}
+
 struct QueueState {
     Registers shader;
-    Registers context = InitialContextRegisters();
+    Registers context = InitialContext();
     Registers userConfig{{0x24a, 0}, {0x24b, 0}};
     std::optional<Registers> savedContext;
     std::array<std::uint32_t, 0x3000> constantRam{};
@@ -66,7 +76,8 @@ struct QueueState {
     std::vector<std::string> markers;
 
     void ClearContext() {
-        context = InitialContextRegisters();
+        // Copy-assignment reuses the map's nodes.
+        context = InitialContext();
     }
 };
 
