@@ -222,7 +222,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             if (color) color->Begin(commands);
         }
         if (storage->depth) storage->depth->Begin(commands);
-        pipeline.Bind(commands);
+        pipeline.Bind(commands, state);
     } else {
         // Host writes made before the batch is submitted are visible to it (submission orders them);
         // this barrier covers the transfer stages of the uploads below.
@@ -236,7 +236,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         }
         if (storage->depth) storage->depth->Begin(commands);
         if (context.drawProfiler) context.drawProfiler->Mark(context, commands, profile, 1);
-        pipeline.Begin(commands, state.renderExtent);
+        pipeline.Begin(commands, state);
     }
     if (depthFastClear) {
         // An HTILE fast clear stands for the whole surface holding the clear values.
