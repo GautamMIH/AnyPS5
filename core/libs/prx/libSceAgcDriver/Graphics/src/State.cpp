@@ -333,9 +333,13 @@ void decodeDepth(const Registers& cx, State& result) {
 
 ShaderStages DecodeShaderStages(const QueueState& queue) {
     const auto value = read(queue.context, 0x2d5);
-    std::ostringstream prefix;
-    prefix << "VGT_SHADER_STAGES_EN=0x" << std::hex << value << ": ";
-    const auto validate = [&](bool condition, const char* reason) { Require(condition, prefix.str() + reason); };
+    // The message is formatted only when a check fails (every draw decodes the stages).
+    const auto validate = [&](bool condition, const char* reason) {
+        if (condition) return;
+        std::ostringstream message;
+        message << "VGT_SHADER_STAGES_EN=0x" << std::hex << value << ": " << reason;
+        Require(false, message.str());
+    };
     validate((value & 0xfc000000u) == 0, "reserved stage bits are set");
     validate((value & 3u) != 3u && ((value >> 3u) & 3u) != 3u && ((value >> 6u) & 3u) != 3u, "reserved LS_EN, ES_EN or VS_EN encoding");
     const auto primitive = read(queue.userConfig, 0x242, "user-config");

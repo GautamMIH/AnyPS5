@@ -1,7 +1,11 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_QUEUESTATE_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_QUEUESTATE_HPP
 
+#include <bit>
 #include <cstdint>
+#include <initializer_list>
+#include <stdexcept>
+#include <utility>
 #include <map>
 #include <array>
 #include <optional>
@@ -10,7 +14,123 @@
 
 namespace AgcDriver {
 
-using Registers = std::map<std::uint32_t, std::uint32_t>;
+// A register bank: offset -> value, with std::map's interface as the driver uses it. Every context
+// and shader register (and most user-config ones) lies below DenseLimit and is kept in an array
+// with a presence mask, so the per-draw state decode reads it by index (a std::map lookup cost
+// ~11% of the worker in heavy Zorro frames); larger offsets go to a map. Iteration is in offset
+// order, like std::map's.
+class Registers {
+public:
+    static constexpr std::uint32_t DenseLimit = 0x400;
+    using value_type = std::pair<const std::uint32_t, std::uint32_t>;
+
+    class const_iterator {
+    public:
+        struct Arrow {
+            value_type value;
+            const value_type* operator->() const { return &value; }
+        };
+        const_iterator() = default;
+        value_type operator*() const { return {key(), value()}; }
+        Arrow operator->() const { return {{key(), value()}}; }
+        const_iterator& operator++() {
+            if (dense < DenseLimit) {
+                dense = owner->nextPresent(dense + 1);
+                if (dense == DenseLimit) sparse = owner->sparse.begin();
+            } else {
+                ++sparse;
+            }
+            return *this;
+        }
+        bool operator==(const const_iterator& other) const { return dense == other.dense && (dense < DenseLimit || sparse == other.sparse); }
+
+    private:
+        friend class Registers;
+        const_iterator(const Registers* owner, std::uint32_t dense, std::map<std::uint32_t, std::uint32_t>::const_iterator sparse) : owner(owner), dense(dense), sparse(sparse) {}
+        std::uint32_t key() const { return dense < DenseLimit ? dense : sparse->first; }
+        std::uint32_t value() const { return dense < DenseLimit ? owner->dense[dense] : sparse->second; }
+        const Registers* owner = nullptr;
+        std::uint32_t dense = DenseLimit;
+        std::map<std::uint32_t, std::uint32_t>::const_iterator sparse;
+    };
+    using iterator = const_iterator;
+
+    Registers() = default;
+    Registers(std::initializer_list<std::pair<std::uint32_t, std::uint32_t>> values) {
+        for (const auto& [offset, value] : values) emplace(offset, value);
+    }
+
+    bool contains(std::uint32_t offset) const { return offset < DenseLimit ? has(offset) : sparse.contains(offset); }
+    std::size_t count(std::uint32_t offset) const { return contains(offset) ? 1 : 0; }
+    std::size_t size() const { return denseCount + sparse.size(); }
+    bool empty() const { return size() == 0; }
+
+    std::uint32_t at(std::uint32_t offset) const {
+        if (offset < DenseLimit) {
+            if (!has(offset)) throw std::out_of_range("register not written");
+            return dense[offset];
+        }
+        return sparse.at(offset);
+    }
+    std::uint32_t& operator[](std::uint32_t offset) {
+        if (offset >= DenseLimit) return sparse[offset];
+        mark(offset);
+        return dense[offset];
+    }
+    std::pair<const_iterator, bool> emplace(std::uint32_t offset, std::uint32_t value) {
+        if (contains(offset)) return {find(offset), false};
+        (*this)[offset] = value;
+        return {find(offset), true};
+    }
+    std::pair<const_iterator, bool> insert_or_assign(std::uint32_t offset, std::uint32_t value) {
+        const bool added = !contains(offset);
+        (*this)[offset] = value;
+        return {find(offset), added};
+    }
+    std::size_t erase(std::uint32_t offset) {
+        if (offset >= DenseLimit) return sparse.erase(offset);
+        if (!has(offset)) return 0;
+        presence[offset / 64] &= ~(std::uint64_t{1} << (offset % 64));
+        dense[offset] = 0;
+        --denseCount;
+        return 1;
+    }
+    void clear() { *this = Registers{}; }
+
+    const_iterator find(std::uint32_t offset) const {
+        if (offset < DenseLimit) return has(offset) ? const_iterator(this, offset, sparse.end()) : end();
+        const auto found = sparse.find(offset);
+        return found == sparse.end() ? end() : const_iterator(this, DenseLimit, found);
+    }
+    const_iterator begin() const {
+        const auto first = nextPresent(0);
+        return const_iterator(this, first, first == DenseLimit ? sparse.begin() : sparse.end());
+    }
+    const_iterator end() const { return const_iterator(this, DenseLimit, sparse.end()); }
+
+    bool operator==(const Registers& other) const { return presence == other.presence && dense == other.dense && sparse == other.sparse; }
+
+private:
+    bool has(std::uint32_t offset) const { return (presence[offset / 64] >> (offset % 64)) & 1u; }
+    void mark(std::uint32_t offset) {
+        if (has(offset)) return;
+        presence[offset / 64] |= std::uint64_t{1} << (offset % 64);
+        ++denseCount;
+    }
+    std::uint32_t nextPresent(std::uint32_t from) const {
+        for (auto word = from / 64; word < presence.size(); ++word) {
+            auto bits = presence[word];
+            if (word == from / 64) bits &= ~std::uint64_t{0} << (from % 64);
+            if (bits != 0) return word * 64 + static_cast<std::uint32_t>(std::countr_zero(bits));
+        }
+        return DenseLimit;
+    }
+    // Absent dense entries hold 0, so equal banks compare equal as arrays.
+    std::array<std::uint32_t, DenseLimit> dense{};
+    std::array<std::uint64_t, DenseLimit / 64> presence{};
+    std::size_t denseCount = 0;
+    std::map<std::uint32_t, std::uint32_t> sparse;
+};
 
 inline Registers buildInitialContextRegisters() {
     Registers result{

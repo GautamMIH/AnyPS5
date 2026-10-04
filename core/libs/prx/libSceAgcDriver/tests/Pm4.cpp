@@ -67,7 +67,37 @@ void testCatalog() {
     for (const auto& [id, name] : custom) check(AgcDriver::Pm4::Name(makePacket(0x10, {0}, id << 2)[0]) == name, "custom opcode name mismatch");
 }
 
+// The register bank keeps std::map's semantics across its dense array and its map of large offsets.
+void testRegisterBank() {
+    AgcDriver::Registers bank{{0x500, 9}, {0x10, 1}, {0x3ff, 7}, {0x10, 99}};
+    check(bank.size() == 3 && bank.at(0x10) == 1, "initializer list must keep the first value of a key");
+    std::vector<std::pair<std::uint32_t, std::uint32_t>> seen;
+    for (const auto& [offset, value] : bank) seen.emplace_back(offset, value);
+    check(seen == std::vector<std::pair<std::uint32_t, std::uint32_t>>{{0x10, 1}, {0x3ff, 7}, {0x500, 9}}, "register bank iterates out of offset order");
+    check(!bank.emplace(0x10, 5).second && bank.at(0x10) == 1, "emplace overwrote a register");
+    check(!bank.insert_or_assign(0x10, 5).second && bank.at(0x10) == 5, "insert_or_assign did not overwrite");
+    check(bank.find(0x11) == bank.end() && bank.find(0x500)->second == 9 && bank.find(0x3ff)->second == 7, "register lookup mismatch");
+    bool threw = false;
+    try {
+        static_cast<void>(bank.at(0x11));
+    } catch (const std::out_of_range&) {
+        threw = true;
+    }
+    check(threw, "reading an unwritten register must throw");
+    AgcDriver::Registers copy = bank;
+    check(copy == bank, "copied register banks differ");
+    check(bank.erase(0x3ff) == 1 && bank.erase(0x3ff) == 0 && !bank.contains(0x3ff) && bank.size() == 2, "erase mismatch");
+    check(!(copy == bank), "banks with different registers compare equal");
+    copy.erase(0x3ff);
+    check(copy == bank, "erased registers must not affect equality");
+    bank[0x20] = 3;
+    check(bank.contains(0x20) && bank.begin()->first == 0x10, "subscript did not insert in order");
+    bank.clear();
+    check(bank.empty() && bank.begin() == bank.end(), "cleared bank is not empty");
+}
+
 void testRegisters() {
+    testRegisterBank();
     AgcDriver::QueueState state;
     execute(state, makePacket(0x79, {0x242, 4}));
     check(state.userConfig.at(0x242) == 4, "primitive type register write was lost");

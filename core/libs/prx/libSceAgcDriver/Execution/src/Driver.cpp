@@ -1403,7 +1403,15 @@ private:
                     }
                     withContext([&] { dispatch(queue, direct, submission); });
                 } else if (opcode == 0x35 || opcode == 0x27 || opcode == 0x2d) {
-                    withContext([&] { draw(queue, Pm4::ResolveDraw(packet, queue), submission); });
+                    Pm4::DrawParameters parameters;
+                    {
+                        // The draw packet's checks are the worker's own guest accesses (unlocked when
+                        // pipelined); without the pipeline they resolve as before.
+                        std::optional<GuestMemory::MemoryAccessScope> memoryScope;
+                        if (pipeline) memoryScope.emplace(accessContext(), accessResolver(), true);
+                        withContext([&] { parameters = Pm4::ResolveDraw(packet, queue); });
+                    }
+                    withContext([&] { draw(queue, parameters, submission); });
                 } else if (opcode == 0x24 || opcode == 0x25 || opcode == 0x2c || opcode == 0x38) {
                     std::vector<Pm4::IndirectDraw> draws;
                     {
