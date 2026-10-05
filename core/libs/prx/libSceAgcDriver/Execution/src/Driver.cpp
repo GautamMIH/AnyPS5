@@ -37,6 +37,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <source_location>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -380,12 +381,13 @@ private:
 
     // Device work outside the device thread: what it queued runs first (the caller must not hold
     // gpuMutex: queued jobs take it).
-    std::unique_lock<std::recursive_mutex> lockDevice() {
+    std::unique_lock<std::recursive_mutex> lockDevice(std::source_location where = std::source_location::current()) {
         if (pipeline) {
             PerformanceTimer timing("Driver.PipelineDrain");
             const auto started = std::chrono::steady_clock::now();
             pipeline->Drain();
-            noteDrain(__builtin_return_address(0), started);
+            // Attributed to the calling line (APS5_TRACE_DRAINS).
+            noteDrain(reinterpret_cast<const void*>(static_cast<std::uintptr_t>(where.line()) << 4u), started);
             timing.Mark("device_call");
         }
         return std::unique_lock(gpuMutex);
