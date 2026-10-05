@@ -135,6 +135,29 @@ add_custom_command(
 add_custom_target(libcohtml_prospero DEPENDS ${LIBCOHTML_PROSPERO_PATCHED})
 list(APPEND PATCHED_OUTPUTS ${LIBCOHTML_PROSPERO_PATCHED})
 
+# The bundled allocator (Linux): libmimalloc.prx defines malloc and friends; the relinker makes it
+# the executable's first dependency, so it serves the whole process (glibc's allocator cost about a
+# fifth of the driver worker's time in heavy frames).
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(MI_OVERRIDE ON CACHE BOOL "" FORCE)
+    set(MI_BUILD_SHARED ON CACHE BOOL "" FORCE)
+    set(MI_BUILD_STATIC OFF CACHE BOOL "" FORCE)
+    set(MI_BUILD_OBJECT OFF CACHE BOOL "" FORCE)
+    set(MI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${CMAKE_SOURCE_DIR}/3rdparty/mimalloc ${CMAKE_CURRENT_BINARY_DIR}/mimalloc EXCLUDE_FROM_ALL)
+    # Named as the relinker expects (the soname is the file name, with no version suffix).
+    set_target_properties(mimalloc PROPERTIES NO_SONAME ON)
+    target_link_options(mimalloc PRIVATE LINKER:-soname,libmimalloc.prx)
+    set(MIMALLOC_PATCHED ${PATCHED_DIR}/libmimalloc.prx)
+    add_custom_command(
+            OUTPUT ${MIMALLOC_PATCHED}
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:mimalloc> ${MIMALLOC_PATCHED}
+            DEPENDS mimalloc
+            COMMENT "Bundling mimalloc"
+    )
+    list(APPEND PATCHED_OUTPUTS ${MIMALLOC_PATCHED})
+endif()
+
 add_custom_target(libs DEPENDS ${PATCHED_OUTPUTS})
 
 if(BUILD_TESTING)

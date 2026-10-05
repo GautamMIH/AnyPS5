@@ -26,6 +26,8 @@ constexpr char kSystemDirectoryName[] = "sce_sys";
 constexpr char kGameExecutableName[] = "eboot.bin";
 constexpr char kOutputExecutableName[] = "eboot.elf";
 constexpr char kLibsDirectoryName[] = "libs";
+// Shipped in libs/ on Linux (see core/libs/CMakeLists.txt).
+constexpr char kAllocatorLibraryName[] = "libmimalloc.prx";
 constexpr char kGameMountName[] = "app0";
 constexpr char kModuleExtension[] = ".prx";
 constexpr char kSignedModuleExtension[] = ".sprx";
@@ -390,6 +392,9 @@ int RelinkGame(const Args& args, const std::string& executablePath) {
 
         if (usesStubs)
             needed.push_back(kUnresolvedLibraryName);
+        // The bundled allocator comes first: its malloc then serves the whole process.
+        if (moduleName == kOutputExecutableName && providedLibraries.count(kAllocatorLibraryName) != 0 && !contains(needed, kAllocatorLibraryName))
+            needed.insert(needed.begin(), kAllocatorLibraryName);
         SetNeededLibraries(section, needed);
         std::string baseVersion = kDefaultBaseVersion;
         for (const auto& symbol : listSymbols(section)) {
