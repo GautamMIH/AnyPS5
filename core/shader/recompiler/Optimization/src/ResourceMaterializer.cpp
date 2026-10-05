@@ -1,3 +1,4 @@
+#include <unordered_set>
 #include "Optimization/ResourceMaterializer.hpp"
 #include "IntermediateRepresentation/IrBuilder.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
@@ -633,6 +634,16 @@ void ownPlanValues(IrResourcePlan& plan) {
         for (const auto* argument : value->Arguments()) {
             if (argument != nullptr) pending.push_back(argument);
         }
+    }
+    {
+        std::uint32_t limit = 0;
+        std::unordered_set<std::uint32_t> ids;
+        bool unique = true;
+        for (const auto* value : order) {
+            unique = unique && ids.insert(value->Id()).second;
+            limit = std::max(limit, value->Id() + 1u);
+        }
+        plan.valueIdLimit = unique && limit <= (1u << 20u) ? limit : 0u;
     }
     for (const auto* value : order) {
         auto clone = std::make_unique<IrValue>(value->Opcode(), value->Type(), value->Id());

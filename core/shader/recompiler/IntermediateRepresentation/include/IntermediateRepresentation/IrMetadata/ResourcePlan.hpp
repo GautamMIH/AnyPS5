@@ -56,6 +56,9 @@ struct IrResourcePlan {
     std::uint32_t userDataBase = 0;
     std::uint32_t userDataCount = 64;
     std::vector<std::unique_ptr<IrValue>> valueStorage;
+    // One past the largest id of valueStorage's values when every id is unique, else 0: evaluators
+    // then keep per-value state in arrays indexed by id.
+    std::uint32_t valueIdLimit = 0;
     std::vector<std::unique_ptr<IrBlock>> blockStorage;
     std::vector<MemoryInfo> memoryInfo;
     std::vector<DescriptorSource> descriptorSources;

@@ -45,13 +45,19 @@ bool Evaluator::EvaluateWide(IrValue* raw, std::uint64_t& result) {
     if (_cache.Find(inst, result)) {
         return true;
     }
-    if (std::find(_visiting.begin(), _visiting.end(), inst) != _visiting.end()) {
-        return false;
+    const bool dense = _cache.Dense(inst);
+    if (dense) {
+        if (!_cache.BeginVisit(inst)) return false;
+    } else {
+        if (std::find(_visiting.begin(), _visiting.end(), inst) != _visiting.end()) {
+            return false;
+        }
+        _visiting.push_back(inst);
     }
-    _visiting.push_back(inst);
     std::uint64_t out = 0;
     const bool evaluated = EvaluateInst(*inst, out);
-    _visiting.pop_back();
+    if (dense) _cache.EndVisit(inst);
+    else _visiting.pop_back();
     if (!evaluated) {
         static const bool debug = std::getenv("APS5_SRT_DEBUG") != nullptr;
         if (debug) std::fprintf(stderr, "[srt] cannot evaluate %s (%zu arguments)\n", std::string(IrOpcodeName(inst->Opcode())).c_str(), inst->ArgumentCount());
