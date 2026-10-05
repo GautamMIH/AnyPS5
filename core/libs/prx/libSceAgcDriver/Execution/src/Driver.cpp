@@ -1299,9 +1299,10 @@ private:
                 CheckFailure();
                 timing.Mark("failure_check");
                 if (opcode == 0x3c || opcode == 0x93) {
-                    // A wait on a label a pending release writes is a GPU barrier (see below), queued
-                    // in order like one, with no drain. ANYPS5_DRAIN_WAIT_REG_MEM=1 drains first.
-                    static const bool drainWaits = std::getenv("ANYPS5_DRAIN_WAIT_REG_MEM") != nullptr;
+                    // Opt-in (ANYPS5_QUEUE_WAIT_REG_MEM=1): a wait on a label a pending release
+                    // writes is a GPU barrier (see below), queued in order like one, with no drain.
+                    // Zorro gained ~0.5 ms a frame but Hellboy lost ~1 ms, so waits drain by default.
+                    static const bool drainWaits = std::getenv("ANYPS5_QUEUE_WAIT_REG_MEM") == nullptr;
                     static const bool cpuWaits = std::getenv("ANYPS5_CPU_WAIT_REG_MEM") != nullptr;
                     if (pipeline && device != nullptr && !drainWaits && !cpuWaits && pendingReleaseSatisfies(packet)) {
                         pipeline->Post([device = device] { device->AcquireGpuMemory(); }, {}, false);
