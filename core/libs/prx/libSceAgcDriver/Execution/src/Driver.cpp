@@ -1077,14 +1077,18 @@ private:
             for (const auto& binding : result.bindings) {
                 if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) anyWrite = true;
                 if (binding.kind != ShaderRecompiler::DescriptorKind::StorageBuffer || binding.readOnly) continue;
-                // The address table and fault buffer are the driver's own buffers, not guest memory.
-                if (binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer) continue;
+                // Only guest buffers are guest memory: the address table and fault buffer are the
+                // driver's, and shader data and flattened SRTs are copies of their words (their
+                // "descriptors" are contents, not V#s) that are never written back.
+                if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
                 // Writable buffers write within their descriptors' ranges (as ShaderResources binds them).
                 for (std::size_t element = 0; element < binding.count; ++element) {
                     if ((element + 1u) * 4u > binding.guestDescriptor.size()) {
                         anyWrite = true;
                         break;
                     }
+                    // Elements the recompiler proved read-only are bound read-only.
+                    if (element < binding.bufferWritten.size() && !binding.bufferWritten[element]) continue;
                     const auto* words = binding.guestDescriptor.data() + element * 4u;
                     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
                     const auto base = descriptor.Base48();

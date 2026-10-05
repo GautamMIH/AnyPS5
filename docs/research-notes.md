@@ -285,6 +285,14 @@ Issues that needed research, with a short answer. Check here before researching;
   - The SRT evaluator keeps per-value state in id-indexed arrays: 6.5 -> 6.0 ms.
   - Tried and dropped: an epoch-wide union of scanned pages for CPU-write collection. Scans stayed at 1.33 against 1.36 ms; textures rarely share pages.
   - Zorro gameplay is bimodal too: runs land near 3780 frames (43 ms median) or 3470 (53 ms) whatever the build. Judge per-draw changes by profiled ms per frame, not frame counts.
+- **Pipelined driver: most worker waits came from misread data buffers (fixed, 2026-10-04).**
+  - queueDraw read every writable storage buffer binding's words as a V#. Flattened SRTs and shader data are copies of their contents (addDataBuffer, never written back). Their words are not descriptors.
+  - A 2-word flattened SRT marked the draw "may write anywhere", about 500k draws per 100 s. 99% of the worker's waits for the device thread were on such draws; only ~1% hit address-table (BDA) ranges.
+  - Write ranges now come from GuestBuffers bindings only, skipping elements the recompiler proved read-only (bufferWritten).
+  - Reads that wait for a queued job fell from 5.1% to 0.09%. APS5_VERIFY_PIPELINE: 12.1M skips checked, 0 missed.
+  - Zorro gameplay, 120 s, 3 alternating runs: 3970-4011 frames (heavy-frame median 39.4-39.7 ms) against 3507-3870 (42.2-51.5 ms). The slow mode no longer appeared.
+  - Bounding BDA store ranges per draw (evaluating saddr bases at capture) is no longer worth building: those waits are ~1% of the remainder.
+  - CPU-write scans: ~13 PAGEMAP_SCANs per epoch and ~58 epochs a frame; only 0.15% find written pages. A fault-based dirty flag would remove them, but libc's watches take the tracking mutex on every fault. Left for later (at most 2.3 ms of device time).
 - **Libraries need $ORIGIN runpaths.** The NID patcher rebuilt .dynstr with DT_NEEDED and DT_SONAME strings only, leaving an empty DT_RUNPATH. Libraries found only those dependencies the game had already loaded. libSceVideoOut's new libSceKeyboard dependency (games rarely import it) then failed to load ("libSceKeyboard.prx: cannot open shared object file"). Every prx is now built with runpath $ORIGIN, and the patcher keeps DT_RPATH/DT_RUNPATH strings.
 - **Same-named game modules and AnyPS5 libraries.** Upstream added partial stand-ins (libSceNpCppWebApi, libfmod, libfmodstudio, libcohtml, libRenoirCore). If an AnyPS5 library always wins, it shadows complete game copies: Smurfs then calls missing FMOD functions. The relinker now decides by provenance and import coverage (see README).
 - **Indexed indirect draws (DRAW_INDEX_INDIRECT 0x25, _MULTI 0x38).** The hardware encoding uses draw-initiator source select 0 (DMA) and, for _MULTI, the draw-index SGPR location in DW4 bits 0-15 (0x280 = none). Only the non-indexed forms use source select 2.
