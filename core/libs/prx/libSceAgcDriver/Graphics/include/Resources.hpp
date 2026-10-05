@@ -181,6 +181,8 @@ public:
     VkCommandBuffer Handle() const;
     void SubmitAndWait();
     void Submit();
+    // Submissions of any command batch so far (one queue: later submissions complete later).
+    static std::uint64_t Submissions();
     void Wait();
     bool IsComplete();
     void Reset();

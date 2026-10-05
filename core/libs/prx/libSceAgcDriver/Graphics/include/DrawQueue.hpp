@@ -74,7 +74,13 @@ private:
         bool hasBarrier = false;
         // The occlusion query around the batch, or -1.
         std::int32_t query = -1;
+        // A marker this batch's completion stands for (SubmitMarker), or 0.
+        std::uint64_t marker = 0;
     };
+    // CommandBatch::Submissions() right after the last batch was submitted.
+    std::uint64_t lastBatchSubmission = 0;
+    // The latest marker reached by retiring the batch carrying it.
+    std::uint64_t retiredMarker = 0;
     struct SampleCounter {
         explicit SampleCounter(const Context& context, bool precise);
         ~SampleCounter();

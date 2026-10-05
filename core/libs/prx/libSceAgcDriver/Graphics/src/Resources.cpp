@@ -1,3 +1,4 @@
+#include <atomic>
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/BufferPool.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -275,8 +276,17 @@ void CommandBatch::Reset() {
     beginTiming();
 }
 
+namespace {
+std::atomic<std::uint64_t> submissionCount{0};
+}
+
+std::uint64_t CommandBatch::Submissions() {
+    return submissionCount.load(std::memory_order_acquire);
+}
+
 void CommandBatch::Submit() {
     PerformanceTimer timing("Graphics.Submit");
+    submissionCount.fetch_add(1, std::memory_order_acq_rel);
     Require(!submitted, "command batch has already been submitted");
     if (timestamp != UINT32_MAX) context.Function<PFN_vkCmdWriteTimestamp>("vkCmdWriteTimestamp")(commands, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, context.gpuTimestamps->Pool(), timestamp + 1);
     Check(context.Function<PFN_vkEndCommandBuffer>("vkEndCommandBuffer")(commands), "vkEndCommandBuffer");

@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <cstdlib>
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -25,6 +27,7 @@ void DrawQueue::retire(Batch batch) {
     for (const auto& entry : batch.entries)
         for (const auto& [begin, end] : entry.writes) writes.Remove(begin, end);
     batch.entries.clear();
+    if (batch.marker != 0) retiredMarker = std::max(retiredMarker, batch.marker);
     available.push_back(std::move(batch.commands));
     timing.Mark("resources_release");
 }
@@ -68,6 +71,16 @@ void DrawQueue::RecordMemoryBarrier(const Context& context) {
 
 std::uint64_t DrawQueue::SubmitMarker(const Context& context) {
     Flush();
+    // The last draw batch is the latest submission: its completion is the marker (an empty batch
+    // cost a submission and a fence per release and per finished submission).
+    // ANYPS5_MARKER_BATCHES=1 submits an empty batch per marker (the former way).
+    static const bool separate = std::getenv("ANYPS5_MARKER_BATCHES") != nullptr;
+    if (!separate && !pending.empty() && pending.back().marker == 0 && lastBatchSubmission == CommandBatch::Submissions()) {
+        const auto serial = nextMarker++;
+        pending.back().marker = serial;
+        markers.push_back({serial, nullptr});
+        return serial;
+    }
     std::unique_ptr<CommandBatch> commands;
     if (available.empty()) {
         commands = std::make_unique<CommandBatch>(context);
@@ -86,6 +99,20 @@ std::uint64_t DrawQueue::SubmitMarker(const Context& context) {
 void DrawQueue::collectMarkers(bool wait, std::uint64_t serial) {
     while (!markers.empty() && markers.front().serial <= serial) {
         auto& front = markers.front();
+        if (!front.commands) {
+            // Carried by a draw batch: reached when that batch retires (batches retire in order).
+            Collect();
+            while (wait && retiredMarker < front.serial && !pending.empty()) {
+                pending.front().commands->Wait();
+                auto batch = std::move(pending.front());
+                pending.erase(pending.begin());
+                retire(std::move(batch));
+            }
+            if (retiredMarker < front.serial) break;
+            reachedMarker = front.serial;
+            markers.pop_front();
+            continue;
+        }
         if (!front.commands->IsComplete()) {
             if (!wait) break;
             front.commands->Wait();

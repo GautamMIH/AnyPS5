@@ -160,6 +160,7 @@ void DrawQueue::Flush() {
     pending.push_back(std::move(recording));
     recording = Batch{};
     pending.back().commands->Submit();
+    lastBatchSubmission = CommandBatch::Submissions();
 }
 
 void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes) {
