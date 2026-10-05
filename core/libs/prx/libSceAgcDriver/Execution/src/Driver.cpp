@@ -486,6 +486,18 @@ private:
         std::vector<std::pair<std::shared_ptr<IFlipRequest>, std::shared_ptr<FrameTiming>>> flips;
     };
     std::deque<Completion> completions;
+    // The RELEASE_MEM packets the worker deferred, numbered in order, and how many of them have
+    // completed (completions finish in order): the worker sees its pending releases without
+    // draining the device thread, which may not have queued them yet. Worker only, but for the count.
+    std::deque<std::pair<std::uint64_t, std::vector<std::uint32_t>>> deferredReleases;
+    std::uint64_t releasesDeferred = 0;
+    std::atomic<std::uint64_t> releasesCompleted{0};
+    // Whether a deferred release still pending will satisfy the WAIT_REG_MEM. Worker only.
+    bool pendingReleaseSatisfies(std::span<const std::uint32_t> packet) {
+        const auto completed = releasesCompleted.load(std::memory_order_acquire);
+        while (!deferredReleases.empty() && deferredReleases.front().first <= completed) deferredReleases.pop_front();
+        return std::any_of(deferredReleases.begin(), deferredReleases.end(), [&](const auto& release) { return Pm4::ReleaseSatisfiesWait(packet, release.second); });
+    }
     // Dwords that WRITE_DATA and small fills recorded on the GPU leave in guest memory, with the
     // draw-queue serial of the write: valid while that write is the range's last queued writer.
     struct PredictedDword {
@@ -548,6 +560,20 @@ private:
         wakeCompleter();
     }
 
+    // A completion ordered after everything queued so far, without waiting for the device thread:
+    // it queues the completion as its next job (jobs hold gpuMutex), behind the draws before it.
+    // Every place that waits for all completions drains the device thread first. Caller does not
+    // hold gpuMutex. ANYPS5_DRAIN_COMPLETIONS=1 drains instead.
+    void deferCompletion(Completion completion, std::source_location where = std::source_location::current()) {
+        static const bool drain = std::getenv("ANYPS5_DRAIN_COMPLETIONS") != nullptr;
+        if (pipeline && !drain) {
+            pipeline->Post([this, completion = std::move(completion)]() mutable { queueCompletion(std::move(completion)); }, {}, false);
+        } else {
+            const auto gpuLock = lockDevice(where);
+            queueCompletion(std::move(completion));
+        }
+    }
+
     // Caller holds gpuMutex. Finishes the completions whose GPU work is done (all of them if wait),
     // in order: labels are written here; interrupts and completed serials go to finishCompletions.
     Completed pollCompletions(bool wait) {
@@ -575,6 +601,7 @@ private:
             if (next.flip) done.flips.emplace_back(std::move(next.flip), std::move(next.flipTiming));
             if (next.interrupt) done.interrupts.emplace_back(next.eventQueue, *next.interrupt);
             if (next.serial != 0) done.serials.push_back(next.serial);
+            if (!next.release.empty()) releasesCompleted.fetch_add(1, std::memory_order_release);
             completions.pop_front();
         }
         completionsPending = !completions.empty();
@@ -1272,6 +1299,32 @@ private:
                 CheckFailure();
                 timing.Mark("failure_check");
                 if (opcode == 0x3c || opcode == 0x93) {
+                    // A wait on a label a pending release writes is a GPU barrier (see below), queued
+                    // in order like one, with no drain. ANYPS5_DRAIN_WAIT_REG_MEM=1 drains first.
+                    static const bool drainWaits = std::getenv("ANYPS5_DRAIN_WAIT_REG_MEM") != nullptr;
+                    static const bool cpuWaits = std::getenv("ANYPS5_CPU_WAIT_REG_MEM") != nullptr;
+                    if (pipeline && device != nullptr && !drainWaits && !cpuWaits && pendingReleaseSatisfies(packet)) {
+                        pipeline->Post([device = device] { device->AcquireGpuMemory(); }, {}, false);
+                        timing.Mark("gpu_wait_queued");
+                        cursor += count;
+                        continue;
+                    }
+                    // A label already in memory is read like any worker read (waiting only for a
+                    // queued job that writes it); a wait it does not satisfy yet drains below.
+                    if (pipeline && device != nullptr && !drainWaits && !cpuWaits) {
+                        bool satisfied = false;
+                        {
+                            const GuestMemory::MemoryAccessScope memoryScope(accessContext(), accessResolver(), true);
+                            const GuestMemory::AccessSite accessSite("wait_reg_mem");
+                            satisfied = Pm4::WaitSatisfied(packet);
+                        }
+                        if (satisfied) {
+                            timing.Mark("memory_wait");
+                            WriteTracker::NextEpoch();
+                            cursor += count;
+                            continue;
+                        }
+                    }
                     const auto gpuLock = lockDevice();
                     const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
@@ -1318,13 +1371,13 @@ private:
                 if (opcode == 0x49) {
                     // RELEASE_MEM writes its label (and raises its interrupt) once the GPU work
                     // before it completed; the worker goes on meanwhile.
-                    const auto gpuLock = lockDevice();
                     Completion completion;
                     completion.release.assign(packet.begin(), packet.end());
                     completion.eventQueue = static_cast<int>(submission.queue);
                     if (((packet[2] >> 24u) & 7u) != 0) completion.interrupt = packet[7];
                     if (TraceRelease()) std::fprintf(stderr, "[agc-release] queued serial=%llu queue=0x%x label=0x%llx data=0x%08x%08x select=%u interrupt=%u context=0x%x\n", static_cast<unsigned long long>(submission.serial), static_cast<unsigned>(submission.queue), static_cast<unsigned long long>(packet[3] | (static_cast<std::uint64_t>(packet[4]) << 32u)), packet[6], packet[5], packet[2] >> 29u, (packet[2] >> 24u) & 7u, packet[7]);
-                    queueCompletion(std::move(completion));
+                    deferredReleases.emplace_back(++releasesDeferred, completion.release);
+                    deferCompletion(std::move(completion));
                     timing.Mark("release_deferred");
                     cursor += count;
                     continue;
@@ -1533,11 +1586,12 @@ private:
                         PerformanceContext timingContext(frameTiming.get());
                         PerformanceTimer timing("Driver.SubmissionCompletion");
                         {
-                            const auto gpuLock = lockDevice();
                             Completion completion;
                             completion.serial = active[index].serial;
-                            queueCompletion(std::move(completion));
-                            stashCompletions(pollCompletions(false));
+                            deferCompletion(std::move(completion));
+                            // Finished ones are published now if the device is free, else by the completer.
+                            std::unique_lock gpuLock(gpuMutex, std::try_to_lock);
+                            if (gpuLock.owns_lock()) stashCompletions(pollCompletions(false));
                         }
                         publishCompletions();
                     }
