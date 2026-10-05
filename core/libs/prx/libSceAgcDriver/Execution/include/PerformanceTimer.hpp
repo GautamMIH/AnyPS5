@@ -175,9 +175,9 @@ private:
 class PerformanceTimer {
 public:
     explicit PerformanceTimer(const char* scope) : frame(Enabled() ? PerformanceContext::Current() : nullptr), scope(scope) {
-        if (frame != nullptr) {
-            total = frame->Get(scope, "total");
-        }
+        // Disabled (no frame): no clock reads either; timers sit on hot paths.
+        if (frame == nullptr) return;
+        total = frame->Get(scope, "total");
         start = Clock::now();
         previous = start;
     }

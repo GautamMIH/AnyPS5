@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -422,14 +423,20 @@ bool GuestVirtualAccessible_nid_postfix(std::uint64_t address, std::uint64_t byt
         std::uint64_t end = 0;
         bool writable = false;
     };
-    thread_local std::array<Confirmed, 8> confirmed{};
+    thread_local std::array<Confirmed, 16> confirmed{};
     thread_local std::uint64_t confirmedGeneration = std::numeric_limits<std::uint64_t>::max();
     thread_local std::size_t nextConfirmed = 0;
     const auto generation = mappingGeneration.load(std::memory_order_acquire);
+    // Debug aid: APS5_TRACE_AREA_CACHE=1 counts this thread's misses and generation changes.
+    static const bool traceCache = std::getenv("APS5_TRACE_AREA_CACHE") != nullptr;
+    thread_local std::uint64_t traceCalls = 0, traceMisses = 0, traceChanges = 0;
+    if (traceCache && ++traceCalls % 500000 == 0) std::fprintf(stderr, "[area-cache] thread calls %llu misses %llu generation changes %llu\n", static_cast<unsigned long long>(traceCalls), static_cast<unsigned long long>(traceMisses), static_cast<unsigned long long>(traceChanges));
     if (generation == confirmedGeneration) {
         for (const auto& area : confirmed)
             if (area.begin <= address && address + bytes <= area.end && (!writable || area.writable)) return true;
+        ++traceMisses;
     } else {
+        ++traceChanges;
         confirmed = {};
         confirmedGeneration = generation;
     }
@@ -448,9 +455,24 @@ bool GuestVirtualAccessible_nid_postfix(std::uint64_t address, std::uint64_t byt
         if (!committed(record.kind) || !hostReadable(record.protection) || (writable && !hostWritable(record.protection))) return false;
         cursor = record.end;
     }
-    // A range within one area remembers the area.
-    if (end <= first->second.end) {
-        confirmed[nextConfirmed] = {first->first, first->second.end, hostWritable(first->second.protection)};
+    // Remembers the whole run of adjacent accessible areas around the range (ranges often cross area
+    // boundaries), writable only if every area in it is.
+    const auto accessible = [](const Record& record) { return committed(record.kind) && hostReadable(record.protection); };
+    auto low = first;
+    bool runWritable = true;
+    while (low != map.begin()) {
+        const auto previous = std::prev(low);
+        if (previous->second.end != low->first || !accessible(previous->second)) break;
+        low = previous;
+    }
+    auto high = low;
+    std::uint64_t runEnd = low->first;
+    for (; high != map.end() && high->first == runEnd && accessible(high->second); ++high) {
+        runWritable = runWritable && hostWritable(high->second.protection);
+        runEnd = high->second.end;
+    }
+    if (low->first <= address && end <= runEnd) {
+        confirmed[nextConfirmed] = {low->first, runEnd, runWritable};
         nextConfirmed = (nextConfirmed + 1) % confirmed.size();
     }
     return true;
