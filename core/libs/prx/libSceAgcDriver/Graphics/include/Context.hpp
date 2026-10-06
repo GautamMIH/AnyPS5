@@ -91,6 +91,8 @@ struct Context {
     // shaderClipDistance / shaderCullDistance: vertex-stage clip and cull distance outputs.
     bool clipDistance = false;
     bool cullDistance = false;
+    // VK_EXT_shader_viewport_index_layer: vertex-pipeline stages may write the layer and viewport index.
+    bool viewportIndexLayer = false;
     bool externalMemoryHost = false;
     GuestGpuMemory* guestGpuMemory = nullptr;
 

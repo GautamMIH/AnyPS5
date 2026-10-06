@@ -130,6 +130,7 @@ struct VulkanDevice::State {
     bool storageImageWriteWithoutFormat = false;
     bool clipDistance = false;
     bool cullDistance = false;
+    bool viewportIndexLayer = false;
     bool depthClamp = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
@@ -464,6 +465,15 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         deviceExtensions.push_back(VK_KHR_FRAGMENT_SHADER_BARYCENTRIC_EXTENSION_NAME);
         state->capabilities.push_back(spv::CapabilityFragmentBarycentricKHR);
         state->spirvExtensions.push_back("SPV_KHR_fragment_shader_barycentric");
+    }
+    // Vertex-pipeline stages writing the layer or viewport index: core in SPIR-V 1.5 (Vulkan 1.2),
+    // available to the 1.3/1.4 modules this device takes through VK_EXT_shader_viewport_index_layer
+    // (Balatro's vertex shaders write one).
+    if (hasExtension(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME)) {
+        deviceExtensions.push_back(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
+        state->capabilities.push_back(spv::CapabilityShaderViewportIndexLayerEXT);
+        state->spirvExtensions.push_back("SPV_EXT_shader_viewport_index_layer");
+        state->viewportIndexLayer = true;
     }
     if (state->shaderClock) {
         deviceExtensions.push_back(VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
@@ -1065,6 +1075,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.clipDistance = state->clipDistance;
     context.depthClamp = state->depthClamp;
     context.cullDistance = state->cullDistance;
+    context.viewportIndexLayer = state->viewportIndexLayer;
     context.externalMemoryHost = state->externalMemoryHost;
     context.guestGpuMemory = state->guestGpuMemory.get();
     context.imageMemory = state->imageMemory;

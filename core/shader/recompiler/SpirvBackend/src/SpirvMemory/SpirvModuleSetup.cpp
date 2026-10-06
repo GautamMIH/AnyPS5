@@ -1,3 +1,4 @@
+#include <string_view>
 #include "SpirvBackend/SpirvMemory/SpirvModuleSetup.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvConstants.hpp"
@@ -137,13 +138,20 @@ void DefineModule(SpirvEmitterState& state) {
     if (InputVariableForKind(state, StageInputKind::Layer) != 0) {
         state.module.EmitCapability(spv::CapabilityGeometry);
     }
-    if (state.layerVariable != 0) {
-        state.module.RequireVersion(0x00010500u);
-        state.module.EmitCapability(spv::CapabilityShaderLayer);
-    }
-    if (state.viewportIndexVariable != 0) {
-        state.module.RequireVersion(0x00010500u);
-        state.module.EmitCapability(spv::CapabilityShaderViewportIndex);
+    // Below SPIR-V 1.5 the device may offer them through SPV_EXT_shader_viewport_index_layer.
+    const bool layerExtension = state.spirvVersion < 0x00010500u && std::find(state.supportedExtensions.begin(), state.supportedExtensions.end(), std::string_view("SPV_EXT_shader_viewport_index_layer")) != state.supportedExtensions.end();
+    if ((state.layerVariable != 0 || state.viewportIndexVariable != 0) && layerExtension) {
+        state.module.EmitExtension("SPV_EXT_shader_viewport_index_layer");
+        state.module.EmitCapability(spv::CapabilityShaderViewportIndexLayerEXT);
+    } else {
+        if (state.layerVariable != 0) {
+            state.module.RequireVersion(0x00010500u);
+            state.module.EmitCapability(spv::CapabilityShaderLayer);
+        }
+        if (state.viewportIndexVariable != 0) {
+            state.module.RequireVersion(0x00010500u);
+            state.module.EmitCapability(spv::CapabilityShaderViewportIndex);
+        }
     }
     if (InputVariableForKind(state, StageInputKind::SampleId) != 0) {
         state.module.EmitCapability(spv::CapabilitySampleRateShading);

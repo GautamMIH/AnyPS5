@@ -13,6 +13,7 @@ void APS5_VABI DeleteTypeInfo(std::type_info*) {
 }
 
 bool APS5_VABI IsPointerTypeInfo(const std::type_info*) { return false; }
+bool APS5_VABI IsTrueTypeInfo(const std::type_info*) { return true; }
 
 bool APS5_VABI CatchTypeInfo(const std::type_info* self, const std::type_info* thrown, void** object, unsigned) {
     if (!self || !thrown || !object) throw std::invalid_argument("invalid RTTI catch arguments");
@@ -65,4 +66,13 @@ extern "C" {
 LibcException::TypeInfoVtable _ZTVN10__cxxabiv117__class_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__class_type_info)};
 LibcException::TypeInfoVtable _ZTVN10__cxxabiv120__si_class_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__si_class_type_info)};
 LibcException::TypeInfoVtable _ZTVN10__cxxabiv121__vmi_class_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__vmi_class_type_info)};
+// Type-info classes games emit for their own pointer, member-pointer, function, enum and array types
+// (Balatro imports the pointer one; unresolved, its typeid(T*) objects pointed at nothing and the
+// first pointer-typed throw or catch called through a null vtable). Catching goes through Match,
+// which tells the kinds apart by these vtables' type info.
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv119__pointer_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__pointer_type_info), LibcException::DestroyTypeInfo, LibcException::DeleteTypeInfo, LibcException::IsTrueTypeInfo};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv129__pointer_to_member_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__pointer_to_member_type_info)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv120__function_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__function_type_info), LibcException::DestroyTypeInfo, LibcException::DeleteTypeInfo, LibcException::IsPointerTypeInfo, LibcException::IsTrueTypeInfo};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv116__enum_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__enum_type_info)};
+LibcException::TypeInfoVtable _ZTVN10__cxxabiv117__array_type_infoE_nid_postfix {0, &typeid(__cxxabiv1::__array_type_info)};
 }

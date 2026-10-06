@@ -126,6 +126,12 @@ struct Module {
             return;
         }
         const auto signature = Signature(type);
+        if (vertex && storage == spv::StorageClassOutput && (value == spv::BuiltInLayer || value == spv::BuiltInViewportIndex)) {
+            // The render-target layer or viewport a vertex shader selects (the capability, from
+            // SPV_EXT_shader_viewport_index_layer or SPIR-V 1.5, is checked against the device's features).
+            Require(signature == "i32" || signature == "u32", "invalid layer or viewport index type");
+            return;
+        }
         if (vertex && storage == spv::StorageClassInput) {
             Require((value == spv::BuiltInVertexIndex || value == spv::BuiltInInstanceIndex) && signature == "i32", "unsupported vertex built-in input");
         } else if (vertex && storage == spv::StorageClassOutput) {
@@ -231,8 +237,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     capability == spv::CapabilityMeshShadingEXT;
 
                 const bool isLayerCapability =
-                    fragment && features.geometryShader &&
-                    capability == spv::CapabilityGeometry;
+                    (fragment && features.geometryShader && capability == spv::CapabilityGeometry) ||
+                    (!fragment && features.viewportIndexLayer && capability == spv::CapabilityShaderViewportIndexLayerEXT);
 
                 Require(
                     isBaseCapability ||
@@ -254,6 +260,10 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 const auto end = std::find(text, text + bytes.size(), '\0');
                 Require(end != text + bytes.size(), "unterminated SPIR-V extension");
                 const std::string_view extension(text, static_cast<std::size_t>(end - text));
+                if (extension == "SPV_EXT_shader_viewport_index_layer") {
+                    Require(!fragment && features.viewportIndexLayer, "SPV_EXT_shader_viewport_index_layer requires VK_EXT_shader_viewport_index_layer in a vertex-pipeline stage");
+                    break;
+                }
                 if (extension == "SPV_KHR_fragment_shader_barycentric") {
                     Require(fragment && fragmentShaderBarycentric, "SPV_KHR_fragment_shader_barycentric requires enabled fragmentShaderBarycentric in a fragment shader");
                     break;

@@ -141,6 +141,8 @@ union DinkumwareConstant {
 DinkumwareConstant _Inf_nid_postfix = {.Double = std::numeric_limits<double>::infinity()};
 
 double APS5_VABI tanh_nid_postfix(double x) { return std::tanh(x); }
+double APS5_VABI cosh_nid_postfix(double x) { return std::cosh(x); }
+double APS5_VABI sinh_nid_postfix(double x) { return std::sinh(x); }
 float APS5_VABI tanhf_nid_postfix(float x) { return std::tanh(x); }
 float APS5_VABI _FCosh_nid_postfix(float x, float y) { return y * std::cosh(x); }
 

@@ -105,9 +105,11 @@ struct ShaderDeviceFeatures {
     // shaderClipDistance / shaderCullDistance: the ClipDistance and CullDistance capabilities.
     bool clipDistance = false;
     bool cullDistance = false;
+    // VK_EXT_shader_viewport_index_layer: ShaderViewportIndexLayerEXT in vertex-pipeline stages.
+    bool viewportIndexLayer = false;
 
     static ShaderDeviceFeatures Of(const Context& context) {
-        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance};
+        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance, context.viewportIndexLayer};
     }
 };
 
