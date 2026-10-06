@@ -577,6 +577,8 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     // sample offset).
     if (state->imageGatherExtended) state->capabilities.push_back(spv::CapabilityImageGatherExtended);
     enabled.shaderResourceMinLod = available.shaderResourceMinLod;
+    // Advertised to the recompiler's target as upstream does (image sample clamps emit MinLod).
+    if (enabled.shaderResourceMinLod) state->capabilities.push_back(spv::CapabilityMinLod);
     enabled.occlusionQueryPrecise = available.occlusionQueryPrecise;
     state->occlusionQueryPrecise = enabled.occlusionQueryPrecise == VK_TRUE;
     state->shaderResourceMinLod = enabled.shaderResourceMinLod == VK_TRUE;
