@@ -17,14 +17,19 @@
 
 namespace AgcDriver {
 
-// Opt-in (ANYPS5_PIN_DRIVER_THREADS=1): pins the calling driver thread to one physical performance
-// core, its own: rank 0 takes the last such core, rank 1 the one before. On hybrid CPUs Linux lists
+// Pins the calling driver thread to one physical performance core, its own: rank 0 takes the last
+// such core, rank 1 the one before (ANYPS5_PIN_DRIVER_THREADS=0 leaves placement to the scheduler).
+// Zorro gameplay (3 alternating runs): 4179-4227 frames in 120 s against 3972-4020, heavy-frame
+// median 36.0-36.3 ms against 39.1-39.9; Hellboy unchanged or better (fast runs 16.3 against 17.0 ms). On hybrid CPUs Linux lists
 // the performance cores' logical CPUs in /sys/devices/cpu_core/cpus; elsewhere every CPU counts. The
 // driver's worker and device thread are the frame's critical path, and an efficiency core or a
 // hyperthread sibling shared with a spinning game thread slows them. Linux only.
 inline void PinToPerformanceCore(unsigned rank) {
 #ifndef _WIN32
-    static const bool enabled = std::getenv("ANYPS5_PIN_DRIVER_THREADS") != nullptr;
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_PIN_DRIVER_THREADS");
+        return value == nullptr || std::string(value) != "0";
+    }();
     if (!enabled) return;
     // Logical CPUs from a list such as "0-7,9".
     const auto parseList = [](const std::string& text) {
