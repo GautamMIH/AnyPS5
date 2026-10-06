@@ -1,3 +1,4 @@
+#include <cstdio>
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -149,8 +150,18 @@ static void SetupSampler(Ngs2Voice& voice, const Ngs2WaveformFormat& format) {
 }
 
 static void AddWaveformBlocks(Ngs2Voice& voice, const Ngs2SamplerVoiceWaveformBlocksParam& param) {
-    constexpr std::uint32_t knownFlags = SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE | SCE_NGS2_WAVEFORM_BLOCKS_FLAG_RESET;
+    // Bit 1 (0x2) is undocumented here; Balatro sets it with CONTINUE when it refills a streamed
+    // waveform, so it is taken as appending the blocks (what happens without RESET anyway).
+    constexpr std::uint32_t appendFlag = 0x2;
+    constexpr std::uint32_t knownFlags = SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE | SCE_NGS2_WAVEFORM_BLOCKS_FLAG_RESET | appendFlag;
     if ((param.flags & ~knownFlags) != 0) throw std::runtime_error("NGS2: waveform block flags " + Ngs2Hex(param.flags) + " are not implemented");
+    if ((param.flags & appendFlag) != 0) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::fprintf(stderr, "[NGS2] waveform block flag 0x2 taken as appending the blocks\n");
+        }
+    }
     if (voice.channels == 0 || (param.num_blocks != 0 && (param.blocks == nullptr || param.data == nullptr))) APS5_INVALID_ARG_EX;
     const bool reset = (param.flags & SCE_NGS2_WAVEFORM_BLOCKS_FLAG_RESET) != 0;
     if (!voice.acceptsBlocks && !reset) throw std::invalid_argument("NGS2: the voice waveform was already closed");
@@ -167,10 +178,23 @@ static void AddWaveformBlocks(Ngs2Voice& voice, const Ngs2SamplerVoiceWaveformBl
         if (block.num_samples == 0 && block.data_size == 0) continue;
         const std::uint64_t bytes = voice.waveformType == SCE_NGS2_WAVEFORM_TYPE_ATRAC9 ? Ngs2Atrac9BlockBytes(voice, block)
                                   : (static_cast<std::uint64_t>(block.num_skip_samples) + block.num_samples) * frameBytes;
-        if (block.num_samples == 0 || bytes > block.data_size) {
-            throw std::invalid_argument("NGS2: waveform block " + std::to_string(i) + " does not fit its data");
+        auto accepted = block;
+        if (voice.waveformType != SCE_NGS2_WAVEFORM_TYPE_ATRAC9 && block.num_samples != 0 && bytes > block.data_size) {
+            // A PCM block counting more samples than its data holds: games streaming music give a
+            // track's length with a refill buffer (Balatro: 8.3 M samples in 16 KiB). Refilled
+            // streaming is not modelled; the block plays the samples its data holds.
+            const auto held = block.data_size / frameBytes;
+            if (held <= block.num_skip_samples) continue;
+            accepted.num_samples = static_cast<std::uint32_t>(held - block.num_skip_samples);
+            static bool reported = false;
+            if (!reported) {
+                reported = true;
+                std::fprintf(stderr, "[NGS2] waveform block of %u samples in %llu bytes: playing the %u samples it holds (streamed waveforms are not modelled)\n", block.num_samples, static_cast<unsigned long long>(block.data_size), accepted.num_samples);
+            }
+        } else if (block.num_samples == 0 || bytes > block.data_size) {
+            throw std::invalid_argument("NGS2: waveform block " + std::to_string(i) + " does not fit its data (" + std::to_string(block.num_skip_samples) + " skipped and " + std::to_string(block.num_samples) + " samples of " + std::to_string(voice.channels) + " channels in " + std::to_string(block.data_size) + " bytes at " + std::to_string(block.data_offset) + ")");
         }
-        voice.blocks.push_back({static_cast<const std::uint8_t*>(param.data) + block.data_offset, block});
+        voice.blocks.push_back({static_cast<const std::uint8_t*>(param.data) + block.data_offset, accepted});
     }
 }
 

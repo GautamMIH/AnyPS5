@@ -1,3 +1,5 @@
+#include <algorithm>
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <optional>
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
@@ -260,6 +262,25 @@ std::size_t ShaderResources::addDataBuffer(std::span<const std::uint32_t> words)
     return allocations.size() - 1;
 }
 
+namespace {
+
+// A zero-filled guest allocation that texture descriptors with a null base address are pointed at.
+// On the console such a descriptor is bound but not sampled (an optional texture behind a branch),
+// as shadPS4's null image assumes; sampling it here reads zeros instead of failing the draw
+// (Balatro binds one while its textures load). 1 MiB covers a 64 KiB tile block for six cube faces.
+std::uint64_t NullTextureMemory() {
+    static const std::uint64_t address = [] {
+        void* mapped = nullptr;
+        constexpr int readWrite = GuestMemoryBacking::kProtCpuRead | GuestMemoryBacking::kProtCpuWrite | GuestMemoryBacking::kProtGpuRead;
+        const auto status = GuestMemoryBacking::GuestVirtualMap_nid_postfix(&mapped, 1u << 20u, 1u << 16u, GuestMemoryBacking::Kind::Flexible, readWrite, 0, -1);
+        Require(status == GuestMemoryBacking::Status::Ok && mapped != nullptr, "cannot map the null texture's guest memory");
+        return reinterpret_cast<std::uint64_t>(mapped);
+    }();
+    return address;
+}
+
+}
+
 void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags, std::vector<Binding>& bindings) {
     Require(binding.count != 0, "empty descriptor binding");
     const bool sampledImage = binding.kind == ShaderRecompiler::DescriptorKind::SampledImage;
@@ -302,8 +323,47 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(context.textureCache != nullptr, "device texture cache is unavailable");
         Require(binding.count <= context.limits.maxPerStageDescriptorSampledImages, "shader sampled-image descriptors exceed per-stage limits");
         for (std::uint32_t element = 0; element < binding.count; ++element) {
-            const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
+            auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
+            // A null base address (BASE_ADDRESS, the low 40 bits of the first two dwords): a 1x1, one
+            // level, one layer texture over zeroed guest memory, keyed by the patched descriptor.
+            std::array<std::uint32_t, 8> nullWords{};
+            const bool nullBase = words[0] == 0 && (words[1] & 0xffu) == 0;
+            if (nullBase) {
+                std::copy(words.begin(), words.end(), nullWords.begin());
+                const auto base = NullTextureMemory() >> 8u;
+                // An all-zero descriptor (no texture bound) has no type or format either: a linear
+                // 8_8_8_8 UNORM image of the shader's declared shape whose selects read zero.
+                const auto type = (nullWords[3] >> 28u) & 0xfu;
+                const auto format = (nullWords[1] >> 20u) & 0x1ffu;
+                if (type < 8u || format == 0u) {
+                    nullWords = {};
+                    std::uint32_t shapeType = 9u;
+                    switch (*binding.imageShape) {
+                        case ShaderRecompiler::DescriptorImageShape::Image1D: shapeType = 8u; break;
+                        case ShaderRecompiler::DescriptorImageShape::Image2D: shapeType = 9u; break;
+                        case ShaderRecompiler::DescriptorImageShape::Image3D: shapeType = 10u; break;
+                        case ShaderRecompiler::DescriptorImageShape::ImageCube: shapeType = 11u; break;
+                        case ShaderRecompiler::DescriptorImageShape::Image2DArray: shapeType = 13u; break;
+                    }
+                    nullWords[1] = 56u << 20u;
+                    nullWords[3] = shapeType << 28u;
+                }
+                nullWords[0] = static_cast<std::uint32_t>(base);
+                nullWords[1] = (nullWords[1] & ~0xffu) | static_cast<std::uint32_t>((base >> 32u) & 0xffu);
+                words = nullWords;
+                static std::atomic<bool> reported{false};
+                if (!reported.exchange(true)) std::fprintf(stderr, "[AnyPS5] sampling zeros for a texture descriptor with a null base address\n");
+            }
             auto resource = DecodeTextureResource(words);
+            if (nullBase) {
+                resource.width = 1;
+                resource.height = 1;
+                resource.mipCount = 1;
+                resource.baseLevel = 0;
+                resource.lastLevel = 0;
+                resource.baseArray = 0;
+                resource.depthOrLastArray = 0;
+            }
             const auto view = SampledViewDimension(*binding.imageShape, resource.dimension);
             Require(view.has_value(), "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (" + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ") cannot be viewed with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
             resource.viewDimension = *view;

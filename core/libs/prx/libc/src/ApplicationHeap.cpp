@@ -57,8 +57,15 @@ TValue read(const void* pointer, std::size_t offset) {
 }
 
 #if defined(__linux__)
+// The console's allocator returns 32-byte aligned blocks and games rely on it: LÖVE (Balatro) refuses
+// to hand an object to Lua unless its pointer is 32-byte aligned ("unexpected alignment ... should be
+// 32"), and quit at boot whenever a 16-byte aligned host block came back. Every default allocation is
+// at least that aligned.
+constexpr std::size_t GuestHeapAlignment = 32;
+
 void* APS5_VABI defaultAllocate(std::size_t bytes) {
-    return std::malloc(bytes == 0 ? 1 : bytes);
+    void* pointer = nullptr;
+    return posix_memalign(&pointer, GuestHeapAlignment, bytes == 0 ? 1 : bytes) == 0 ? pointer : nullptr;
 }
 
 void APS5_VABI defaultFree(void* pointer) {
@@ -66,15 +73,28 @@ void APS5_VABI defaultFree(void* pointer) {
 }
 
 void* APS5_VABI defaultReallocate(void* pointer, std::size_t bytes) {
-    return std::realloc(pointer, bytes == 0 ? 1 : bytes);
+    if (bytes == 0) bytes = 1;
+    void* moved = std::realloc(pointer, bytes);
+    if (moved == nullptr || reinterpret_cast<std::uintptr_t>(moved) % GuestHeapAlignment == 0) return moved;
+    // The host allocator moved the block to a 16-byte boundary: move it again to an aligned one.
+    void* aligned = defaultAllocate(bytes);
+    if (aligned == nullptr) return nullptr;
+    std::memcpy(aligned, moved, bytes);
+    std::free(moved);
+    return aligned;
 }
 
 void* APS5_VABI defaultCalloc(std::size_t count, std::size_t bytes) {
-    return std::calloc(count == 0 ? 1 : count, bytes == 0 ? 1 : bytes);
+    if (count == 0) count = 1;
+    if (bytes == 0) bytes = 1;
+    if (bytes > static_cast<std::size_t>(-1) / count) return nullptr;
+    void* pointer = defaultAllocate(count * bytes);
+    if (pointer != nullptr) std::memset(pointer, 0, count * bytes);
+    return pointer;
 }
 
 int APS5_VABI defaultPosixAlign(void** pointer, std::size_t alignment, std::size_t bytes) {
-    return posix_memalign(pointer, alignment < sizeof(void*) ? sizeof(void*) : alignment, bytes == 0 ? 1 : bytes);
+    return posix_memalign(pointer, alignment < GuestHeapAlignment ? GuestHeapAlignment : alignment, bytes == 0 ? 1 : bytes);
 }
 
 void* APS5_VABI defaultAlign(std::size_t alignment, std::size_t bytes) {

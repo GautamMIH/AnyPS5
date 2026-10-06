@@ -8,7 +8,7 @@ add_library(libSceNgs2.native SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Voice.cpp
 )
 target_include_directories(libSceNgs2.native PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/LibAtrac9/C/src)
-target_link_libraries(libSceNgs2.native PRIVATE atrac9)
+target_link_libraries(libSceNgs2.native PRIVATE atrac9 libc)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(libSceNgs2.native PRIVATE LINKER:--exclude-libs,ALL)
 endif()

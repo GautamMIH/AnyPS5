@@ -158,6 +158,41 @@ static std::vector<std::uint8_t> At9File(std::uint32_t sampleRate) {
     return file;
 }
 
+// A 16-bit stereo PCM WAV (format tag 1) with `frames` sample frames, and the same as 8-bit.
+static std::vector<std::uint8_t> PcmFile(std::uint32_t frames, std::uint16_t bits) {
+    std::vector<std::uint8_t> file;
+    PutTag(file, "RIFF");
+    Put32(file, 0);
+    PutTag(file, "WAVE");
+    PutTag(file, "fmt ");
+    Put32(file, 16);
+    Put16(file, 1);
+    Put16(file, 2);
+    Put32(file, 44100);
+    Put32(file, 44100u * 2u * (bits / 8u));
+    Put16(file, static_cast<std::uint16_t>(2u * (bits / 8u)));
+    Put16(file, bits);
+    PutTag(file, "data");
+    Put32(file, frames * 2u * (bits / 8u));
+    file.resize(file.size() + frames * 2u * (bits / 8u));
+    const auto riffSize = static_cast<std::uint32_t>(file.size() - 8);
+    std::memcpy(file.data() + 4, &riffSize, sizeof(riffSize));
+    return file;
+}
+
+static void TestParsePcm() {
+    const auto file = PcmFile(1000, 16);
+    Ngs2WaveformInfo info{};
+    Require(sceNgs2ParseWaveformData(file.data(), file.size(), &info) == SCE_NGS2_OK);
+    Require(info.format.waveform_type == SCE_NGS2_WAVEFORM_TYPE_PCM_I16L && info.format.num_channels == 2 && info.format.sample_rate == 44100);
+    Require(info.num_samples == 1000 && info.data_size == 4000 && info.data_offset == file.size() - 4000);
+    Require(info.audio_unit_size == 4 && info.num_audio_unit_samples == 1 && info.audio_frame_size == 4 && info.num_audio_frame_samples == 1);
+    Require(info.num_blocks == 1 && info.block[0].data_offset == info.data_offset && info.block[0].num_samples == 1000);
+    // 8-bit samples are no voice format: refused, not thrown.
+    const auto bytes = PcmFile(10, 8);
+    Require(sceNgs2ParseWaveformData(bytes.data(), bytes.size(), &info) == SCE_NGS2_ERROR_UNKNOWN_WAVEFORM_FORMAT);
+}
+
 static void TestParse() {
     const auto file = At9File(48000);
     Ngs2WaveformInfo info{};
@@ -235,6 +270,7 @@ int main() {
     TestSkipAndBlockEnd(reference);
     TestRepeatAndState(reference);
     TestParse();
+    TestParsePcm();
     TestCalcBlock();
     TestCorruptSuperframeAtPageEnd();
     return 0;

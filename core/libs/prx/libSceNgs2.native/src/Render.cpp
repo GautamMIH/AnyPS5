@@ -193,7 +193,9 @@ static std::vector<float>& OutputMix(std::vector<std::vector<float>>& mixes, con
     if (voice.outputId >= numBufferInfo) throw std::invalid_argument("NGS2: mastering output " + std::to_string(voice.outputId) + " has no render buffer");
     const auto& output = bufferInfo[voice.outputId];
     const auto sampleBytes = SampleBytes(output.waveform_type);
-    if (output.num_channels != voice.channels) throw std::runtime_error("NGS2: mixing " + std::to_string(voice.channels) + " mastering channels into " + std::to_string(output.num_channels) + " is not implemented");
+    // Fewer mastering channels than the buffer has fill its first channels (front left and right of
+    // a 7.1 buffer for stereo; Balatro masters stereo into 8 channels); folding more is not done.
+    if (output.num_channels < voice.channels || output.num_channels == 0) throw std::runtime_error("NGS2: mixing " + std::to_string(voice.channels) + " mastering channels into " + std::to_string(output.num_channels) + " is not implemented");
     if (output.buffer == nullptr || output.buffer_size < static_cast<std::size_t>(grain) * output.num_channels * sampleBytes) {
         throw std::invalid_argument("NGS2: render buffer " + std::to_string(voice.outputId) + " is missing or too small");
     }
@@ -227,8 +229,13 @@ void Ngs2RenderSystem(Ngs2System& system, const Ngs2RenderBufferInfo* bufferInfo
         RenderVoice(*voice, voices, grain, system.option.sample_rate);
         if (voice->rack->rackId != SCE_NGS2_RACK_ID_MASTERING || !voice->hasSamples) continue;
         auto& mix = OutputMix(mixes, bufferInfo, numBufferInfo, *voice, grain);
+        const auto stride = bufferInfo[voice->outputId].num_channels;
         for (std::uint32_t channel = 0; channel < voice->channels; channel++) {
-            for (std::uint32_t i = 0; i < grain; i++) mix[i * voice->channels + channel] += voice->samples[channel * grain + i];
+            for (std::uint32_t i = 0; i < grain; i++) mix[i * stride + channel] += voice->samples[channel * grain + i];
+        }
+        // A mono voice into a wider buffer plays on both front channels.
+        if (voice->channels == 1 && stride >= 2) {
+            for (std::uint32_t i = 0; i < grain; i++) mix[i * stride + 1] += voice->samples[i];
         }
     }
     for (std::uint32_t i = 0; i < numBufferInfo; i++) {

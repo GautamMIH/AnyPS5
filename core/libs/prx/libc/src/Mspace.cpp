@@ -18,6 +18,9 @@ namespace {
 
 constexpr unsigned MspaceThreadUnsafe = 1;
 constexpr std::uintptr_t Granule = 16;
+// Blocks are aligned to 32 bytes, as the console's allocator returns them, and games check it (LÖVE:
+// "unexpected alignment ... should be 32" for objects from an mspace). Arena bases need only Granule.
+constexpr std::uintptr_t BlockAlignment = 32;
 // The start of the arena memory stays reserved, as dlmalloc's create_mspace_with_base keeps its
 // header there, so the handle is an address inside that memory but never an allocation.
 constexpr std::uintptr_t ArenaHeaderBytes = 64;
@@ -70,7 +73,7 @@ void RemoveFree(Arena& arena, ChunkIterator chunk) {
 
 void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
     if (!arena) return nullptr;
-    alignment = std::max<std::size_t>(alignment, Granule);
+    alignment = std::max<std::size_t>(alignment, BlockAlignment);
     const auto needed = AlignUp(std::max<std::size_t>(size, 1), Granule);
     if (needed < size || needed > std::numeric_limits<std::uintptr_t>::max() - alignment) {
         Error(12);

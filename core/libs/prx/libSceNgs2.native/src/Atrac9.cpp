@@ -1,3 +1,5 @@
+#include <vector>
+#include <fstream>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -181,9 +183,77 @@ static int ParseAtrac9(const RiffChunks& chunks, Ngs2WaveformInfo& info) {
     return SCE_NGS2_OK;
 }
 
+// PCM WAV (format tag 1, or 3 for IEEE float; or WAVE_FORMAT_EXTENSIBLE with those subformats): the
+// voices play 16-bit integer and 32-bit float samples. Each sample frame is one audio unit and
+// frame; a "smpl" chunk's first loop sets the loop positions. Balatro's sounds are such files.
+static constexpr std::uint8_t PCM_SUBFORMAT_TAIL[14] = {0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71};
+
+static int ParsePcm(const RiffChunks& chunks, std::uint16_t tag, Ngs2WaveformInfo& info) {
+    const auto* format = chunks.format;
+    if (chunks.formatSize < 16) return SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT;
+    if (tag == WAVE_FORMAT_EXTENSIBLE) {
+        if (chunks.formatSize < FMT_GUID_OFFSET + 16 || std::memcmp(format + FMT_GUID_OFFSET + 2, PCM_SUBFORMAT_TAIL, sizeof(PCM_SUBFORMAT_TAIL)) != 0) return SCE_NGS2_ERROR_UNKNOWN_WAVEFORM_FORMAT;
+        tag = ReadLe16(format + FMT_GUID_OFFSET);
+    }
+    const auto channels = ReadLe16(format + 2);
+    const auto sampleRate = ReadLe32(format + 4);
+    const auto blockAlign = ReadLe16(format + 12);
+    const auto bits = ReadLe16(format + 14);
+    std::uint32_t type = 0;
+    if (tag == 1 && bits == 16) type = SCE_NGS2_WAVEFORM_TYPE_PCM_I16L;
+    else if (tag == 3 && bits == 32) type = SCE_NGS2_WAVEFORM_TYPE_PCM_F32L;
+    else return SCE_NGS2_ERROR_UNKNOWN_WAVEFORM_FORMAT;
+    if (channels == 0 || sampleRate == 0 || blockAlign != channels * (bits / 8u)) return SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT;
+    info.format = {type, channels, sampleRate, 0, 0, 0};
+    info.data_offset = static_cast<std::uint32_t>(chunks.dataOffset);
+    info.data_size = static_cast<std::uint32_t>(chunks.dataSize);
+    info.num_samples = static_cast<std::uint32_t>(chunks.dataSize / blockAlign);
+    info.audio_unit_size = blockAlign;
+    info.num_audio_unit_samples = 1;
+    info.num_audio_unit_per_frame = 1;
+    info.audio_frame_size = blockAlign;
+    info.num_audio_frame_samples = 1;
+    info.num_delay_samples = 0;
+    // smpl: 36 header bytes, then 24-byte loops (cue id, type, start, end, fraction, play count).
+    if (chunks.sampler != nullptr && chunks.samplerSize >= 36 + 24 && ReadLe32(chunks.sampler + 28) != 0) {
+        info.loop_begin_position = ReadLe32(chunks.sampler + 36 + 8);
+        info.loop_end_position = ReadLe32(chunks.sampler + 36 + 12);
+    }
+    info.num_blocks = 1;
+    info.block[0].data_offset = chunks.dataOffset;
+    info.block[0].data_size = chunks.dataSize;
+    info.block[0].num_skip_samples = 0;
+    info.block[0].num_samples = info.num_samples;
+    return SCE_NGS2_OK;
+}
+
 #pragma GCC visibility push(default)
 
 extern "C" {
+
+int APS5_VABI sceNgs2ParseWaveformData(const void* data, size_t data_size, Ngs2WaveformInfo* info);
+
+// The waveform in a file from offset on (the guest path is resolved as the kernel does). Data
+// offsets are reported as file positions: the game reads the samples from the file with them.
+int APS5_VABI sceNgs2ParseWaveformFile(const char* path, std::uint64_t offset, Ngs2WaveformInfo* info) {
+    if (info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
+    *info = {};
+    if (path == nullptr) return SCE_NGS2_ERROR_INVALID_WAVEFORM_DATA;
+    std::ifstream file(ResolvePath_nid_no_patch(path), std::ios::binary);
+    if (!file) return SCE_NGS2_ERROR_INVALID_WAVEFORM_DATA;
+    file.seekg(0, std::ios::end);
+    const auto size = static_cast<std::uint64_t>(file.tellg());
+    if (offset >= size) return SCE_NGS2_ERROR_INVALID_WAVEFORM_DATA;
+    std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size - offset));
+    file.seekg(static_cast<std::streamoff>(offset));
+    file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    if (!file) return SCE_NGS2_ERROR_INVALID_WAVEFORM_DATA;
+    const int result = sceNgs2ParseWaveformData(bytes.data(), bytes.size(), info);
+    if (result != SCE_NGS2_OK) return result;
+    info->data_offset += static_cast<std::uint32_t>(offset);
+    for (std::uint32_t block = 0; block < info->num_blocks && block < 4; ++block) info->block[block].data_offset += offset;
+    return SCE_NGS2_OK;
+}
 
 int APS5_VABI sceNgs2ParseWaveformData(const void* data, size_t data_size, Ngs2WaveformInfo* info) {
     if (info == nullptr) return SCE_NGS2_ERROR_INVALID_OUT_ADDRESS;
@@ -197,6 +267,7 @@ int APS5_VABI sceNgs2ParseWaveformData(const void* data, size_t data_size, Ngs2W
         std::memcmp(chunks.format + FMT_GUID_OFFSET, ATRAC9_GUID, sizeof(ATRAC9_GUID)) == 0) {
         return ParseAtrac9(chunks, *info);
     }
+    if (tag == 1 || tag == 3 || tag == WAVE_FORMAT_EXTENSIBLE) return ParsePcm(chunks, tag, *info);
     throw std::runtime_error("NGS2: parsing waveform format tag " + Ngs2Hex(tag) + " is not implemented");
 }
 
