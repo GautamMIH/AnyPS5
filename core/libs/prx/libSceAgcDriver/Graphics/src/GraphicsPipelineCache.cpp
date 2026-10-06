@@ -9,6 +9,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <set>
+#include <string>
+#include <unordered_map>
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -24,6 +26,21 @@ void appendStencil(std::string& key, const VkStencilOpState& stencil) {
     append(key, stencil.passOp);
     append(key, stencil.depthFailOp);
     append(key, stencil.compareOp);
+}
+
+// The vertex input layout of a vertex program's attributes: a function of the attributes and the
+// device's format support, so it is remembered by their bytes (rebuilding it cost about 0.35 ms of
+// a heavy frame). Equal bytes are equal attributes.
+const VertexInputLayout& vertexInputLayout(const Context& context, std::span<const ShaderRecompiler::VertexAttribute> attributes) {
+    static_assert(std::is_trivially_copyable_v<ShaderRecompiler::VertexAttribute>);
+    thread_local std::unordered_map<std::string, VertexInputLayout> layouts;
+    std::string key;
+    key.reserve(sizeof(VkPhysicalDevice) + attributes.size_bytes());
+    append(key, context.physical);
+    if (!attributes.empty()) key.append(reinterpret_cast<const char*>(attributes.data()), attributes.size_bytes());
+    if (const auto found = layouts.find(key); found != layouts.end()) return found->second;
+    if (layouts.size() >= 4096) layouts.clear();
+    return layouts.emplace(std::move(key), BuildVertexInputLayout(context, attributes)).first->second;
 }
 
 std::string makeKey(const Context& context, const State& state, const ShaderResources& resources, std::span<const CompiledShader> shaders) {
@@ -85,7 +102,7 @@ std::string makeKey(const Context& context, const State& state, const ShaderReso
         append(key, tessellation.outputTopology);
     }
     timing.Mark("state");
-    const auto input = BuildVertexInputLayout(context, shaders.front().program->vertexAttributes);
+    const auto& input = vertexInputLayout(context, shaders.front().program->vertexAttributes);
     timing.Mark("vertex_layout");
     append(key, input.bindings.size());
     for (const auto& binding : input.bindings) {

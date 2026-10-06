@@ -144,11 +144,16 @@ bool TextureCache::unchanged(Entry& entry) {
     const auto bytes = entry.bytes;
     // Writes through another mapping of the same memory would not mark these pages.
     const auto memoryGeneration = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
-    const std::array<std::uint64_t, 4> at{WriteTracker::Epoch(), WriteTracker::GpuWriteGeneration(), WriteTracker::AliasWriteGeneration(), memoryGeneration};
+    // GPU writes are checked per range below (GpuWrittenSince): the global GPU-write generation moved
+    // with every batch, so a memo keyed on it rarely held. ANYPS5_TEXTURE_MEMO_GPU_GENERATION=1 keys on it.
+    static const bool keyGpuGeneration = std::getenv("ANYPS5_TEXTURE_MEMO_GPU_GENERATION") != nullptr;
+    const std::array<std::uint64_t, 4> at{WriteTracker::Epoch(), keyGpuGeneration ? WriteTracker::GpuWriteGeneration() : 0u, WriteTracker::AliasWriteGeneration(), memoryGeneration};
     // Read before any check: a driver write after it is seen by the next validation.
     const auto driverSequence = WriteTracker::DriverWriteSequence();
     timing.Mark("generations");
-    if (entry.unchangedAt == at && !WriteTracker::DriverWrittenSince(entry.address, bytes, entry.unchangedDriverSequence)) {
+    static const bool sticky = std::getenv("ANYPS5_STICKY_GPU_WRITES") != nullptr;
+    const auto gpuWritten = [&] { return sticky ? WriteTracker::GpuWritten(entry.address, bytes) : WriteTracker::GpuWrittenSince(entry.address, bytes, entry.gpuSequence); };
+    if (entry.unchangedAt == at && !WriteTracker::DriverWrittenSince(entry.address, bytes, entry.unchangedDriverSequence) && (keyGpuGeneration || !gpuWritten())) {
         entry.unchangedDriverSequence = driverSequence;
         timing.Mark("memo_hit");
         return true;
@@ -166,8 +171,7 @@ bool TextureCache::unchanged(Entry& entry) {
     // Written by the GPU since it was validated (shadPS4 keeps a dirty flag per image for this; an
     // "ever written" mark made every texture in such memory compare on each use).
     // ANYPS5_STICKY_GPU_WRITES=1: any GPU write ever made to the range counts (the former rule).
-    static const bool sticky = std::getenv("ANYPS5_STICKY_GPU_WRITES") != nullptr;
-    if (sticky ? WriteTracker::GpuWritten(entry.address, bytes) : WriteTracker::GpuWrittenSince(entry.address, bytes, entry.gpuSequence)) {
+    if (gpuWritten()) {
         noteUnchangedFailure(2, bytes);
         return false;
     }

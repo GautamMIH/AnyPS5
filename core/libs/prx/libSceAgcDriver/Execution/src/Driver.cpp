@@ -14,6 +14,7 @@
 #include "prx/libc/include/Shutdown.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DeviceThread.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ThreadPlacement.hpp"
 #include "Optimization/include/Optimization/ShaderStageInputInfo.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -1333,9 +1334,13 @@ private:
                     // Opt-in (ANYPS5_QUEUE_WAIT_REG_MEM=1): a wait on a label a pending release
                     // writes is a GPU barrier (see below), queued in order like one, with no drain.
                     // Zorro gained ~0.5 ms a frame but Hellboy lost ~1 ms, so waits drain by default.
-                    static const bool drainWaits = std::getenv("ANYPS5_QUEUE_WAIT_REG_MEM") == nullptr;
+                    // ANYPS5_QUEUE_RELEASE_WAITS=1 and ANYPS5_READ_LABEL_WAITS=1 enable each half on its own
+                    // (to find which one cost Hellboy); ANYPS5_QUEUE_WAIT_REG_MEM=1 enables both.
+                    static const bool queueBoth = std::getenv("ANYPS5_QUEUE_WAIT_REG_MEM") != nullptr;
+                    static const bool queueReleases = queueBoth || std::getenv("ANYPS5_QUEUE_RELEASE_WAITS") != nullptr;
+                    static const bool readLabels = queueBoth || std::getenv("ANYPS5_READ_LABEL_WAITS") != nullptr;
                     static const bool cpuWaits = std::getenv("ANYPS5_CPU_WAIT_REG_MEM") != nullptr;
-                    if (pipeline && device != nullptr && !drainWaits && !cpuWaits && pendingReleaseSatisfies(packet)) {
+                    if (pipeline && device != nullptr && queueReleases && !cpuWaits && pendingReleaseSatisfies(packet)) {
                         pipeline->Post([device = device] { device->AcquireGpuMemory(); }, {}, false);
                         timing.Mark("gpu_wait_queued");
                         cursor += count;
@@ -1343,7 +1348,7 @@ private:
                     }
                     // A label already in memory is read like any worker read (waiting only for a
                     // queued job that writes it); a wait it does not satisfy yet drains below.
-                    if (pipeline && device != nullptr && !drainWaits && !cpuWaits) {
+                    if (pipeline && device != nullptr && readLabels && !cpuWaits) {
                         bool satisfied = false;
                         {
                             const GuestMemory::MemoryAccessScope memoryScope(accessContext(), accessResolver(), true);
@@ -1604,6 +1609,7 @@ private:
 
     void run() noexcept {
         NameThread("AgcWorker");
+        PinToPerformanceCore(0);
         // Memory waits normally resolve within microseconds; one that stays blocked this long with no
         // other work able to run is a synchronization the emulation cannot satisfy.
         constexpr auto stallLimit = std::chrono::seconds(10);

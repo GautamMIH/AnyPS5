@@ -153,7 +153,9 @@ void Framebuffer::Begin(VkCommandBuffer commands, VkExtent2D extent) const {
 void ValidateDynamicState(const Context& context, const State& state) {
     const auto& viewport = state.viewport;
     Require(std::isfinite(viewport.minDepth) && std::isfinite(viewport.maxDepth), "non-finite viewport depth range");
-    Require(context.depthRangeUnrestricted || (viewport.minDepth >= 0 && viewport.minDepth <= 1 && viewport.maxDepth >= 0 && viewport.maxDepth <= 1), "viewport depth [" + std::to_string(viewport.minDepth) + ", " + std::to_string(viewport.maxDepth) + "] outside [0, 1] requires VK_EXT_depth_range_unrestricted");
+    // The message is built only on failure (this runs for every draw).
+    if (!(context.depthRangeUnrestricted || (viewport.minDepth >= 0 && viewport.minDepth <= 1 && viewport.maxDepth >= 0 && viewport.maxDepth <= 1)))
+        Require(false, "viewport depth [" + std::to_string(viewport.minDepth) + ", " + std::to_string(viewport.maxDepth) + "] outside [0, 1] requires VK_EXT_depth_range_unrestricted");
     Require(std::isfinite(viewport.x) && std::isfinite(viewport.y) && std::isfinite(viewport.width) && std::isfinite(viewport.height), "viewport arithmetic overflow");
     Require(viewport.width <= context.limits.maxViewportDimensions[0] && std::abs(viewport.height) <= context.limits.maxViewportDimensions[1], "viewport dimensions exceed device limits");
     Require(viewport.x >= context.limits.viewportBoundsRange[0] && viewport.x + viewport.width <= context.limits.viewportBoundsRange[1], "viewport X exceeds device bounds");

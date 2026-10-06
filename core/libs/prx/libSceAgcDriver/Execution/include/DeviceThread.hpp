@@ -1,6 +1,7 @@
 #ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DEVICETHREAD_HPP
 #define CORE_LIBS_PRX_LIBSCEAGCDRIVER_EXECUTION_INCLUDE_DEVICETHREAD_HPP
 
+#include "prx/libSceAgcDriver/Execution/include/ThreadPlacement.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
 #include <algorithm>
 #include <array>
@@ -173,6 +174,7 @@ private:
     void run() {
 #ifndef _WIN32
         pthread_setname_np(pthread_self(), "AgcDevice");
+        PinToPerformanceCore(1);
 #endif
         for (;;) {
             {
