@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 
@@ -105,7 +107,6 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     Require(bcSwizzle == 0, "guest texture descriptor uses a BC swizzle which is not implemented");
 
     Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
-    Require(lastLevel <= maxMip, "guest texture descriptor exposes mip levels past the surface");
 
     const auto tileMode = resolveTileMode(tileModeRaw);
     const auto dimension = resolveDimension(typeRaw);
@@ -134,15 +135,30 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
             break;
     }
 
+    // Views may name levels past MAX_MIP. One that starts inside the surface ends at its last level
+    // (a 512x512 view through 1x1 over a 9-level surface). One that starts past it addresses those
+    // levels as the hardware does, through the chain extended to its last level, which must keep
+    // the allocated levels and the surface size (levels in the mip tail: PPSA21564's bloom pass
+    // stores level 6 of a 6-level 1920x1080 RGBA16F SW_64KB_R_X chain).
+    auto viewLastLevel = lastLevel;
+    auto mipCount = maxMip + 1u;
+    if (baseLevel <= maxMip) {
+        viewLastLevel = std::min(lastLevel, maxMip);
+    } else {
+        Require(dimension != TextureDimension::k3D, "guest 3D texture descriptor starts past the surface's last mip level");
+        Require(MipLevelsFitAllocation(tileMode, format, width, height, mipCount, lastLevel + 1u), "guest texture descriptor starts past the surface's last mip level at levels that would move the surface's own");
+        mipCount = lastLevel + 1u;
+    }
+
     GuestTextureResource result{};
     result.baseAddress = baseAddress;
     result.width = width;
     result.height = height;
     result.depthOrLastArray = depth;
     result.baseArray = baseArray;
-    result.mipCount = maxMip + 1u;
+    result.mipCount = mipCount;
     result.baseLevel = baseLevel;
-    result.lastLevel = lastLevel;
+    result.lastLevel = viewLastLevel;
     result.tileMode = tileMode;
     result.dimension = dimension;
     result.viewDimension = dimension;

@@ -261,4 +261,23 @@ std::uint64_t ComputeSurfaceSize(const std::vector<TileMipLayout>& mips, std::ui
     return sliceSize * arrayLayers;
 }
 
+bool MipLevelsFitAllocation(TextureTileMode tileMode, std::uint32_t format, std::uint32_t width, std::uint32_t height, std::uint32_t allocatedLevels, std::uint32_t levels) {
+    Require(allocatedLevels != 0 && levels >= allocatedLevels && levels <= 16u, "an extended mip chain must cover the allocated levels and at most 16");
+    // Depth surfaces have a single level and no mip tail: another level always grows them.
+    if (tileMode == TextureTileMode::Depth64KB) return levels == allocatedLevels;
+    const auto allocated = ComputeMipLayout(tileMode, format, width, height, allocatedLevels);
+    const auto extended = ComputeMipLayout(tileMode, format, width, height, levels);
+    const auto bytes = ComputeSurfaceSize(allocated, 1);
+    if (ComputeSurfaceSize(extended, 1) != bytes) return false;
+    for (std::uint32_t level = 0; level < allocatedLevels; ++level) {
+        const auto& before = allocated[level];
+        const auto& after = extended[level];
+        if (before.tiledOffset != after.tiledOffset || before.tiledSize != after.tiledSize || before.blocksPerRow != after.blocksPerRow || before.tail != after.tail || before.tailX != after.tailX || before.tailY != after.tailY) return false;
+    }
+    for (auto level = allocatedLevels; level < levels; ++level) {
+        if (extended[level].tiledOffset + extended[level].tiledSize > bytes) return false;
+    }
+    return true;
+}
+
 }
