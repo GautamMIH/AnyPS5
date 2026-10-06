@@ -483,6 +483,19 @@ State DecodeState(const QueueState& queue) {
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         if (((writeMask >> (4u * slot)) & 0xfu) != 0) result.colorTargetMask |= 1u << slot;
     }
+    // Pixel shader colour exports are compacted (upstream 1c4aadb3): export i goes to the i-th slot
+    // whose CB_SHADER_MASK nibble is non-zero and takes the i-th SPI_SHADER_COL_FORMAT field. Targets
+    // are decoded per slot (their registers) and moved to their export index at the end, so
+    // attachments, blends, export mappings and pipeline keys follow the shader's output locations.
+    std::array<std::uint32_t, MaxColorTargets> exportOf{};
+    {
+        const bool compacted = result.hasFragmentShader && !metadataPass;
+        std::uint32_t next = 0;
+        for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+            if (!compacted) exportOf[slot] = slot;
+            else exportOf[slot] = ((shaderMask >> (4u * slot)) & 0xfu) != 0 ? next++ : MaxColorTargets;
+        }
+    }
     result.eliminateFastClear = metadataPass && result.HasColorTarget();
     if (!(colorControl == 0xcc0010u || result.eliminateFastClear || (colorControl == 0xcc0000u && !result.HasColorTarget()))) {
         std::ostringstream message;
@@ -502,7 +515,7 @@ State DecodeState(const QueueState& queue) {
     // and exports nothing. A target whose export format is ZERO receives no export, so the colour
     // block leaves it unwritten whatever the masks enable.
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
-        const auto format = (exportFormat >> (4u * slot)) & 0xfu;
+        const auto format = exportOf[slot] < MaxColorTargets ? (exportFormat >> (4u * exportOf[slot])) & 0xfu : 0u;
         if ((result.colorTargetMask & (1u << slot)) == 0 || (format >= 1 && format <= 6) || format == 9 || result.eliminateFastClear) continue;
         if (format == 0) {
             result.colorTargetMask &= ~(1u << slot);
@@ -681,6 +694,36 @@ State DecodeState(const QueueState& queue) {
                 state.colorBlendOp = state.alphaBlendOp;
             }
             for (std::uint32_t i = 0; i < 4; ++i) result.blendConstants[i] = readFloat(cx, 0x105 + i);
+        }
+    }
+    {
+        bool moved = false;
+        for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) moved = moved || ((result.colorTargetMask >> slot) & 1u) != 0 && exportOf[slot] != slot;
+        if (moved) {
+            // Debug aid: APS5_TRACE_MRT=1 prints each distinct compacted export layout once.
+            static const bool traceMrt = std::getenv("APS5_TRACE_MRT") != nullptr;
+            if (traceMrt) {
+                static std::mutex traceMutex;
+                static std::set<std::pair<std::uint32_t, std::uint32_t>> seen;
+                std::lock_guard lock(traceMutex);
+                if (seen.emplace(shaderMask, exportFormat).second) std::fprintf(stderr, "[mrt] compacted exports: CB_SHADER_MASK=0x%x SPI_SHADER_COL_FORMAT=0x%x targets=0x%x\n", shaderMask, exportFormat, result.colorTargetMask);
+            }
+            auto colors = result.colors;
+            auto blends = result.blends;
+            const auto slots = result.colorTargetMask;
+            result.colorTargetMask = 0;
+            for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+                if (((slots >> slot) & 1u) == 0) continue;
+                const auto index = exportOf[slot];
+                result.colors[index] = colors[slot];
+                result.blends[index] = blends[slot];
+                result.colorTargetMask |= 1u << index;
+            }
+            for (std::uint32_t index = 0; index < MaxColorTargets; ++index) {
+                if (((result.colorTargetMask >> index) & 1u) != 0) continue;
+                result.colors[index] = {};
+                result.blends[index] = {};
+            }
         }
     }
     // Debug aid: ANYPS5_TRACE_DEPTH=1 prints each distinct depth configuration of a draw once.
