@@ -6,7 +6,7 @@ layout(set = 0, binding = 1, std430) buffer LinearPixels { uint linear[]; };
 layout(push_constant) uniform Parameters {
     uint width;
     uint height;
-    // 64 KiB blocks per row of a render target; elements per row of a linear surface.
+    // Tile blocks per row of a tiled surface; elements per row of a linear surface.
     uint blocksPerRow;
     uint mode;
     uint elementBytes;
@@ -32,6 +32,17 @@ uint renderTargetOffset(uint x, uint y, uint elementBytes) {
         default:
             return ((x << 4u) & 0x0410u) ^ ((x << 5u) & 0x0340u) ^ ((x << 6u) & 0x0800u) ^ ((x << 11u) & 0xa000u)
                 ^ ((y << 5u) & 0x0f20u) ^ ((y << 6u) & 0x0080u) ^ ((y << 10u) & 0x1000u) ^ ((y << 11u) & 0x4000u);
+    }
+}
+
+// SW_4KB_S in-block offsets per element size (ColorTargetLayout.cpp).
+uint standardOffset(uint x, uint y, uint elementBytes) {
+    switch (elementBytes) {
+        case 1u: return ((y << 4u) & 0x1f0u) ^ ((y << 5u) & 0x400u) ^ (x & 0x00fu) ^ ((x << 5u) & 0x200u) ^ ((x << 6u) & 0x800u);
+        case 2u: return ((y << 4u) & 0x070u) ^ ((y << 5u) & 0x100u) ^ ((y << 6u) & 0x400u) ^ ((x << 1u) & 0x00eu) ^ ((x << 4u) & 0x080u) ^ ((x << 5u) & 0x200u) ^ ((x << 6u) & 0x800u);
+        case 4u: return ((y << 4u) & 0x070u) ^ ((y << 5u) & 0x100u) ^ ((y << 6u) & 0x400u) ^ ((x << 2u) & 0x00cu) ^ ((x << 5u) & 0x080u) ^ ((x << 6u) & 0x200u) ^ ((x << 7u) & 0x800u);
+        case 8u: return ((y << 4u) & 0x030u) ^ ((y << 6u) & 0x100u) ^ ((y << 7u) & 0x400u) ^ ((x << 3u) & 0x008u) ^ ((x << 5u) & 0x0c0u) ^ ((x << 6u) & 0x200u) ^ ((x << 7u) & 0x800u);
+        default: return ((y << 4u) & 0x030u) ^ ((y << 6u) & 0x100u) ^ ((y << 7u) & 0x400u) ^ ((x << 6u) & 0x0c0u) ^ ((x << 7u) & 0x200u) ^ ((x << 8u) & 0x800u);
     }
 }
 
@@ -64,9 +75,15 @@ void main() {
     uint linearByte = (y * parameters.width + x) * elementBytes;
     // A linear surface's rows are padded to 256 bytes (ColorTargetLayout).
     uint tiledByte = (y * parameters.blocksPerRow + x) * elementBytes;
+    bool standard = (parameters.mode & 16u) != 0u;
     if ((parameters.mode & 8u) != 0u) {
-        // A mip-tail level: one 64 KiB block, addressed from the level's origin inside it.
-        tiledByte = renderTargetOffset(x + parameters.tailX, y + parameters.tailY, elementBytes) & 0xffffu;
+        // A mip-tail level: one tile block, addressed from the level's origin inside it.
+        tiledByte = standard ? standardOffset(x + parameters.tailX, y + parameters.tailY, elementBytes) & 0xfffu : renderTargetOffset(x + parameters.tailX, y + parameters.tailY, elementBytes) & 0xffffu;
+    } else if (standard) {
+        // 4 KiB blocks: 64x64, 64x32, 32x32, 32x16 or 16x16 elements.
+        uint blockWidth = elementBytes <= 2u ? 64u : (elementBytes <= 8u ? 32u : 16u);
+        uint blockHeight = 4096u / (blockWidth * elementBytes);
+        tiledByte = ((y / blockHeight) * parameters.blocksPerRow + x / blockWidth) * 4096u + (standardOffset(x, y, elementBytes) & 0xfffu);
     } else if ((parameters.mode & 4u) != 0u) {
         uint blockWidth = elementBytes <= 2u ? 256u : (elementBytes <= 8u ? 128u : 64u);
         uint blockHeight = 65536u / (blockWidth * elementBytes);

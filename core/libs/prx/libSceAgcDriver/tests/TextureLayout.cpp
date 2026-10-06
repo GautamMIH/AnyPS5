@@ -117,11 +117,46 @@ void viewsPastLastMip() {
     Require(!MipLevelsFitAllocation(TextureTileMode::Depth64KB, 56, 64, 64, 1, 2), "a depth surface has no levels past its last");
 }
 
+// SW_4KB_S colour targets (upstream d7d7c142) address every level of a chain, mip-tail levels
+// included, where the texture path (TexelOffset, checked against addrlib) puts them; SW_64KB_R_X
+// targets likewise.
+void standardColorTargets() {
+    Require(DecodeColorTileMode(0x4dc14000u) == ColorTileMode::Standard4KB, "a SW_4KB_S colour descriptor was rejected");
+    reject([] { DecodeColorTileMode(0x4dc24000u); }, "unsupported color tile mode");
+    for (const auto mode : {ColorTileMode::Standard4KB, ColorTileMode::RenderTarget}) {
+        const auto tileMode = ColorTextureTileMode(mode);
+        for (const std::uint32_t elementBytes : {1u, 2u, 4u, 8u, 16u}) {
+            const auto what = std::string(mode == ColorTileMode::Standard4KB ? "SW_4KB_S" : "SW_64KB_R_X") + " " + std::to_string(elementBytes) + " B";
+            const auto single = ComputeElementMipLayout(tileMode, elementBytes, 100, 70, 1);
+            const ColorTargetLayout whole(100, 70, mode, elementBytes);
+            Require(whole.Bytes() == ComputeSurfaceSize(single, 1), what + ": a 100x70 target's size differs from the texture layout");
+            for (std::uint32_t y = 0; y < 70; ++y) {
+                for (std::uint32_t x = 0; x < 100; ++x) Require(whole.Offset(x, y) == TexelOffset(tileMode, elementBytes, single[0], x, y), what + ": a 100x70 target's element differs from the texture layout");
+            }
+            const auto mips = ComputeElementMipLayout(tileMode, elementBytes, 256, 256, 9);
+            for (std::uint32_t level = 0; level < mips.size(); ++level) {
+                const auto& mip = mips[level];
+                const ColorTail tail = mip.tail ? ColorTail{true, mip.tailX, mip.tailY} : ColorTail{};
+                const ColorTargetLayout layout(mip.width, mip.height, mode, elementBytes, tail);
+                Require(layout.Bytes() == mip.tiledSize, what + ": mip " + std::to_string(level) + " size differs from the texture layout");
+                for (std::uint32_t y = 0; y < mip.height; ++y) {
+                    for (std::uint32_t x = 0; x < mip.width; ++x) Require(mip.tiledOffset + layout.Offset(x, y) == TexelOffset(tileMode, elementBytes, mip, x, y), what + ": mip " + std::to_string(level) + " element (" + std::to_string(x) + ", " + std::to_string(y) + ") differs from the texture layout");
+                }
+            }
+        }
+    }
+    const ColorTargetLayout standard(256, 256, ColorTileMode::Standard4KB);
+    Require(standard.Alignment() == 4096u && standard.Offset(32, 0) == 4096u && standard.Offset(0, 32) == 8u * 4096u && standard.Offset(1, 0) == 4u && standard.Offset(0, 1) == 16u, "SW_4KB_S colour block or element addressing is wrong");
+    // Thin 4 KiB blocks are 64x64, 64x32, 32x32, 32x16 and 16x16 elements (wide before tall).
+    Require(ColorTargetLayout(64, 32, ColorTileMode::Standard4KB, 2).Bytes() == 4096u && ColorTargetLayout(32, 16, ColorTileMode::Standard4KB, 8).Bytes() == 4096u, "SW_4KB_S blocks of 2- and 8-byte elements have the wrong shape");
+}
+
 }
 
 int main() {
     try {
         viewsPastLastMip();
+        standardColorTargets();
         std::puts("AGC driver texture layout tests passed");
         return 0;
     } catch (const std::exception& error) {

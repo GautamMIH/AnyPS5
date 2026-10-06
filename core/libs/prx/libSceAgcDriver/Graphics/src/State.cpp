@@ -564,6 +564,9 @@ State DecodeState(const QueueState& queue) {
         Require(viewMip <= maxMip, "color view mip exceeds the surface");
         const auto attrib3 = read(cx, 0x3b8 + slot);
         color.tileMode = DecodeColorTileMode(attrib3);
+        // A volume in a standard swizzle uses thick blocks that interleave its slices (addrlib
+        // IsThick; textures: IsThickVolume), which the slice-per-layer targets below do not model.
+        Require(((attrib3 >> 24u) & 3u) != 2u || color.tileMode != ColorTileMode::Standard4KB, "3D SW_4KB_S color targets (thick blocks) are not modelled");
         color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
         color.surfaceExtent = color.extent;
         color.mipLevel = viewMip;
@@ -572,8 +575,8 @@ State DecodeState(const QueueState& queue) {
         std::uint64_t mipOffset = 0;
         if (maxMip != 0) {
             // A mipmapped surface is laid out like a texture; the view renders into one of its mips.
-            Require(color.tileMode == ColorTileMode::RenderTarget, "mipmapped linear render targets are unsupported");
-            const auto mips = ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, color.elementBytes, color.extent.width, color.extent.height, maxMip + 1u);
+            Require(color.tileMode != ColorTileMode::Linear, "mipmapped linear render targets are unsupported");
+            const auto mips = ComputeElementMipLayout(ColorTextureTileMode(color.tileMode), color.elementBytes, color.extent.width, color.extent.height, maxMip + 1u);
             const auto& mip = mips.at(viewMip);
             mipOffset = mip.tiledOffset;
             color.extent = {mip.width, mip.height};
@@ -600,12 +603,12 @@ State DecodeState(const QueueState& queue) {
         if (color.Layered()) {
             // Slices are laid out like texture array layers (each holds the whole mip chain), so they
             // share texture addressing; the view renders one mip of slices [start, max].
-            if (color.tileMode != ColorTileMode::RenderTarget) {
+            if (color.tileMode == ColorTileMode::Linear) {
                 std::ostringstream message;
                 message << "AGC graphics: linear array color targets are not modelled (CB_COLOR" << slot << " slices " << sliceStart << ".." << sliceMax << " of " << color.surfaceSlices << ", " << color.extent.width << "x" << color.extent.height << ")";
                 throw std::runtime_error(message.str());
             }
-            color.sliceBytes = ComputeSurfaceSize(ComputeElementMipLayout(TextureTileMode::RenderTarget64KB, color.elementBytes, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount), 1);
+            color.sliceBytes = ComputeSurfaceSize(ComputeElementMipLayout(ColorTextureTileMode(color.tileMode), color.elementBytes, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount), 1);
             color.baseLayer = sliceStart;
             color.layers = sliceMax - sliceStart + 1u;
             color.address += color.sliceBytes * sliceStart;

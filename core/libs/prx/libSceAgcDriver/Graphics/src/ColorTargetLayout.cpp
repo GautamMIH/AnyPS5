@@ -31,6 +31,17 @@ std::uint32_t blockOffset(std::uint32_t x, std::uint32_t y, std::uint32_t elemen
     }
 }
 
+// SW_4KB_S in-block offsets per element size (TextureAddressing.cpp, as for textures).
+std::uint32_t standardOffset(std::uint32_t x, std::uint32_t y, std::uint32_t elementBytes) {
+    switch (elementBytes) {
+        case 1: return ((y << 4u) & 0x1f0u) ^ ((y << 5u) & 0x400u) ^ (x & 0x00fu) ^ ((x << 5u) & 0x200u) ^ ((x << 6u) & 0x800u);
+        case 2: return ((y << 4u) & 0x070u) ^ ((y << 5u) & 0x100u) ^ ((y << 6u) & 0x400u) ^ ((x << 1u) & 0x00eu) ^ ((x << 4u) & 0x080u) ^ ((x << 5u) & 0x200u) ^ ((x << 6u) & 0x800u);
+        case 4: return ((y << 4u) & 0x070u) ^ ((y << 5u) & 0x100u) ^ ((y << 6u) & 0x400u) ^ ((x << 2u) & 0x00cu) ^ ((x << 5u) & 0x080u) ^ ((x << 6u) & 0x200u) ^ ((x << 7u) & 0x800u);
+        case 8: return ((y << 4u) & 0x030u) ^ ((y << 6u) & 0x100u) ^ ((y << 7u) & 0x400u) ^ ((x << 3u) & 0x008u) ^ ((x << 5u) & 0x0c0u) ^ ((x << 6u) & 0x200u) ^ ((x << 7u) & 0x800u);
+        default: return ((y << 4u) & 0x030u) ^ ((y << 6u) & 0x100u) ^ ((y << 7u) & 0x400u) ^ ((x << 6u) & 0x0c0u) ^ ((x << 7u) & 0x200u) ^ ((x << 8u) & 0x800u);
+    }
+}
+
 }
 
 ColorTileMode DecodeColorTileMode(std::uint32_t attrib3) {
@@ -41,7 +52,7 @@ ColorTileMode DecodeColorTileMode(std::uint32_t attrib3) {
     const auto mode = (attrib3 >> 14u) & 0x1fu;
     const auto fmaskMode = (attrib3 >> 19u) & 0x1fu;
     require(fmaskMode == 0 || fmaskMode == 0x18, "AGC graphics: unsupported color FMASK swizzle mode");
-    require(mode == 0 || mode == 0x1b, "AGC graphics: unsupported color tile mode");
+    require(mode == 0 || mode == 5 || mode == 0x1b, "AGC graphics: unsupported color tile mode");
     return static_cast<ColorTileMode>(mode);
 }
 
@@ -63,10 +74,17 @@ ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, 
             pitch = (width + blockWidth - 1u) / blockWidth * blockWidth;
             paddedHeight = (height + blockHeight - 1u) / blockHeight * blockHeight;
             break;
+        case ColorTileMode::Standard4KB:
+            // 4 KiB blocks: 64x64, 64x32, 32x32, 32x16 or 16x16 elements (addrlib's thin 4 KiB blocks).
+            blockWidth = elementBytes <= 2u ? 64u : elementBytes <= 8u ? 32u : 16u;
+            blockHeight = 4096u / (blockWidth * elementBytes);
+            pitch = (width + blockWidth - 1u) / blockWidth * blockWidth;
+            paddedHeight = (height + blockHeight - 1u) / blockHeight * blockHeight;
+            break;
         default: throw std::runtime_error("AGC graphics: unsupported color tile mode");
     }
     if (tail.present) {
-        require(mode == ColorTileMode::RenderTarget, "AGC graphics: a mip tail requires a tiled surface");
+        require(mode != ColorTileMode::Linear, "AGC graphics: a mip tail requires a tiled surface");
         require(tail.x + width <= blockWidth && tail.y + height <= blockHeight, "AGC graphics: mip tail level exceeds its block");
         pitch = blockWidth;
         paddedHeight = blockHeight;
@@ -78,9 +96,11 @@ ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, 
 
 std::size_t ColorTargetLayout::offset(std::uint32_t x, std::uint32_t y) const {
     if (mode == ColorTileMode::Linear) return (static_cast<std::size_t>(y) * pitch + x) * elementBytes;
-    if (tail.present) return blockOffset(x + tail.x, y + tail.y, elementBytes) & 0xffffu;
+    const bool standard = mode == ColorTileMode::Standard4KB;
+    const auto inner = [&](std::uint32_t bx, std::uint32_t by) -> std::size_t { return standard ? standardOffset(bx, by, elementBytes) & 0xfffu : blockOffset(bx, by, elementBytes) & 0xffffu; };
+    if (tail.present) return inner(x + tail.x, y + tail.y);
     const auto block = static_cast<std::size_t>(y / blockHeight) * (pitch / blockWidth) + x / blockWidth;
-    return block * 65536u + (blockOffset(x, y, elementBytes) & 0xffffu);
+    return block * Alignment() + inner(x, y);
 }
 
 std::size_t ColorTargetLayout::Offset(std::uint32_t x, std::uint32_t y) const {

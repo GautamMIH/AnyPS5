@@ -144,7 +144,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     auto source = context.renderCache && !depthCompare ? context.renderCache->Find(resource.baseAddress) : nullptr;
     if (source) {
         const auto& color = source->Description();
-        const auto compatibleTiling = (color.tileMode == ColorTileMode::RenderTarget && resource.tileMode == TextureTileMode::RenderTarget64KB) || (color.tileMode == ColorTileMode::Linear && resource.tileMode == TextureTileMode::kLinear);
+        const auto compatibleTiling = resource.tileMode == ColorTextureTileMode(color.tileMode);
         timing.Mark("find_color");
         if (!compatibleTiling || resource.width != color.extent.width || resource.height != color.extent.height || resource.dimension != TextureDimension::k2D || resource.mipCount != 1 || resource.baseLevel != 0 || resource.baseArray != 0 || IsBlockCompressed(resource.format) || BytesPerElement(resource.format) != color.elementBytes) source.reset();
     }
