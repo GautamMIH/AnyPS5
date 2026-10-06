@@ -1,3 +1,6 @@
+#include <memory>
+#include <atomic>
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
@@ -72,6 +75,66 @@ void noteUnchangedFailure(int reason, std::uint64_t bytes) {
 }
 }
 
+// A write-protect watch over a texture's guest pages (GuestMemoryTracking::Watch, Protection::Read).
+// A CPU write faults: the resolver marks the watch written and unprotects the pages; the next
+// validation scans the range again and re-arms the watch first, so a write after that scan faults.
+struct TextureWatch {
+    std::unique_ptr<GuestMemoryTracking::Watch> handle;
+    std::atomic<bool> written{false};
+    std::atomic<std::uint32_t> fires{0};
+    // Device thread only (under the tracking mutex, as the resolver runs).
+    bool armed = false;
+};
+
+namespace {
+
+bool TextureWatchesEnabled() {
+    static const bool enabled = std::getenv("ANYPS5_TEXTURE_WATCH") != nullptr;
+    return enabled;
+}
+
+// An entry gets a watch after this many clean CPU-write scans; a watch that fires more often than
+// the limit (pages shared with data the guest keeps writing) is dropped for scanning.
+constexpr std::uint32_t WatchAfterCleanScans = 3;
+constexpr std::uint32_t WatchFireLimit = 16;
+
+void resolveTextureWatch(void* owner, GuestMemoryTracking::Access) {
+    auto* watch = static_cast<TextureWatch*>(owner);
+    watch->written.store(true, std::memory_order_release);
+    watch->fires.fetch_add(1, std::memory_order_relaxed);
+    watch->armed = false;
+    watch->handle->Protect(GuestMemoryTracking::Protection::ReadWrite);
+}
+
+}
+
+// Before a CPU-write scan of the entry (tracking mutex held): arms its watch, creating it once the
+// entry has kept validating.
+void TextureCache::armWatch(Entry& entry) {
+    if (entry.watchRefused) return;
+    if (entry.watch && entry.watch->fires.load(std::memory_order_relaxed) > WatchFireLimit) {
+        entry.watch.reset();
+        entry.watchRefused = true;
+        return;
+    }
+    if (!entry.watch) {
+        if (++entry.cleanScans < WatchAfterCleanScans) return;
+        auto watch = std::make_shared<TextureWatch>();
+        try {
+            watch->handle = std::make_unique<GuestMemoryTracking::Watch>(entry.address, static_cast<std::size_t>(entry.bytes), watch.get(), resolveTextureWatch);
+        } catch (const std::exception& error) {
+            static const bool trace = std::getenv("APS5_TRACE_TEXTURE_WATCH") != nullptr;
+            if (trace) std::fprintf(stderr, "[texture-watch] refused 0x%llx+0x%llx: %s\n", static_cast<unsigned long long>(entry.address), static_cast<unsigned long long>(entry.bytes), error.what());
+            entry.watchRefused = true;
+            return;
+        }
+        entry.watch = std::move(watch);
+    }
+    entry.watch->written.store(false, std::memory_order_release);
+    entry.watch->handle->Protect(GuestMemoryTracking::Protection::Read);
+    entry.watch->armed = true;
+}
+
 bool TextureCache::unchanged(Entry& entry) {
     PerformanceTimer timing("Graphics.TextureMemo");
     if (!WriteTracker::Available()) {
@@ -114,9 +177,15 @@ bool TextureCache::unchanged(Entry& entry) {
         return false;
     }
     timing.Mark("alias_check");
-    if (WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration)) {
-        noteUnchangedFailure(4, bytes);
-        return false;
+    // An armed watch that has not fired vouches for the range (single view: every CPU write goes
+    // through these pages). Otherwise the range is scanned, with the watch armed first.
+    const bool watched = TextureWatchesEnabled() && entry.watch && entry.watch->armed && !entry.watch->written.load(std::memory_order_acquire);
+    if (!watched) {
+        if (TextureWatchesEnabled()) armWatch(entry);
+        if (WriteTracker::CpuWrittenSince(entry.address, bytes, entry.cpuGeneration)) {
+            noteUnchangedFailure(4, bytes);
+            return false;
+        }
     }
     timing.Mark("cpu_check");
     entry.unchangedAt = at;

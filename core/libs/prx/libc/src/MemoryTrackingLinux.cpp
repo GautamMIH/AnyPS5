@@ -1,8 +1,10 @@
 #include "prx/libc/include/MemoryTrackingPlatform.hpp"
+#include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <dlfcn.h>
 #include <exception>
 #include <fstream>
@@ -133,7 +135,32 @@ void Install(FaultHandler handler) {
     }
 }
 
+// Committed guest memory whose guest protection gives read-write, non-executable host pages is
+// answered from libc's area map (hostProtection in GuestMemoryBacking.cpp); reading /proc/self/maps
+// costs milliseconds once the process has many mappings. Callers query only pages no watch protects.
+static bool queryGuestAreas(std::uint64_t address, std::size_t bytes, std::vector<Region>& regions) {
+    using namespace GuestMemoryBacking;
+    if (!GuestVirtualAccessible_nid_postfix(address, bytes, true)) return false;
+    const auto end = address + bytes;
+    for (auto cursor = address; cursor < end;) {
+        Area area{};
+        if (!GuestVirtualQuery_nid_postfix(reinterpret_cast<const void*>(cursor), false, &area) || area.address > cursor || area.address + area.bytes <= cursor) return false;
+        const bool readable = (area.protection & (kProtCpuRead | kProtGpuRead)) != 0;
+        const bool writable = (area.protection & (kProtCpuWrite | kProtGpuWrite)) != 0;
+        if (!readable || !writable || (area.protection & kProtCpuExec) != 0) return false;
+        cursor = std::min<std::uint64_t>(end, area.address + area.bytes);
+    }
+    regions.push_back({address, bytes, static_cast<std::uint64_t>(PROT_READ | PROT_WRITE)});
+    return true;
+}
+
 std::vector<Region> Query(std::uint64_t address, std::size_t bytes) {
+    // Opt-in with the driver's texture watches (ANYPS5_TEXTURE_WATCH=1) until measured.
+    static const bool fast = std::getenv("ANYPS5_TEXTURE_WATCH") != nullptr;
+    if (fast) {
+        std::vector<Region> regions;
+        if (queryGuestAreas(address, bytes, regions)) return regions;
+    }
     std::ifstream maps("/proc/self/maps");
     if (!maps) throw std::runtime_error("cannot query tracked guest memory mappings");
     std::vector<Region> regions;

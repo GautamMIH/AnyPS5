@@ -1574,6 +1574,34 @@ private:
         return true;
     }
 
+    // Debug aid: APS5_TRACE_WORKER=1 accounts the worker's time every 10 s: idle (no submission),
+    // blocked (every active submission waits on memory) and running, with the commonest blocking waits.
+    struct WorkerTrace {
+        bool enabled = std::getenv("APS5_TRACE_WORKER") != nullptr;
+        std::chrono::steady_clock::time_point windowStart = std::chrono::steady_clock::now();
+        double idleMs = 0, blockedMs = 0;
+        std::map<std::string, std::pair<std::uint64_t, double>> blockers;
+        void add(double& total, std::chrono::steady_clock::time_point started, const std::string* blocker = nullptr) {
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+            total += ms;
+            if (blocker != nullptr) {
+                auto& entry = blockers[blocker->substr(0, 96)];
+                ++entry.first;
+                entry.second += ms;
+            }
+            const double window = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - windowStart).count();
+            if (window < 10000.0) return;
+            std::fprintf(stderr, "[worker] %.0f ms window: idle %.0f ms, blocked %.0f ms, running %.0f ms\n", window, idleMs, blockedMs, window - idleMs - blockedMs);
+            std::vector<std::pair<double, std::string>> top;
+            for (const auto& [name, value] : blockers) top.emplace_back(value.second, name + " x" + std::to_string(value.first));
+            std::sort(top.rbegin(), top.rend());
+            for (std::size_t i = 0; i < top.size() && i < 6; ++i) std::fprintf(stderr, "[worker]   blocked %.0f ms on %s\n", top[i].first, top[i].second.c_str());
+            windowStart = std::chrono::steady_clock::now();
+            idleMs = blockedMs = 0;
+            blockers.clear();
+        }
+    } workerTrace;
+
     void run() noexcept {
         NameThread("AgcWorker");
         // Memory waits normally resolve within microseconds; one that stays blocked this long with no
@@ -1587,7 +1615,11 @@ private:
                     PerformanceTimer timing("Driver.Worker");
                     std::unique_lock lock(mutex);
                     timing.Mark("queue_mutex_wait");
-                    if (active.empty()) changed.wait(lock, [&] { return failure || stopping || !pending.empty(); });
+                    if (active.empty()) {
+                        const auto idleStart = std::chrono::steady_clock::now();
+                        changed.wait(lock, [&] { return failure || stopping || !pending.empty(); });
+                        if (workerTrace.enabled) workerTrace.add(workerTrace.idleMs, idleStart);
+                    }
                     timing.Mark("wait_for_submission");
                     rethrowFailure();
                     while (!pending.empty()) {
@@ -1641,7 +1673,9 @@ private:
                 }
                 require(std::chrono::steady_clock::now() - lastProgress < stallLimit, ("GPU memory wait never satisfied: " + blockedWait).c_str());
                 std::unique_lock lock(mutex);
+                const auto blockedStart = std::chrono::steady_clock::now();
                 changed.wait_for(lock, std::chrono::microseconds(200), [&] { return failure || !pending.empty(); });
+                if (workerTrace.enabled) workerTrace.add(workerTrace.blockedMs, blockedStart, &blockedWait);
             }
             const auto gpuLock = lockDevice();
             device.reset();

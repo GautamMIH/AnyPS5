@@ -11,6 +11,8 @@
 
 namespace AgcDriver::Graphics {
 
+struct TextureWatch;
+
 class TextureCache {
 public:
     explicit TextureCache(const Context& context);
@@ -64,8 +66,14 @@ private:
         std::array<std::uint64_t, 4> unchangedAt{};
         // The driver-write sequence the memo covers (WriteTracker::DriverWrittenSince).
         std::uint64_t unchangedDriverSequence = 0;
+        // Opt-in (ANYPS5_TEXTURE_WATCH=1): a write-protect watch over the pages of an entry that kept
+        // validating; while armed and unwritten, validation needs no CPU-write scan.
+        std::shared_ptr<TextureWatch> watch;
+        std::uint32_t cleanScans = 0;
+        bool watchRefused = false;
     };
     using Entries = std::list<Entry>;
+    static void armWatch(Entry& entry);
 
     void trim();
     void erase(Entries::iterator it);
