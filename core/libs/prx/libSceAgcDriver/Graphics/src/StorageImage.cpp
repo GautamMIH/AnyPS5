@@ -11,6 +11,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <vector>
+#include <mutex>
+#include <map>
+#include <array>
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -20,6 +24,40 @@ namespace {
 bool checkTiling() {
     static const bool enabled = std::getenv("ANYPS5_CHECK_STORAGE_TILING") != nullptr;
     return enabled;
+}
+
+// Opt-in (ANYPS5_STORAGE_IMAGE_POOL=1): released storage images (image, memory, view) are kept for
+// the next one of the same shape. Creating and freeing them per dispatch cost driver ioctls (about
+// 1 ms of a heavy Zorro frame over both driver threads). Images are released after their work
+// completed, and uploads start from an undefined layout, so a reused image needs nothing else.
+struct PooledImage {
+    VkImage image;
+    VkDeviceMemory memory;
+    VkImageView view;
+};
+using PoolKey = std::array<std::uint64_t, 7>;
+
+struct ImagePool {
+    std::mutex mutex;
+    std::map<PoolKey, std::vector<PooledImage>> images;
+    std::size_t count = 0;
+};
+
+ImagePool& imagePool() {
+    static auto* pool = new ImagePool;
+    return *pool;
+}
+
+bool poolEnabled() {
+    static const bool enabled = std::getenv("ANYPS5_STORAGE_IMAGE_POOL") != nullptr;
+    return enabled;
+}
+
+constexpr std::size_t PooledPerShape = 8;
+constexpr std::size_t PooledTotal = 128;
+
+PoolKey poolKey(VkDevice device, VkImageType type, VkFormat format, VkExtent3D extent, std::uint32_t arrayLayers, VkImageViewType viewType) {
+    return {reinterpret_cast<std::uint64_t>(device), static_cast<std::uint64_t>(type), static_cast<std::uint64_t>(format), extent.width, extent.height, (static_cast<std::uint64_t>(extent.depth) << 32u) | arrayLayers, static_cast<std::uint64_t>(viewType)};
 }
 
 }
@@ -100,6 +138,26 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
     }
 
     try {
+        const auto imageType = volume ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+        const VkExtent3D extent{mip.width, mip.height, volume ? layers : 1u};
+        const auto arrayLayers = volume ? 1u : layers;
+        const auto viewType = volume ? VK_IMAGE_VIEW_TYPE_3D : resource.dimension == TextureDimension::k2DArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+        if (poolEnabled()) {
+            poolShape = poolKey(context.device, imageType, format, extent, arrayLayers, viewType);
+            auto& pool = imagePool();
+            std::lock_guard lock(pool.mutex);
+            const auto found = pool.images.find(*poolShape);
+            if (found != pool.images.end() && !found->second.empty()) {
+                const auto pooled = found->second.back();
+                found->second.pop_back();
+                --pool.count;
+                image = pooled.image;
+                memory = pooled.memory;
+                view = pooled.view;
+                timing.Mark("pooled_image");
+                return;
+            }
+        }
         VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         info.imageType = volume ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
         info.format = format;
@@ -138,6 +196,19 @@ StorageImage::~StorageImage() {
 void StorageImage::release() noexcept {
     if (tilingPool != VK_NULL_HANDLE && context.detiler != nullptr) context.detiler->DestroyPool(tilingPool);
     tilingPool = VK_NULL_HANDLE;
+    if (poolShape && image && memory && view) {
+        auto& pool = imagePool();
+        std::lock_guard lock(pool.mutex);
+        auto& shape = pool.images[*poolShape];
+        if (shape.size() < PooledPerShape && pool.count < PooledTotal) {
+            shape.push_back({image, memory, view});
+            ++pool.count;
+            view = VK_NULL_HANDLE;
+            image = VK_NULL_HANDLE;
+            memory = VK_NULL_HANDLE;
+            return;
+        }
+    }
     if (view) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, view, nullptr);
     if (image) context.Function<PFN_vkDestroyImage>("vkDestroyImage")(context.device, image, nullptr);
     if (memory) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, memory, nullptr);
