@@ -9,21 +9,35 @@
 #include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <cstdarg>
 #include <filesystem>
+#include <stdexcept>
+#include <string>
 #include <system_error>
 #ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
 #include <sys/utime.h>
 #else
 #include <sys/time.h>
+#include <sys/uio.h>
+#include <unistd.h>
 #endif
 
 #if defined(__linux__)
 #include <sys/syscall.h>
-#include <unistd.h>
 #endif
 
+// FreeBSD struct iovec.
+struct KernelIovec {
+    void* base;
+    std::size_t length;
+};
+
 namespace {
+
+constexpr int kIovMax = 1024;
 
 constexpr std::size_t kBsdDirentHeader = 8;
 constexpr std::size_t kHostBufferSize = 32768;
@@ -190,6 +204,112 @@ int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval*
     if (::utimes(native.c_str(), times != nullptr ? values : nullptr) != 0) return FileErrors::Sce(errno);
 #endif
     return 0;
+}
+
+}
+
+// Vectored I/O, pipe and fsync (from upstream ab98cd7f and 7789c0a5).
+namespace {
+
+int checkIovecs(const KernelIovec* iov, const int iovcnt) {
+    if (iovcnt < 0 || iovcnt > kIovMax) return FileErrors::SceBsd(kErrorInvalid);
+    if (iov == nullptr && iovcnt != 0) return FileErrors::SceBsd(kErrorFault);
+    return 0;
+}
+
+// As for any system call on guest memory: tracked pages are resolved first (see Open.cpp).
+void resolveIovecs(const KernelIovec* iov, const int iovcnt, const bool writable) {
+    for (int index = 0; index < iovcnt; ++index) {
+        if (iov[index].base != nullptr && iov[index].length != 0)
+            GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(reinterpret_cast<std::uint64_t>(iov[index].base), iov[index].length, writable);
+    }
+}
+
+#ifndef _WIN32
+static_assert(sizeof(KernelIovec) == sizeof(struct iovec));
+static_assert(offsetof(KernelIovec, base) == offsetof(struct iovec, iov_base));
+static_assert(offsetof(KernelIovec, length) == offsetof(struct iovec, iov_len));
+
+const struct iovec* nativeIovecs(const KernelIovec* iov) {
+    return reinterpret_cast<const struct iovec*>(iov);
+}
+
+std::int64_t sceResult64(const std::int64_t result) {
+    return result < 0 ? FileErrors::Sce(errno) : result;
+}
+#endif
+
+}
+
+extern "C" int APS5_VABI sceKernelFsync(int fd);
+
+extern "C" {
+
+#ifdef _WIN32
+
+std::int64_t APS5_VABI sceKernelReadv(int, const KernelIovec*, int) {
+    throw std::runtime_error(std::string(__func__) + ": not implemented on Windows");
+}
+
+std::int64_t APS5_VABI sceKernelWritev(int, const KernelIovec*, int) {
+    throw std::runtime_error(std::string(__func__) + ": not implemented on Windows");
+}
+
+std::int64_t APS5_VABI sceKernelPreadv(int, const KernelIovec*, int, std::int64_t) {
+    throw std::runtime_error(std::string(__func__) + ": not implemented on Windows");
+}
+
+std::int64_t APS5_VABI sceKernelPwritev(int, const KernelIovec*, int, std::int64_t) {
+    throw std::runtime_error(std::string(__func__) + ": not implemented on Windows");
+}
+
+#else
+
+std::int64_t APS5_VABI sceKernelReadv(int d, const KernelIovec* iov, int iovcnt) {
+    if (const int error = checkIovecs(iov, iovcnt)) return error;
+    resolveIovecs(iov, iovcnt, true);
+    return sceResult64(static_cast<std::int64_t>(::readv(d, nativeIovecs(iov), iovcnt)));
+}
+
+std::int64_t APS5_VABI sceKernelWritev(int d, const KernelIovec* iov, int iovcnt) {
+    if (const int error = checkIovecs(iov, iovcnt)) return error;
+    resolveIovecs(iov, iovcnt, false);
+    return sceResult64(static_cast<std::int64_t>(::writev(d, nativeIovecs(iov), iovcnt)));
+}
+
+std::int64_t APS5_VABI sceKernelPreadv(int d, const KernelIovec* iov, int iovcnt, std::int64_t offset) {
+    if (const int error = checkIovecs(iov, iovcnt)) return error;
+    if (offset < 0) return FileErrors::SceBsd(kErrorInvalid);
+    resolveIovecs(iov, iovcnt, true);
+    return sceResult64(static_cast<std::int64_t>(::preadv(d, nativeIovecs(iov), iovcnt, static_cast<off_t>(offset))));
+}
+
+std::int64_t APS5_VABI sceKernelPwritev(int d, const KernelIovec* iov, int iovcnt, std::int64_t offset) {
+    if (const int error = checkIovecs(iov, iovcnt)) return error;
+    if (offset < 0) return FileErrors::SceBsd(kErrorInvalid);
+    resolveIovecs(iov, iovcnt, false);
+    return sceResult64(static_cast<std::int64_t>(::pwritev(d, nativeIovecs(iov), iovcnt, static_cast<off_t>(offset))));
+}
+
+#endif
+
+int APS5_VABI pipe_nid_postfix(int* descriptors) {
+    if (descriptors == nullptr) return FileErrors::PosixBsd(kErrorFault);
+    GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(reinterpret_cast<std::uint64_t>(descriptors), 2 * sizeof(int), true);
+    int native[2];
+#ifdef _WIN32
+    const int result = ::_pipe(native, 4096, _O_BINARY);
+#else
+    const int result = ::pipe(native);
+#endif
+    if (result != 0) return FileErrors::Posix(errno);
+    std::memcpy(descriptors, native, sizeof(native));
+    return 0;
+}
+
+int APS5_VABI fsync_nid_postfix(int fd) {
+    const int result = sceKernelFsync(fd);
+    return result < 0 ? FileErrors::PosixBsd(result & 0xffff) : 0;
 }
 
 }

@@ -46,6 +46,16 @@ struct PhysicalMemoryPool {
         }
     }
 
+    // Whether every page of [start, start + len) is allocated direct memory.
+    bool Allocated(uint64_t start, size_t len) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        if (start > DIRECT_MEMORY_SIZE || len > DIRECT_MEMORY_SIZE - start) return false;
+        const size_t first = start / PS5_PAGE_SIZE;
+        for (size_t i = 0; i < len / PS5_PAGE_SIZE; ++i)
+            if (!_used[first + i]) return false;
+        return true;
+    }
+
     // The block containing offset, or with findNext the first block above it.
     bool Find(uint64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType) {
         std::lock_guard<std::mutex> lock(_mutex);
@@ -97,6 +107,10 @@ int DirectMemoryAlloc(int64_t searchStart, int64_t searchEnd, size_t len, size_t
 
 void DirectMemoryFree(int64_t start, size_t len) {
     PhysicalMemoryPool::Instance().Free(static_cast<uint64_t>(start), len);
+}
+
+bool DirectMemoryAllocated(int64_t start, size_t len) {
+    return PhysicalMemoryPool::Instance().Allocated(static_cast<uint64_t>(start), len);
 }
 
 bool DirectMemoryFind(int64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType) {

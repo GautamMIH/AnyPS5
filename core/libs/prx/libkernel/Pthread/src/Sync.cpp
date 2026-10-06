@@ -31,10 +31,10 @@ PthreadMutexPrivate* resolveMutex(PthreadMutex* mutex) {
     current = slot.load(std::memory_order_acquire);
     if (isStaticMutexInitializer(current)) {
         // FreeBSD: PTHREAD_MUTEX_INITIALIZER (0) is an error-checking mutex, the adaptive
-        // initializer (1) a normal one.
+        // initializer (1) an adaptive one.
         const bool adaptive = reinterpret_cast<std::uintptr_t>(current) == kAdaptiveMutexInitializer;
         current = new PthreadMutexPrivate();
-        current->_type = adaptive ? MutexType::Normal : MutexType::ErrorCheck;
+        current->_type = adaptive ? MutexType::Adaptive : MutexType::ErrorCheck;
         slot.store(current, std::memory_order_release);
     }
     return current;

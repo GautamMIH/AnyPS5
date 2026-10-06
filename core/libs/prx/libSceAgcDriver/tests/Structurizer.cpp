@@ -61,8 +61,14 @@ const BasicBlock* innermostLoopHeader(const ControlFlowGraph& graph, std::uint32
 void requireStructuredBranches(const ControlFlowGraph& graph, const char* name) {
     for (const auto& block : graph.blocks) {
         const auto& terminator = block.terminator;
-        if (terminator.kind != TerminatorKind::ConditionalBranch || terminator.loopHeader || terminator.mergeBlock != InvalidControlFlowId || terminator.trueBlock == terminator.falseBlock) continue;
+        if (terminator.kind != TerminatorKind::ConditionalBranch || terminator.loopHeader || terminator.trueBlock == terminator.falseBlock) continue;
         const auto* loop = innermostLoopHeader(graph, block.id);
+        if (terminator.mergeBlock != InvalidControlFlowId) {
+            if (loop != nullptr && terminator.mergeBlock == loop->terminator.continueBlock) {
+                throw std::runtime_error(std::string(name) + ": block " + std::to_string(block.id) + " in the loop at block " + std::to_string(loop->id) + " merges at the loop's continue block " + std::to_string(terminator.mergeBlock));
+            }
+            continue;
+        }
         const auto exits = [&](std::uint32_t target) { return loop != nullptr && (target == loop->terminator.mergeBlock || target == loop->terminator.continueBlock); };
         if (!exits(terminator.trueBlock) && !exits(terminator.falseBlock)) {
             throw std::runtime_error(std::string(name) + ": block " + std::to_string(block.id) + " branches to " + std::to_string(terminator.trueBlock) + "/" + std::to_string(terminator.falseBlock) + " without a merge, and neither is its loop's merge or continue");
@@ -87,6 +93,25 @@ int main() {
         auto exitTails = makeGraph({{1}, {2}, {3, 4}, {7}, {5, 6}, {7, 1}, {7}, {}});
         Structurizer{}.Structurize(exitTails);
         requireStructuredBranches(exitTails, "a loop with two exit tails");
+        auto endingExits = makeGraph({{6, 1}, {2}, {3}, {6, 4}, {2, 5}, {}, {}});
+        Structurizer{}.Structurize(endingExits);
+        requireStructuredBranches(endingExits, "a loop whose two exits end the program");
+        auto threeEndingExits = makeGraph({{1}, {2}, {5, 3}, {6, 4}, {1, 7}, {}, {}, {}});
+        Structurizer{}.Structurize(threeEndingExits);
+        requireStructuredBranches(threeEndingExits, "a loop whose three exits end the program");
+        auto innerEndingExit = makeGraph({{1}, {2}, {3}, {7, 4}, {2, 5}, {1, 6}, {}, {}});
+        Structurizer{}.Structurize(innerEndingExit);
+        requireStructuredBranches(innerEndingExit, "an inner loop exit that ends the program");
+        auto earlyReturn = makeGraph({{2, 1}, {4, 2}, {3, 5}, {5}, {}, {}});
+        Structurizer{}.Structurize(earlyReturn);
+        requireStructuredBranches(earlyReturn, "an early return inside a selection that joins its parent's merge");
+        for (const auto& block : earlyReturn.blocks) {
+            const auto merge = block.terminator.mergeBlock;
+            if (merge != InvalidControlFlowId && !earlyReturn.Dominates(block.id, merge)) {
+                std::fprintf(stderr, "an early return inside a selection: header %u does not dominate its merge %u\n", block.id, merge);
+                return 1;
+            }
+        }
     } catch (const std::exception& error) {
         std::fprintf(stderr, "%s\n", error.what());
         return 1;

@@ -218,9 +218,7 @@ std::lconv* APS5_VABI localeconv_nid_postfix() {
     return &conventions;
 }
 
-[[noreturn]] void APS5_VABI quick_exit_nid_postfix(int status) {
-    std::quick_exit(status);
-}
+// quick_exit is defined in Process.cpp (runs guest at_quick_exit callbacks).
 
 int APS5_VABI __cxa_thread_atexit_nid_postfix(ExitFunction function, void* object, void* dso) {
     return __cxa_thread_atexit_impl(reinterpret_cast<void (*)(void*)>(function), object, dso);

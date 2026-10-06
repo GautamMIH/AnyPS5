@@ -1,6 +1,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <new>
+#include <stdexcept>
+#include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "../include/PthreadSync.hpp"
@@ -23,14 +25,20 @@ int APS5_VABI pthread_rwlock_wrlock_nid_postfix(PthreadRwlock* rwlock) {
     return PthreadSync::RwlockLock(rwlock, true, std::nullopt);
 }
 
+// FreeBSD: a lock that is free is taken without looking at abstime; only a wait checks it.
+static int timedLock(PthreadRwlock* rwlock, const KernelTimespec* abstime, const bool exclusive, const char* function) {
+    if (!abstime) throw std::runtime_error(std::string(function) + ": null abstime");
+    if (PthreadSync::RwlockTryLock(rwlock, exclusive) == 0) return 0;
+    if (abstime->tv_nsec < 0 || abstime->tv_nsec >= 1000000000) return PthreadSync::kErrorInvalid;
+    return PthreadSync::RwlockLock(rwlock, exclusive, PthreadSync::DeadlineAt(PthreadSync::kClockRealtime, abstime->tv_sec, abstime->tv_nsec));
+}
+
 int APS5_VABI pthread_rwlock_timedrdlock_nid_postfix(PthreadRwlock* rwlock, const KernelTimespec* abstime) {
-    if (!abstime) return PthreadSync::kErrorInvalid;
-    return PthreadSync::RwlockLock(rwlock, false, PthreadSync::DeadlineAt(PthreadSync::kClockRealtime, abstime->tv_sec, abstime->tv_nsec));
+    return timedLock(rwlock, abstime, false, __func__);
 }
 
 int APS5_VABI pthread_rwlock_timedwrlock_nid_postfix(PthreadRwlock* rwlock, const KernelTimespec* abstime) {
-    if (!abstime) return PthreadSync::kErrorInvalid;
-    return PthreadSync::RwlockLock(rwlock, true, PthreadSync::DeadlineAt(PthreadSync::kClockRealtime, abstime->tv_sec, abstime->tv_nsec));
+    return timedLock(rwlock, abstime, true, __func__);
 }
 
 int APS5_VABI pthread_rwlock_tryrdlock_nid_postfix(PthreadRwlock* rwlock) {

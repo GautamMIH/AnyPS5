@@ -154,6 +154,7 @@ private:
         append(key, value.sampleMaskExportEnable);
         append(key, value.earlyZ);
         append(key, value.executeOnNoop);
+        append(key, value.conservativeZExport);
         append(key, value.targetOutputMode);
         append(key, value.targetExportMapping);
     }

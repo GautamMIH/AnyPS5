@@ -128,7 +128,15 @@ ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOut
         );
     }
 
-    fileWriter.Write(absOutputPath, patcher->Patch(module.Image, result.OriginalHeaders, result.DynamicSection, result.OriginalPltGotVaddr, runPath, args.lazyBinding, args.windowsDiagnostics, module.Trampolines, result.LinkInfo));
+    std::vector<std::uint8_t> executableBytes;
+    try {
+        executableBytes = patcher->Patch(module.Image, result.OriginalHeaders, result.DynamicSection, result.OriginalPltGotVaddr, runPath, args.lazyBinding, args.windowsDiagnostics, module.Trampolines, result.LinkInfo);
+    } catch (Domain::RelinkerException& error) {
+        // Errors name the input they came from (upstream InputPath).
+        error.InputPath = args.inputPath;
+        throw;
+    }
+    fileWriter.Write(absOutputPath, executableBytes);
     std::cout << "External prx references: " << result.RegistryEntries.size() << "\nOutput file: " << absOutputPath << '\n';
 
     return ModuleRelinkOutcome{ReadNeededLibraries(result.DynamicSection), isLibrary};

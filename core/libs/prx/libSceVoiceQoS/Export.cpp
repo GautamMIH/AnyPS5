@@ -1,33 +1,92 @@
 #include <atomic>
 #include <cstdint>
 #include <cstddef>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
 // Voice chat needs the network, which an offline console never provides, so titles initialise the
-// library and never create endpoints; the endpoint functions are deliberately not provided yet.
+// library and never create endpoints; the endpoint functions fail loudly if a title calls them.
 namespace {
 
 constexpr int VOICE_QOS_OK = 0;
+constexpr std::int32_t VOICE_QOS_APP_TYPE_GAME = 0x20000000;
+constexpr std::int32_t VOICE_QOS_APP_TYPE_10000000 = 0x10000000;
 
-std::atomic<bool> initialized{false};
+std::mutex g_mutex;
+bool g_initialized = false;
 
 }
 
 extern "C" {
 
 int APS5_VABI sceVoiceQoSInit(void* mem_block, uint32_t mem_size, int32_t app_type) {
-    (void)app_type;
-    if (mem_block == nullptr || mem_size == 0) APS5_INVALID_ARG_EX;
+    if (!mem_block || mem_size == 0) throw std::invalid_argument("sceVoiceQoSInit: null or empty memory block");
+    if (app_type != VOICE_QOS_APP_TYPE_GAME && app_type != VOICE_QOS_APP_TYPE_10000000) throw std::invalid_argument("sceVoiceQoSInit: unsupported app type " + std::to_string(app_type));
+    std::lock_guard lock(g_mutex);
     // The library's error codes for misuse are unknown, so misuse fails loudly.
-    if (initialized.exchange(true)) throw std::logic_error("sceVoiceQoSInit: already initialized");
+    if (g_initialized) throw std::runtime_error("sceVoiceQoSInit: already initialized");
+    g_initialized = true;
     return VOICE_QOS_OK;
 }
 
 int APS5_VABI sceVoiceQoSEnd(void) {
-    if (!initialized.exchange(false)) throw std::logic_error("sceVoiceQoSEnd: not initialized");
+    std::lock_guard lock(g_mutex);
+    if (!g_initialized) throw std::logic_error("sceVoiceQoSEnd: not initialized");
+    g_initialized = false;
     return VOICE_QOS_OK;
+}
+
+int APS5_VABI sceVoiceQoSCreateLocalEndpoint() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceVoiceQoSDeleteLocalEndpoint() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceVoiceQoSCreateRemoteEndpoint() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceVoiceQoSDeleteRemoteEndpoint() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceVoiceQoSConnect() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceVoiceQoSDisconnect() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceVoiceQoSSetLocalEndpointAttribute() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceVoiceQoSSetRemoteEndpointAttribute() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceVoiceQoSReadPacket() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI sceVoiceQoSWritePacket() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
 }
 
 }

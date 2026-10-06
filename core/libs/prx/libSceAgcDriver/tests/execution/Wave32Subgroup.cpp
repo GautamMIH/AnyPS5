@@ -69,13 +69,25 @@ int main() {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        // Our VulkanDevice has no per-wave ComputeTarget: the device target runs wave32 programs
+        // isolated in wider host subgroups.
         const auto target = device->Target();
-        if (target.subgroupSize != WaveSize) {
+        if (target.subgroupSize < WaveSize) {
             std::printf("skipped, the device runs wave32 programs on %u-wide subgroups\n", target.subgroupSize);
             return VulkanTestSkipped;
         }
         Run(*device, target);
         Check();
+        if (device->Target().subgroupSize != target.subgroupSize && device->Target().subgroupSize >= WaveSize) {
+            Run(*device, device->Target());
+            Check();
+        }
+        if (device->Target().subgroupSize == WaveSize) {
+            auto wide = device->Target();
+            wide.subgroupSize = 64;
+            Run(*device, wide);
+            Check();
+        }
         std::puts("wave32 subgroup tests passed");
         return 0;
     } catch (const std::exception& error) {

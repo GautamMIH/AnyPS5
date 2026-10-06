@@ -5,6 +5,7 @@
 #include "SpirvBackend/SpirvEmitter.hpp"
 #include "BdaAbi.hpp"
 #include <array>
+#include <functional>
 
 namespace ShaderRecompiler {
 
@@ -23,6 +24,8 @@ std::uint32_t EmitBdaRead(SpirvValueEmitContext& ctx, const IrValue& inst, std::
 // Stores a dword at a 4-aligned guest address through a range with Write permission and notes its
 // page in the fault buffer's written set; a failure records its fault and stores nothing.
 void EmitBdaWrite(SpirvValueEmitContext& ctx, const IrValue& inst, std::uint32_t address, std::uint32_t value);
+void EmitBdaStore(SpirvValueEmitContext& ctx, const IrValue& inst, std::uint32_t address, std::uint32_t value, std::uint32_t bits);
+std::uint32_t EmitBdaAtomic(SpirvValueEmitContext& ctx, const IrValue& inst, std::uint32_t address, std::uint32_t bytes, const std::function<std::uint32_t(std::uint32_t)>& operation);
 // Reads the dwords of a 1-4 dword load at address + offset that the program extracts, with one
 // table lookup for the whole span; the per-byte lookups of EmitBdaRead remain the fallback (and
 // the only path under APS5_BDA_BYTE_READS=1). Dwords the program never extracts are neither read

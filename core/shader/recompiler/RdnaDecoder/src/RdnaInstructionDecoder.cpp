@@ -5,6 +5,7 @@
 #include "RdnaDecoder/RdnaOpcode.hpp"
 #include "RdnaDecoder/RdnaScalarOpDecoder.hpp"
 #include "RdnaDecoder/RdnaVectorOpDecoder.hpp"
+#include <algorithm>
 #include <bit>
 #include <cstdio>
 #include <stdexcept>
@@ -151,7 +152,7 @@ void DecodeRdnaProgram(std::span<const std::uint32_t> code, RdnaProgram& program
     program.instructions.reserve(code.size());
     program.code = code;
 
-    std::vector<bool> branchTargets;
+    std::uint32_t furthestBranchTarget = 0;
     for (std::uint32_t wordIndex = 0; wordIndex < code.size();) {
         // s_code_end (SOPP opcode 31) pads the end of shader code for instruction prefetch and
         // traps if executed: nothing from it on is part of the program.
@@ -167,16 +168,13 @@ void DecodeRdnaProgram(std::span<const std::uint32_t> code, RdnaProgram& program
 
         if (IsDirectBranchOpcode(instruction.op)) {
             const std::uint32_t targetIndex = instruction.branchTarget / static_cast<std::uint32_t>(sizeof(std::uint32_t));
-            if (branchTargets.empty()) {
-                branchTargets.resize(code.size());
-            }
-            if (targetIndex >= branchTargets.size()) {
+            if (targetIndex >= code.size()) {
                 throw std::out_of_range("branch target is out of the code span bounds");
             }
-            branchTargets[targetIndex] = true;
+            furthestBranchTarget = std::max(furthestBranchTarget, targetIndex);
         }
 
-        if (instruction.op == RdnaOpcode::SEndpgm && (wordIndex >= code.size() || branchTargets.empty() || !branchTargets[wordIndex])) {
+        if (instruction.op == RdnaOpcode::SEndpgm && furthestBranchTarget < wordIndex) {
             return;
         }
     }

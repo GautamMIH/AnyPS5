@@ -4,6 +4,7 @@
 #include "Optimization/RequestMemoryView.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include "Optimization/ShaderStageInputInfo.hpp"
+#include "SpirvBackend/SpirvAnalysis.hpp"
 #if ANYPS5_ENABLE_SPIRV_TOOLS
 #include "SpirvBackend/SpirvOptimizer.hpp"
 #endif
@@ -11,10 +12,12 @@
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <initializer_list>
 #include <iostream>
 #include <map>
 #include <future>
+#include <memory>
 #include <stdexcept>
 #include <span>
 #include <string>
@@ -302,6 +305,306 @@ void verifyPixelParameterSlots() {
 
 }
 
+void verifyComputedTexelOffsets() {
+    using namespace ShaderRecompiler;
+    constexpr std::uint32_t Format8888UNorm = 56;
+    constexpr std::uint32_t Type2D = 9;
+    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
+    static Texture texture;
+    static std::array<std::uint32_t, 64> output{};
+    const auto textureBase = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture.bytes.data()));
+    const auto outputBase = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
+    const std::array<std::uint32_t, 16> userData{
+        static_cast<std::uint32_t>(textureBase >> 8u), static_cast<std::uint32_t>((textureBase >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u,
+        static_cast<std::uint32_t>(outputBase), static_cast<std::uint32_t>((outputBase >> 32u) & 0xffffu), 64u, 0xfacu};
+    const auto program = [](std::uint32_t offsetSource, std::uint32_t literal) {
+        std::vector<std::uint32_t> code{0x7e020200u | offsetSource};
+        if (offsetSource == 0xffu) code.push_back(literal);
+        code.insert(code.end(), {0x7e040280u, 0x7e060280u, 0xf0dc0f08u, 0x00400401u, 0xe0700000u, 0x80030400u, 0xbf810000u});
+        return code;
+    };
+    const auto computed = program(0x100u, 0u);
+    const auto constant = program(0xffu, 0x3fu | (1u << 8u));
+    const std::array<std::uint32_t, 2> withGather{1u, static_cast<std::uint32_t>(spv::CapabilityImageGatherExtended)};
+    const auto recompile = [&](const std::vector<std::uint32_t>& code, bool offsets) {
+        RecompileRequest request{};
+        request.shader = {ShaderStage::Compute, 0x30000u, code, 0, {}};
+        request.context.waveSize = 32;
+        request.context.userDataBaseRegister = 0;
+        request.context.userData = userData;
+        request.context.compute = ShaderComputeStageInfo{{32u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = 32;
+        request.target.supportedCapabilities = withGather;
+        request.target.fragmentShaderBarycentricEnabled = false;
+        request.target.nonConstantImageOffsets = offsets;
+        request.layout.pushConstantSizeBytes = 128;
+        request.useCache = false;
+        AgcDriver::ShaderMemory memory({});
+        static_cast<void>(memory.Capture(request));
+        request.context.memory = memory.Regions();
+        return Recompile(request).spirv;
+    };
+    const auto sampleOperands = [](const std::vector<std::uint32_t>& words) {
+        std::uint32_t mask = 0;
+        bool gatherExtended = false;
+        for (std::size_t cursor = 5; cursor < words.size();) {
+            const auto count = words[cursor] >> 16u;
+            require(count != 0 && count <= words.size() - cursor, "texel offsets: truncated SPIR-V instruction");
+            const auto op = words[cursor] & 0xffffu;
+            if (op == spv::OpCapability && words[cursor + 1] == spv::CapabilityImageGatherExtended) gatherExtended = true;
+            if (op == spv::OpImageSampleExplicitLod && count > 5u) mask |= words[cursor + 5];
+            cursor += count;
+        }
+        return std::pair{mask, gatherExtended};
+    };
+    // Without VK_KHR_maintenance8 a computed offset moves the coordinates by whole texels of the
+    // sampled level (OffsetCoordinates) instead of failing: no Offset operand, no ImageGatherExtended.
+    const auto [movedMask, movedGather] = sampleOperands(recompile(computed, false));
+    require((movedMask & (spv::ImageOperandsOffsetMask | spv::ImageOperandsConstOffsetMask)) == 0u && !movedGather, "texel offsets: a computed offset without maintenance8 did not move the coordinates");
+    const auto [computedMask, computedGather] = sampleOperands(recompile(computed, true));
+    require((computedMask & spv::ImageOperandsOffsetMask) != 0u && (computedMask & spv::ImageOperandsConstOffsetMask) == 0u && computedGather, "texel offsets: a computed offset is not an Offset operand");
+    for (const bool offsets : {false, true}) {
+        const auto [constantMask, constantGather] = sampleOperands(recompile(constant, offsets));
+        require((constantMask & spv::ImageOperandsConstOffsetMask) != 0u && (constantMask & spv::ImageOperandsOffsetMask) == 0u && !constantGather, "texel offsets: a constant offset is not a ConstOffset operand");
+    }
+}
+
+void verifyWaveUniformValues() {
+    using namespace ShaderRecompiler;
+    IrProgram program;
+    program.Resources().stage = IrShaderStage::Compute;
+    MemoryInfo scalar;
+    scalar.kind = ResourceKind::ScalarAddress;
+    MemoryInfo global;
+    global.kind = ResourceKind::Global;
+    program.Resources().memoryInfo = {scalar, global};
+    auto& block = program.CreateBlock();
+    program.SetEntryBlock(block);
+    program.BlockOrder().push_back(&block);
+    const auto emit = [&](IrOpcode opcode, IrType type, std::initializer_list<IrValue*> arguments, std::uint64_t flags = 0) -> IrValue& {
+        auto& value = program.CreateValue(opcode, type, flags);
+        for (auto* argument : arguments) value.AddArgument(argument);
+        block.AppendInstruction(&value);
+        return value;
+    };
+    const auto memory = [](std::uint32_t index) {
+        MemoryFlags flags{index, 0u};
+        std::uint64_t bits = 0;
+        std::memcpy(&bits, &flags, sizeof(flags));
+        return bits;
+    };
+    auto& zero = program.CreateValue(IrOpcode::Void, IrType::U32);
+    zero.SetImmediateU32(0u);
+    auto& active = program.CreateValue(IrOpcode::Void, IrType::U1);
+    active.SetImmediateBool(true);
+    auto& userData = emit(IrOpcode::GetUserData, IrType::U32, {&zero});
+    auto& lane = emit(IrOpcode::LaneId, IrType::U32, {});
+    auto& uniformSum = emit(IrOpcode::IAdd32, IrType::U32, {&userData, &userData});
+    auto& laneSum = emit(IrOpcode::IAdd32, IrType::U32, {&userData, &lane});
+    auto& address = emit(IrOpcode::GetAddressResource, IrType::AddressResource, {&userData, &userData});
+    auto& scalarLoad = emit(IrOpcode::LoadAddressU32, IrType::U32, {&address, &uniformSum, &zero, &active}, memory(0u));
+    auto& laneOffsetLoad = emit(IrOpcode::LoadAddressU32, IrType::U32, {&address, &laneSum, &zero, &active}, memory(0u));
+    auto& globalLoad = emit(IrOpcode::LoadAddressU32, IrType::U32, {&address, &uniformSum, &zero, &active}, memory(1u));
+    auto& fromScalarLoad = emit(IrOpcode::IAdd32, IrType::U32, {&scalarLoad, &uniformSum});
+    auto& fromGlobalLoad = emit(IrOpcode::IAdd32, IrType::U32, {&globalLoad, &uniformSum});
+    auto& compare = emit(IrOpcode::ULessThan32, IrType::U1, {&laneSum, &userData});
+    auto& ballot = emit(IrOpcode::Ballot, IrType::U32x4, {&compare});
+    const auto uniform = WaveUniformValues(program);
+    for (const auto* value : {&userData, &uniformSum, &address, &scalarLoad, &fromScalarLoad, &ballot}) {
+        require(uniform.contains(value), "wave-uniform values: a value every lane of the wave computes alike was not found uniform");
+    }
+    for (const auto* value : {&lane, &laneSum, &laneOffsetLoad, &globalLoad, &fromGlobalLoad, &compare}) {
+        require(!uniform.contains(value), "wave-uniform values: a value that may differ between lanes was found uniform");
+    }
+}
+
+void verifyTwoLaneUniformValues() {
+    using namespace ShaderRecompiler;
+    struct alignas(4096) GuestTables {
+        std::array<std::uint32_t, 64> output{};
+        std::array<std::uint32_t, 8> srt{};
+    };
+    static GuestTables guest;
+    auto& output = guest.output;
+    const auto outputBase = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
+    auto& srt = guest.srt;
+    srt = {6u, 7u, 0u, 0u, static_cast<std::uint32_t>(outputBase), static_cast<std::uint32_t>((outputBase >> 32u) & 0xffffu), 64u, 0xfacu};
+    const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(srt.data()));
+    const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u)};
+    const std::array<std::uint32_t, 10> code{0xf4040080u, 0xfa000000u, 0xf4080200u, 0xfa000010u, 0xbf8cc07fu, 0x93040302u, 0x4a020004u, 0xe0700000u, 0x80020100u, 0xbf810000u};
+    const auto multiplies = [&](std::uint32_t subgroupSize) {
+        RecompileRequest request{};
+        request.shader = {ShaderStage::Compute, 0x40000u, code, 0, {}};
+        request.context.waveSize = 64;
+        request.context.userDataBaseRegister = 0;
+        request.context.userData = userData;
+        request.context.compute = ShaderComputeStageInfo{{64u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = subgroupSize;
+        request.target.fragmentShaderBarycentricEnabled = false;
+        request.layout.pushConstantSizeBytes = 128;
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        request.context.memory = memory.Regions();
+        const auto words = Recompile(request, *capture).spirv;
+        std::size_t count = 0;
+        for (std::size_t cursor = 5; cursor < words.size();) {
+            const auto length = words[cursor] >> 16u;
+            require(length != 0 && length <= words.size() - cursor, "two-lane uniform values: truncated SPIR-V instruction");
+            if ((words[cursor] & 0xffffu) == spv::OpIMul) ++count;
+            cursor += length;
+        }
+        return count;
+    };
+    const auto oneLane = multiplies(64u);
+    require(oneLane != 0u, "two-lane uniform values: the scalar multiply is missing from the module");
+    require(multiplies(32u) == oneLane, "two-lane uniform values: a two-lane invocation computes a scalar value once per lane");
+}
+
+void verifyFunctionLdsBound() {
+    using namespace ShaderRecompiler;
+    const auto build = [](const auto& body) {
+        IrProgram program;
+        program.Resources().stage = IrShaderStage::Pixel;
+        for (const std::uint32_t offset : {0u, 256u, 512u, 0xfffffff0u}) {
+            MemoryInfo lds;
+            lds.kind = ResourceKind::Lds;
+            lds.offset = offset;
+            program.Resources().memoryInfo.push_back(lds);
+        }
+        auto& block = program.CreateBlock();
+        program.SetEntryBlock(block);
+        program.BlockOrder().push_back(&block);
+        const auto emit = [&](IrOpcode opcode, IrType type, std::initializer_list<IrValue*> arguments, std::uint32_t memory = ~0u) -> IrValue& {
+            std::uint64_t bits = 0;
+            if (memory != ~0u) {
+                MemoryFlags flags{memory, 0u};
+                std::memcpy(&bits, &flags, sizeof(flags));
+            }
+            auto& value = program.CreateValue(opcode, type, bits);
+            for (auto* argument : arguments) value.AddArgument(argument);
+            block.AppendInstruction(&value);
+            return value;
+        };
+        const auto constant = [&](std::uint32_t immediate) -> IrValue& {
+            auto& value = program.CreateValue(IrOpcode::Void, IrType::U32);
+            value.SetImmediateU32(immediate);
+            return value;
+        };
+        auto& active = program.CreateValue(IrOpcode::Void, IrType::U1);
+        active.SetImmediateBool(true);
+        body(program, block, emit, constant, active);
+        return std::pair{FunctionLdsDwords(program), AnalyzeProgramRequirements(program)};
+    };
+
+    const auto [laneSlots, laneRequirements] = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        auto& lane = emit(IrOpcode::LaneId, IrType::U32, {});
+        auto& address = emit(IrOpcode::ShiftLeftLogical32, IrType::U32, {&lane, &constant(2u)});
+        for (const std::uint32_t memory : {0u, 1u, 2u}) emit(IrOpcode::WriteSharedU32, IrType::Void, {&address, &lane, &active}, memory);
+        emit(IrOpcode::LoadSharedU32, IrType::U32, {&address, &active}, 2u);
+    });
+    require(laneSlots == 192u, "function LDS: lane-strided slots up to byte 767 must take 192 dwords");
+    require(laneRequirements.functionLds && laneRequirements.functionLdsDwords == 192u, "function LDS: the requirements do not carry the bounded size");
+    {
+        std::vector<std::uint32_t> rebased;
+        for (const auto& [inst, address] : laneRequirements.functionLdsAddresses) rebased.push_back(address);
+        std::sort(rebased.begin(), rebased.end());
+        require(rebased == std::vector<std::uint32_t>{0u, 0u, 0u, 0u}, "function LDS: lane-strided slots must be addressed without the lane term");
+    }
+
+    const auto [mixed, mixedRequirements] = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        auto& lane = emit(IrOpcode::LaneId, IrType::U32, {});
+        auto& address = emit(IrOpcode::ShiftLeftLogical32, IrType::U32, {&lane, &constant(2u)});
+        emit(IrOpcode::WriteSharedU32, IrType::Void, {&address, &lane, &active}, 0u);
+        emit(IrOpcode::LoadSharedU32, IrType::U32, {&constant(8u), &active}, 0u);
+    });
+    require(mixed == 64u && mixedRequirements.functionLdsAddresses.empty(), "function LDS: a constant address beside lane-strided ones must keep the lane term");
+
+    const auto [strides, stridesRequirements] = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        auto& lane = emit(IrOpcode::LaneId, IrType::U32, {});
+        auto& four = emit(IrOpcode::ShiftLeftLogical32, IrType::U32, {&lane, &constant(2u)});
+        auto& eight = emit(IrOpcode::IMul32, IrType::U32, {&lane, &constant(8u)});
+        emit(IrOpcode::WriteSharedU32, IrType::Void, {&four, &lane, &active}, 0u);
+        emit(IrOpcode::LoadSharedU32, IrType::U32, {&eight, &active}, 0u);
+    });
+    require(strides == 128u && stridesRequirements.functionLdsAddresses.empty(), "function LDS: two lane strides must keep the lane term");
+
+    const auto [halfWord, halfWordRequirements] = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        auto& lane = emit(IrOpcode::LaneId, IrType::U32, {});
+        auto& address = emit(IrOpcode::ShiftLeftLogical32, IrType::U32, {&lane, &constant(1u)});
+        emit(IrOpcode::WriteSharedU32, IrType::Void, {&address, &lane, &active}, 0u);
+    });
+    require(halfWord == 64u && halfWordRequirements.functionLdsAddresses.empty(), "function LDS: a lane stride that is not whole dwords must keep the lane term");
+
+    const auto [summed, summedRequirements] = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        auto& lane = emit(IrOpcode::LaneId, IrType::U32, {});
+        auto& scaled = emit(IrOpcode::IMul32, IrType::U32, {&constant(16u), &lane});
+        auto& low = emit(IrOpcode::IAdd32, IrType::U32, {&scaled, &constant(4u)});
+        auto& other = emit(IrOpcode::LaneId, IrType::U32, {});
+        auto& shifted = emit(IrOpcode::ShiftLeftLogical32, IrType::U32, {&other, &constant(4u)});
+        auto& high = emit(IrOpcode::IAdd32, IrType::U32, {&constant(1024u), &shifted});
+        emit(IrOpcode::WriteSharedU32x2, IrType::Void, {&low, &lane, &lane, &active}, 0u);
+        emit(IrOpcode::LoadSharedU32x4, IrType::U32x4, {&high, &active}, 1u);
+    });
+    {
+        std::vector<std::uint32_t> rebased;
+        for (const auto& [inst, address] : summedRequirements.functionLdsAddresses) rebased.push_back(address);
+        std::sort(rebased.begin(), rebased.end());
+        require(rebased == std::vector<std::uint32_t>{4u, 1024u}, "function LDS: lane ids of separate instructions with one stride must share the rebase");
+        require(summedRequirements.functionLdsDwords == 384u && summed == 576u, "function LDS: the rebased array must hold the rebased addresses");
+    }
+
+    const auto [wide, wideRequirements] = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        auto& lane = emit(IrOpcode::LaneId, IrType::U32, {});
+        auto& masked = emit(IrOpcode::BitwiseAnd32, IrType::U32, {&lane, &constant(7u)});
+        auto& scaled = emit(IrOpcode::IMul32, IrType::U32, {&masked, &constant(16u)});
+        auto& chosen = emit(IrOpcode::SelectU32, IrType::U32, {&active, &scaled, &constant(0x100u)});
+        emit(IrOpcode::LoadSharedU32x4, IrType::U32x4, {&chosen, &active}, 0u);
+    });
+    require(wide == 128u, "function LDS: a 4-dword access at byte 0x100 must take 68 dwords, rounded to 128");
+    require(wideRequirements.functionLdsDwords == 128u, "function LDS: the requirements do not carry the wide access's size");
+    require(wideRequirements.functionLdsAddresses.empty(), "function LDS: a selected address must keep the lane term");
+
+    const auto [unbounded, unboundedRequirements] = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        auto& user = emit(IrOpcode::GetUserData, IrType::U32, {&constant(0u)});
+        emit(IrOpcode::WriteSharedU32, IrType::Void, {&user, &user, &active}, 0u);
+    });
+    require(unbounded == FunctionLdsDwordLimit && unboundedRequirements.functionLdsDwords == FunctionLdsDwordLimit, "function LDS: an address without a bound must keep the full array");
+
+    const auto wrapping = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        emit(IrOpcode::LoadSharedU32, IrType::U32, {&constant(0x20u), &active}, 3u);
+    }).first;
+    require(wrapping == FunctionLdsDwordLimit, "function LDS: an offset that can wrap the address must keep the full array");
+
+    const auto loop = build([](IrProgram& program, IrBlock& block, auto& emit, auto& constant, IrValue& active) {
+        auto& phi = program.CreateValue(IrOpcode::Phi, IrType::U32);
+        block.AppendInstruction(&phi);
+        auto& next = emit(IrOpcode::IAdd32, IrType::U32, {&phi, &constant(4u)});
+        phi.AddPhiOperand(&block, &constant(0u));
+        phi.AddPhiOperand(&block, &next);
+        emit(IrOpcode::WriteSharedU32, IrType::Void, {&phi, &next, &active}, 0u);
+    }).first;
+    require(loop == FunctionLdsDwordLimit, "function LDS: a loop-carried address must keep the full array");
+
+    const auto joined = build([](IrProgram& program, IrBlock& block, auto& emit, auto& constant, IrValue& active) {
+        auto& phi = program.CreateValue(IrOpcode::Phi, IrType::U32);
+        block.AppendInstruction(&phi);
+        phi.AddPhiOperand(&block, &constant(0x40u));
+        phi.AddPhiOperand(&block, &constant(0x3fcu));
+        emit(IrOpcode::WriteSharedU32, IrType::Void, {&phi, &constant(1u), &active}, 0u);
+    }).first;
+    require(joined == 256u, "function LDS: a phi of bounded addresses must take its largest");
+
+    const auto unsized = build([](IrProgram&, IrBlock&, auto& emit, auto& constant, IrValue& active) {
+        emit(IrOpcode::LoadShared, IrType::U32, {&constant(0u), &active}, 0u);
+    }).first;
+    require(unsized == FunctionLdsDwordLimit, "function LDS: an access without a known width must keep the full array");
+}
+
 int main() {
     try {
         using namespace ShaderRecompiler;
@@ -310,6 +613,10 @@ int main() {
         verifyMeshConfiguration();
         verifyPixelInputs();
         verifyPixelParameterSlots();
+        verifyComputedTexelOffsets();
+        verifyWaveUniformValues();
+        verifyTwoLaneUniformValues();
+        verifyFunctionLdsBound();
 #if ANYPS5_ENABLE_SPIRV_TOOLS
         const std::vector<std::uint32_t> minimalSpirv{
             0x07230203u, 0x00010000u, 0u, 5u, 0u,

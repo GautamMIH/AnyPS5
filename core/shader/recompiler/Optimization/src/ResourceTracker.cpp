@@ -803,7 +803,7 @@ private:
         const bool depth = (memory.imageSampleFlags & RdnaImageSampleFlagCompare) != 0;
         for (std::uint32_t i = 0; i < m_info.images.size(); i++) {
             auto& image = m_info.images[i];
-            if (image.source == source && image.resourceClass == resourceClass && image.dimension == memory.imageDimension && image.mipMode == mip && image.depthCompare == depth && image.r128 == memory.imageR128) {
+            if (image.source == source && image.resourceClass == resourceClass && image.dimension == memory.imageDimension && image.mipMode == mip && image.depthCompare == depth && image.r128 == memory.imageR128 && image.packed == memory.imagePacked) {
                 Merge(image, op, pc);
                 return i;
             }
@@ -819,6 +819,7 @@ private:
         image.mipMode = mip;
         image.depthCompare = depth;
         image.r128 = memory.imageR128;
+        image.packed = memory.imagePacked;
         Merge(image, op, pc);
         m_info.images.push_back(image);
         return static_cast<std::uint32_t>(m_info.images.size() - 1);
@@ -958,9 +959,9 @@ private:
                 std::fprintf(stderr, "[bda] %s at pc 0x%08x: %s access, offset %s%s\n", std::string(IrOpcodeName(op)).c_str(), flags.pc, kind, immediateOffset ? "immediate" : "dynamic", memory.kind == ResourceKind::ScalarAddress && !immediateOffset ? " (a register offset is not planned by the SRT walker)" : "");
             }
             m_info.usesDma = true;
-            // Global and flat stores write through the table too: the draw must lease registered
-            // memory writable, or the stores land in a read-only copy.
-            m_info.bdaWrites = m_info.bdaWrites || addressInfo.access == AddressAccess::Write;
+            // Global and flat stores and atomics write through the table too: the draw must lease
+            // registered memory writable, or the writes land in a read-only copy.
+            m_info.bdaWrites = m_info.bdaWrites || addressInfo.access == AddressAccess::Write || addressInfo.access == AddressAccess::Atomic;
             return;
         }
 

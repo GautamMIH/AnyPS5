@@ -25,6 +25,33 @@ bool TranslationContext::integer16Binary(const RdnaInstruction& inst, IrOpcode o
     return true;
 }
 
+IrU32 TranslationContext::saturateU16Result(const RdnaInstruction& inst, const IrU32& value, bool sign) {
+    if (!inst.destination.clamp) {
+        return value;
+    }
+    if (!sign) {
+        return IrU32(ir.Emit(IrOpcode::UMin32, IrType::U32, {&value.Value(), &ir.Constant(0xffffu)}));
+    }
+    const IrU32 upper(ir.Emit(IrOpcode::SMin32, IrType::U32, {&value.Value(), &ir.Constant(0x7fffu)}));
+    return IrU32(ir.Emit(IrOpcode::SMax32, IrType::U32, {&upper.Value(), &ir.Constant(0xffff8000u)}));
+}
+
+IrU32 TranslationContext::wideAdd(const RdnaInstruction& inst, const IrU32& low, const IrU32& high, const IrU32& addend, bool sign) {
+    const IrU32 sum(ir.IAdd(low.Value(), addend.Value()));
+    if (!inst.destination.clamp) {
+        return sum;
+    }
+    const IrU32 carry(ir.Select(ir.ULessThan(sum.Value(), low.Value()), ir.Constant(1u), ir.Constant(0u)));
+    IrU32 top(ir.IAdd(high.Value(), carry.Value()));
+    if (!sign) {
+        return IrU32(ir.Select(ir.INotEqual(top.Value(), ir.Constant(0u)), ir.Constant(0xffffffffu), sum.Value()));
+    }
+    top = IrU32(ir.IAdd(top.Value(), ir.ShiftRightArithmetic(addend.Value(), ir.Constant(31u))));
+    const IrU1 overflow(ir.INotEqual(top.Value(), ir.ShiftRightArithmetic(sum.Value(), ir.Constant(31u))));
+    IrValue& saturated = ir.BitwiseXor(ir.ShiftRightArithmetic(top.Value(), ir.Constant(31u)), ir.Constant(0x7fffffffu));
+    return IrU32(ir.Select(overflow.Value(), saturated, sum.Value()));
+}
+
 bool TranslationContext::vMed3I16(const RdnaInstruction& inst) {
     const IrU32 first = readU16AsU32(sourceAt(inst, 0u), true);
     const IrU32 second = readU16AsU32(sourceAt(inst, 1u), true);
@@ -46,11 +73,14 @@ bool TranslationContext::integer16Ternary(const RdnaInstruction& inst, IrOpcode 
 bool TranslationContext::integer16Mad(const RdnaInstruction& inst, bool sign, bool wide) {
     const IrU32 lhs = readU16AsU32(sourceAt(inst, 0u), sign);
     const IrU32 rhs = readU16AsU32(sourceAt(inst, 1u), sign);
-    const IrU32 addend = wide ? readU32(sourceAt(inst, 2u)) : readU16AsU32(sourceAt(inst, 2u), sign);
-    const IrU32 result(ir.IAdd(ir.IMul(lhs.Value(), rhs.Value()), addend.Value()));
+    const IrU32 product(ir.IMul(lhs.Value(), rhs.Value()));
     if (wide) {
+        const IrU32 high(sign ? ir.ShiftRightArithmetic(product.Value(), ir.Constant(31u)) : ir.Constant(0u));
+        const IrU32 result = wideAdd(inst, product, high, readU32(sourceAt(inst, 2u)), sign);
         writeOperand(inst.destination, &result.Value());
     } else {
+        const IrU32 addend = readU16AsU32(sourceAt(inst, 2u), sign);
+        const IrU32 result = saturateU16Result(inst, IrU32(ir.IAdd(product.Value(), addend.Value())), sign);
         write16Bits(inst.destination, IrU32(ir.BitwiseAnd(result.Value(), ir.Constant(0xffffu))));
     }
     return true;
@@ -84,11 +114,19 @@ bool TranslationContext::packedInteger16Shift(const RdnaInstruction& inst, IrOpc
     return true;
 }
 
-bool TranslationContext::packedInteger16Binary(const RdnaInstruction& inst, IrOpcode opcode) {
+IrU32 TranslationContext::saturateInteger16(const RdnaOperand& destination, IrU32 value, bool sign) {
+    if (!destination.clamp) {
+        return value;
+    }
+    IrValue& lower = ir.Emit(IrOpcode::SMax32, IrType::U32, {&value.Value(), &ir.Constant(sign ? 0xffff8000u : 0u)});
+    return IrU32(ir.Emit(IrOpcode::SMin32, IrType::U32, {&lower, &ir.Constant(sign ? 0x7fffu : 0xffffu)}));
+}
+
+bool TranslationContext::packedInteger16Binary(const RdnaInstruction& inst, IrOpcode opcode, bool sign) {
     const auto translateLane = [&](bool highLane) {
-        const IrU32 lhs = readU16LaneAsU32(sourceAt(inst, 0u), highLane, false);
-        const IrU32 rhs = readU16LaneAsU32(sourceAt(inst, 1u), highLane, false);
-        return IrU32(ir.Emit(opcode, IrType::U32, {&lhs.Value(), &rhs.Value()}));
+        const IrU32 lhs = readU16LaneAsU32(sourceAt(inst, 0u), highLane, sign);
+        const IrU32 rhs = readU16LaneAsU32(sourceAt(inst, 1u), highLane, sign);
+        return saturateInteger16(inst.destination, IrU32(ir.Emit(opcode, IrType::U32, {&lhs.Value(), &rhs.Value()})), sign);
     };
     const IrU32 low = translateLane(false);
     const IrU32 high = translateLane(true);
@@ -99,11 +137,14 @@ bool TranslationContext::packedInteger16Binary(const RdnaInstruction& inst, IrOp
 
 bool TranslationContext::packedInteger16Mad(const RdnaInstruction& inst, bool sign) {
     const auto translateLane = [&](bool highLane) {
-        const IrU32 lhs = readU16LaneAsU32(sourceAt(inst, 0u), highLane, false);
-        const IrU32 rhs = readU16LaneAsU32(sourceAt(inst, 1u), highLane, false);
-        const IrU32 product(ir.IMul(lhs.Value(), rhs.Value()));
+        const IrU32 lhs = readU16LaneAsU32(sourceAt(inst, 0u), highLane, sign);
+        const IrU32 rhs = readU16LaneAsU32(sourceAt(inst, 1u), highLane, sign);
+        IrU32 product(ir.IMul(lhs.Value(), rhs.Value()));
+        if (inst.destination.clamp && !sign) {
+            product = IrU32(ir.Emit(IrOpcode::UMin32, IrType::U32, {&product.Value(), &ir.Constant(0xffffu)}));
+        }
         const IrU32 addend = readU16LaneAsU32(sourceAt(inst, 2u), highLane, sign);
-        return IrU32(ir.IAdd(product.Value(), addend.Value()));
+        return saturateInteger16(inst.destination, IrU32(ir.IAdd(product.Value(), addend.Value())), sign);
     };
     const IrU32 low = translateLane(false);
     const IrU32 high = translateLane(true);
@@ -305,8 +346,15 @@ bool TranslationContext::integer24(const RdnaInstruction& inst, bool sign, bool 
     const IrU32 rhs(ir.Emit(extractOpcode, IrType::U32, {&rhsSource.Value(), &ir.Constant(0u), &ir.Constant(24u)}));
     const IrOpcode multiplyOpcode = high ? (sign ? IrOpcode::SMulHi : IrOpcode::UMulHi) : IrOpcode::IMul32;
     IrU32 result(ir.Emit(multiplyOpcode, IrType::U32, {&lhs.Value(), &rhs.Value()}));
+    if (inst.destination.clamp && !high && !addend) {
+        const IrU32 top(ir.Emit(sign ? IrOpcode::SMulHi : IrOpcode::UMulHi, IrType::U32, {&lhs.Value(), &rhs.Value()}));
+        IrValue& expected = sign ? ir.ShiftRightArithmetic(result.Value(), ir.Constant(31u)) : ir.Constant(0u);
+        IrValue& saturated = sign ? ir.BitwiseXor(ir.ShiftRightArithmetic(top.Value(), ir.Constant(31u)), ir.Constant(0x7fffffffu)) : ir.Constant(0xffffffffu);
+        result = IrU32(ir.Select(ir.INotEqual(top.Value(), expected), saturated, result.Value()));
+    }
     if (addend) {
-        result = IrU32(ir.IAdd(result.Value(), readU32(sourceAt(inst, 2u)).Value()));
+        const IrU32 productHigh(inst.destination.clamp ? ir.Emit(sign ? IrOpcode::SMulHi : IrOpcode::UMulHi, IrType::U32, {&lhs.Value(), &rhs.Value()}) : ir.Constant(0u));
+        result = wideAdd(inst, result, productHigh, readU32(sourceAt(inst, 2u)), sign);
     }
     writeOperand(inst.destination, &result.Value());
     return true;
@@ -325,10 +373,24 @@ bool TranslationContext::vMad64x32(const RdnaInstruction& inst, bool sign) {
     const IrU32 carryLowU32(ir.Select(carryLow.Value(), ir.Constant(1u), ir.Constant(0u)));
     const IrU32 high(ir.IAdd(high0.Value(), carryLowU32.Value()));
     const IrU1 carry1(ir.ULessThan(high.Value(), high0.Value()));
-    const IrU64 result(ir.ConstructU64(low.Value(), high.Value()));
+    const IrU1 carry(ir.LogicalOr(carry0.Value(), carry1.Value()));
+    IrU32 resultLow = low;
+    IrU32 resultHigh = high;
+    if (inst.destination.clamp) {
+        if (sign) {
+            IrValue& flipped = ir.BitwiseAnd(ir.BitwiseXor(mulHigh.Value(), high.Value()), ir.BitwiseXor(add[1].Value(), high.Value()));
+            const IrU1 overflow(ir.INotEqual(ir.ShiftRightLogical(flipped, ir.Constant(31u)), ir.Constant(0u)));
+            IrValue& addSign = ir.ShiftRightArithmetic(add[1].Value(), ir.Constant(31u));
+            resultLow = IrU32(ir.Select(overflow.Value(), ir.BitwiseXor(addSign, ir.Constant(0xffffffffu)), low.Value()));
+            resultHigh = IrU32(ir.Select(overflow.Value(), ir.BitwiseXor(addSign, ir.Constant(0x7fffffffu)), high.Value()));
+        } else {
+            resultLow = IrU32(ir.Select(carry.Value(), ir.Constant(0xffffffffu), low.Value()));
+            resultHigh = IrU32(ir.Select(carry.Value(), ir.Constant(0xffffffffu), high.Value()));
+        }
+    }
+    const IrU64 result(ir.ConstructU64(resultLow.Value(), resultHigh.Value()));
     writeOperand(inst.destination, &result.Value());
     if (inst.destination2.kind != RdnaOperandKind::Null && inst.destination2.kind != RdnaOperandKind::Unknown) {
-        const IrU1 carry(ir.LogicalOr(carry0.Value(), carry1.Value()));
         if (!sign) {
             writeMask(inst.destination2, carry);
             return true;
@@ -346,7 +408,7 @@ bool TranslationContext::vSadU32(const RdnaInstruction& inst) {
     const IrU32 lo(ir.Emit(IrOpcode::UMin32, IrType::U32, {&lhs.Value(), &rhs.Value()}));
     const IrU32 hi(ir.Emit(IrOpcode::UMax32, IrType::U32, {&lhs.Value(), &rhs.Value()}));
     const IrU32 addend = readU32(sourceAt(inst, 2u));
-    const IrU32 result(ir.IAdd(ir.ISub(hi.Value(), lo.Value()), addend.Value()));
+    const IrU32 result = wideAdd(inst, IrU32(ir.ISub(hi.Value(), lo.Value())), IrU32(ir.Constant(0u)), addend, false);
     writeOperand(inst.destination, &result.Value());
     return true;
 }
@@ -374,7 +436,7 @@ bool TranslationContext::subwordSad(const RdnaInstruction& inst, std::uint32_t f
         sum = IrU32(ir.ShiftLeftLogical(sum.Value(), ir.Constant(sumShift)));
     }
     const IrU32 addend = readU32(sourceAt(inst, 2u));
-    const IrU32 result(ir.IAdd(sum.Value(), addend.Value()));
+    const IrU32 result = wideAdd(inst, sum, IrU32(ir.Constant(0u)), addend, false);
     writeOperand(inst.destination, &result.Value());
     return true;
 }
@@ -392,14 +454,15 @@ bool TranslationContext::vQsadU8(const RdnaInstruction& inst, bool masked, bool 
     const std::array<IrU32, 2> accumulator = readU32Pair(sourceAt(inst, 2u));
     if (wide) {
         const std::array<IrU32, 2> accumulatorHigh = readU32Pair(offsetOperand(sourceAt(inst, 2u), 2u));
-        writeU32Pair(inst.destination, {IrU32(ir.IAdd(accumulator[0].Value(), sad(0u).Value())), IrU32(ir.IAdd(accumulator[1].Value(), sad(8u).Value()))});
+        const IrU32 zero(ir.Constant(0u));
+        writeU32Pair(inst.destination, {wideAdd(inst, sad(0u), zero, accumulator[0], false), wideAdd(inst, sad(8u), zero, accumulator[1], false)});
         writeU32Pair(offsetOperand(inst.destination, 2u),
-            {IrU32(ir.IAdd(accumulatorHigh[0].Value(), sad(16u).Value())), IrU32(ir.IAdd(accumulatorHigh[1].Value(), sad(24u).Value()))});
+            {wideAdd(inst, sad(16u), zero, accumulatorHigh[0], false), wideAdd(inst, sad(24u), zero, accumulatorHigh[1], false)});
         return true;
     }
     const auto packed = [&](const IrU32& addend, std::uint32_t shift) {
-        const IrU32 low(ir.IAdd(addend.Value(), sad(shift).Value()));
-        const IrU32 high(ir.IAdd(ir.ShiftRightLogical(addend.Value(), ir.Constant(16u)), sad(shift + 8u).Value()));
+        const IrU32 low = saturateU16Result(inst, IrU32(ir.IAdd(ir.BitwiseAnd(addend.Value(), ir.Constant(0xffffu)), sad(shift).Value())), false);
+        const IrU32 high = saturateU16Result(inst, IrU32(ir.IAdd(ir.ShiftRightLogical(addend.Value(), ir.Constant(16u)), sad(shift + 8u).Value())), false);
         return IrU32(ir.BitwiseOr(ir.BitwiseAnd(low.Value(), ir.Constant(0xffffu)), ir.ShiftLeftLogical(high.Value(), ir.Constant(16u))));
     };
     writeU32Pair(inst.destination, {packed(accumulator[0], 0u), packed(accumulator[1], 16u)});
@@ -589,15 +652,21 @@ bool TranslationContext::sBfmB64(const RdnaInstruction& inst) {
     return true;
 }
 
+IrU32 TranslationContext::extractBits32(IrU32 source, IrU32 offset, IrU32 rawCount, bool sign) {
+    const IrU32 count(ir.Emit(IrOpcode::UMin32, IrType::U32, {&rawCount.Value(), &ir.Constant(32u)}));
+    const IrU32 discard(ir.BitwiseAnd(ir.ISub(ir.Constant(32u), count.Value()), ir.Constant(31u)));
+    const IrU32 shifted(sign ? ir.ShiftRightArithmetic(source.Value(), offset.Value()) : ir.ShiftRightLogical(source.Value(), offset.Value()));
+    const IrU32 aligned(ir.ShiftLeftLogical(shifted.Value(), discard.Value()));
+    const IrU32 field(sign ? ir.ShiftRightArithmetic(aligned.Value(), discard.Value()) : ir.ShiftRightLogical(aligned.Value(), discard.Value()));
+    return IrU32(ir.Select(ir.INotEqual(count.Value(), ir.Constant(0u)), field.Value(), ir.Constant(0u)));
+}
+
 bool TranslationContext::sBfeU32(const RdnaInstruction& inst, bool sign) {
     const IrU32 source = readU32(sourceAt(inst, 0u));
     const IrU32 field = readU32(sourceAt(inst, 1u));
     const IrU32 offset(ir.Emit(IrOpcode::BitFieldUExtract, IrType::U32, {&field.Value(), &ir.Constant(0u), &ir.Constant(5u)}));
     const IrU32 rawCount(ir.Emit(IrOpcode::BitFieldUExtract, IrType::U32, {&field.Value(), &ir.Constant(16u), &ir.Constant(7u)}));
-    const IrU32 available(ir.ISub(ir.Constant(32u), offset.Value()));
-    const IrU32 count(ir.Emit(IrOpcode::UMin32, IrType::U32, {&rawCount.Value(), &available.Value()}));
-    const IrOpcode opcode = sign ? IrOpcode::BitFieldSExtract : IrOpcode::BitFieldUExtract;
-    const IrU32 result(ir.Emit(opcode, IrType::U32, {&source.Value(), &offset.Value(), &count.Value()}));
+    const IrU32 result = extractBits32(source, offset, rawCount, sign);
     writeOperand(inst.destination, &result.Value());
     ir.SetScc(ir.INotEqual(result.Value(), ir.Constant(0u)));
     return true;
@@ -673,15 +742,12 @@ bool TranslationContext::vAlignbitB32(const RdnaInstruction& inst) {
 bool TranslationContext::vAlignbyteB32(const RdnaInstruction& inst) {
     const IrU32 hi = readU32(sourceAt(inst, 0u));
     const IrU32 lo = readU32(sourceAt(inst, 1u));
-    const IrU32 byteOffset(ir.BitwiseAnd(readU32(sourceAt(inst, 2u)).Value(), ir.Constant(31u)));
+    const IrU32 byteOffset(ir.BitwiseAnd(readU32(sourceAt(inst, 2u)).Value(), ir.Constant(3u)));
     const IrU32 bitOffset(ir.ShiftLeftLogical(byteOffset.Value(), ir.Constant(3u)));
     const IrU64 concatenated(ir.ConstructU64(lo.Value(), hi.Value()));
-    const IrU32 maskedBitOffset(ir.BitwiseAnd(bitOffset.Value(), ir.Constant(63u)));
-    const IrU64 shifted(ir.Emit(IrOpcode::ShiftRightLogical64, IrType::U64, {&concatenated.Value(), &maskedBitOffset.Value()}));
-    const IrU1 inRange(ir.ULessThan(byteOffset.Value(), ir.Constant(8u)));
+    const IrU64 shifted(ir.Emit(IrOpcode::ShiftRightLogical64, IrType::U64, {&concatenated.Value(), &bitOffset.Value()}));
     const std::array<IrU32, 2> extracted = extractU64(shifted);
-    const IrU32 result(ir.Select(inRange.Value(), extracted[0].Value(), ir.Constant(0u)));
-    writeOperand(inst.destination, &result.Value());
+    writeOperand(inst.destination, &extracted[0].Value());
     return true;
 }
 
@@ -791,17 +857,9 @@ bool TranslationContext::vCndmaskB32(const RdnaInstruction& inst) {
     const IrU1 condition = readMask(maskOperand);
     const RdnaOperand& falseOperand = sourceAt(inst, 0u);
     const RdnaOperand& trueOperand = sourceAt(inst, 1u);
-    IrValue* result = nullptr;
-    if (falseOperand.negate || falseOperand.absolute || trueOperand.negate || trueOperand.absolute) {
-        IrValue* falseValue = readOperand(falseOperand, IrType::F32);
-        IrValue* trueValue = readOperand(trueOperand, IrType::F32);
-        result = &ir.Emit(IrOpcode::SelectF32, IrType::F32, {&condition.Value(), trueValue, falseValue});
-    } else {
-        const IrU32 falseValue = readU32(falseOperand);
-        const IrU32 trueValue = readU32(trueOperand);
-        result = &ir.Select(condition.Value(), trueValue.Value(), falseValue.Value());
-    }
-    writeOperand(inst.destination, result);
+    const IrU32 falseValue = readU32(falseOperand);
+    const IrU32 trueValue = readU32(trueOperand);
+    writeOperand(inst.destination, &ir.Select(condition.Value(), trueValue.Value(), falseValue.Value()));
     return true;
 }
 

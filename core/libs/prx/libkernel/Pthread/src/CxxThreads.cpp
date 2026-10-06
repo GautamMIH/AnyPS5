@@ -18,7 +18,6 @@ constexpr int kThrdTimedOut = 2;
 constexpr int kThrdBusy = 3;
 constexpr int kThrdError = 4;
 constexpr int kMtxRecursive = 0x100;
-constexpr std::int64_t kXtimeTicksPerSecond = 10'000'000;
 
 struct Xtime {
     std::int64_t sec;
@@ -124,9 +123,7 @@ int APS5_VABI _Thrd_join_nid_postfix(Pthread thread, int* result) {
     return kThrdSuccess;
 }
 
-std::int64_t APS5_VABI _Xtime_get_ticks_nid_postfix() {
-    const auto sinceEpoch = std::chrono::system_clock::now().time_since_epoch();
-    return std::chrono::duration_cast<std::chrono::nanoseconds>(sinceEpoch).count() / (1'000'000'000 / kXtimeTicksPerSecond);
-}
+// _Xtime_get_ticks is a libc export (OpenOrbis lists it under libc/LibcInternal); it lives in
+// prx/libc/src/Time.cpp.
 
 }

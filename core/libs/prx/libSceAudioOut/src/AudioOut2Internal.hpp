@@ -36,9 +36,10 @@ static constexpr std::uint32_t AUDIO_OUT2_SAMPLE_RATE = 48000;
 // The grain a push carries, in samples per channel: a context's num_grains (Demon's Souls: 256, 5.33 ms).
 static constexpr std::uint32_t AUDIO_OUT2_DEFAULT_GRAIN = 256;
 static constexpr std::uint32_t AUDIO_OUT2_OUTPUT_CHANNELS = 2;
-static constexpr std::uint32_t AUDIO_OUT2_PORT_CHANNELS_MAX = 8;
+static constexpr std::uint32_t AUDIO_OUT2_PORT_CHANNELS_MAX = 12;
 
 struct AudioOut2Context;
+struct AudioOut2StereoFold;
 
 struct AudioOut2Port {
     bool used = false;
@@ -50,11 +51,12 @@ struct AudioOut2Port {
     // Channel count and sample type decoded from dataFormat: float samples, or 16-bit integers.
     std::uint32_t channels = 0;
     bool int16 = false;
+    const AudioOut2StereoFold* fold = nullptr;
     // The PCM buffer (one grain, interleaved) the title last handed over through the data attribute.
     // It is guest memory the title rewrites every tick, so it is read when the context mixes, not
     // when it is set.
     const void* data = nullptr;
-    float volume[AUDIO_OUT2_PORT_CHANNELS_MAX] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    float volume[AUDIO_OUT2_PORT_CHANNELS_MAX] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     std::uint64_t dataSets = 0;
     std::uint64_t attributeTraces = 0;
 };

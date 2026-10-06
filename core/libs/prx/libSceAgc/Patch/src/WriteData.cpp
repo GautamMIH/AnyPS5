@@ -15,10 +15,6 @@ int APS5_VABI sceAgcWriteDataPatchSetAddressOrOffset(std::uint32_t* cmd, std::ui
     return 0;
 }
 
-// AnyPS5 presents a base PS5, so PS5 Pro ("Trinity") paths stay disabled (see sceKernelIsTrinityMode).
-void APS5_VABI sceAgcGetIsTrinityMode(std::uint8_t* result) {
-    Agc::Command::Require(result != nullptr, __func__, "null result");
-    *result = 0;
-}
+// sceAgcGetIsTrinityMode lives in Misc/src/Platform.cpp (base PS5: always false).
 
 }

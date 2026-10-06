@@ -1,10 +1,11 @@
+#include <array>
 #include <cerrno>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
 #include <mutex>
 #include <stdexcept>
-#include <unordered_map>
+#include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/File/include/FileErrors.hpp"
@@ -21,10 +22,15 @@
 
 namespace {
 
+constexpr std::int32_t kStateProcessing = 2;
 constexpr std::int32_t kStateCompleted = 3;
 constexpr std::int32_t kStateAborted = 4;
 constexpr std::uint32_t kWaitAnd = 1;
 constexpr std::uint32_t kWaitOr = 2;
+// Request ids cycle through a fixed table, as the PS5 AIO queue ids do.
+constexpr std::int32_t kMaxRequests = 512;
+constexpr std::int32_t kRequestNumMax = 128;
+constexpr std::int32_t kIdNumMax = 128;
 
 struct SchedulingParam {
     std::int32_t schedulingWindowSize;
@@ -41,10 +47,27 @@ struct AioParam {
 };
 
 // Submitted requests run to completion before the submit call returns; the table keeps each
-// request's final state until the guest deletes it.
+// request's final state. A deleted or cancelled request reads as aborted until its id is reused.
 std::mutex requestMutex;
-std::unordered_map<std::int32_t, std::int32_t> requests;
+std::array<std::int32_t, kMaxRequests> requests{};
 std::int32_t nextRequest = 1;
+
+bool validId(const std::int32_t id) {
+    return id > 0 && id < kMaxRequests;
+}
+
+std::int32_t allocate(const std::int32_t state) {
+    const std::lock_guard lock(requestMutex);
+    const std::int32_t id = nextRequest;
+    nextRequest = nextRequest + 1 == kMaxRequests ? 1 : nextRequest + 1;
+    requests[id] = state;
+    return id;
+}
+
+void setState(const std::int32_t id, const std::int32_t state) {
+    const std::lock_guard lock(requestMutex);
+    requests[id] = state;
+}
 
 #ifdef _WIN32
 // Windows has no pread/pwrite: a duplicated descriptor keeps the caller's file position intact.
@@ -90,10 +113,7 @@ std::int32_t complete(KernelAioRwRequest* requestsToRun, const std::int32_t coun
         requestsToRun[index].result->state = static_cast<std::uint32_t>(failed ? kStateAborted : kStateCompleted);
         aborted = aborted || failed;
     }
-    const std::lock_guard lock(requestMutex);
-    const std::int32_t id = nextRequest++;
-    requests.emplace(id, aborted ? kStateAborted : kStateCompleted);
-    return id;
+    return allocate(aborted ? kStateAborted : kStateCompleted);
 }
 
 int validate(const KernelAioRwRequest* request, const std::int32_t size, const void* ids) {
@@ -110,19 +130,29 @@ int submit(KernelAioRwRequest* request, const std::int32_t size, std::int32_t* i
     return 0;
 }
 
-int submitMultiple(KernelAioRwRequest* request, const std::int32_t size, std::int32_t* ids, const bool write) {
+int submitMultiple(KernelAioRwRequest* request, const std::int32_t size, std::int32_t* ids, const bool write, const char* name) {
     if (const int error = validate(request, size, ids)) return error;
+    if (size > kRequestNumMax) throw std::runtime_error(std::string(name) + ": more than 128 requests per batch is not modelled");
     for (std::int32_t index = 0; index < size; ++index)
         ids[index] = complete(&request[index], 1, write);
     return 0;
 }
 
+// Batch calls check every id before touching any output.
+int validateIds(const std::int32_t* ids, const std::int32_t count, const void* out, const char* name, const bool allowZero) {
+    if (!ids || !out) return SCE_KERNEL_ERROR_EFAULT;
+    if (count < 0) return SCE_KERNEL_ERROR_EINVAL;
+    if (count > kIdNumMax) throw std::runtime_error(std::string(name) + ": more than 128 ids per batch is not modelled");
+    for (std::int32_t index = 0; index < count; ++index)
+        if (!(allowZero && ids[index] == 0) && !validId(ids[index])) return SCE_KERNEL_ERROR_EINVAL;
+    return 0;
+}
+
 int stateOf(const std::int32_t id, std::int32_t* state) {
     if (!state) return SCE_KERNEL_ERROR_EFAULT;
+    if (!validId(id)) return SCE_KERNEL_ERROR_EINVAL;
     const std::lock_guard lock(requestMutex);
-    const auto found = requests.find(id);
-    if (found == requests.end()) return SCE_KERNEL_ERROR_EINVAL;
-    *state = found->second;
+    *state = requests[id];
     return 0;
 }
 
@@ -169,12 +199,12 @@ int APS5_VABI sceKernelAioSubmitWriteCommands(KernelAioRwRequest* req, int32_t s
 
 int APS5_VABI sceKernelAioSubmitReadCommandsMultiple(KernelAioRwRequest* req, int32_t size, int32_t prio, int32_t* ids) {
     (void)prio;
-    return submitMultiple(req, size, ids, false);
+    return submitMultiple(req, size, ids, false, "sceKernelAioSubmitReadCommandsMultiple");
 }
 
 int APS5_VABI sceKernelAioSubmitWriteCommandsMultiple(KernelAioRwRequest* req, int32_t size, int32_t prio, int32_t* ids) {
     (void)prio;
-    return submitMultiple(req, size, ids, true);
+    return submitMultiple(req, size, ids, true, "sceKernelAioSubmitWriteCommandsMultiple");
 }
 
 int APS5_VABI sceKernelAioPollRequest(int32_t id, int32_t* state) {
@@ -199,28 +229,53 @@ int APS5_VABI sceKernelAioWaitRequest(int32_t id, int32_t* state, uint32_t* usec
 
 int APS5_VABI sceKernelAioWaitRequests(const int32_t* ids, int32_t count, int32_t* states, uint32_t mode, uint32_t* usec) {
     (void)usec;
-    if (mode != kWaitAnd && mode != kWaitOr) return SCE_KERNEL_ERROR_EINVAL;
-    return sceKernelAioPollRequests(ids, count, states);
+    if (const int error = validateIds(ids, count, states, "sceKernelAioWaitRequests", false)) return error;
+    if (mode != kWaitAnd && mode != kWaitOr) throw std::runtime_error("sceKernelAioWaitRequests: unsupported wait mode " + std::to_string(mode));
+    const std::lock_guard lock(requestMutex);
+    for (int32_t index = 0; index < count; ++index)
+        states[index] = requests[ids[index]];
+    return 0;
 }
 
+// Id 0 names no request: it reports processing and changes nothing.
 int APS5_VABI sceKernelAioCancelRequest(int32_t id, int32_t* state) {
-    return stateOf(id, state);
+    if (!state) return SCE_KERNEL_ERROR_EFAULT;
+    if (id == 0) {
+        *state = kStateProcessing;
+        return 0;
+    }
+    if (!validId(id)) return SCE_KERNEL_ERROR_EINVAL;
+    setState(id, kStateAborted);
+    *state = kStateAborted;
+    return 0;
+}
+
+int APS5_VABI sceKernelAioCancelRequests(const int32_t* ids, int32_t count, int32_t* states) {
+    if (const int error = validateIds(ids, count, states, "sceKernelAioCancelRequests", true)) return error;
+    for (int32_t index = 0; index < count; ++index) {
+        if (ids[index] == 0) {
+            states[index] = kStateProcessing;
+            continue;
+        }
+        setState(ids[index], kStateAborted);
+        states[index] = kStateAborted;
+    }
+    return 0;
 }
 
 int APS5_VABI sceKernelAioDeleteRequest(int32_t id, int32_t* ret) {
     if (!ret) return SCE_KERNEL_ERROR_EFAULT;
-    const std::lock_guard lock(requestMutex);
-    if (requests.erase(id) == 0) return SCE_KERNEL_ERROR_EINVAL;
+    if (!validId(id)) return SCE_KERNEL_ERROR_EINVAL;
+    setState(id, kStateAborted);
     *ret = 0;
     return 0;
 }
 
 int APS5_VABI sceKernelAioDeleteRequests(const int32_t* ids, int32_t count, int32_t* rets) {
-    if (!ids || !rets) return SCE_KERNEL_ERROR_EFAULT;
-    if (count <= 0) return SCE_KERNEL_ERROR_EINVAL;
+    if (const int error = validateIds(ids, count, rets, "sceKernelAioDeleteRequests", false)) return error;
     for (int32_t index = 0; index < count; ++index) {
-        const int result = sceKernelAioDeleteRequest(ids[index], &rets[index]);
-        if (result != 0) return result;
+        setState(ids[index], kStateAborted);
+        rets[index] = 0;
     }
     return 0;
 }

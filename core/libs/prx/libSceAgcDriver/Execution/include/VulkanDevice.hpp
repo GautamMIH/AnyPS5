@@ -20,6 +20,9 @@ public:
     VulkanDevice(const VulkanDevice&) = delete;
     VulkanDevice& operator=(const VulkanDevice&) = delete;
     ShaderRecompiler::SpirvTarget Target() const;
+    // The target for a compute program of the given wave size (upstream's API). Subgroup size control
+    // is not enabled, so the device's subgroup size stands (32 on NVIDIA).
+    ShaderRecompiler::SpirvTarget ComputeTarget(std::uint32_t waveSize) const;
     void WaitIdle();
     void WaitDraws();
     // The samples that passed the depth and stencil tests in every draw recorded since the first
@@ -55,7 +58,8 @@ public:
     // ANYPS5_GPU_TIMING: adds the GPU time of batches completed since the last report to the frame
     // (GPU.<label>, bytes = batches; GPU.busy = their sum).
     void ReportGpuTime(FrameTiming& frame);
-    void Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});
+    // programAddress only labels the dispatch (upstream's profiling); it does not change the work.
+    void Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, std::uint64_t programAddress = 0);
     void Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});
     void EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});
 

@@ -11,7 +11,7 @@ extern "C" {
 
 int APS5_VABI scePthreadMutexattrInit(PthreadMutexattr* attr) {
     if (!attr) throw std::runtime_error("scePthreadMutexattrInit: null attr");
-    auto* p = new (std::nothrow) PthreadMutexattrPrivate{MutexType::Normal};
+    auto* p = new (std::nothrow) PthreadMutexattrPrivate{MutexType::ErrorCheck};
     if (!p) return PthreadSync::SceError(PthreadSync::kErrorNoMemory);
     *attr = p;
     return SCE_OK;
@@ -30,8 +30,8 @@ int APS5_VABI scePthreadMutexattrSettype(PthreadMutexattr* attr, int type) {
     case 1: (*attr)->type = MutexType::ErrorCheck; break;
     case 2: (*attr)->type = MutexType::Recursive; break;
     case 3: (*attr)->type = MutexType::Normal; break;
-    // PTHREAD_MUTEX_ADAPTIVE_NP spins before sleeping; otherwise it behaves as a normal mutex.
-    case 4: (*attr)->type = MutexType::Normal; break;
+    // PTHREAD_MUTEX_ADAPTIVE_NP spins before sleeping; a relock reports EDEADLK.
+    case 4: (*attr)->type = MutexType::Adaptive; break;
     default: return PthreadSync::SceError(PthreadSync::kErrorInvalid);
     }
     return SCE_OK;
@@ -46,7 +46,7 @@ int APS5_VABI scePthreadMutexattrSetprotocol(PthreadMutexattr* attr, int protoco
 
 int APS5_VABI scePthreadMutexInit(PthreadMutex* mutex, const PthreadMutexattr* attr, const char*) {
     if (!mutex) throw std::runtime_error("scePthreadMutexInit: null mutex");
-    return PthreadSync::SceError(PthreadSync::MutexCreate(mutex, attr && *attr ? (*attr)->type : MutexType::Normal));
+    return PthreadSync::SceError(PthreadSync::MutexCreate(mutex, attr && *attr ? (*attr)->type : MutexType::ErrorCheck));
 }
 
 int APS5_VABI scePthreadMutexDestroy(PthreadMutex* mutex) {

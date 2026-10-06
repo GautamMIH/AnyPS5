@@ -5,6 +5,15 @@
 
 namespace ShaderRecompiler {
 
+namespace {
+
+DppMoveFlags dppFlags(const RdnaOperand& operand) {
+    const auto control = operand.dpp8 ? DppMoveFlags::Lanes8 | operand.dppCtrl : operand.dppCtrl;
+    return {control, static_cast<std::uint8_t>(operand.dppRowMask), static_cast<std::uint8_t>(operand.dppBankMask), operand.dppFetchInactive, operand.dppBoundCtrl};
+}
+
+}
+
 const RdnaOperand& TranslationContext::sourceAt(const RdnaInstruction& inst, std::uint32_t index) {
     switch (index) {
         case 0u: return inst.source0;
@@ -26,6 +35,7 @@ RdnaOperand TranslationContext::destinationOperand(const RdnaInstruction& inst) 
             continue;
         }
         destination.dpp = true;
+        destination.dpp8 = source.dpp8;
         destination.dppCtrl = source.dppCtrl;
         destination.dppRowMask = source.dppRowMask;
         destination.dppBankMask = source.dppBankMask;
@@ -112,6 +122,7 @@ RdnaOperand TranslationContext::plainOperand(const RdnaOperand& operand) {
     result.dppFetchInactive = false;
     result.dppBoundCtrl = false;
     result.dpp = false;
+    result.dpp8 = false;
     return result;
 }
 
@@ -141,21 +152,14 @@ IrValue* TranslationContext::readOperand(const RdnaOperand& operand, IrType type
         return &ir.ConstructU64(pair[0].Value(), pair[1].Value());
     }
     IrU32 bits = applyBitSourceModifiers(operand, readRawU32(operand));
-    if (TypesOverlap(type, IrType::F32) && !TypesOverlap(type, IrType::U32)) {
-        IrF32 value(ir.BitCastF32(bits.Value()));
-        if (operand.absolute) {
-            value = IrF32(ir.Emit(IrOpcode::FPAbs32, IrType::F32, {&value.Value()}));
-        }
-        if (operand.negate) {
-            value = IrF32(ir.Emit(IrOpcode::FPNeg32, IrType::F32, {&value.Value()}));
-        }
-        return &value.Value();
-    }
     if (operand.absolute) {
         bits = IrU32(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffffffu)));
     }
     if (operand.negate) {
         bits = IrU32(ir.BitwiseXor(bits.Value(), ir.Constant(0x80000000u)));
+    }
+    if (TypesOverlap(type, IrType::F32) && !TypesOverlap(type, IrType::U32)) {
+        return &ir.BitCastF32(bits.Value());
     }
     if (!TypesOverlap(type, IrType::U32)) {
         throw std::runtime_error("TranslationContext::readOperand requested unsupported operand type");
@@ -224,7 +228,7 @@ void TranslationContext::writeOperand(const RdnaOperand& operand, IrValue* value
 
 IrU32 TranslationContext::applyBitSourceModifiers(const RdnaOperand& operand, IrU32 value) {
     if (operand.dpp) {
-        const DppMoveFlags flags{static_cast<std::uint16_t>(operand.dppCtrl), static_cast<std::uint8_t>(operand.dppRowMask), static_cast<std::uint8_t>(operand.dppBankMask), operand.dppFetchInactive, operand.dppBoundCtrl};
+        const auto flags = dppFlags(operand);
         value = IrU32(ir.Emit(IrOpcode::DppMoveU32, IrType::U32, {&value.Value(), &ir.GetExec()}, flags));
     }
     if (operand.sdwaSel != 6u) {
@@ -247,18 +251,44 @@ IrU32 TranslationContext::applyBitSourceModifiers(const RdnaOperand& operand, Ir
 
 IrF32 TranslationContext::applyF32ResultModifiers(const RdnaOperand& operand, IrF32 value) {
     if (operand.omod != 0u) {
-        float multiplier = 0.5f;
-        switch (operand.omod) {
-            case 1u: multiplier = 2.0f; break;
-            case 2u: multiplier = 4.0f; break;
-            default: break;
+        IrValue& bits = ir.BitCastU32(value.Value());
+        IrValue& magnitude = ir.BitwiseAnd(bits, ir.Constant(0x7fffffffu));
+        IrValue& sign = ir.BitwiseAnd(bits, ir.Constant(0x80000000u));
+        IrValue* result = nullptr;
+        if (operand.omod == 3u) {
+            result = &ir.Select(ir.ULessThan(magnitude, ir.Constant(0x01000000u)), sign, ir.ISub(bits, ir.Constant(0x00800000u)));
+        } else {
+            const std::uint32_t exponentStep = operand.omod == 1u ? 0x00800000u : 0x01000000u;
+            result = &ir.Select(ir.ULessThan(magnitude, ir.Constant(0x7f800000u - exponentStep)), ir.IAdd(bits, ir.Constant(exponentStep)), ir.BitwiseOr(sign, ir.Constant(0x7f800000u)));
         }
-        value = IrF32(ir.Emit(IrOpcode::FPMul32, IrType::F32, {&value.Value(), &ir.ConstantF32(multiplier)}));
+        result = &ir.Select(ir.ULessThan(magnitude, ir.Constant(0x00800000u)), ir.Constant(0u), *result);
+        result = &ir.Select(ir.UGreaterThan(magnitude, ir.Constant(0x7f7fffffu)), bits, *result);
+        value = IrF32(ir.BitCastF32(*result));
     }
     if (operand.clamp) {
         value = IrF32(ir.Emit(IrOpcode::FPSaturate32, IrType::F32, {&value.Value()}));
     }
     return value;
+}
+
+IrF32 TranslationContext::applyF16ResultModifiers(const RdnaOperand& operand, IrF32 value) {
+    if (!operand.clamp) {
+        return value;
+    }
+    const IrF32 zero(ir.ConstantF32(0.0f));
+    const IrU1 positive(ir.Emit(IrOpcode::FPOrdGreaterThan32, IrType::U1, {&value.Value(), &zero.Value()}));
+    const IrF32 limited(ir.Emit(IrOpcode::FPMin32, IrType::F32, {&value.Value(), &ir.ConstantF32(1.0f)}));
+    return selectF32(positive, limited, zero);
+}
+
+IrU32 TranslationContext::clampF16Bits(const RdnaOperand& operand, IrU32 bits) {
+    if (!operand.clamp) {
+        return bits;
+    }
+    const IrU32 magnitude(ir.BitwiseAnd(bits.Value(), ir.Constant(0x7fffu)));
+    const IrU1 zero(ir.LogicalOr(ir.UGreaterThan(bits.Value(), ir.Constant(0x7fffu)), ir.UGreaterThan(magnitude.Value(), ir.Constant(0x7c00u))));
+    const IrU32 limited(ir.Select(ir.UGreaterThan(magnitude.Value(), ir.Constant(0x3c00u)), ir.Constant(0x3c00u), bits.Value()));
+    return IrU32(ir.Select(zero.Value(), ir.Constant(0u), limited.Value()));
 }
 
 IrU32 TranslationContext::readScalarCode(std::uint32_t code) {
@@ -356,7 +386,7 @@ void TranslationContext::writeRawU32(const RdnaOperand& operand, IrU32 value) {
             const VectorReg reg = static_cast<VectorReg>(operand.reg);
             IrValue& old = ir.GetVectorReg(reg);
             if (operand.dpp) {
-                const DppMoveFlags flags{static_cast<std::uint16_t>(operand.dppCtrl), static_cast<std::uint8_t>(operand.dppRowMask), static_cast<std::uint8_t>(operand.dppBankMask), operand.dppFetchInactive, operand.dppBoundCtrl};
+                const auto flags = dppFlags(operand);
                 value = IrU32(ir.Emit(IrOpcode::DppUpdateU32, IrType::U32, {&value.Value(), &old, &ir.GetExec()}, flags));
             } else {
                 value = IrU32(ir.Select(ir.GetExec(), value.Value(), old));

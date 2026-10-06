@@ -41,6 +41,14 @@ int APS5_VABI sceUserServiceGetAccessibilityZoomEnabled(int user_id, int32_t* zo
  return USER_SERVICE_OK;
 }
 
+int APS5_VABI sceUserServiceGetAccessibilityZoomFollowFocus(int user_id, int32_t* zoom_follow_focus) {
+ if (zoom_follow_focus == nullptr || user_id != USER_SERVICE_INITIAL_USER_ID) {
+  return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ }
+ *zoom_follow_focus = 0;
+ return USER_SERVICE_OK;
+}
+
 int APS5_VABI sceUserServiceGetAgeLevel(int user_id, uint32_t* age_level) {
  if (user_id != USER_SERVICE_INITIAL_USER_ID || !age_level) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
  *age_level = USER_SERVICE_ADULT_AGE_LEVEL;
@@ -113,12 +121,6 @@ int APS5_VABI sceUserServiceInitialize2(void) {
 }
 
 int APS5_VABI sceUserServiceTerminate(void) {
- return USER_SERVICE_OK;
-}
-
-int APS5_VABI sceUserServiceGetAccessibilityZoomFollowFocus(int user_id, int32_t* zoom_follow_focus) {
- if (user_id != USER_SERVICE_INITIAL_USER_ID || !zoom_follow_focus) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- *zoom_follow_focus = 0;
  return USER_SERVICE_OK;
 }
 

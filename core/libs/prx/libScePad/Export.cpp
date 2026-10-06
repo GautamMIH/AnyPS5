@@ -179,10 +179,9 @@ int APS5_VABI scePadResetOrientation(int handle) {
 }
 
 int APS5_VABI scePadSetAngularVelocityDeadbandState(int handle, bool enable) {
- (void)handle;
- (void)enable;
- NotImplemented_nid_no_patch(__func__);
- return 0;
+ if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
+ if (enable) NotImplemented_nid_no_patch(__func__);
+ return PAD_OK;
 }
 
 int APS5_VABI scePadSetLightBar(int handle, const PadLightBarParam* param) {
@@ -243,6 +242,12 @@ int APS5_VABI scePadSetVibrationMode(int handle, int mode) {
 int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool enabled) {
  (void)enabled;
  return PAD_OK;
+}
+
+APS5_EXPORT("fCWdlnmB1Ks", scePadUnknown_fCWdlnmB1Ks);
+int APS5_VABI scePadUnknown_fCWdlnmB1Ks(void) {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
 }
 
 }

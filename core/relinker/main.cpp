@@ -60,8 +60,8 @@ int main(const int argc, char* argv[]) {
         // A single executable: modules shipped beside it (sce_module/) are relinked as guest
         // modules it loads first. --game mode relinks a whole dump, modules included.
         auto module = Cli::PrepareModule(inputBytes, args);
-        std::cout << "sce_module/sce_modules processing: " << (args.skipSceModule ? "disabled (--skip-sce-module)" : "enabled") << '\n';
-        for (const auto& name : args.excludedSceModules) std::cout << "sce_module excluded: " << name << '\n';
+        std::cout << "sce_module/sce_modules/prx processing: " << (args.skipSceModule ? "disabled (--skip-sce-module)" : "enabled") << '\n';
+        for (const auto& name : args.excludedSceModules) std::cout << "Guest module excluded: " << name << '\n';
         std::vector<Relinker::GuestArtifact> guestArtifacts;
         if (!args.skipSceModule) {
             const auto syscallScanner = args.skipSyscallCheck ? Relinker::MakeNullSyscallScanner() : Relinker::MakeSyscallScanner();
@@ -77,10 +77,8 @@ int main(const int argc, char* argv[]) {
         std::cout << "Expected runtime layout (relative to the output executable):\n"
                   << std::filesystem::path(absPath).filename().string() << "\n"
                   << "libs/\n    *.prx\napp0/\n    <game resources>\n";
-        if (!guestArtifacts.empty()) {
-            std::cout << "    " << guestArtifacts.front().Path.parent_path().filename().string() << "/\n";
-            for (const auto& artifact : guestArtifacts) std::cout << "        " << artifact.Path.filename().string() << '\n';
-        }
+        for (const auto& artifact : guestArtifacts)
+            std::cout << "    " << artifact.Path.parent_path().filename().string() << "/" << artifact.Path.filename().string() << '\n';
         std::cout << "Game resources and system libraries must be placed in this layout separately.\n";
         if (args.runPath != "$ORIGIN/libs") std::cout << "Custom library search path (--rpath): " << args.runPath << '\n';
 
@@ -90,6 +88,7 @@ int main(const int argc, char* argv[]) {
         std::cerr << "FAIL: " << e.what();
         if (e.FailureOffset != 0) std::cerr << " (offset 0x" << std::hex << e.FailureOffset << ")";
         std::cerr << "\n";
+        if (!e.InputPath.empty()) std::cerr << "Input: " << e.InputPath << '\n';
         return 2;
     } catch (const Codegen::CodegenException& e) {
         std::cerr << "FAIL: " << e.what();

@@ -2,11 +2,18 @@
 #include <cstdint>
 #include <cmath>
 #include <limits>
+#include <cstdlib>
 #include <cstdint>
+#include <cstring>
+#include <stdexcept>
 
 #include "prx/libc/include/General.hpp"
 
 extern "C" {
+
+std::lldiv_t APS5_VABI lldiv_nid_postfix(long long numerator, long long denominator) {
+    return std::lldiv(numerator, denominator);
+}
 
 float APS5_VABI fmodf_nid_postfix(float x, float y) { return std::fmod(x, y); }
 float APS5_VABI asinf_nid_postfix(float x) { return std::asin(x); }
@@ -14,6 +21,7 @@ float APS5_VABI acosf_nid_postfix(float x) { return std::acos(x); }
 float APS5_VABI atan2f_nid_postfix(float y, float x) { return std::atan2(y, x); }
 float APS5_VABI tanf_nid_postfix(float x) { return std::tan(x); }
 float APS5_VABI log10f_nid_postfix(float x) { return std::log10(x); }
+float APS5_VABI logbf_nid_postfix(float x) { return std::logb(x); }
 double APS5_VABI exp2_nid_postfix(double x) { return std::exp2(x); }
 double APS5_VABI ldexp_nid_postfix(double x, int exponent) { return std::ldexp(x, exponent); }
 double APS5_VABI scalbn_nid_postfix(double x, int exponent) { return std::scalbn(x, exponent); }
@@ -79,7 +87,6 @@ float APS5_VABI hypotf_nid_postfix(float x, float y) { return std::hypot(x, y); 
 double APS5_VABI hypot_nid_postfix(double x, double y) { return std::hypot(x, y); }
 long double APS5_VABI frexpl_nid_postfix(long double x, int* exp) { return std::frexp(x, exp); }
 double APS5_VABI logb_nid_postfix(double x) { return std::logb(x); }
-float APS5_VABI logbf_nid_postfix(float x) { return std::logb(x); }
 float APS5_VABI nearbyintf_nid_postfix(float x) { return std::nearbyint(x); }
 float APS5_VABI fmaxf_nid_postfix(float x, float y) { return std::fmax(x, y); }
 float APS5_VABI fminf_nid_postfix(float x, float y) { return std::fmin(x, y); }
@@ -136,6 +143,22 @@ DinkumwareConstant _Inf_nid_postfix = {.Double = std::numeric_limits<double>::in
 double APS5_VABI tanh_nid_postfix(double x) { return std::tanh(x); }
 float APS5_VABI tanhf_nid_postfix(float x) { return std::tanh(x); }
 float APS5_VABI _FCosh_nid_postfix(float x, float y) { return y * std::cosh(x); }
+
+struct alignas(16) LibcFloatConstant { std::uint32_t bits[4]; };
+LibcFloatConstant _FInf_nid_postfix {{0x7f800000u, 0, 0, 0}};
+LibcFloatConstant _FNan_nid_postfix {{0x7fc00000u, 0, 0, 0}};
+
+short APS5_VABI _FDtest_nid_postfix(const float* value) {
+    constexpr short Denormal = -2, Finite = -1, Zero = 0, Infinite = 1, NotANumber = 2;
+    if (value == nullptr) throw std::invalid_argument("_FDtest: null value");
+    std::uint32_t bits;
+    std::memcpy(&bits, value, sizeof(bits));
+    const auto exponent = bits & 0x7f800000u;
+    const auto fraction = bits & 0x007fffffu;
+    if (exponent == 0x7f800000u) return fraction != 0 ? NotANumber : Infinite;
+    if (exponent == 0) return fraction != 0 ? Denormal : Zero;
+    return Finite;
+}
 int APS5_VABI __signbitf_nid_postfix(float x) { return std::signbit(x) ? 1 : 0; }
 
 static std::mutex g_randLock;

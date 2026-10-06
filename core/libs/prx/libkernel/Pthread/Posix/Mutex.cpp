@@ -62,8 +62,8 @@ int APS5_VABI pthread_mutexattr_settype_nid_postfix(PthreadMutexattr* attr, int 
     case 1: (*attr)->type = MutexType::ErrorCheck; break;
     case 2: (*attr)->type = MutexType::Recursive; break;
     case 3: (*attr)->type = MutexType::Normal; break;
-    // PTHREAD_MUTEX_ADAPTIVE_NP spins before sleeping; otherwise it behaves as a normal mutex.
-    case 4: (*attr)->type = MutexType::Normal; break;
+    // PTHREAD_MUTEX_ADAPTIVE_NP spins before sleeping; a relock reports EDEADLK.
+    case 4: (*attr)->type = MutexType::Adaptive; break;
     default: return PthreadSync::kErrorInvalid;
     }
     return 0;

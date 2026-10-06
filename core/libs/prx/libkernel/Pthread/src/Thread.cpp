@@ -49,6 +49,17 @@ static std::atomic<get_thread_atexit_count_func_t> threadAtexitCount{nullptr};
 static std::atomic<thread_atexit_report_func_t> threadAtexitReport{nullptr};
 static thread_local bool threadFinishing = false;
 
+#ifdef _WIN32
+static void SetStackFromHost(PthreadPrivate* thread) {
+    ULONG_PTR low = 0;
+    ULONG_PTR high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    if (high <= low) throw std::runtime_error("Cannot query the host thread stack");
+    thread->stackAddress = reinterpret_cast<void*>(low);
+    thread->stackSize = static_cast<std::size_t>(high - low);
+}
+#endif
+
 void ThreadLifecycle::SetThreadDtors(thread_dtors_func_t callback) {
     threadDtors.store(callback);
 }
@@ -268,6 +279,20 @@ void APS5_VABI scePthreadExit(void* retval) {
 
 Pthread APS5_VABI scePthreadSelf() {
 #ifdef _WIN32
+    // A host thread that never went through scePthreadCreate is adopted on first use, with the
+    // host stack reported as its own.
+    if (!currentThread) {
+        auto adopted = std::make_unique<PthreadPrivate>();
+        HANDLE handle = nullptr;
+        if (!DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
+            throw std::system_error(GetLastError(), std::system_category(), "Adopting guest thread");
+        adopted->nativeHandle = handle;
+        adopted->threadId = std::this_thread::get_id();
+        adopted->_detached = true;
+        adopted->references.store(1, std::memory_order_relaxed);
+        SetStackFromHost(adopted.get());
+        currentThread = adopted.release();
+    }
     return currentThread;
 #else
     if (!currentLinuxThread) {
@@ -294,6 +319,10 @@ int APS5_VABI scePthreadCancel(Pthread thread) {
 
 int APS5_VABI scePthreadEqual(Pthread thread1, Pthread thread2) {
  return thread1 == thread2 ? 1 : 0;
+}
+
+KernelCpumask APS5_VABI sceKernelGetAvailableCpumask(void) {
+    return kDefaultThreadAffinity;
 }
 
 int APS5_VABI scePthreadGetaffinity(Pthread thread, KernelCpumask* mask) {

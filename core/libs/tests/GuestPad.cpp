@@ -1,4 +1,5 @@
 #include "prx/libScePad/include/Pad.hpp"
+#include "prx/libScePad/include/PadInputTypes.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <chrono>
@@ -14,6 +15,7 @@ int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool);
 int APS5_VABI scePadInit_nid_postfix(void);
 int APS5_VABI scePadSetTiltCorrectionState(int, bool);
 int APS5_VABI scePadResetOrientation(int);
+int APS5_VABI scePadSetAngularVelocityDeadbandState(int, bool);
 }
 
 static void Require(bool value) { if (!value) std::abort(); }
@@ -42,6 +44,20 @@ static void CheckTiltCorrection(int handle) {
     PadPublishInput_nid_postfix(PadInputState{});
 }
 
+static void CheckTouchContact() {
+    PadInputState touch;
+    touch.buttons = static_cast<std::uint32_t>(Pad::PadButton::TouchPad);
+    touch.touch[0] = {true, 960, 471, 0};
+    PadPublishInput_nid_postfix(touch);
+    const auto data = Pad::ReadState();
+    Require((data.buttons & static_cast<std::uint32_t>(Pad::PadButton::TouchPad)) != 0);
+    Require(data.touch_data_touch_num == 1);
+    Require(data.touch_data_touch0_x == 960);
+    Require(data.touch_data_touch0_y == 471);
+    PadPublishInput_nid_postfix(PadInputState{});
+    Pad::ReadState();
+}
+
 int main() {
     constexpr int user = 0x10000000;
 
@@ -58,10 +74,13 @@ int main() {
     Require(scePadGetHandle(user, 2, 0) == PAD_ERROR_NO_HANDLE);
     Require(scePadOpen_nid_postfix(0xff, 16, 0, nullptr) == handle);
     CheckTiltCorrection(handle);
+    CheckTouchContact();
     Require(scePadGetHandle(0xff, 16, 0) == handle);
     Require(scePadGetHandle(user, 16, 0) == PAD_ERROR_NO_HANDLE);
     Require(scePadGetHandle(user, 0, 1) == PAD_ERROR_NO_HANDLE);
     Require(scePadClose_nid_postfix(handle) == 0);
     Require(scePadGetHandle(user, 0, 0) == PAD_ERROR_NO_HANDLE);
     Require(scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(true) == 0);
+    Require(scePadSetAngularVelocityDeadbandState(handle, false) == 0);
+    Require(scePadSetAngularVelocityDeadbandState(handle + 1, false) == PAD_ERROR_INVALID_HANDLE);
 }

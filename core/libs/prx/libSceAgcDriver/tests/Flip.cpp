@@ -99,6 +99,10 @@ void testFlipAndBoundary() {
     Packet rejected{rollback.data(), 12, 0, {}};
     expectFailure([&] { sceAgcDriverSubmitDcb(&rejected); });
     check(output->state->alive == 0 && output->state->ready == 0, "rejected submission retained or executed a reservation");
+    // The upstream "flip inside a COND_EXEC range is rejected" case is omitted:
+    // COND_EXEC is not implemented in this driver yet, so there is no
+    // conditional execution range for a flip to be rejected from. Restore the
+    // case when COND_EXEC support lands.
     {
         std::lock_guard lock(output->state->mutex);
         output->state->block = true;

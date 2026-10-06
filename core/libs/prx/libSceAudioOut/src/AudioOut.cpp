@@ -26,6 +26,7 @@ static constexpr int PORT_TYPE_AUX = 127;
 
 static constexpr int PORTS_MAX = 32;
 static constexpr int DEFAULT_VOLUME = 32768;
+static constexpr int DEFAULT_PADSPK_MIX_LEVEL = 11626;
 static constexpr std::uint32_t FORMAT_MASK = 0xFFu;
 static constexpr std::uint64_t TARGET_LATENCY_US = 40000;
 static constexpr std::uint64_t DRAIN_TIMEOUT_US = 200000;
@@ -86,7 +87,9 @@ struct Port {
     Format format = Format::Unknown;
     int channels = 0;
     int volume[8] = {};
+    int mixLevel = DEFAULT_VOLUME;
     std::uint64_t lastOutputTime = 0;
+    std::uint64_t lastDataOutputTime = 0;
     SDL_AudioDeviceID device = 0;
     SDL_AudioSpec spec = {};
 };
@@ -148,7 +151,7 @@ static const void* prepareBuffer(const Port& port, const void* data, std::vector
     const auto bps = bytesPerSample(port.format);
     const auto size = frames * ch * bps;
 
-    bool volumeChanged = false;
+    bool volumeChanged = port.mixLevel != DEFAULT_VOLUME;
     for (std::uint32_t i = 0; i < ch; i++) {
         if (port.volume[i] != DEFAULT_VOLUME) {
             volumeChanged = true;
@@ -166,11 +169,12 @@ static const void* prepareBuffer(const Port& port, const void* data, std::vector
     if (formatIsFloat(port.format)) {
         auto* dst = reinterpret_cast<float*>(buf.data());
         const auto* src = static_cast<const float*>(data);
+        const float mixLevel = static_cast<float>(port.mixLevel) / static_cast<float>(DEFAULT_VOLUME);
         for (std::uint32_t fr = 0; fr < frames; fr++) {
             for (std::uint32_t c = 0; c < ch; c++) {
                 const auto srcCh = isStd ? STD_8CH_MAP[c] : c;
                 dst[fr * ch + c] = src[fr * ch + srcCh] *
-                    (static_cast<float>(port.volume[c]) / static_cast<float>(DEFAULT_VOLUME));
+                    (static_cast<float>(port.volume[c]) / static_cast<float>(DEFAULT_VOLUME)) * mixLevel;
             }
         }
     } else {
@@ -180,7 +184,7 @@ static const void* prepareBuffer(const Port& port, const void* data, std::vector
             for (std::uint32_t c = 0; c < ch; c++) {
                 const auto srcCh = isStd ? STD_8CH_MAP[c] : c;
                 std::int64_t s = static_cast<std::int64_t>(src[fr * ch + srcCh]) *
-                    port.volume[c] / DEFAULT_VOLUME;
+                    port.volume[c] * port.mixLevel / (static_cast<std::int64_t>(DEFAULT_VOLUME) * DEFAULT_VOLUME);
                 s = std::clamp(s,
                     static_cast<std::int64_t>(std::numeric_limits<std::int16_t>::min()),
                     static_cast<std::int64_t>(std::numeric_limits<std::int16_t>::max()));
@@ -330,6 +334,8 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
             port.format = format;
             port.channels = channelsForFormat(format);
             port.lastOutputTime = 0;
+            port.lastDataOutputTime = 0;
+            port.mixLevel = type == PORT_TYPE_PADSPK ? DEFAULT_PADSPK_MIX_LEVEL : DEFAULT_VOLUME;
             for (int c = 0; c < port.channels; c++) {
                 port.volume[c] = DEFAULT_VOLUME;
             }
@@ -388,7 +394,10 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
     const std::uint64_t done = sceKernelGetProcessTime();
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (Port* current = getPort(handle)) current->lastOutputTime = done;
+        if (Port* current = getPort(handle)) {
+            current->lastOutputTime = done;
+            if (ptr != nullptr) current->lastDataOutputTime = done;
+        }
     }
     return static_cast<int>(port.samplesNum);
 }
@@ -447,7 +456,10 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         for (std::uint32_t i = 0; i < num; i++) {
-            if (Port* current = getPort(param[i].handle)) current->lastOutputTime = done;
+            if (Port* current = getPort(param[i].handle)) {
+                current->lastOutputTime = done;
+                if (param[i].ptr != nullptr) current->lastDataOutputTime = done;
+            }
         }
     }
 
@@ -477,6 +489,19 @@ int APS5_VABI sceAudioOutSetVolume(int handle, std::uint32_t flag, int* vol) {
         }
         port->volume[i] = vol[srcIdx];
     }
+    return 0;
+}
+
+int APS5_VABI sceAudioOutGetLastOutputTime(int handle, std::uint64_t* outputTime) {
+    if (outputTime == nullptr) {
+        return -2144993276;
+    }
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Port* port = getPort(handle);
+    if (port == nullptr) {
+        return -2144993277;
+    }
+    *outputTime = port->lastDataOutputTime;
     return 0;
 }
 
@@ -521,9 +546,23 @@ int APS5_VABI sceAudioOutGetPortState(int handle, AudioOutPortState* state) {
     return 0;
 }
 
-int APS5_VABI sceAudioOutSetMixLevelPadSpk(void) {
- NotImplemented_nid_no_patch(__func__);
- return 0;
+int APS5_VABI sceAudioOutSetMixLevelPadSpk(int handle, int mixLevel) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Port* port = getPort(handle);
+    if (port == nullptr) {
+        return -2144993277;
+    }
+    if (port->type != PORT_TYPE_PADSPK) {
+        return -2144993270;
+    }
+    if (mixLevel > DEFAULT_VOLUME) {
+        return -2144993260;
+    }
+    if (mixLevel < 0) {
+        throw std::runtime_error("sceAudioOutSetMixLevelPadSpk: negative mix level not supported");
+    }
+    port->mixLevel = mixLevel;
+    return 0;
 }
 
 }

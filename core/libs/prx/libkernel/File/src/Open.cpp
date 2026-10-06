@@ -397,7 +397,9 @@ int APS5_VABI sceKernelChmod(const char* path, uint16_t mode) {
 }
 
 int APS5_VABI sceKernelFchmod(int fd, uint16_t mode) {
-    return sceResult(NativeFchmod(fd, mode));
+    // A socket has no file mode to change; a closed socket descriptor is a bad descriptor.
+    if (fd >= GuestSockets::FirstDescriptor) return FileErrors::SceBsd(GuestSockets::IsOpen(fd) ? kErrorInvalid : 9);
+    return sceResult(NativeFchmod(fd, mode & 07777));
 }
 
 int APS5_VABI sceKernelUtimes(const char* path, const KernelTimeval* times) {
@@ -476,7 +478,8 @@ int APS5_VABI chmod_nid_postfix(const char* path, int mode) {
 }
 
 int APS5_VABI fchmod_nid_postfix(int d, int mode) {
-    return posixResult(NativeFchmod(d, mode));
+    if (d >= GuestSockets::FirstDescriptor) return FileErrors::PosixBsd(GuestSockets::IsOpen(d) ? kErrorInvalid : 9);
+    return posixResult(NativeFchmod(d, mode & 07777));
 }
 
 int APS5_VABI flock_nid_postfix(int d, int operation) {
@@ -490,6 +493,11 @@ int APS5_VABI utimes_nid_postfix(const char* path, const KernelTimeval* times) {
 }
 
 int APS5_VABI futimes_nid_postfix(int d, const KernelTimeval* times) {
+    if (d >= GuestSockets::FirstDescriptor) return FileErrors::PosixBsd(GuestSockets::IsOpen(d) ? kErrorInvalid : 9);
+    if (times != nullptr) {
+        for (int i = 0; i < 2; ++i)
+            if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) return FileErrors::PosixBsd(kErrorInvalid);
+    }
 #ifdef _WIN32
     (void)d;
     (void)times;

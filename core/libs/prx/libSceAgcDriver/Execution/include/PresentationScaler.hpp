@@ -17,6 +17,7 @@ public:
 
     void EnsureSourceImage(std::uint32_t width, std::uint32_t height);
     void RecordUpload(VkCommandBuffer commands, VkBuffer uploadBuffer);
+    void RecordClear(VkCommandBuffer commands, const VkClearColorValue& color);
     void RecordImage(VkCommandBuffer commands, VkImage image);
     void RecordBlit(VkCommandBuffer commands, VkImage destinationImage, std::uint32_t destinationWidth, std::uint32_t destinationHeight);
 
