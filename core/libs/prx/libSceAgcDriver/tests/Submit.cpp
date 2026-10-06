@@ -117,6 +117,61 @@ void testClearState() {
     AgcDriverWaitIdle_nid_postfix();
 }
 
+std::vector<std::uint32_t> makePacket(std::uint32_t opcode, std::initializer_list<std::uint32_t> payload) {
+    std::vector<std::uint32_t> result{0xc0000000u | (static_cast<std::uint32_t>(payload.size() - 1) << 16u) | (opcode << 8u)};
+    result.insert(result.end(), payload);
+    return result;
+}
+
+std::uint32_t low(const void* pointer) { return static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(pointer)); }
+std::uint32_t high(const void* pointer) { return static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(pointer) >> 32u); }
+
+std::vector<std::uint32_t> joinPackets(std::initializer_list<std::vector<std::uint32_t>> packets) {
+    std::vector<std::uint32_t> words;
+    for (const auto& packet : packets) words.insert(words.end(), packet.begin(), packet.end());
+    return words;
+}
+
+// WRITE_DATA of one dword to memory (5 dwords).
+std::vector<std::uint32_t> writeWord(std::uint32_t& target, std::uint32_t value) {
+    return makePacket(0x37, {0x00100200, low(&target), high(&target), value});
+}
+
+void submitWords(std::vector<std::uint32_t>& words) {
+    Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "conditional submission failed");
+    AgcDriverWaitIdle_nid_postfix();
+}
+
+void testConditionalExecution() {
+    alignas(4) static std::uint32_t condition = 0, guarded = 0, after = 0, nestedTarget = 0;
+    const auto conditional = [&](std::uint32_t words) { return makePacket(0x22, {low(&condition), high(&condition), 0, words}); };
+    // A zero condition skips the guarded packet; the next one runs.
+    auto words = joinPackets({conditional(5), writeWord(guarded, 1), writeWord(after, 2)});
+    submitWords(words);
+    check(guarded == 0 && after == 2, "COND_EXEC with a zero condition did not skip its range");
+    condition = 7;
+    after = 0;
+    words = joinPackets({conditional(5), writeWord(guarded, 1), writeWord(after, 2)});
+    submitWords(words);
+    check(guarded == 1 && after == 2, "COND_EXEC with a non-zero condition skipped its range");
+    // A guarded INDIRECT_BUFFER is skipped whole.
+    condition = 0;
+    after = 0;
+    auto nested = writeWord(nestedTarget, 3);
+    words = joinPackets({conditional(4), makePacket(0x3f, {low(nested.data()), high(nested.data()), static_cast<std::uint32_t>(nested.size()) | 0x0f200000u}), writeWord(after, 4)});
+    submitWords(words);
+    check(nestedTarget == 0 && after == 4, "a guarded INDIRECT_BUFFER ran or the packet after it did not");
+    // Ranges ending inside a packet or past the command buffer are rejected at submission.
+    words = joinPackets({conditional(3), writeWord(guarded, 9)});
+    Packet inside{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+    check(expectFailure([&] { sceAgcDriverSubmitDcb(&inside); }).find("ends inside a packet") != std::string::npos, "a COND_EXEC range ending inside a packet was accepted");
+    words = joinPackets({conditional(9), writeWord(guarded, 9)});
+    Packet past{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+    check(expectFailure([&] { sceAgcDriverSubmitDcb(&past); }).find("exceeds its command buffer") != std::string::npos, "a COND_EXEC range past its command buffer was accepted");
+    check(guarded == 1, "a rejected COND_EXEC submission executed");
+}
+
 void testSubmissions() {
     std::vector<std::thread> producers;
     std::array<std::exception_ptr, 4> errors{};
@@ -168,6 +223,7 @@ int main() {
         testValidation();
         testClearState();
         testSubmissions();
+        testConditionalExecution();
         testWorkerFailure();
         check(expectFailure([] { LibcRunShutdown_nid_postfix(); }).find("required shader register") != std::string::npos, "shutdown lost worker failure");
         std::puts("AGC driver submit tests passed");

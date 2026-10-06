@@ -181,7 +181,7 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         case 0x3a: case 0x8d:
             return "graphics draw, shader stages and guest render-target materialization are not implemented";
         case 0x20: return {};
-        case 0x22: return "conditional command execution and conditional flip reservation are not implemented";
+        case 0x22: return {};
         case 0x3f: return {};
         case 0x33: return "command-buffer branching is not implemented";
         case 0x3c: case 0x93: return {};
@@ -199,6 +199,10 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         default: return "opcode is not known in the reference";
     }
 }
+
+// COND_EXEC (upstream 9df0de29): the cache policy is defined on compute queues only (MEC).
+constexpr std::uint32_t ConditionCachePolicy = 3u << 25u;
+constexpr std::uint32_t ConditionalWordsMask = 0x3fffu;
 
 void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
     require(packet.size() >= 2, "truncated PM4 header or payload");
@@ -294,11 +298,18 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             require((packet.back() & ~0xa000u) == 0x41u, "indirect dispatch modifiers are not implemented");
             break;
         case 0x42: size(2); require(packet[1] == 0, "unsupported PFP_SYNC_ME payload"); break;
+        case 0x22:
+            size(5);
+            require((packet[1] & 3u) == 0, "COND_EXEC reserved address bits are not implemented");
+            require(packet[2] <= 0xffffu, "COND_EXEC address bits above 48 are not implemented");
+            require((packet[3] & ~(queue == 0 ? 0u : ConditionCachePolicy)) == 0, "COND_EXEC reserved control fields are not implemented");
+            require((packet[4] & ~ConditionalWordsMask) == 0, "COND_EXEC reserved count bits are not implemented");
+            break;
         case 0x20: {
             size(4);
             require((packet[1] & ~0x00071100u) == 0, "unsupported SET_PREDICATION fields");
             const auto operation = (packet[1] >> 16u) & 7u;
-            require(operation == 0 || operation == 1 || operation == 3, "only clear, occlusion and boolean predication are implemented");
+            require(operation == 0 || operation == 1 || operation == 3 || operation == 4, "only clear, occlusion and boolean predication are implemented");
             require(operation == 0 || ((packet[2] & 0xfu) == 0 && (packet[2] != 0 || packet[3] != 0)), "predication requires an aligned address");
             break;
         }
@@ -506,6 +517,18 @@ bool ValueSatisfiesWait(std::span<const std::uint32_t> wait, std::uint64_t value
     }
 }
 
+std::size_t ConditionalWords(std::span<const std::uint32_t> packet) {
+    require(packet.size() == 5 && ((packet[0] >> 8u) & 0xffu) == 0x22u, "expected COND_EXEC packet");
+    return packet[4] & ConditionalWordsMask;
+}
+
+std::uint32_t ReadCondition(std::span<const std::uint32_t> packet) {
+    require(packet.size() == 5 && ((packet[0] >> 8u) & 0xffu) == 0x22u, "expected COND_EXEC packet");
+    std::uint32_t value = 0;
+    GuestMemory::Read(address(packet[1], packet[2]), std::as_writable_bytes(std::span(&value, 1)), 4);
+    return value;
+}
+
 std::optional<BranchTarget> ResolveBranch(std::span<const std::uint32_t> packet) {
     Validate(packet, 0x20);
     require(packet.size() == 14, "expected a conditional INDIRECT_BUFFER");
@@ -549,7 +572,7 @@ std::uint64_t GpuClock() {
 
 bool AccessesMemory(std::uint32_t header) {
     switch ((header >> 8u) & 0xffu) {
-        case 0x16: case 0x20: case 0x24: case 0x25: case 0x27: case 0x2c: case 0x2d: case 0x35: case 0x38: case 0x37: case 0x3c: case 0x40: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
+        case 0x16: case 0x20: case 0x22: case 0x24: case 0x25: case 0x27: case 0x2c: case 0x2d: case 0x35: case 0x38: case 0x37: case 0x3c: case 0x40: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
         default: return false;
     }
 }
@@ -715,8 +738,9 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             }
             const auto source = address(packet[2] & ~0xfu, packet[3]);
             std::uint64_t value = 0;
-            if (operation == 3) {
-                GuestMemory::Read(source, std::as_writable_bytes(std::span(&value, 1)), 8);
+            if (operation == 3 || operation == 4) {
+                // Boolean predication: a 64-bit (3) or 32-bit (4) value (upstream 124be3e7).
+                GuestMemory::Read(source, std::as_writable_bytes(std::span(&value, 1)).first(operation == 3 ? 8 : 4), operation == 3 ? 8 : 4);
             } else {
                 // Occlusion: one begin/end pair of ZPASS counters per depth block, each marked
                 // ready by bit 63.

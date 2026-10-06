@@ -751,6 +751,18 @@ private:
             require(count <= commands.size() - cursor, "truncated PM4 packet");
             try {
                 Pm4::Validate(commands.subspan(cursor, count), queue);
+                // A COND_EXEC range is skipped as a whole: it must end on a packet boundary of its own
+                // command buffer and hold no flip (a skipped flip would leave its reservation pending).
+                if (((header >> 8u) & 0xffu) == 0x22u) {
+                    const auto end = cursor + count + Pm4::ConditionalWords(commands.subspan(cursor, count));
+                    require(end <= commands.size(), "conditional execution range exceeds its command buffer");
+                    std::size_t inner = cursor + count;
+                    while (inner < end) {
+                        require(commands[inner] != FlipPacketHeader, "a flip inside a conditional execution range is not implemented");
+                        inner += static_cast<std::size_t>((commands[inner] >> 16u) & 0x3fffu) + 2;
+                    }
+                    require(inner == end, "conditional execution range ends inside a packet");
+                }
             } catch (const std::exception& error) {
                 throw std::runtime_error("AGC driver: " + Pm4::Name(header) + " at DWORD " + std::to_string(cursor) + ": " + error.what());
             }
@@ -1265,6 +1277,25 @@ private:
                     std::fprintf(stderr, "[pm4] q%u op=0x%02x dwords=%zu:%s\n", static_cast<unsigned>(submission.queue), static_cast<unsigned>(opcode), count, words.c_str());
                 }
                 else std::fprintf(stderr, "[pm4] q%u op=0x%02x dwords=%zu\n", static_cast<unsigned>(submission.queue), static_cast<unsigned>(opcode), count);
+            }
+            if (opcode == 0x22) {
+                // COND_EXEC: the dword is read once earlier packets and their GPU writes are done (as
+                // for a conditional branch); zero skips the guarded dwords of this buffer, which are
+                // still unspliced here, so a guarded INDIRECT_BUFFER is skipped whole.
+                std::uint32_t condition = 0;
+                {
+                    const auto gpuLock = lockDevice();
+                    if (device != nullptr) device->WaitIdle();
+                    stashCompletions(pollCompletions(true));
+                    const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+                        if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+                    });
+                    const GuestMemory::AccessSite accessSite("cond_exec");
+                    condition = Pm4::ReadCondition(packet);
+                }
+                publishCompletions();
+                cursor += count + (condition == 0 ? Pm4::ConditionalWords(packet) : 0u);
+                continue;
             }
             if (opcode == 0x3f && count == 14) {
                 // The compare value may be written by earlier GPU work.

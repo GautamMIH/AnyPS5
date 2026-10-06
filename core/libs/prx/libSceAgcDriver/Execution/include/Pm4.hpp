@@ -65,6 +65,9 @@ struct BranchTarget {
     std::uint32_t dwords;
 };
 std::optional<BranchTarget> ResolveBranch(std::span<const std::uint32_t> packet);
+// COND_EXEC: the dwords after the packet it guards, and the dword it tests (zero skips them).
+std::size_t ConditionalWords(std::span<const std::uint32_t> packet);
+std::uint32_t ReadCondition(std::span<const std::uint32_t> packet);
 std::string DescribeWait(std::span<const std::uint32_t> packet);
 // GPU reference clock used for timestamp writes, in 100 MHz ticks.
 std::uint64_t GpuClock();

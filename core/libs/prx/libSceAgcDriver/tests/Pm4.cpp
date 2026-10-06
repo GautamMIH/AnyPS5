@@ -68,6 +68,50 @@ void testCatalog() {
 }
 
 // The register bank keeps std::map's semantics across its dense array and its map of large offsets.
+void testConditionalValidation() {
+    alignas(4) static std::uint32_t condition = 0;
+    const auto valid = makePacket(0x22, {low(&condition), high(&condition), 0, 0x3fff});
+    check(AgcDriver::Pm4::UnsupportedReason(valid[0]).empty() && AgcDriver::Pm4::AccessesMemory(valid[0]), "COND_EXEC is rejected or does not synchronize guest memory");
+    AgcDriver::Pm4::Validate(valid, 0);
+    AgcDriver::Pm4::Validate(valid, 0x20);
+    check(AgcDriver::Pm4::ConditionalWords(valid) == 0x3fff, "COND_EXEC count decoded wrong");
+    check(AgcDriver::Pm4::ConditionalWords(makePacket(0x22, {low(&condition), high(&condition), 0, 0})) == 0, "empty COND_EXEC range decoded wrong");
+    AgcDriver::Pm4::Validate(makePacket(0x22, {low(&condition), high(&condition), 3u << 25u, 5}), 0x20);
+    const auto invalidWord = [&](std::size_t word, std::uint32_t value, std::uint32_t queue, const char* text) {
+        auto packet = valid;
+        packet[word] = value;
+        expectFailure([&] { AgcDriver::Pm4::Validate(packet, queue); }, text);
+    };
+    invalidWord(1, low(&condition) | 1u, 0, "reserved address bits");
+    invalidWord(1, low(&condition) | 2u, 0x20, "reserved address bits");
+    invalidWord(2, 0x10000u, 0, "above 48");
+    invalidWord(3, 3u << 25u, 0, "reserved control fields");
+    invalidWord(3, 1u, 0x20, "reserved control fields");
+    invalidWord(4, 0x4000u, 0, "reserved count bits");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x22, {0, 0, 0}), 0); }, "packet size");
+    expectFailure([] { AgcDriver::Pm4::ConditionalWords(makePacket(0x37, {0x100, 0, 0, 0})); }, "expected COND_EXEC");
+    condition = 0x80;
+    check(AgcDriver::Pm4::ReadCondition(makePacket(0x22, {low(&condition), high(&condition), 0, 5})) == 0x80, "COND_EXEC read its condition wrong");
+}
+
+void testBooleanPredication() {
+    // Operation 4 reads 32 bits, operation 3 64 bits; bit 8 runs predicated packets when the value is
+    // non-zero (else when it is zero).
+    alignas(16) static std::uint32_t flag[4] = {0, 1, 0, 0};
+    AgcDriver::QueueState state;
+    const auto setPredication = [&](std::uint32_t operation, bool executeWhenSet) {
+        return makePacket(0x20, {(operation << 16u) | (executeWhenSet ? 0x100u : 0u) | 0x1000u, low(flag), high(flag)});
+    };
+    execute(state, setPredication(4, true));
+    check(state.predicateSkip, "32-bit predication read past its value");
+    execute(state, setPredication(3, true));
+    check(!state.predicateSkip, "64-bit predication ignored its high dword");
+    execute(state, setPredication(4, false));
+    check(!state.predicateSkip, "32-bit predication on a zero value skipped");
+    execute(state, makePacket(0x20, {0, 0, 0}));
+    check(!state.predicateSkip, "clearing predication left packets skipped");
+}
+
 void testRegisterBank() {
     AgcDriver::Registers bank{{0x500, 9}, {0x10, 1}, {0x3ff, 7}, {0x10, 99}};
     check(bank.size() == 3 && bank.at(0x10) == 1, "initializer list must keep the first value of a key");
@@ -98,6 +142,8 @@ void testRegisterBank() {
 
 void testRegisters() {
     testRegisterBank();
+    testConditionalValidation();
+    testBooleanPredication();
     AgcDriver::QueueState state;
     execute(state, makePacket(0x79, {0x242, 4}));
     check(state.userConfig.at(0x242) == 4, "primitive type register write was lost");

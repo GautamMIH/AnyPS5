@@ -99,10 +99,12 @@ void testFlipAndBoundary() {
     Packet rejected{rollback.data(), 12, 0, {}};
     expectFailure([&] { sceAgcDriverSubmitDcb(&rejected); });
     check(output->state->alive == 0 && output->state->ready == 0, "rejected submission retained or executed a reservation");
-    // The upstream "flip inside a COND_EXEC range is rejected" case is omitted:
-    // COND_EXEC is not implemented in this driver yet, so there is no
-    // conditional execution range for a flip to be rejected from. Restore the
-    // case when COND_EXEC support lands.
+    alignas(4) static std::uint32_t condition = 1;
+    const auto conditionAddress = reinterpret_cast<std::uintptr_t>(&condition);
+    std::array<std::uint32_t, 11> guarded{0xc0032200, static_cast<std::uint32_t>(conditionAddress), static_cast<std::uint32_t>(conditionAddress >> 32u), 0, 6, 0xc004105c, 7, 0, 1, 0, 0};
+    Packet conditionalFlip{guarded.data(), 11, 0, {}};
+    check(expectFailure([&] { sceAgcDriverSubmitDcb(&conditionalFlip); }).find("a flip inside a conditional execution range") != std::string::npos, "a flip inside a COND_EXEC range was not rejected");
+    check(output->state->alive == 0 && output->state->ready == 0, "a rejected conditional flip retained or executed a reservation");
     {
         std::lock_guard lock(output->state->mutex);
         output->state->block = true;
