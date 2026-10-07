@@ -113,6 +113,8 @@ struct VulkanDevice::State {
     bool primitiveListRestart = false;
     bool occlusionQueryPrecise = false;
     bool imageViewMinLod = false;
+    // VK_EXT_shader_image_atomic_int64 with shaderImageInt64Atomics enabled (64-bit image atomics).
+    bool imageInt64Atomics = false;
     // VK_KHR_maintenance8: sampling takes a non-constant texel Offset (upstream 301f3b16).
     bool maintenance8 = false;
     // VK_KHR_shader_clock (s_memtime, upstream 1043f90d).
@@ -480,6 +482,31 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->capabilities.push_back(spv::CapabilityShaderClockKHR);
         state->spirvExtensions.push_back("SPV_KHR_shader_clock");
     }
+    // 64-bit buffer atomics (the recompiler declares Int64Atomics for them) and, where the device
+    // has VK_EXT_shader_image_atomic_int64, 64-bit image atomics (the recompiler refuses those
+    // unless the target lists Int64ImageEXT).
+    VkPhysicalDeviceShaderAtomicInt64FeaturesKHR atomicInt64Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES_KHR};
+    if (hasExtension(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &atomicInt64Features};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+    }
+    const bool bufferInt64Atomics = atomicInt64Features.shaderBufferInt64Atomics == VK_TRUE;
+    atomicInt64Features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_INT64_FEATURES_KHR};
+    atomicInt64Features.shaderBufferInt64Atomics = VK_TRUE;
+    if (bufferInt64Atomics) deviceExtensions.push_back(VK_KHR_SHADER_ATOMIC_INT64_EXTENSION_NAME);
+    VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT imageAtomicInt64Features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT};
+    if (hasExtension(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &imageAtomicInt64Features};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+    }
+    state->imageInt64Atomics = imageAtomicInt64Features.shaderImageInt64Atomics == VK_TRUE;
+    imageAtomicInt64Features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT};
+    imageAtomicInt64Features.shaderImageInt64Atomics = VK_TRUE;
+    if (state->imageInt64Atomics) {
+        deviceExtensions.push_back(VK_EXT_SHADER_IMAGE_ATOMIC_INT64_EXTENSION_NAME);
+        state->capabilities.push_back(spv::CapabilityInt64ImageEXT);
+        state->spirvExtensions.push_back("SPV_EXT_shader_image_int64");
+    }
     deviceExtensions.push_back(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
     state->capabilities.push_back(spv::CapabilitySignedZeroInfNanPreserve);
     state->spirvExtensions.push_back("SPV_KHR_float_controls");
@@ -629,6 +656,14 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     if (state->shaderClock) {
         clockFeatures.pNext = byteFeatures.pNext;
         byteFeatures.pNext = &clockFeatures;
+    }
+    if (bufferInt64Atomics) {
+        atomicInt64Features.pNext = byteFeatures.pNext;
+        byteFeatures.pNext = &atomicInt64Features;
+    }
+    if (state->imageInt64Atomics) {
+        imageAtomicInt64Features.pNext = byteFeatures.pNext;
+        byteFeatures.pNext = &imageAtomicInt64Features;
     }
     bdaFeatures.pNext = &byteFeatures;
     deviceInfo.pNext = &bdaFeatures;
@@ -1070,6 +1105,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.primitiveListRestart = state->primitiveListRestart;
     context.shaderResourceMinLod = state->shaderResourceMinLod;
     context.imageViewMinLod = state->imageViewMinLod;
+    context.imageInt64Atomics = state->imageInt64Atomics;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
     context.clipDistance = state->clipDistance;

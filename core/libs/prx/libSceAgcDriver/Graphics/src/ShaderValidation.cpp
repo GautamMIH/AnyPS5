@@ -220,7 +220,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     (features.storageImageReadWithoutFormat && capability == spv::CapabilityStorageImageReadWithoutFormat) ||
                     (features.storageImageWriteWithoutFormat && capability == spv::CapabilityStorageImageWriteWithoutFormat) ||
                     (features.clipDistance && capability == spv::CapabilityClipDistance) ||
-                    (features.cullDistance && capability == spv::CapabilityCullDistance);
+                    (features.cullDistance && capability == spv::CapabilityCullDistance) ||
+                    (features.imageInt64Atomics && (capability == spv::CapabilityInt64Atomics || capability == spv::CapabilityInt64ImageEXT));
 
                 const bool isBdaCapability =
                     shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version &&
@@ -268,7 +269,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     Require(fragment && fragmentShaderBarycentric, "SPV_KHR_fragment_shader_barycentric requires enabled fragmentShaderBarycentric in a fragment shader");
                     break;
                 }
-                Require(extension == "SPV_KHR_float_controls" || (mesh && extension == "SPV_EXT_mesh_shader") || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (extension == "SPV_KHR_physical_storage_buffer" || extension == "SPV_KHR_8bit_storage")), "unsupported SPIR-V extension");
+                Require(extension == "SPV_KHR_float_controls" || (features.imageInt64Atomics && extension == "SPV_EXT_shader_image_int64") || (mesh && extension == "SPV_EXT_mesh_shader") || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (extension == "SPV_KHR_physical_storage_buffer" || extension == "SPV_KHR_8bit_storage")), "unsupported SPIR-V extension");
                 break;
             }
             case spv::OpDecorateId:

@@ -107,9 +107,11 @@ struct ShaderDeviceFeatures {
     bool cullDistance = false;
     // VK_EXT_shader_viewport_index_layer: ShaderViewportIndexLayerEXT in vertex-pipeline stages.
     bool viewportIndexLayer = false;
+    // VK_EXT_shader_image_atomic_int64: Int64Atomics, Int64ImageEXT and SPV_EXT_shader_image_int64.
+    bool imageInt64Atomics = false;
 
     static ShaderDeviceFeatures Of(const Context& context) {
-        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance, context.viewportIndexLayer};
+        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance, context.viewportIndexLayer, context.imageInt64Atomics};
     }
 };
 

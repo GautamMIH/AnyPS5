@@ -25,7 +25,9 @@ constexpr std::uint32_t Format32_32Float = 64;
 constexpr std::uint32_t Type2D = 9;
 alignas(256) std::array<std::uint32_t, Threads * Inputs> Input{};
 alignas(256) std::array<std::uint32_t, Threads * Results> Output{};
-alignas(4096) std::array<std::uint32_t, 4096> Texels{};
+// The image lives in guest memory: this driver writes storage images back through it.
+constexpr std::size_t TexelWords = 4096;
+std::uint32_t* Texels = nullptr;
 
 alignas(256) constexpr std::array<std::uint32_t, 219> Code{
     0x34020085, 0x34060088, 0xe0381000, 0x80000401, 0xe0341010, 0x80001001, 0xbf8c3f70, 0x7e100300,
@@ -109,11 +111,11 @@ std::array<std::uint32_t, 8> TextureDescriptor(const void* data, std::uint32_t w
 
 void Run(AgcDriver::VulkanDevice& device, std::uint32_t format) {
     Output.fill(0xdeadbeefu);
-    Texels.fill(0xdeadbeefu);
+    std::fill_n(Texels, TexelWords, 0xdeadbeefu);
     std::vector<std::uint32_t> userData(16, 0u);
     const auto input = BufferDescriptor(Input.data(), static_cast<std::uint32_t>(Input.size() * 4u));
     const auto output = BufferDescriptor(Output.data(), static_cast<std::uint32_t>(Output.size() * 4u));
-    const auto texture = TextureDescriptor(Texels.data(), Threads, Operations, format);
+    const auto texture = TextureDescriptor(Texels, Threads, Operations, format);
     std::copy(input.begin(), input.end(), userData.begin());
     std::copy(output.begin(), output.end(), userData.begin() + 4);
     std::copy(texture.begin(), texture.end(), userData.begin() + 8);
@@ -175,6 +177,8 @@ int main() {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        const GuestTestMemory texels(TexelWords * sizeof(std::uint32_t));
+        Texels = texels.As<std::uint32_t>();
         FillInput();
         for (const auto format : {Format32_32UInt, Format32_32SInt, Format32_32Float}) {
             Run(*device, format);
