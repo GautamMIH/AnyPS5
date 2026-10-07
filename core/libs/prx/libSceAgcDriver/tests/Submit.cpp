@@ -5,7 +5,9 @@
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Query.hpp"
 #include <array>
+#include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -217,6 +219,34 @@ void testWorkerFailure() {
 
 }
 
+void testShaderHeaderAlignment() {
+    alignas(256) static const std::array<std::uint32_t, 64> code{0xbf810000};
+    alignas(8) static std::array<std::byte, 2 * sizeof(Shader)> storage{};
+    Shader shader{};
+    shader.file_header = 0x34333231;
+    shader.version = 0x18;
+    shader.header_size = sizeof(Shader);
+    shader.shader_size = sizeof(code);
+    shader.code = code.data();
+    const auto at = [](std::size_t offset, const Shader& fields) {
+        std::memcpy(storage.data() + offset, &fields, sizeof(fields));
+        return reinterpret_cast<const Shader*>(storage.data() + offset);
+    };
+    for (const std::size_t offset : {0, 4, 1}) AgcDriverRegisterShader_nid_postfix(at(offset, shader));
+    const auto refused = [](const std::string& message, const char* reason) { check(message.find(reason) != std::string::npos, message.c_str()); };
+    refused(expectFailure([] { AgcDriverRegisterShader_nid_postfix(nullptr); }), "null or misaligned address");
+    refused(expectFailure([] { AgcDriverRegisterShader_nid_postfix(reinterpret_cast<const Shader*>(0x1001)); }), "not readable");
+    Shader misplaced = shader;
+    misplaced.code = code.data() + 1;
+    refused(expectFailure([&] { AgcDriverRegisterShader_nid_postfix(at(4, misplaced)); }), "null or misaligned address");
+    Shader older = shader;
+    older.version = 0x17;
+    refused(expectFailure([&] { AgcDriverRegisterShader_nid_postfix(at(1, older)); }), "invalid shader header");
+    Shader truncated = shader;
+    truncated.header_size = sizeof(Shader) - 4;
+    refused(expectFailure([&] { AgcDriverRegisterShader_nid_postfix(at(4, truncated)); }), "smaller than its fixed fields");
+}
+
 int main() {
     try {
         testEvents();
@@ -224,6 +254,7 @@ int main() {
         testClearState();
         testSubmissions();
         testConditionalExecution();
+        testShaderHeaderAlignment();
         testWorkerFailure();
         check(expectFailure([] { LibcRunShutdown_nid_postfix(); }).find("required shader register") != std::string::npos, "shutdown lost worker failure");
         std::puts("AGC driver submit tests passed");

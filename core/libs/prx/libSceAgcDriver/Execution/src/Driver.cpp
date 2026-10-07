@@ -319,15 +319,16 @@ public:
 
     void RegisterShader(const Shader* shader) {
         CheckFailure();
-        // Shader binaries embedded in game data are only guaranteed 4-byte alignment, so the fixed
-        // fields are read through a copy rather than through the guest pointer.
-        GuestMemory::CheckRange(shader, sizeof(Shader), alignof(std::uint32_t));
+        // Shader headers have no alignment guarantee (PPSA26344 uses its shader packs in place, with
+        // headers 4 and 1 bytes past an 8-byte boundary; upstream 4e18def4), so the fixed fields are
+        // read through a copy rather than through the guest pointer. The code stays 256-byte aligned.
+        GuestMemory::CheckRange(shader, sizeof(Shader), 1);
         Shader fixed;
         std::memcpy(&fixed, shader, sizeof(Shader));
         require(fixed.file_header == 0x34333231u && fixed.version == 0x18u, "invalid shader header");
         require(fixed.header_size >= sizeof(Shader), "shader header is smaller than its fixed fields");
         require(fixed.shader_size != 0 && (fixed.shader_size & 3u) == 0, "invalid shader size");
-        GuestMemory::CheckRange(shader, fixed.header_size, alignof(std::uint32_t));
+        GuestMemory::CheckRange(shader, fixed.header_size, 1);
         const auto* code = const_cast<const void*>(fixed.code);
         GuestMemory::CheckRange(code, fixed.shader_size, 256);
         ShaderSnapshot snapshot{reinterpret_cast<std::uintptr_t>(code), reinterpret_cast<std::uintptr_t>(shader), fixed.type, {}, {}};
