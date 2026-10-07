@@ -144,9 +144,12 @@ void testIndirectPlaceholder() {
         auto* packet = writers[i](&storage.buffer, nullptr, 0);
         check(packet[0] == headers[i] && packet[1] == 0 && packet[2] == 0 && packet[3] == 0x80000000u && packet[4] == 0, "placeholder packet mismatch");
         check(storage.buffer.cursor_up == packet + 5, "placeholder cursor mismatch");
-        const auto before = storage.words;
-        expectFailure([&] { writers[i](&storage.buffer, nullptr, 1); });
-        check(storage.words == before && storage.buffer.cursor_up == packet + 5, "null register list with a count modified the buffer");
+        // Upstream (6b6b93e2) rejects a null list with registers. This branch accepts every null GPU
+        // address when the packet is written, as games encode packets with null addresses to measure
+        // their layouts (Packet.cpp CheckGpuAddress); the GPU rejects it if the packet runs.
+        auto* measured = writers[i](&storage.buffer, nullptr, 1);
+        check(measured == packet + 5 && measured[0] == headers[i] && measured[1] == 0 && measured[2] == 0 && measured[3] == 0x80000000u && measured[4] == 1, "null register list with a count was not written as measured");
+        check(storage.buffer.cursor_up == packet + 10, "null register list with a count cursor mismatch");
         check(addressSetters[i](packet, registers.data()) == 0 && countSetters[i](packet, 2) == 0, "placeholder was not patched");
         const auto address = reinterpret_cast<std::uintptr_t>(registers.data());
         check(packet[1] == static_cast<std::uint32_t>(address) && packet[2] == static_cast<std::uint32_t>(address >> 32u) && packet[4] == 2, "patched placeholder mismatch");
