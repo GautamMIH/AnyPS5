@@ -417,6 +417,24 @@ private:
         callers.clear();
     }
 
+    // Debug aid: APS5_TRACE_READ_WAITS=1 totals the worker's reads that wait for the device thread
+    // by access site (PM4 packets by opcode) every 10 s.
+    static void noteReadWait(const char* site, bool drain, std::chrono::steady_clock::time_point started) {
+        static const bool trace = std::getenv("APS5_TRACE_READ_WAITS") != nullptr;
+        if (!trace) return;
+        static std::map<std::string, std::pair<std::uint64_t, double>> sites;
+        static auto window = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        auto& total = sites[std::string(site) + (drain ? " (drain)" : " (wait)")];
+        ++total.first;
+        total.second += std::chrono::duration<double, std::milli>(now - started).count();
+        if (now - window < std::chrono::seconds(10)) return;
+        for (const auto& [name, value] : sites) std::fprintf(stderr, "[read-waits] %8llu calls %8.1f ms  %s\n", static_cast<unsigned long long>(value.first), value.second, name.c_str());
+        std::fprintf(stderr, "[read-waits] --- %.0f ms window\n", std::chrono::duration<double, std::milli>(now - window).count());
+        sites.clear();
+        window = now;
+    }
+
     static void resolveForDevice(void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
     }
@@ -455,10 +473,13 @@ private:
             else self.pipeline->WaitFor(need.serial);
             // Reads: attributed to two pseudo-callers (1: full drain, 2: wait for a writer).
             noteDrain(reinterpret_cast<const void*>(need.kind == DeviceThread::Need::Drain ? 1 : 2), started);
+            noteReadWait(GuestMemory::AccessSite::Current(), need.kind == DeviceThread::Need::Drain, started);
             timing.Mark(need.kind == DeviceThread::Need::Drain ? "read_drain" : "read_wait");
         }
         // Later queued jobs do not write the range: the device's present state is the one to resolve.
+        const auto lockStarted = std::chrono::steady_clock::now();
         std::lock_guard gpuLock(self.gpuMutex);
+        noteReadWait(need.kind == DeviceThread::Need::Resolve ? "resolve: gpu mutex" : "after wait: gpu mutex", false, lockStarted);
         if (self.device) self.device->ResolveMemory(address, bytes, writable);
         GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
     }
@@ -1528,7 +1549,17 @@ private:
                     std::unique_lock<std::recursive_mutex> gpuLock(gpuMutex, std::defer_lock);
                     if (!pipeline) gpuLock.lock();
                     const GuestMemory::MemoryAccessScope memoryScope(accessContext(), accessResolver(), pipeline != nullptr);
-                    const GuestMemory::AccessSite accessSite("pm4_execute");
+                    // Named by opcode for the read-wait trace.
+                    static const auto siteNames = [] {
+                        std::array<std::string, 256> names;
+                        for (std::size_t i = 0; i < names.size(); ++i) {
+                            char name[24];
+                            std::snprintf(name, sizeof(name), "pm4_execute_0x%02zx", i);
+                            names[i] = name;
+                        }
+                        return names;
+                    }();
+                    const GuestMemory::AccessSite accessSite(siteNames[opcode].c_str());
                     withContext([&] { Pm4::Execute(packet, queue); });
                     timing.Mark("pm4_execute");
                 }

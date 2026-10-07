@@ -132,6 +132,17 @@ Issues that needed research, with a short answer. Check here before researching;
 - **Saves skew Spirit runs too.** Spirit autosaves into its run folder like Zorro, so repeated runs of the same folder start later in the game; clear _sd before every comparison run. Spirit frame counts earlier in this work mix builds with save progress.
 - **Scripted input is time-based.** As the driver gets faster, presses land in different menu states and runs diverge. Compare per-call costs or matching scenes (check dumped frames), not per-frame totals over fixed frame ranges.
 - **Profiling runs.** ANYPS5_SCRIPTED_INPUT="25:cross,30:cross" reaches gameplay unattended; frames after the scene settles are the ones to compare (scenes vary 200-1000+ draws a frame).
+- **Worker/device overlap is not the main lever (October 2026, Zorro gameplay ~37 ms).**
+  - Per frame: the worker spends ~21 ms on the CPU, the device thread ~24.5 ms in ~1300 jobs, and the GPU is busy ~16.7 ms. execute_to_flip_packet matches the flip interval, and the game waits in sceKernelWaitEqueue about one frame ahead.
+  - By default the worker drains the device thread at ~200 WAIT_REG_MEM packets a frame (~8 ms). With ANYPS5_QUEUE_WAIT_REG_MEM=1 those drains go, but frame time does not move. The worker's CPU rises ~2.4 ms, because DeviceThread::Check scans a longer job queue on every read. Its waits move to 0x9f register-pair reads (~2.4 ms), and the device thread still idles ~20% of the time.
+  - So the bottleneck moves between the two threads within a frame. Even perfect overlap is bounded by device work (~27 ms). The way to 16 ms is cutting both threads' CPU per frame.
+  - Smaller findings:
+    - Giving the driver threads exclusive P-cores (moving every other thread to CPUs 0-3 and 8-11 externally) gained ~1-2 ms median over 2+2 runs.
+    - Per-job queue overhead (locks, wakes, DirtyRanges) is ~2 ms a frame across both threads.
+    - The driver cores run at ~3.7 of 4.6 GHz (93 C package).
+  - Debug aids:
+    - APS5_TRACE_DEVICE=1: device thread idle, job wall and job CPU time.
+    - APS5_TRACE_READ_WAITS=1: worker reads that wait for the device thread, by access site and PM4 opcode, including gpuMutex waits.
 
 ## Upstream merges
 

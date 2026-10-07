@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <ctime>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -176,10 +177,27 @@ private:
         pthread_setname_np(pthread_self(), "AgcDevice");
         PinToPerformanceCore(1);
 #endif
+        // Debug aid: APS5_TRACE_DEVICE=1 splits the thread's time every 10 s into idle (no job),
+        // jobs' wall time and jobs' CPU time (the rest of a job's wall time it was off the CPU).
+        static const bool trace = std::getenv("APS5_TRACE_DEVICE") != nullptr;
+        const auto threadCpu = [] {
+#ifndef _WIN32
+            timespec now{};
+            clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+            return static_cast<double>(now.tv_sec) * 1e3 + static_cast<double>(now.tv_nsec) / 1e6;
+#else
+            return 0.0;
+#endif
+        };
+        auto window = std::chrono::steady_clock::now();
+        double idleMs = 0, jobWallMs = 0, jobCpuMs = 0;
+        std::uint64_t jobCount = 0;
         for (;;) {
             {
                 std::unique_lock lock(mutex);
+                const auto idleStart = std::chrono::steady_clock::now();
                 wake.wait(lock, [&] { return stopping || !jobs.empty(); });
+                if (trace) idleMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - idleStart).count();
                 if (jobs.empty()) return;
                 runningJob = std::move(jobs.front());
                 jobs.pop_front();
@@ -187,10 +205,24 @@ private:
             }
             Ranges published;
             std::exception_ptr error;
+            const auto jobStart = std::chrono::steady_clock::now();
+            const auto jobCpuStart = trace ? threadCpu() : 0.0;
             try {
                 published = runJob(runningJob.run);
             } catch (...) {
                 error = std::current_exception();
+            }
+            if (trace) {
+                const auto now = std::chrono::steady_clock::now();
+                jobWallMs += std::chrono::duration<double, std::milli>(now - jobStart).count();
+                jobCpuMs += threadCpu() - jobCpuStart;
+                ++jobCount;
+                if (now - window >= std::chrono::seconds(10)) {
+                    std::fprintf(stderr, "[device] %.0f ms window: idle %.0f ms, %llu jobs %.0f ms wall, %.0f ms on CPU\n", std::chrono::duration<double, std::milli>(now - window).count(), idleMs, static_cast<unsigned long long>(jobCount), jobWallMs, jobCpuMs);
+                    window = now;
+                    idleMs = jobWallMs = jobCpuMs = 0;
+                    jobCount = 0;
+                }
             }
             {
                 std::lock_guard lock(mutex);
