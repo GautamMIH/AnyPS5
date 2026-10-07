@@ -79,6 +79,9 @@ private:
     std::vector<Allocation> allocations;
     std::vector<std::shared_ptr<Texture>> textures;
     std::vector<std::shared_ptr<Sampler>> samplers;
+    // While a shader's bindings are added: its sampled textures (index into textures) and the masks
+    // of the sampler elements paired with each (DescriptorBinding::imageSamplers).
+    std::vector<std::pair<std::size_t, std::uint32_t>> pairedSamplers;
     std::vector<std::unique_ptr<StorageImage>> storageImages;
 };
 

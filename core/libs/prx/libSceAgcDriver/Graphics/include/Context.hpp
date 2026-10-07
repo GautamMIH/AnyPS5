@@ -88,6 +88,8 @@ struct Context {
     bool storageImageWriteWithoutFormat = false;
     // shaderImageInt64Atomics enabled (VK_EXT_shader_image_atomic_int64): 64-bit image atomics.
     bool imageInt64Atomics = false;
+    // VK_EXT_sampler_filter_minmax enabled: min and max sampler reduction modes.
+    bool samplerFilterMinmax = false;
     // The 8 and 8_8 sRGB formats sampled through UNORM views and decoded in the shader
     // (SrgbDecodeFormats); the shader target carries the same set.
     std::uint32_t srgbDecodeFormats = 0;

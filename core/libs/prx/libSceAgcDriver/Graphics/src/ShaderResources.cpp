@@ -96,6 +96,8 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
             Require(shader.program != nullptr, "missing compiled shader");
             const VkShaderStageFlags flags = VulkanStage(shader.stage);
             std::uint64_t stageDescriptors = 0;
+            const auto firstSampler = samplers.size();
+            pairedSamplers.clear();
             for (const auto& binding : shader.program->bindings) {
                 Require(binding.descriptorSet == 0, "unexpected descriptor set: every shader resource must use descriptor set zero");
                 Require(occupied.insert(binding.binding).second, "duplicate shader binding");
@@ -131,6 +133,10 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
                 }
                 bindings.push_back(std::move(item));
             }
+            // Min/max reduction samplers with linear filtering need a view format that filters
+            // min/max (upstream 1afcd202); the pairs name elements of this shader's sampler binding.
+            const auto shaderSamplers = std::span<const std::shared_ptr<Sampler>>(samplers).subspan(firstSampler);
+            for (const auto& [texture, mask] : pairedSamplers) RequireFilterMinmax(context, textures[texture]->ViewFormat(), mask, shaderSamplers);
         }
         Require(storageBuffers <= context.limits.maxDescriptorSetStorageBuffers, "pipeline descriptors exceed device limits");
         timing.Mark("bindings");
@@ -376,7 +382,17 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
                 ? VkComponentMapping{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A}
                 : VkComponentMapping{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             const bool depthCompare = element < binding.imageDepthCompare.size() && binding.imageDepthCompare[element];
-            textures.push_back(context.textureCache->Get(words, resource, components, depthCompare));
+            auto texture = context.textureCache->Get(words, resource, components, depthCompare);
+            // A texture sampled with unnormalized coordinates (upstream 76ddd9b6): the host sampler
+            // selects the S#'s texels only on a single-level, single-layer 1D or 2D view of mip 0.
+            if (element < binding.imageUnnormalized.size() && binding.imageUnnormalized[element]) {
+                const auto range = texture->SampledViewRange();
+                const bool singleLevel = range.levels == 1u && range.layers == 1u && resource.baseLevel == 0u && EffectiveMinLod(resource) == 0.0f;
+                if (!singleLevel || (range.type != VK_IMAGE_VIEW_TYPE_1D && range.type != VK_IMAGE_VIEW_TYPE_2D)) throw std::runtime_error("AGC graphics: guest texture sampled with unnormalized coordinates is not a single-level, single-layer 1D or 2D view starting at mip 0, which is not implemented (base level " + std::to_string(resource.baseLevel) + ", levels " + std::to_string(range.levels) + ", layers " + std::to_string(range.layers) + ", view type " + std::to_string(static_cast<int>(range.type)) + ")");
+            }
+            // The sampler elements paired with it, checked once the shader's samplers are bound.
+            pairedSamplers.push_back({textures.size(), element < binding.imageSamplers.size() ? binding.imageSamplers[element] : 0u});
+            textures.push_back(std::move(texture));
             item.imageAllocations.push_back(textures.size() - 1);
         }
         Require(textures.size() <= context.limits.maxDescriptorSetSampledImages, "pipeline sampled-image descriptors exceed device limits");
@@ -384,9 +400,11 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(elementWords == 4, "guest sampler descriptor must contain 4 dwords");
         Require(binding.count <= context.limits.maxPerStageDescriptorSamplers, "shader sampler descriptors exceed per-stage limits");
         Require(binding.samplerDepthCompare.size() == binding.count, "guest sampler binding is missing depth comparison metadata");
+        Require(binding.samplerUnnormalized.empty() || binding.samplerUnnormalized.size() == binding.count, "guest sampler binding has unnormalized coordinate metadata of another size");
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
-            auto resource = DecodeSamplerResource(words);
+            const bool unnormalized = element < binding.samplerUnnormalized.size() && binding.samplerUnnormalized[element];
+            auto resource = DecodeSamplerResource(words, unnormalized);
             resource.compareEnable = binding.samplerDepthCompare.at(element);
             if (!context.samplerCache) context.samplerCache = std::make_shared<SamplerCache>();
             samplers.push_back(context.samplerCache->Get(context, words, resource));

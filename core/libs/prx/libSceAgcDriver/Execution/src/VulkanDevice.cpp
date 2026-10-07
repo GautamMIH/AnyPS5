@@ -139,6 +139,8 @@ struct VulkanDevice::State {
     bool depthClamp = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
+    // VK_EXT_sampler_filter_minmax with both filterMinmax properties: min/max sampler reduction.
+    bool samplerFilterMinmax = false;
     std::unique_ptr<Graphics::TextureDetiler> detiler;
     std::unique_ptr<Graphics::GpuColorTransfer> colorTransfer;
     std::shared_ptr<Graphics::BufferPool> bufferPool;
@@ -527,6 +529,13 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         deviceExtensions.push_back(VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
         deviceExtensions.push_back(VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);
     }
+    if (hasExtension(VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME)) {
+        VkPhysicalDeviceSamplerFilterMinmaxPropertiesEXT minmaxProperties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES_EXT};
+        VkPhysicalDeviceProperties2 minmaxQuery{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, &minmaxProperties};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(selected, &minmaxQuery);
+        state->samplerFilterMinmax = minmaxProperties.filterMinmaxSingleComponentFormats == VK_TRUE && minmaxProperties.filterMinmaxImageComponentMapping == VK_TRUE;
+        if (state->samplerFilterMinmax) deviceExtensions.push_back(VK_EXT_SAMPLER_FILTER_MINMAX_EXTENSION_NAME);
+    }
     state->depthRangeUnrestricted = hasExtension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     if (state->depthRangeUnrestricted) deviceExtensions.push_back(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     VkPhysicalDeviceDepthClipControlFeaturesEXT depthClipFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT};
@@ -842,6 +851,10 @@ bool VulkanDevice::Presentable() const {
     return state->extent.width != 0 && state->extent.height != 0;
 }
 
+bool VulkanDevice::SamplerFilterMinmax() const {
+    return state->samplerFilterMinmax;
+}
+
 bool VulkanDevice::PrimitiveListRestart() const {
     return state->primitiveListRestart;
 }
@@ -1112,6 +1125,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.imageViewMinLod = state->imageViewMinLod;
     context.imageInt64Atomics = state->imageInt64Atomics;
     context.srgbDecodeFormats = state->srgbDecodeFormats;
+    context.samplerFilterMinmax = state->samplerFilterMinmax;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
     context.clipDistance = state->clipDistance;

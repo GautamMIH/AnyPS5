@@ -73,8 +73,9 @@ std::uint8_t Red(std::uint32_t x) {
 void FillTexels() {
     Texels.fill(0);
     const auto descriptor = TextureDescriptor();
-    const auto surface = AgcDriver::Graphics::DescribeSurface(AgcDriver::Graphics::DecodeTextureResource(descriptor));
-    const auto& mip = surface.mips.at(0);
+    // This driver's tiling layout (upstream's harness used its DescribeSurface).
+    const auto resource = AgcDriver::Graphics::DecodeTextureResource(descriptor);
+    const auto mip = AgcDriver::Graphics::ComputeMipLayout(resource.tileMode, resource.format, resource.width, resource.height, resource.mipCount).at(0);
     for (std::uint32_t x = 0; x < Width; ++x) {
         auto* texel = Texels.data() + mip.tiledOffset + x * 4u;
         texel[0] = Red(x);

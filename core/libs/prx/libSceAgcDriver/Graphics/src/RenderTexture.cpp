@@ -36,6 +36,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView resident texture");
+        noteView(viewInfo);
         timing.Mark("allocate");
         extent = info.extent;
         recordCopy();
@@ -76,6 +77,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& d
         viewInfo.components = components;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView resident depth texture");
+        noteView(viewInfo);
         timing.Mark("allocate");
         const auto texelBytes = static_cast<std::size_t>(descriptor.width) * descriptor.height * depthSource->HostDepthBytes();
         staging = std::make_unique<Buffer>(context, texelBytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -99,6 +101,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& d
     viewInfo.components = components;
     viewInfo.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
     Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView direct depth");
+    noteView(viewInfo);
 }
 
 Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& depthSource, VkComponentMapping components, FeedbackView) : Texture(context, depthSource, components, DirectView{}) {

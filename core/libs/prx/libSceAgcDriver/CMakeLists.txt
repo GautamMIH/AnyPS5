@@ -361,9 +361,8 @@ list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ImageAtomics|ImageAtomicsBi
 # Others drive upstream's driver internals (single color/blend state, DescribeSurface, StorageTexture,
 # texture cache flushes) and need porting to this driver's State and caches.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(EmulatedColorCompare|ImageStorePacked|PixelLds|PixelLdsLaneSlots|PixelValidMask|ViewPastLastMip)\\.cpp$")
-# Upstream tests of driver features not ported yet (device selection by name, sampler reduction
-# modes) or of its internals (DescribeSurface).
-list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(DeviceSelection|ImageGatherOneDimensional|ImageSampleReduction)\\.cpp$")
+# Upstream tests of driver features not ported yet (device selection by name).
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(DeviceSelection)\\.cpp$")
 # Open issue: image_sample_d on a 3D texture returns a wrong value with this driver (lane 0 0x447a5000,
 # expected 0x3fa00000); excluded until investigated.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/ImageSampleDerivatives\\.cpp$")

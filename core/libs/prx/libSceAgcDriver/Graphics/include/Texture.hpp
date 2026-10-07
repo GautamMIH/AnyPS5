@@ -46,6 +46,15 @@ public:
     Texture& operator=(const Texture&) = delete;
 
     VkImageView View() const;
+    // The sampled view's type, level and layer counts, and format (for unnormalized-coordinate and
+    // min/max-filter checks).
+    struct ViewRange {
+        VkImageViewType type;
+        std::uint32_t levels;
+        std::uint32_t layers;
+    };
+    ViewRange SampledViewRange() const { return viewRange; }
+    VkFormat ViewFormat() const { return viewFormat; }
     VkDeviceSize AllocationBytes() const { return allocationBytes; }
     // Whether the GPU finished filling the image (destroying it earlier waits for the queue).
     bool UploadComplete() const;
@@ -60,12 +69,18 @@ private:
     void releaseUploadResources() noexcept;
     // Allocates and binds the image's memory (from the device's ImageMemory when it has one).
     void bindImageMemory(const char* operation);
+    void noteView(const VkImageViewCreateInfo& info) {
+        viewRange = {info.viewType, info.subresourceRange.levelCount, info.subresourceRange.layerCount};
+        viewFormat = info.format;
+    }
 
     Context context;
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     std::optional<ImageMemory::Allocation> imageAllocation;
     VkImageView view = VK_NULL_HANDLE;
+    ViewRange viewRange{};
+    VkFormat viewFormat = VK_FORMAT_UNDEFINED;
     VkDeviceSize allocationBytes = 0;
     std::shared_ptr<ResidentColor> source;
     std::shared_ptr<ResidentDepth> depthSource;

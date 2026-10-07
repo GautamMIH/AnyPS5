@@ -334,6 +334,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
             viewInfo.pNext = &minLod;
         }
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView");
+        noteView(viewInfo);
     } catch (...) {
         release();
         throw;

@@ -20,6 +20,20 @@ bool isAnisoFilter(std::uint32_t raw) {
     return raw == 2 || raw == 3;
 }
 
+VkSamplerReductionMode toVkReductionMode(std::uint32_t raw) {
+    switch (raw) {
+        case 0: return VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT;
+        case 1: return VK_SAMPLER_REDUCTION_MODE_MIN_EXT;
+        case 2: return VK_SAMPLER_REDUCTION_MODE_MAX_EXT;
+        default: throw std::runtime_error("AGC graphics: guest sampler descriptor uses an unknown reduction filter mode " + std::to_string(raw));
+    }
+}
+
+// Clamp modes 4 to 7 address the border; only they read the border colour.
+bool readsBorderColor(std::uint32_t raw) {
+    return raw >= 4u && raw <= 7u;
+}
+
 VkSamplerAddressMode toVkAddressMode(std::uint32_t raw) {
     switch (raw) {
         case 0: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
@@ -41,7 +55,7 @@ float toSignedLodBias(std::uint32_t raw) {
 
 }
 
-GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words) {
+GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words, bool unnormalizedProven) {
     Require(words.size() == 4, "guest sampler descriptor must contain 4 dwords");
 
     const auto clampX = (words[0] >> 0u) & 0x7u;
@@ -51,6 +65,7 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
     const auto depthCompareFunc = (words[0] >> 12u) & 0x7u;
     const auto forceUnormCoords = ((words[0] >> 15u) & 0x1u) != 0;
     const auto anisoThreshold = (words[0] >> 16u) & 0x7u;
+    const auto mcCoordTrunc = ((words[0] >> 19u) & 0x1u) != 0;
     const auto forceSrgb = ((words[0] >> 20u) & 0x1u) != 0;
     const auto anisoBias = (words[0] >> 21u) & 0x3fu;
     const auto truncCoord = ((words[0] >> 27u) & 0x1u) != 0;
@@ -74,13 +89,25 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
 
     const auto borderColorType = (words[3] >> 30u) & 0x3u;
 
-    Require(!forceUnormCoords, "guest sampler descriptor uses unnormalized coordinates which are not implemented");
+    // Unnormalized coordinates (upstream 76ddd9b6): only where the recompiler proved the host sampler
+    // selects the texels the S# does, with matching filters and clamps that keep coordinates inside.
+    Require(!forceUnormCoords || unnormalizedProven, "guest sampler descriptor uses unnormalized coordinates which are not implemented");
+    if (forceUnormCoords) {
+        Require(xyMagFilter == xyMinFilter, "guest sampler descriptor uses unnormalized coordinates with different minification and magnification filters, which is not implemented");
+        Require(!isAnisoFilter(xyMagFilter), "guest sampler descriptor uses unnormalized coordinates with anisotropic filtering, which is not implemented");
+        Require(clampX == 2u || clampX == 6u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampX) + " on X; only clamp-to-last-texel and clamp-to-border are implemented");
+        Require(clampY == 2u || clampY == 6u, "guest sampler descriptor uses unnormalized coordinates with clamp mode " + std::to_string(clampY) + " on Y; only clamp-to-last-texel and clamp-to-border are implemented");
+        Require(!truncCoord, "guest sampler descriptor uses unnormalized coordinates with TRUNC_COORD, which is not implemented");
+        Require(!mcCoordTrunc, "guest sampler descriptor uses unnormalized coordinates with MC_COORD_TRUNC, which is not implemented");
+    } else {
+        Require(!unnormalizedProven, "guest sampler descriptor is bound as unnormalized without FORCE_UNNORMALIZED");
+    }
     Require(anisoThreshold == 0, "guest sampler descriptor uses an anisotropy threshold override which is not implemented");
     Require(!forceSrgb, "guest sampler descriptor forces sRGB decoding which is not implemented");
     Require(anisoBias == 0, "guest sampler descriptor uses an anisotropy bias which is not implemented");
     Require(!truncCoord, "guest sampler descriptor uses coordinate truncation which is not implemented");
     Require(!disableCubeWrap, "guest sampler descriptor disables seamless cube filtering which is not implemented");
-    Require(filterMode == 0, "guest sampler descriptor uses a reduction filter mode which is not implemented");
+    const auto reductionMode = toVkReductionMode(filterMode);
     Require(!disableDegamma, "guest sampler descriptor disables degamma which is not implemented");
     Require(perfMip == 0 && perfZ == 0, "guest sampler descriptor uses performance counters which are not implemented");
     Require(lodBiasSec == 0, "guest sampler descriptor uses a secondary LOD bias which is not implemented");
@@ -88,8 +115,11 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
     Require(!anisoOverride, "guest sampler descriptor uses an anisotropy override which is not implemented");
     Require(!blendZeroPrt, "guest sampler descriptor uses PRT blend-zero which is not implemented");
     Require(mipFilter <= 2u, "guest sampler descriptor uses an unknown mip filter " + std::to_string(mipFilter));
+    // lavapipe and NVIDIA disagree on min/max reduction across mip levels (upstream 1afcd202).
+    Require(mipFilter != 2u || reductionMode == VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT, "guest sampler descriptor combines a min or max reduction with a linear mip filter, which is not implemented");
 
     const auto aniso = isAnisoFilter(xyMagFilter) || isAnisoFilter(xyMinFilter);
+    Require(!aniso || reductionMode == VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT, "guest sampler descriptor combines a min or max reduction with anisotropic filtering, which is not implemented");
     auto anisoRatio = 1.0f;
     if (aniso) {
         Require(maxAnisoRatio <= 4u, "guest sampler descriptor uses an unknown anisotropy ratio " + std::to_string(maxAnisoRatio));
@@ -110,7 +140,12 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
         case 0: border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK; break;
         case 1: border = VK_BORDER_COLOR_INT_OPAQUE_BLACK; break;
         case 2: border = VK_BORDER_COLOR_INT_OPAQUE_WHITE; break;
-        default: throw std::runtime_error("AGC graphics: guest sampler descriptor uses a border color table which is not implemented");
+        default:
+            // A table entry (type 3) is read only through an axis that addresses the border
+            // (upstream ad56d004); otherwise the colour is never sampled.
+            if (readsBorderColor(clampX) || readsBorderColor(clampY) || readsBorderColor(clampZ)) throw std::runtime_error("AGC graphics: guest sampler descriptor uses a border color table which is not implemented");
+            border = VK_BORDER_COLOR_INT_TRANSPARENT_BLACK;
+            break;
     }
 
     GuestSamplerResource result{};
@@ -128,6 +163,16 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words)
     result.borderColor = border;
     const std::array compareOps{VK_COMPARE_OP_NEVER, VK_COMPARE_OP_LESS, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_ALWAYS};
     result.compareOp = compareOps.at(depthCompareFunc);
+    result.reductionMode = reductionMode;
+    if (forceUnormCoords) {
+        result.unnormalizedCoordinates = true;
+        result.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        result.minLod = 0.0f;
+        result.maxLod = 0.0f;
+        result.lodBias = 0.0f;
+        result.anisotropyEnable = false;
+        result.maxAnisotropy = 1.0f;
+    }
     return result;
 }
 

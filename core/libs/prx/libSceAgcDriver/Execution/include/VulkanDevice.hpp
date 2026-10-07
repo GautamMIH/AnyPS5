@@ -51,6 +51,8 @@ public:
     static bool AsyncFlip();
     // VK_EXT_primitive_topology_list_restart: primitive restart also applies to list topologies.
     bool PrimitiveListRestart() const;
+    // VK_EXT_sampler_filter_minmax: min and max sampler reduction modes (S# FILTER_MODE 1 and 2).
+    bool SamplerFilterMinmax() const;
     void PresentClear(std::uint32_t width, std::uint32_t height, bool opaque);
     void PresentPixels(std::uint32_t width, std::uint32_t height, std::span<const std::byte> pixels);
     void PresentDisplayBuffer(const DisplayBuffer& buffer);
