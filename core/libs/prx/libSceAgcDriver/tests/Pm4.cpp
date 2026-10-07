@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -650,6 +651,95 @@ void testDriverSubmission() {
     check(destination[0] == 0, "rejected submission executed a prefix");
 }
 
+std::vector<std::uint32_t> condWrite(std::uint32_t control, const std::uint32_t& poll, std::uint32_t reference, std::uint32_t mask, std::uint32_t& target, std::uint32_t value) {
+    return makePacket(0x45, {control, low(&poll), high(&poll), reference, mask, low(&target), high(&target), value});
+}
+
+// COND_WRITE (upstream 159d06d2): a masked 32-bit memory poll compared like WAIT_REG_MEM, then a
+// memory write of the data dword on a match.
+void testConditionalWrite() {
+    AgcDriver::QueueState state;
+    alignas(4) std::uint32_t poll = 0x1234u;
+    alignas(4) std::uint32_t target = 0;
+    const auto valid = condWrite(0x113, poll, 0x34, 0xff, target, 7);
+    check(AgcDriver::Pm4::Name(valid[0]) == "COND_WRITE" && valid[0] == 0xc0074500u, "COND_WRITE header or name mismatch");
+    check(AgcDriver::Pm4::UnsupportedReason(valid[0]).empty() && AgcDriver::Pm4::AccessesMemory(valid[0]), "COND_WRITE is rejected or does not synchronize guest memory");
+    const std::array<std::pair<std::uint32_t, bool>, 7> functions{{{0, true}, {1, false}, {2, true}, {3, true}, {4, false}, {5, true}, {6, false}}};
+    for (const auto& [function, writes] : functions) {
+        target = 0;
+        execute(state, condWrite(0x110 | function, poll, 0x34, 0xff, target, 9));
+        check(target == (writes ? 9u : 0u), "COND_WRITE compared the masked poll value incorrectly");
+    }
+    target = 0;
+    execute(state, condWrite(0x111, poll, 0x35, 0xff, target, 10));
+    check(target == 10, "COND_WRITE less-than did not write");
+    target = 0;
+    execute(state, condWrite(0x116, poll, 0x1233, 0xffffffffu, target, 11));
+    check(target == 11, "COND_WRITE greater-than with a full mask did not write");
+
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x45, {0x113, low(&poll), high(&poll), 0, 0, low(&target), high(&target)}), 0); }, "packet size");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x2000113, poll, 0, 0, target, 0), 0); }, "reserved");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x103, poll, 0, 0, target, 0), 0); }, "register-space");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x117, poll, 0, 0, target, 0), 0); }, "compare function");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x013, poll, 0, 0, target, 0), 0); }, "destination");
+    expectFailure([&] { AgcDriver::Pm4::Validate(condWrite(0x213, poll, 0, 0, target, 0), 0); }, "destination");
+    auto misaligned = condWrite(0x113, poll, 0, 0, target, 0);
+    misaligned[2] += 2;
+    expectFailure([&] { AgcDriver::Pm4::Validate(misaligned, 0); }, "misaligned");
+    misaligned = condWrite(0x113, poll, 0, 0, target, 0);
+    misaligned[6] += 1;
+    expectFailure([&] { AgcDriver::Pm4::Validate(misaligned, 0); }, "misaligned");
+
+    // The poll is read and the target written through the range synchronization.
+    struct MemoryState {
+        std::uint32_t poll = 0;
+        std::uint32_t target = 0;
+        bool read = false;
+        bool written = false;
+    } memory;
+    const AgcDriver::GuestMemory::MemoryAccessScope scope(&memory, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+        auto& memory = *static_cast<MemoryState*>(context);
+        check(bytes == sizeof(std::uint32_t), "COND_WRITE resolved an unrelated range");
+        if (writable) {
+            check(address == reinterpret_cast<std::uintptr_t>(&memory.target), "COND_WRITE resolved an unrelated target");
+            memory.written = true;
+        } else {
+            check(address == reinterpret_cast<std::uintptr_t>(&memory.poll), "COND_WRITE resolved an unrelated poll address");
+            memory.poll = 5;
+            memory.read = true;
+        }
+    });
+    execute(state, condWrite(0x113, memory.poll, 5, 0xffffffffu, memory.target, 12));
+    check(memory.read && memory.written && memory.target == 12, "COND_WRITE used a stale poll value or skipped synchronizing its target");
+}
+
+void testConditionalWriteSubmission() {
+    alignas(4) static std::uint32_t poll = 0;
+    static std::array<std::uint32_t, 2> results{};
+    results.fill(0);
+    poll = 0;
+    std::vector<std::uint32_t> commands;
+    for (const auto& packet : {
+        makePacket(0x37, {0x100, low(&poll), high(&poll), 5}),
+        condWrite(0x113, poll, 5, 0xffffffffu, results[0], 51),
+        condWrite(0x114, poll, 5, 0xffffffffu, results[1], 52)
+    }) commands.insert(commands.end(), packet.begin(), packet.end());
+    Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
+    check(sceAgcDriverSubmitDcb(&packet) == 0, "COND_WRITE submission failed");
+    AgcDriverWaitIdle_nid_postfix();
+    check(results[0] == 51, "COND_WRITE read its poll value before an earlier packet of its queue stored it");
+    check(results[1] == 0, "COND_WRITE wrote although its comparison failed");
+}
+
+// A user data register the title never wrote reads 0 (upstream f5a6a31b).
+void testUnwrittenUserData() {
+    AgcDriver::Registers shader{{0x8c, 0x100}, {0x8d, 0}, {0x240, 0x200}, {0x2400, 7}};
+    check(shader.userData(0x8c) == 0x100 && shader.userData(0x240) == 0x200 && shader.userData(0x2400) == 7, "a written user data register was not read");
+    check(shader.userData(0x8d) == 0, "a user data register written as zero was not read");
+    check(shader.userData(0x95) == 0 && shader.userData(0x241) == 0 && shader.userData(0x2401) == 0, "an unwritten user data register does not read zero");
+    check(!shader.contains(0x95), "reading user data wrote the register");
+}
+
 void testAsyncMemoryFailure() {
     auto commands = makePacket(0x37, {0x100, 0x1000, 0, 1});
     Packet packet{commands.data(), static_cast<std::uint32_t>(commands.size()), 0, {}};
@@ -683,7 +773,10 @@ int main(int argc, char** argv) {
         testEventWrite();
         testAcquireMem();
         testMemoryWaits();
+        testConditionalWrite();
+        testUnwrittenUserData();
         testDriverSubmission();
+        testConditionalWriteSubmission();
         LibcRunShutdown_nid_postfix();
         std::puts("PM4 catalog, registers, state, memory and submission tests passed");
         return 0;

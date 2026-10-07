@@ -800,7 +800,7 @@ private:
         const auto userCount = (readRegister(queue.shader, 0x213) >> 1u) & 0x1fu;
         std::vector<std::uint32_t> userData;
         for (std::uint32_t i = 0; i < userCount; ++i) {
-            userData.push_back(readRegister(queue.shader, 0x240 + i));
+            userData.push_back(queue.shader.userData(0x240 + i));
         }
         auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
         // USE_THREAD_DIMENSIONS (direct dispatches only, Pm4::Validate): the packet counts threads.
@@ -924,7 +924,7 @@ private:
                 {},
                 {{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}}
             };
-            for (std::uint32_t i = 0; i < userCount; ++i) result.userData.push_back(readRegister(queue.shader, userDataBase + i));
+            for (std::uint32_t i = 0; i < userCount; ++i) result.userData.push_back(queue.shader.userData(userDataBase + i));
             result.owner = it->second;
             return result;
         };
@@ -1427,7 +1427,7 @@ private:
                     cursor += count;
                     continue;
                 }
-                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x58 || header == FlipPacketHeader) {
+                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x45 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x58 || header == FlipPacketHeader) {
                     const auto gpuLock = lockDevice();
                     timing.Mark("gpu_mutex_wait");
                     // Cache and partial-flush events and ACQUIRE_MEM order GPU work against GPU work:
@@ -1448,14 +1448,14 @@ private:
                     }
                     const auto sampleDump = opcode == 0x46 && (packet[1] & 0x3fu) == 0x39u;
                     const auto gpuBarrier = (opcode == 0x46 && !sampleDump) || opcode == 0x58;
-                    const auto waitDraws = opcode == 0x37 || opcode == 0x40 || opcode == 0x50 || opcode == 0x42 || sampleDump;
+                    const auto waitDraws = opcode == 0x37 || opcode == 0x40 || opcode == 0x45 || opcode == 0x50 || opcode == 0x42 || sampleDump;
                     if (sampleDump) {
                         dumpSampleCounters(packet, device.get());
                     } else if (device != nullptr) {
                         if (gpuBarrier) device->AcquireGpuMemory();
                         else if (waitDraws) {
                             // Which packet types make the worker drain the GPU (Driver.DrainFor.<packet>).
-                            PerformanceTimer drainTiming(opcode == 0x37 ? "Driver.DrainFor.WriteData" : opcode == 0x40 ? "Driver.DrainFor.CopyData" : opcode == 0x50 ? "Driver.DrainFor.DmaData" : "Driver.DrainFor.PfpSyncMe");
+                            PerformanceTimer drainTiming(opcode == 0x37 ? "Driver.DrainFor.WriteData" : opcode == 0x40 ? "Driver.DrainFor.CopyData" : opcode == 0x45 ? "Driver.DrainFor.CondWrite" : opcode == 0x50 ? "Driver.DrainFor.DmaData" : "Driver.DrainFor.PfpSyncMe");
                             device->WaitDraws();
                         }
                         else if (!VulkanDevice::AsyncFlip()) {

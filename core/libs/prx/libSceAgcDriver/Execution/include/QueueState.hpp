@@ -61,6 +61,14 @@ public:
     }
 
     bool contains(std::uint32_t offset) const { return offset < DenseLimit ? has(offset) : sparse.contains(offset); }
+    // A user data register (SPI_SHADER_USER_DATA_*, COMPUTE_USER_DATA_*) within a stage's RSRC2 count
+    // that the title never wrote reads 0, as Kyty and SharpEmu read it and AMD PAL and Mesa
+    // initialize the user data registers (the console's value is not confirmed).
+    std::uint32_t userData(std::uint32_t offset) const {
+        if (offset < DenseLimit) return has(offset) ? dense[offset] : 0u;
+        const auto found = sparse.find(offset);
+        return found == sparse.end() ? 0u : found->second;
+    }
     std::size_t count(std::uint32_t offset) const { return contains(offset) ? 1 : 0; }
     std::size_t size() const { return denseCount + sparse.size(); }
     bool empty() const { return size() == 0; }

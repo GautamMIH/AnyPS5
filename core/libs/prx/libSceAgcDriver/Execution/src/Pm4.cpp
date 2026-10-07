@@ -174,7 +174,7 @@ std::string_view UnsupportedReason(std::uint32_t header) {
     }
     switch (opcode) {
         case 0x11: case 0x12: case 0x13: case 0x15: case 0x16: case 0x26:
-        case 0x27: case 0x2a: case 0x2d: case 0x2f: case 0x35: case 0x37: case 0x40: case 0x42: case 0x46: case 0x50:
+        case 0x27: case 0x2a: case 0x2d: case 0x2f: case 0x35: case 0x37: case 0x40: case 0x42: case 0x45: case 0x46: case 0x50:
         case 0x58: case 0x63: case 0x64: case 0x69: case 0x76: case 0x79: case 0x7a:
         case 0x81: case 0x83: case 0x9f: return {};
         case 0x24: case 0x25: case 0x2c: case 0x38: return {};
@@ -342,6 +342,17 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             const auto target = address(packet[2], packet[3]);
             require(target != 0 && (target & (opcode == 0x3c ? 3u : 7u)) == 0, "null or misaligned WAIT_REG_MEM address");
             require(packet.back() <= 0xffffu, "invalid WAIT_REG_MEM poll interval");
+            break;
+        }
+        // COND_WRITE: a memory poll compared like a 32-bit WAIT_REG_MEM, then a memory write of
+        // the data dword on a match. Register polls and register or scratch destinations throw.
+        case 0x45: {
+            size(9);
+            require((packet[1] & ~0x317u) == 0, "COND_WRITE reserved fields are not implemented");
+            require((packet[1] & 0x10u) != 0, "register-space COND_WRITE poll is not implemented");
+            require((packet[1] & 7u) <= 6u, "invalid COND_WRITE compare function");
+            require(((packet[1] >> 8u) & 3u) == 1u, "register or scratch COND_WRITE destination is not implemented");
+            require((packet[2] & 3u) == 0 && (packet[6] & 3u) == 0, "misaligned COND_WRITE address");
             break;
         }
         case 0x49: {
@@ -574,7 +585,7 @@ std::uint64_t GpuClock() {
 
 bool AccessesMemory(std::uint32_t header) {
     switch ((header >> 8u) & 0xffu) {
-        case 0x16: case 0x20: case 0x22: case 0x24: case 0x25: case 0x27: case 0x2c: case 0x2d: case 0x35: case 0x38: case 0x37: case 0x3c: case 0x40: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
+        case 0x16: case 0x20: case 0x22: case 0x24: case 0x25: case 0x27: case 0x2c: case 0x2d: case 0x35: case 0x38: case 0x37: case 0x3c: case 0x40: case 0x45: case 0x49: case 0x50: case 0x63: case 0x64: case 0x83: case 0x93: case 0x9f: return true;
         default: return false;
     }
 }
@@ -780,6 +791,12 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         case 0x83:
             GuestMemory::Write(address(packet[3], packet[4]), std::as_bytes(std::span(queue.constantRam).subspan(packet[1] / 4, packet[2])), 4);
             return;
+        case 0x45: {
+            std::uint32_t value = 0;
+            GuestMemory::Read(address(packet[2], packet[3]), std::as_writable_bytes(std::span(&value, 1)), 4);
+            if (ValueSatisfiesWait(packet, value)) GuestMemory::Write(address(packet[6], packet[7]), std::as_bytes(packet.subspan(8, 1)), 4);
+            return;
+        }
         case 0x37: {
             const auto destination = address(packet[2], packet[3]);
             if ((packet[1] & 0x10000u) != 0) {
