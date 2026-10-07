@@ -254,6 +254,23 @@ target_link_libraries(agc_driver_texture_layout_tests PRIVATE
 set_target_properties(agc_driver_texture_layout_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_texture_layout_tests)
 
+# Guest resource decoding without a device (S# and texture formats; this branch's coverage of the
+# decoding upstream tests in the unbuilt agc_driver_graphics_tests).
+add_executable(agc_driver_resource_decode_tests EXCLUDE_FROM_ALL
+        tests/ResourceDecode.cpp
+)
+target_include_directories(agc_driver_resource_decode_tests PRIVATE
+        ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
+)
+target_link_libraries(agc_driver_resource_decode_tests PRIVATE
+        libSceAgcDriver
+        libc
+)
+set_target_properties(agc_driver_resource_decode_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_resource_decode_tests)
+
 add_executable(agc_driver_color_transfer_device_tests EXCLUDE_FROM_ALL
         tests/ColorTransferDevice.cpp
 )
@@ -383,7 +400,7 @@ foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
 endforeach()
 
 if(BUILD_TESTING)
-    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_vop1_control_decode_tests agc_shader_disk_cache_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_color_exports_tests agc_driver_texture_layout_tests agc_driver_color_transfer_device_tests ${agcExecutionTests})
+    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_dpp_write_tests agc_vop1_control_decode_tests agc_shader_disk_cache_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_color_exports_tests agc_driver_texture_layout_tests agc_driver_resource_decode_tests agc_driver_color_transfer_device_tests ${agcExecutionTests})
         string(REGEX REPLACE "_tests$" "" agcTestName "${agcTest}")
         set_target_properties(${agcTest} PROPERTIES EXCLUDE_FROM_ALL OFF)
         add_test(NAME ${agcTestName} COMMAND ${agcTest})
