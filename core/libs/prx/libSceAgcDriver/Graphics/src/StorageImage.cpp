@@ -216,6 +216,27 @@ void StorageImage::release() noexcept {
     memory = VK_NULL_HANDLE;
 }
 
+void DropPooledStorageImages(VkDevice device, PFN_vkGetDeviceProcAddr deviceProc) {
+    auto& pool = imagePool();
+    std::lock_guard lock(pool.mutex);
+    const auto destroyView = reinterpret_cast<PFN_vkDestroyImageView>(deviceProc(device, "vkDestroyImageView"));
+    const auto destroyImage = reinterpret_cast<PFN_vkDestroyImage>(deviceProc(device, "vkDestroyImage"));
+    const auto freeMemory = reinterpret_cast<PFN_vkFreeMemory>(deviceProc(device, "vkFreeMemory"));
+    for (auto it = pool.images.begin(); it != pool.images.end();) {
+        if (it->first[0] != reinterpret_cast<std::uint64_t>(device)) {
+            ++it;
+            continue;
+        }
+        for (const auto& pooled : it->second) {
+            destroyView(device, pooled.view, nullptr);
+            destroyImage(device, pooled.image, nullptr);
+            freeMemory(device, pooled.memory, nullptr);
+        }
+        pool.count -= it->second.size();
+        it = pool.images.erase(it);
+    }
+}
+
 std::vector<VkBufferImageCopy> StorageImage::imageCopies() const {
     std::vector<VkBufferImageCopy> copies;
     for (std::uint32_t layer = 0; layer < layers; ++layer) {

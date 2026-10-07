@@ -1747,6 +1747,23 @@ extern "C" void AgcDriverWaitIdle_nid_postfix() {
     AgcDriver::WaitIdle();
 }
 
+namespace {
+
+std::mutex& VulkanLoaderMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+}
+
+extern "C" void AgcDriverLockVulkanLoader_nid_postfix() {
+    VulkanLoaderMutex().lock();
+}
+
+extern "C" void AgcDriverUnlockVulkanLoader_nid_postfix() {
+    VulkanLoaderMutex().unlock();
+}
+
 extern "C" void AgcDriverRegisterShader_nid_postfix(const Shader* shader) {
     AgcDriver::RegisterShader(shader);
 }

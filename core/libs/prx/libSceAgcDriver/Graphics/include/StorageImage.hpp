@@ -63,6 +63,10 @@ private:
     std::optional<std::array<std::uint64_t, 7>> poolShape;
 };
 
+// Destroys the pooled storage images (ANYPS5_STORAGE_IMAGE_POOL=1) of a device about to be destroyed:
+// the pool outlives devices, and a later device may get the same handle.
+void DropPooledStorageImages(VkDevice device, PFN_vkGetDeviceProcAddr deviceProc);
+
 }
 
 #endif

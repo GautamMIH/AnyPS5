@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/BdaFeatures.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PresentationScaler.hpp"
@@ -19,6 +20,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Sampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/StorageImage.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
 #include "prx/libc/include/General.hpp"
 #include <cctype>
@@ -270,6 +272,7 @@ struct VulkanDevice::State {
             if (swapchain) reinterpret_cast<PFN_vkDestroySwapchainKHR>(deviceProc(device, "vkDestroySwapchainKHR"))(device, swapchain, nullptr);
             const auto destroyPool = reinterpret_cast<PFN_vkDestroyCommandPool>(deviceProc(device, "vkDestroyCommandPool"));
             const auto destroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(deviceProc(device, "vkDestroyDevice"));
+            Graphics::DropPooledStorageImages(device, deviceProc);
             if (pool != VK_NULL_HANDLE) {
                 Graphics::DropRecycledCommandBatches(device, pool, deviceProc);
                 destroyPool(device, pool, nullptr);
@@ -300,6 +303,13 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     if (state->instanceProc == nullptr) {
         throw std::runtime_error("Vulkan loader: vkGetInstanceProcAddr missing");
     }
+    // SDL_CreateWindow with SDL_WINDOW_VULKAN loads and queries the Vulkan loader; on Windows that,
+    // during vkCreateInstance on another thread, intermittently made the NVIDIA ICD fail instance
+    // creation (upstream e419513f). DisplayWindow::create holds the same lock.
+    AgcDriverLockVulkanLoader_nid_postfix();
+    struct LoaderUnlock {
+        ~LoaderUnlock() { AgcDriverUnlockVulkanLoader_nid_postfix(); }
+    } loaderUnlock;
     VkApplicationInfo application{VK_STRUCTURE_TYPE_APPLICATION_INFO};
     application.pApplicationName = "AnyPS5 libSceAgcDriver";
     application.apiVersion = VK_API_VERSION_1_1;
