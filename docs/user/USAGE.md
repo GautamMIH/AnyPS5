@@ -91,7 +91,7 @@ Games that open the console's system font sets (`sceFontOpenFontSet`) need font 
 
 ### GPU selection
 
-The game runs on the first Vulkan 1.1 device with graphics and compute queues and swapchain presentation, preferring a discrete GPU over an integrated one. Set `ANYPS5_GPU` to a part of a device name, compared without regard to case, to run on another device; the names are printed at start-up in the `Physical device candidate` lines. When no usable device contains the text, the start fails and the error lists the device names.
+The game runs on the first Vulkan 1.1 device with graphics and compute queues and swapchain presentation, preferring a discrete GPU over an integrated one. Set `ANYPS5_GPU` to a part of a device name, compared without regard to case, to run on another device (a number below the device count selects a device by enumeration index instead); the selected device is printed at start-up as `[AnyPS5] Vulkan device:`. When no usable device contains the text, the start fails and the error lists the device names.
 
 ## Exit codes
 

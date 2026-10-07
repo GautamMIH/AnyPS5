@@ -356,13 +356,12 @@ file(GLOB agcExecutionTestSources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/
 # driver resolves images only in guest memory (StorageImage, render targets) and grants address-table
 # writes only to guest memory it maps in place (in games those targets are guest allocations), so
 # these need a guest-memory harness first: image tests fail with "guest memory backing range ... is
-# unmapped", store/atomic tests with a BDA permission fault (reason 2).
+# unmapped", store/atomic tests with a BDA permission fault (reason 2). VulkanTestDevice.hpp has a
+# guest-memory block (GuestTestMemory) for images, as ImageAtomics64 and the image format tests use.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ImageAtomics|ImageAtomicsBitwise|ImageAtomicsFloat|ImageCacheBits|ImageTexelStatus|PixelHelperLanes|FlatStore|FlatCacheBits|GlobalAtomicCsub|GlobalAtomics|GlobalAtomics64|GlobalAtomicsFloat|GlobalAtomicsLanes|GlobalStoreAddtid|GlobalVccBase)\\.cpp$")
 # Others drive upstream's driver internals (single color/blend state, DescribeSurface, StorageTexture,
 # texture cache flushes) and need porting to this driver's State and caches.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(EmulatedColorCompare|ImageStorePacked|PixelLds|PixelLdsLaneSlots|PixelValidMask|ViewPastLastMip)\\.cpp$")
-# Upstream tests of driver features not ported yet (device selection by name).
-list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(DeviceSelection)\\.cpp$")
 # Open issue: image_sample_d on a 3D texture returns a wrong value with this driver (lane 0 0x447a5000,
 # expected 0x3fa00000); excluded until investigated.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/ImageSampleDerivatives\\.cpp$")

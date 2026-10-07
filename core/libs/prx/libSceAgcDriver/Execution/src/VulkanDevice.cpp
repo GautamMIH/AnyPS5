@@ -21,6 +21,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
 #include "prx/libc/include/General.hpp"
+#include <cctype>
+#include <optional>
+#include <string_view>
 #include <SDL_loadso.h>
 #include <SDL_error.h>
 #include <spirv/unified1/spirv.hpp>
@@ -335,14 +338,29 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     devices.resize(count);
     // Device preference follows shadPS4 (vk_instance.cpp): Vulkan 1.1 support, then discrete GPUs,
     // then anything but a CPU implementation, then the largest device-local heap. The first
-    // suitable device in that order is used. ANYPS5_GPU=<index> picks a device by enumeration
-    // index instead.
+    // suitable device in that order is used. ANYPS5_GPU picks devices whose name contains its text,
+    // compared without regard to case (upstream e998b2dd); a number below the device count picks a
+    // device by enumeration index instead, as before.
     const auto getProperties = state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties>("vkGetPhysicalDeviceProperties");
     const auto getMemory = state->InstanceFunction<PFN_vkGetPhysicalDeviceMemoryProperties>("vkGetPhysicalDeviceMemoryProperties");
-    if (const char* chosen = std::getenv("ANYPS5_GPU")) {
-        const auto index = std::strtoul(chosen, nullptr, 10);
-        require(index < devices.size(), "ANYPS5_GPU names a device index past the enumerated devices");
-        devices = {devices[index]};
+    const char* requestedName = std::getenv("ANYPS5_GPU");
+    if (requestedName != nullptr && *requestedName == '\0') requestedName = nullptr;
+    std::string candidateNames;
+    for (auto physical : devices) {
+        VkPhysicalDeviceProperties properties{};
+        getProperties(physical, &properties);
+        if (!candidateNames.empty()) candidateNames += ", ";
+        candidateNames += properties.deviceName;
+    }
+    const auto byIndex = [&]() -> std::optional<std::size_t> {
+        if (requestedName == nullptr) return std::nullopt;
+        const std::string_view text(requestedName);
+        if (text.size() > 9 || !std::all_of(text.begin(), text.end(), [](char c) { return c >= '0' && c <= '9'; })) return std::nullopt;
+        const auto index = static_cast<std::size_t>(std::strtoul(requestedName, nullptr, 10));
+        return index < devices.size() ? std::optional<std::size_t>(index) : std::nullopt;
+    }();
+    if (byIndex) {
+        devices = {devices[*byIndex]};
     } else {
         const auto deviceLocalBytes = [&](VkPhysicalDevice physical) {
             VkPhysicalDeviceMemoryProperties memory{};
@@ -369,6 +387,22 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
             if (lCpu != rCpu) return rCpu;
             return deviceLocalBytes(left) > deviceLocalBytes(right);
         });
+        if (requestedName != nullptr) {
+            const auto matches = [&](VkPhysicalDevice physical) {
+                VkPhysicalDeviceProperties properties{};
+                getProperties(physical, &properties);
+                const std::string_view name(properties.deviceName);
+                const std::string_view request(requestedName);
+                if (request.size() > name.size()) return false;
+                for (std::size_t start = 0; start + request.size() <= name.size(); ++start) {
+                    std::size_t index = 0;
+                    while (index < request.size() && std::tolower(static_cast<unsigned char>(name[start + index])) == std::tolower(static_cast<unsigned char>(request[index]))) ++index;
+                    if (index == request.size()) return true;
+                }
+                return false;
+            };
+            devices.erase(std::remove_if(devices.begin(), devices.end(), [&](VkPhysicalDevice physical) { return !matches(physical); }), devices.end());
+        }
     }
     VkPhysicalDevice selected = VK_NULL_HANDLE;
     std::uint32_t family = 0;
@@ -410,6 +444,9 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         if (selected != VK_NULL_HANDLE) {
             break;
         }
+    }
+    if (selected == VK_NULL_HANDLE && requestedName != nullptr) {
+        throw std::runtime_error(std::string("Vulkan: no usable device whose name contains ANYPS5_GPU=\"") + requestedName + "\"; devices: " + candidateNames);
     }
     if (selected == VK_NULL_HANDLE) {
         throw std::runtime_error(window ? "Vulkan: no Vulkan 1.1 device with graphics, compute and swapchain presentation" : "Vulkan: no Vulkan 1.1 graphics and compute queue");
@@ -1067,6 +1104,10 @@ void VulkanDevice::present(std::uint32_t width, std::uint32_t height, bool opaqu
 
 ShaderRecompiler::SpirvTarget VulkanDevice::ComputeTarget(std::uint32_t) const {
     return Target();
+}
+
+std::string VulkanDevice::DeviceName() const {
+    return state->properties.deviceName;
 }
 
 ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {

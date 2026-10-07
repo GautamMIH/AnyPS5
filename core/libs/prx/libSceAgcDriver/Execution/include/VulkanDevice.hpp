@@ -8,6 +8,7 @@
 #include "prx/libSceAgcDriver/Execution/include/DisplayBuffer.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include <memory>
+#include <string>
 
 namespace AgcDriver {
 
@@ -19,6 +20,8 @@ public:
     ~VulkanDevice();
     VulkanDevice(const VulkanDevice&) = delete;
     VulkanDevice& operator=(const VulkanDevice&) = delete;
+    // The selected physical device's name (ANYPS5_GPU selects by name).
+    std::string DeviceName() const;
     ShaderRecompiler::SpirvTarget Target() const;
     // The target for a compute program of the given wave size (upstream's API). Subgroup size control
     // is not enabled, so the device's subgroup size stands (32 on NVIDIA).
