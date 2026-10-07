@@ -18,7 +18,8 @@ namespace AgcDriver::Graphics {
 // command buffer; otherwise on the CPU around it.
 class StorageImage {
 public:
-    StorageImage(const Context& context, const GuestTextureResource& resource);
+    // format: the image and view format (StorageImageFormat), of the guest format's element size.
+    StorageImage(const Context& context, const GuestTextureResource& resource, VkFormat format);
     ~StorageImage();
     StorageImage(const StorageImage&) = delete;
     StorageImage& operator=(const StorageImage&) = delete;

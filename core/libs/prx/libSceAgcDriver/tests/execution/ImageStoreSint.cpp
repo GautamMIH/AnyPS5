@@ -2,7 +2,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
-#include "prx/libc/include/GuestAllocations.hpp"
 #include "Recompiler.hpp"
 #include "VulkanTestDevice.hpp"
 #ifdef _WIN32
@@ -67,34 +66,15 @@ constexpr std::array<std::uint32_t, 24> Edges{
     0x7fffffffu, 0x80000000u, 0x12345678u, 0xedcba988u, 0x00007ffeu, 0xffff8001u, 0x0000007eu, 0xffffff81u,
 };
 
+// Guest memory: this driver writes storage images back only through guest mappings (upstream's
+// harness registered a host allocation and flushed its pending storage textures).
 class GuestBlock {
 public:
-    GuestBlock() {
-#ifdef _WIN32
-        block = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, BlockBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-#else
-        block = static_cast<std::uint8_t*>(std::aligned_alloc(BlockBytes, BlockBytes));
-#endif
-        Require(block != nullptr, "image store sint: cannot allocate the guest block");
-        GuestAllocations::Mutation().Add(block, BlockBytes, true, true);
-    }
-
-    ~GuestBlock() {
-        GuestAllocations::Mutation().Remove(block);
-#ifdef _WIN32
-        VirtualFree(block, 0, MEM_RELEASE);
-#else
-        std::free(block);
-#endif
-    }
-
-    GuestBlock(const GuestBlock&) = delete;
-    GuestBlock& operator=(const GuestBlock&) = delete;
-
-    std::uint8_t* Data() { return block; }
+    GuestBlock() : memory(BlockBytes) {}
+    std::uint8_t* Data() { return memory.As<std::uint8_t>(); }
 
 private:
-    std::uint8_t* block = nullptr;
+    GuestTestMemory memory;
 };
 
 struct Format {
@@ -231,7 +211,6 @@ void Dispatch(AgcDriver::VulkanDevice& device, std::uint8_t* texels, std::span<c
     const auto result = ShaderRecompiler::Recompile(request);
     device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
     device.WaitIdle();
-    AgcDriver::Graphics::StorageTexture::FlushPending(reinterpret_cast<std::uintptr_t>(texels), TexelBytes, nullptr, "test");
     device.WaitIdle();
 }
 

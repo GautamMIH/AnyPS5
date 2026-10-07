@@ -1,7 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
-#include "prx/libc/include/GuestAllocations.hpp"
 #include "Recompiler.hpp"
 #include "VulkanTestDevice.hpp"
 #ifdef _WIN32
@@ -92,34 +91,15 @@ constexpr std::array<std::uint32_t, 11> StoreValues{
     0x40000000u, 0x7f800000u, 0x7fc00000u, 0x000116c2u, 0x3f7fbe77u,
 };
 
+// Guest memory: this driver writes storage images back only through guest mappings (upstream's
+// harness registered a host allocation and flushed its pending storage textures).
 class GuestBlock {
 public:
-    GuestBlock() {
-#ifdef _WIN32
-        block = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, BlockBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-#else
-        block = static_cast<std::uint8_t*>(std::aligned_alloc(BlockBytes, BlockBytes));
-#endif
-        Require(block != nullptr, "image converted unorm: cannot allocate the guest block");
-        GuestAllocations::Mutation().Add(block, BlockBytes, true, true);
-    }
-
-    ~GuestBlock() {
-        GuestAllocations::Mutation().Remove(block);
-#ifdef _WIN32
-        VirtualFree(block, 0, MEM_RELEASE);
-#else
-        std::free(block);
-#endif
-    }
-
-    GuestBlock(const GuestBlock&) = delete;
-    GuestBlock& operator=(const GuestBlock&) = delete;
-
-    std::uint8_t* Data() { return block; }
+    GuestBlock() : memory(BlockBytes) {}
+    std::uint8_t* Data() { return memory.As<std::uint8_t>(); }
 
 private:
-    std::uint8_t* block = nullptr;
+    GuestTestMemory memory;
 };
 
 std::string Hex(std::uint32_t value) {
@@ -217,7 +197,6 @@ void CheckRoundTrip(AgcDriver::VulkanDevice& device, std::uint8_t* texels) {
     auto* target = texels + RoundTripOffset;
     std::fill(target, target + LoadWidth * 4u, static_cast<std::uint8_t>(0xa5u));
     Run(device, RoundTrip, TextureDescriptor(texels, UnormFormat, SwizzleXYZ1, LoadWidth), {}, LoadGroups, TextureDescriptor(target, UnormFormat, SwizzleXYZ1, LoadWidth));
-    AgcDriver::Graphics::StorageTexture::FlushPending(reinterpret_cast<std::uintptr_t>(target), LoadWidth * 4u, nullptr, "test");
     device.WaitIdle();
     for (std::uint32_t index = 0; index < LoadWidth; ++index) {
         std::uint32_t actual = 0;
@@ -240,7 +219,6 @@ void CheckStore(AgcDriver::VulkanDevice& device, std::uint8_t* texels, std::span
         }
     }
     Run(device, code, TextureDescriptor(texels, UnormFormat, SwizzleXYZ1, Threads), BufferDescriptor(Input.data(), static_cast<std::uint32_t>(Input.size() * 4u)), 1);
-    AgcDriver::Graphics::StorageTexture::FlushPending(reinterpret_cast<std::uintptr_t>(texels), Threads * 4u, nullptr, "test");
     device.WaitIdle();
     for (std::uint32_t tid = 0; tid < Threads; ++tid) {
         std::uint32_t actual = 0;

@@ -62,7 +62,7 @@ PoolKey poolKey(VkDevice device, VkImageType type, VkFormat format, VkExtent3D e
 
 }
 
-StorageImage::StorageImage(const Context& context, const GuestTextureResource& resource) : context(context), resource(resource) {
+StorageImage::StorageImage(const Context& context, const GuestTextureResource& resource, VkFormat format) : context(context), resource(resource) {
     PerformanceTimer timing("Graphics.StorageImage.Upload");
     Require(resource.dimension == TextureDimension::k2D || resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::k3D, "storage images support 2D, 2D-array and 3D textures only");
     // A volume's slices are addressed like layers (thin tilings; see DecodeTextureResource).
@@ -71,7 +71,6 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
     Require(resource.baseLevel == resource.lastLevel, "storage image views must address a single mip");
     Require(resource.minLod <= resource.baseLevel * 256u, "guest storage texture descriptor clamps its minimum LOD above the level it addresses, which is not implemented");
     Require(!IsBlockCompressed(resource.format), "block-compressed storage images are invalid");
-    const auto format = ResolveTextureFormat(resource.format);
     elementBytes = BytesPerElement(resource.format);
     VkFormatProperties properties{};
     context.formatProperties(context.physical, format, &properties);

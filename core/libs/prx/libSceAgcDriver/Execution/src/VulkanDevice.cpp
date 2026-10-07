@@ -18,6 +18,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DescriptorCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Sampler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
 #include "prx/libc/include/General.hpp"
 #include <SDL_loadso.h>
@@ -113,6 +114,8 @@ struct VulkanDevice::State {
     bool primitiveListRestart = false;
     bool occlusionQueryPrecise = false;
     bool imageViewMinLod = false;
+    // 8 and 8_8 sRGB formats the shader decodes (Graphics::SrgbDecodeFormats).
+    std::uint32_t srgbDecodeFormats = 0;
     // VK_EXT_shader_image_atomic_int64 with shaderImageInt64Atomics enabled (64-bit image atomics).
     bool imageInt64Atomics = false;
     // VK_KHR_maintenance8: sampling takes a non-constant texel Offset (upstream 301f3b16).
@@ -415,6 +418,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     state->properties = properties.properties;
     state->physical = selected;
     std::fprintf(stderr, "[AnyPS5] Vulkan device: %s\n", state->properties.deviceName);
+    state->srgbDecodeFormats = Graphics::SrgbDecodeFormats(state->InstanceFunction<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties"), selected);
     if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0) {
         state->capabilities.push_back(spv::CapabilityGroupNonUniform);
         if ((state->subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) != 0) state->capabilities.push_back(spv::CapabilityGroupNonUniformBallot);
@@ -1057,6 +1061,7 @@ ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
     ShaderRecompiler::SpirvTarget target{VK_API_VERSION_1_1, state->meshShader ? 0x00010400u : 0x00010300u, state->subgroup.subgroupSize, ShaderRecompiler::BdaAbi::Version, state->capabilities, state->spirvExtensions, state->fragmentShaderBarycentric, {limits.maxComputeWorkGroupSize[0], limits.maxComputeWorkGroupSize[1], limits.maxComputeWorkGroupSize[2]}, limits.maxComputeWorkGroupInvocations, limits.maxComputeSharedMemorySize, {}, {}};
     target.storageBufferOffsetAlignment = static_cast<std::uint32_t>(limits.minStorageBufferOffsetAlignment);
     target.nonConstantImageOffsets = state->maintenance8;
+    target.srgbDecodeFormats = state->srgbDecodeFormats;
     if (state->meshShader) {
         const auto& mesh = state->meshLimits;
         target.mesh = ShaderRecompiler::MeshTargetLimits{{mesh.maxMeshWorkGroupSize[0], mesh.maxMeshWorkGroupSize[1], mesh.maxMeshWorkGroupSize[2]}, mesh.maxMeshWorkGroupInvocations, std::min(mesh.maxMeshSharedMemorySize, mesh.maxMeshPayloadAndSharedMemorySize), mesh.maxMeshOutputVertices, mesh.maxMeshOutputPrimitives, mesh.maxMeshOutputComponents, std::min(mesh.maxMeshOutputMemorySize, mesh.maxMeshPayloadAndOutputMemorySize), mesh.meshOutputPerVertexGranularity, mesh.meshOutputPerPrimitiveGranularity};
@@ -1106,6 +1111,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.shaderResourceMinLod = state->shaderResourceMinLod;
     context.imageViewMinLod = state->imageViewMinLod;
     context.imageInt64Atomics = state->imageInt64Atomics;
+    context.srgbDecodeFormats = state->srgbDecodeFormats;
     context.storageImageReadWithoutFormat = state->storageImageReadWithoutFormat;
     context.storageImageWriteWithoutFormat = state->storageImageWriteWithoutFormat;
     context.clipDistance = state->clipDistance;

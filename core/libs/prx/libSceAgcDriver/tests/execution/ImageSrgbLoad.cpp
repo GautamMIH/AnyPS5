@@ -1,7 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
-#include "prx/libc/include/GuestAllocations.hpp"
 #include "Recompiler.hpp"
 #include "VulkanTestDevice.hpp"
 #ifdef _WIN32
@@ -73,34 +72,15 @@ alignas(256) constexpr auto StoreXy = StoreCode(0x3u);
 alignas(256) constexpr auto SampleLz = SamplerCode(0xf09c0f08u);
 alignas(256) constexpr auto Gather4Lz = SamplerCode(0xf11c0108u);
 
+// Guest memory: this driver writes storage images back only through guest mappings (upstream's
+// harness registered a host allocation and flushed its pending storage textures).
 class GuestBlock {
 public:
-    GuestBlock() {
-#ifdef _WIN32
-        block = static_cast<std::uint8_t*>(VirtualAlloc(nullptr, BlockBytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
-#else
-        block = static_cast<std::uint8_t*>(std::aligned_alloc(BlockBytes, BlockBytes));
-#endif
-        Require(block != nullptr, "image sRGB load: cannot allocate the guest block");
-        GuestAllocations::Mutation().Add(block, BlockBytes, true, true);
-    }
-
-    ~GuestBlock() {
-        GuestAllocations::Mutation().Remove(block);
-#ifdef _WIN32
-        VirtualFree(block, 0, MEM_RELEASE);
-#else
-        std::free(block);
-#endif
-    }
-
-    GuestBlock(const GuestBlock&) = delete;
-    GuestBlock& operator=(const GuestBlock&) = delete;
-
-    std::uint8_t* Data() { return block; }
+    GuestBlock() : memory(BlockBytes) {}
+    std::uint8_t* Data() { return memory.As<std::uint8_t>(); }
 
 private:
-    std::uint8_t* block = nullptr;
+    GuestTestMemory memory;
 };
 
 std::string Hex(std::uint32_t value) {
@@ -194,10 +174,8 @@ void CheckStoredLoad(AgcDriver::VulkanDevice& device, GuestBlock& block, std::sp
     const auto bytes = Width * (format == Srgb8 ? 1u : 2u);
     std::fill(block.Data(), block.Data() + BlockBytes, std::uint8_t{0x5au});
     Run(device, format == Srgb8 ? std::span<const std::uint32_t>(StoreX) : std::span<const std::uint32_t>(StoreXy), block.Data(), format == Srgb8 ? Unorm8 : Unorm8_8, SwizzleXY01, Groups);
-    Require(AgcDriver::Graphics::StorageTexture::FindPending(address, bytes) != nullptr, what + ": the image_store results are not pending in the storage image");
     Run(device, code, block.Data(), format, swizzle, Groups);
     Verify(dmask, format, swizzle, what);
-    AgcDriver::Graphics::StorageTexture::FlushPending(address, BlockBytes, nullptr, "test");
     device.WaitIdle();
 }
 

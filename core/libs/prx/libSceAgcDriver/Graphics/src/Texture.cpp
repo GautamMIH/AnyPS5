@@ -118,7 +118,7 @@ std::uint64_t SliceLinearBytes(const std::vector<TileMipLayout>& mips) {
 Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, VkComponentMapping components, std::span<const std::byte> snapshot, bool depthCompare) : context(context) {
     PerformanceTimer timing("Graphics.TextureCreate");
     try {
-        const auto colorFormat = ResolveTextureFormat(descriptor.format);
+        const auto colorFormat = SampledTextureFormat(context.srgbDecodeFormats, descriptor.format);
         const bool depthLayout = colorFormat == VK_FORMAT_R32_SFLOAT || colorFormat == VK_FORMAT_R16_UNORM;
         const auto decodeChannel = depthCompare && !depthLayout ? CompareChannelDecoder(colorFormat) : nullptr;
         Require(!depthCompare || depthLayout || decodeChannel != nullptr, "comparison sampling of a texture whose first channel is not decoded (guest format " + std::to_string(static_cast<unsigned>(descriptor.format)) + ", Vulkan format " + std::to_string(static_cast<int>(colorFormat)) + ")");

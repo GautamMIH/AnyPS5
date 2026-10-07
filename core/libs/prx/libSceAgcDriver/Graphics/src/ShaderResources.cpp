@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/General.hpp"
@@ -302,7 +303,9 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
                 throw std::runtime_error("AGC graphics: guest storage image dimension " + std::to_string(static_cast<int>(resource.dimension)) + " disagrees with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
             }
             if (*binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2DArray) resource.dimension = TextureDimension::k2DArray;
-            storageImages.push_back(std::make_unique<StorageImage>(context, resource));
+            const bool atomic = element < binding.imageAtomic.size() && binding.imageAtomic[element];
+            const bool atomic64 = element < binding.imageAtomic64.size() && binding.imageAtomic64[element];
+            storageImages.push_back(std::make_unique<StorageImage>(context, resource, StorageImageFormat(ResolveTextureFormat(resource.format), atomic, atomic64)));
             item.imageAllocations.push_back(storageImages.size() - 1);
         }
         Require(storageImages.size() <= context.limits.maxDescriptorSetStorageImages, "pipeline storage-image descriptors exceed device limits");
@@ -367,7 +370,11 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             const auto view = SampledViewDimension(*binding.imageShape, resource.dimension);
             Require(view.has_value(), "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (" + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ") cannot be viewed with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
             resource.viewDimension = *view;
-            const VkComponentMapping components{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
+            // A converted format's shader applies DST_SEL itself (upstream baa202d2): its view keeps
+            // the packed dword in X.
+            const VkComponentMapping components = IsConvertedTextureFormat(resource.format)
+                ? VkComponentMapping{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A}
+                : VkComponentMapping{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
             const bool depthCompare = element < binding.imageDepthCompare.size() && binding.imageDepthCompare[element];
             textures.push_back(context.textureCache->Get(words, resource, components, depthCompare));
             item.imageAllocations.push_back(textures.size() - 1);

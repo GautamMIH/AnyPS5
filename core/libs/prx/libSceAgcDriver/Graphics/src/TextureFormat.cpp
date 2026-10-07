@@ -1,6 +1,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
+#include "RdnaDecoder/include/RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include <array>
+#include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
@@ -18,6 +21,7 @@ struct FormatEntry {
 constexpr FormatEntry kFormatLookup[] = {
     {1, VK_FORMAT_R8_UNORM, 1, false},
     {5, VK_FORMAT_R8_UINT, 1, false},
+    {6, VK_FORMAT_R8_SINT, 1, false},
     {7, VK_FORMAT_R16_UNORM, 2, false},
     {8, VK_FORMAT_R16_SNORM, 2, false},
     {11, VK_FORMAT_R16_UINT, 2, false},
@@ -91,8 +95,10 @@ constexpr auto MakeFormatLookupTable() {
 
 constexpr auto kFormatLookupTable = MakeFormatLookupTable();
 
+// Formats without a Vulkan equivalent that the shader reads and writes through R32_UINT, converting
+// each field itself: 10_11_11_UNORM (30, upstream baa202d2) and 10_11_11_UINT (34).
 std::uint32_t remapGuestFormat(std::uint32_t guestFormat) {
-    return guestFormat == 34 ? 20 : guestFormat;
+    return guestFormat == 30 || guestFormat == 34 ? 20 : guestFormat;
 }
 
 const FormatEntry& findFormatEntry(std::uint32_t guestFormat) {
@@ -110,6 +116,57 @@ VkFormat ResolveTextureFormat(std::uint32_t guestFormat) {
 
 std::uint32_t BytesPerElement(std::uint32_t guestFormat) {
     return findFormatEntry(guestFormat).bytesPerElement;
+}
+
+bool IsConvertedTextureFormat(std::uint32_t guestFormat) {
+    return remapGuestFormat(guestFormat) != guestFormat;
+}
+
+std::uint32_t SrgbDecodeFormats(PFN_vkGetPhysicalDeviceFormatProperties formatProperties, VkPhysicalDevice physical) {
+    const char* forced = std::getenv("APS5_SRGB_SHADER_DECODE");
+    const bool always = forced != nullptr && std::strcmp(forced, "1") == 0;
+    const auto sampled = [&](ShaderRecompiler::IrBufferFormat format) {
+        VkFormatProperties properties{};
+        formatProperties(physical, ResolveTextureFormat(static_cast<std::uint32_t>(format)), &properties);
+        return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    };
+    std::uint32_t formats = 0;
+    for (const auto format : {ShaderRecompiler::IrBufferFormat::Format8Srgb, ShaderRecompiler::IrBufferFormat::Format8_8Srgb}) {
+        if ((always || !sampled(format)) && sampled(ShaderRecompiler::SrgbUnormFormat(format))) formats |= ShaderRecompiler::SrgbDecodeBit(format);
+    }
+    return formats;
+}
+
+VkFormat SampledTextureFormat(std::uint32_t srgbDecodeFormats, std::uint32_t guestFormat) {
+    const auto format = static_cast<ShaderRecompiler::IrBufferFormat>(guestFormat);
+    if ((srgbDecodeFormats & ShaderRecompiler::SrgbDecodeBit(format)) == 0u) return ResolveTextureFormat(guestFormat);
+    return ResolveTextureFormat(static_cast<std::uint32_t>(ShaderRecompiler::SrgbUnormFormat(format)));
+}
+
+VkFormat StorageImageFormat(VkFormat format, bool atomic, bool atomic64) {
+    if (atomic64) {
+        switch (format) {
+            case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32_SFLOAT: return VK_FORMAT_R64_UINT;
+            default: return format;
+        }
+    }
+    if (atomic) {
+        switch (format) {
+            case VK_FORMAT_R32_SINT: case VK_FORMAT_R32_SFLOAT: return VK_FORMAT_R32_UINT;
+            default: return format;
+        }
+    }
+    switch (format) {
+        case VK_FORMAT_R8G8_SINT: return VK_FORMAT_R8G8_UINT;
+        case VK_FORMAT_R8G8B8A8_SINT: return VK_FORMAT_R8G8B8A8_UINT;
+        case VK_FORMAT_R16_SINT: return VK_FORMAT_R16_UINT;
+        case VK_FORMAT_R16G16_SINT: return VK_FORMAT_R16G16_UINT;
+        case VK_FORMAT_R16G16B16A16_SINT: return VK_FORMAT_R16G16B16A16_UINT;
+        case VK_FORMAT_R32_SINT: return VK_FORMAT_R32_UINT;
+        case VK_FORMAT_R32G32_SINT: return VK_FORMAT_R32G32_UINT;
+        case VK_FORMAT_R32G32B32A32_SINT: return VK_FORMAT_R32G32B32A32_UINT;
+        default: return format;
+    }
 }
 
 bool IsBlockCompressed(std::uint32_t guestFormat) {

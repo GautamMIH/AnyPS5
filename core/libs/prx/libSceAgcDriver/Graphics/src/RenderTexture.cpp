@@ -11,7 +11,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& s
     PerformanceTimer timing("Graphics.RenderTexture");
     try {
         Require(source != nullptr && descriptor.dimension == TextureDimension::k2D && descriptor.mipCount == 1 && descriptor.baseLevel == 0 && descriptor.baseArray == 0, "invalid resident texture view");
-        const auto format = ResolveTextureFormat(descriptor.format);
+        const auto format = SampledTextureFormat(context.srgbDecodeFormats, descriptor.format);
         // The copy reinterprets texels bitwise, so only the element size has to match.
         Require(!IsBlockCompressed(descriptor.format) && BytesPerElement(descriptor.format) == source->Description().elementBytes, "resident texture copy requires the render target's element size");
         VkFormatProperties properties{};
@@ -51,7 +51,7 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& d
     try {
         Require(depthSource != nullptr && descriptor.dimension == TextureDimension::k2D && descriptor.mipCount == 1 && descriptor.baseLevel == 0 && descriptor.baseArray == 0, "invalid resident depth texture view");
         const auto& depth = depthSource->Description();
-        const auto format = ResolveTextureFormat(descriptor.format);
+        const auto format = SampledTextureFormat(context.srgbDecodeFormats, descriptor.format);
         // The copy reinterprets depth bits, so the texture's element size must be the depth's.
         Require(!IsBlockCompressed(descriptor.format) && BytesPerElement(descriptor.format) == depthSource->HostDepthBytes() && descriptor.width == depth.extent.width && descriptor.height == depth.extent.height, "resident depth texture copy requires the depth plane's size and element size");
         VkFormatProperties properties{};
