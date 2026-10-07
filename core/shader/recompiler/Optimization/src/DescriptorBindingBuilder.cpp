@@ -197,16 +197,39 @@ const char* UnnormalizedUseReason(std::uint32_t uses) {
     }
 }
 
+// Which samplers (and the images they sample) take unnormalized coordinates. Populate runs for
+// every draw and almost no sampler forces unnormalized coordinates, so the proof allocates only
+// when one does (vectors, and a sampler descriptor built per sampler, cost ~1 ms of a heavy frame).
+// Per-element flags that are almost always false stay empty unless one is set (then they span the
+// binding); every reader treats a missing element as false.
+void SetRareFlag(std::vector<bool>& flags, std::size_t element, std::size_t count, bool value) {
+    if (!value) return;
+    if (flags.empty()) flags.assign(count, false);
+    flags[element] = true;
+}
+
 struct UnnormalizedProof {
     std::vector<bool> samplers;
     std::vector<bool> images;
+    bool Sampler(std::uint32_t index) const { return index < samplers.size() && samplers[index]; }
+    bool Image(std::uint32_t index) const { return index < images.size() && images[index]; }
 };
 
 UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapshot& snapshot) {
-    UnnormalizedProof proof{std::vector<bool>(info.samplers.size()), std::vector<bool>(info.images.size())};
+    UnnormalizedProof proof;
     for (std::uint32_t r = 0; r < info.samplers.size(); r++) {
-        if ((GuestSamplersDescriptor({r}, snapshot)[0] & ForceUnnormalizedBit) == 0u) {
+        if (r >= snapshot.samplers.size()) {
+            fail("DescriptorBindingBuilder::Populate guest sampler index is out of range");
+        }
+        if (snapshot.samplers[r].dwordCount == 0u) {
+            fail("DescriptorBindingBuilder::Populate guest sampler descriptor is empty");
+        }
+        if ((snapshot.samplers[r].dwords[0] & ForceUnnormalizedBit) == 0u) {
             continue;
+        }
+        if (proof.samplers.empty()) {
+            proof.samplers.assign(info.samplers.size(), false);
+            proof.images.assign(info.images.size(), false);
         }
         const auto& sampler = info.samplers[r];
         const std::uint32_t unsupported = sampler.uses & ~static_cast<std::uint32_t>(SamplerUseExplicitLod);
@@ -320,7 +343,8 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
         }
     }
     const UnnormalizedProof unnormalized = ProveUnnormalized(info, snapshot);
-    const std::vector<std::uint32_t> samplerElements = SamplerElements(layout, info);
+    // Only images sampled through a pair need sampler elements.
+    const std::vector<std::uint32_t> samplerElements = info.sampledPairs.empty() ? std::vector<std::uint32_t>{} : SamplerElements(layout, info);
 
     std::vector<DescriptorBinding> bindings;
     bindings.reserve(layout.descriptors.size());
@@ -352,22 +376,28 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
         case DescriptorRole::GuestImages:
             physical.guestDescriptor = GuestImagesDescriptor(logical.resources, snapshot);
             physical.imageShape = ImageShapeFor(info.images, logical.resources);
-            for (const std::uint32_t resource : logical.resources) {
+            physical.imageWritten.reserve(logical.resources.size());
+            physical.imageDepthCompare.reserve(logical.resources.size());
+            physical.imageAtomic.reserve(logical.resources.size());
+            physical.imageSamplers.reserve(logical.resources.size());
+            for (std::size_t element = 0; element < logical.resources.size(); ++element) {
+                const std::uint32_t resource = logical.resources[element];
                 const auto& image = info.images.at(resource);
                 physical.imageWritten.push_back(image.written || image.atomic);
                 physical.imageDepthCompare.push_back(image.depthCompare);
                 physical.imageAtomic.push_back(image.atomic);
-                physical.imageAtomic64.push_back(image.atomic64);
-                physical.imageUnnormalized.push_back(unnormalized.images.at(resource));
+                SetRareFlag(physical.imageAtomic64, element, logical.resources.size(), image.atomic64);
+                SetRareFlag(physical.imageUnnormalized, element, logical.resources.size(), unnormalized.Image(resource));
                 physical.imageSamplers.push_back(ImageSamplerMask(info, samplerElements, resource));
             }
             break;
         case DescriptorRole::GuestSamplers:
             physical.guestDescriptor = GuestSamplersDescriptor(logical.resources, snapshot);
+            physical.samplerDepthCompare.reserve(logical.resources.size());
             for (std::size_t element = 0; element < logical.resources.size(); ++element) {
                 const auto& sampler = info.samplers.at(logical.resources[element]);
                 physical.samplerDepthCompare.push_back(sampler.depthCompare);
-                physical.samplerUnnormalized.push_back(unnormalized.samplers.at(logical.resources[element]));
+                SetRareFlag(physical.samplerUnnormalized, element, logical.resources.size(), unnormalized.Sampler(logical.resources[element]));
                 if (sampler.forcePointFiltering) {
                     auto& filter = physical.guestDescriptor.at(element * 4u + 2u);
                     filter = PointFilteredSamplerWord(physical.guestDescriptor.at(element * 4u), filter);

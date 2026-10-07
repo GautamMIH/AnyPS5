@@ -687,9 +687,13 @@ void verifyUnnormalizedSamplers() {
         request.context.memory = memory.Regions();
         return Recompile(request);
     };
+    // Unset flags may be left empty (every reader takes a missing element as false).
     const auto flags = [](const RecompileResult& result, DescriptorRole role) {
         for (const auto& binding : result.bindings) {
-            if (binding.role == role) return role == DescriptorRole::GuestSamplers ? binding.samplerUnnormalized : binding.imageUnnormalized;
+            if (binding.role != role) continue;
+            auto values = role == DescriptorRole::GuestSamplers ? binding.samplerUnnormalized : binding.imageUnnormalized;
+            if (values.empty()) values.assign(binding.count, false);
+            return values;
         }
         throw std::runtime_error("unnormalized samplers: the program has no sampler or image binding");
     };
@@ -789,7 +793,8 @@ void verifyUnusedUnnormalizedSampler() {
     expectFailure([&] { static_cast<void>(populate(compared)); }, "unnormalized guest sampler is used with depth comparison, which is not implemented", "unnormalized samplers: a depth-compare S# without live uses was accepted");
     snapshot.samplers[0].dwords[0] = 0x00000092u;
     const auto normalized = populate(info);
-    require(normalized[0].imageUnnormalized == std::vector<bool>{false} && normalized[1].samplerUnnormalized == std::vector<bool>{false}, "unnormalized samplers: a normalized S# was flagged");
+    const auto allFalse = [](const std::vector<bool>& values) { return std::none_of(values.begin(), values.end(), [](bool value) { return value; }); };
+    require(allFalse(normalized[0].imageUnnormalized) && allFalse(normalized[1].samplerUnnormalized), "unnormalized samplers: a normalized S# was flagged");
 }
 
 void verifyWaveUniformValues() {
