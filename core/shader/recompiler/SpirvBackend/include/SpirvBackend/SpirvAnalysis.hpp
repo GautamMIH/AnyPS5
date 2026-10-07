@@ -25,6 +25,7 @@ struct SpirvRequirements {
     bool functionScratch = false;
     bool pixelValidMask = false;
     bool bufferInt64Atomics = false;
+    bool imageInt64Atomics = false;
     bool sharedInt64Atomics = false;
     // A buffer load or store is coherent (MemoryInfo::coherent): the guest buffers are Coherent.
     bool float64 = false;

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <initializer_list>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Pthread/include/Pthread.hpp"
@@ -23,11 +24,17 @@ namespace {
 
 constexpr int kMaxSignal = 128;
 constexpr int kErrorInvalid = static_cast<int>(0x80020016);
-constexpr int kErrorAlreadyExists = static_cast<int>(0x80020011);
 constexpr int kErrorNoThread = static_cast<int>(0x80020003);
 constexpr int kErrorAgain = static_cast<int>(0x80020023);
 
 using GuestHandler = void (APS5_VABI*)(int, void*);
+
+// Handlers may be installed for SIGHUP, SIGILL, SIGFPE, SIGBUS, SIGSEGV and SIGUSR1 (as in shadPS4).
+bool AllowedSignal(int signum) {
+    for (const int allowed : {1, 4, 8, 10, 11, 30})
+        if (allowed == signum) return true;
+    return false;
+}
 
 std::mutex exceptionMutex;
 std::array<std::atomic<void*>, kMaxSignal> exceptionHandlers{};
@@ -111,9 +118,10 @@ int bindHostSignal(int guestSignal) {
 extern "C" {
 
 int APS5_VABI sceKernelInstallExceptionHandler(int signum, void* handler) {
- if (signum <= 0 || signum >= kMaxSignal || !handler) return kErrorInvalid;
+ if (!AllowedSignal(signum) || !handler) return kErrorInvalid;
  const std::lock_guard lock(exceptionMutex);
- if (exceptionHandlers[static_cast<std::size_t>(signum)].load() != nullptr) return kErrorAlreadyExists;
+ // A second handler for a signal is refused (EAGAIN, as in shadPS4).
+ if (exceptionHandlers[static_cast<std::size_t>(signum)].load() != nullptr) return kErrorAgain;
 #ifndef _WIN32
  if (const int error = bindHostSignal(signum)) return error;
 #endif
@@ -122,7 +130,7 @@ int APS5_VABI sceKernelInstallExceptionHandler(int signum, void* handler) {
 }
 
 int APS5_VABI sceKernelRemoveExceptionHandler(int signum) {
- if (signum <= 0 || signum >= kMaxSignal) return kErrorInvalid;
+ if (!AllowedSignal(signum)) return kErrorInvalid;
  const std::lock_guard lock(exceptionMutex);
  exceptionHandlers[static_cast<std::size_t>(signum)] = nullptr;
  return 0;

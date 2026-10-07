@@ -510,4 +510,9 @@ int APS5_VABI futimes_nid_postfix(int d, const KernelTimeval* times) {
 #endif
 }
 
+int APS5_VABI sceKernelFcntl() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }

@@ -57,7 +57,7 @@ void testCatalog() {
         const auto reason = AgcDriver::Pm4::UnsupportedReason(packet[0]);
         if (!reason.empty()) expectFailure([&] { AgcDriver::Pm4::Validate(packet, 0); }, std::string(reason).c_str());
     }
-    check(values.size() == 54, "reference opcode catalog is incomplete");
+    check(values.size() == 55, "reference opcode catalog is incomplete");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0xff, {0}), 0); }, "not known");
     const std::array<std::pair<std::uint32_t, const char*>, 11> custom{{
         {5, "DRAW_RESET"}, {6, "WAIT_FLIP_DONE"}, {9, "DISPATCH_RESET"}, {11, "PUSH_MARKER"},
@@ -92,6 +92,20 @@ void testConditionalValidation() {
     expectFailure([] { AgcDriver::Pm4::ConditionalWords(makePacket(0x37, {0x100, 0, 0, 0})); }, "expected COND_EXEC");
     condition = 0x80;
     check(AgcDriver::Pm4::ReadCondition(makePacket(0x22, {low(&condition), high(&condition), 0, 5})) == 0x80, "COND_EXEC read its condition wrong");
+}
+
+void testAlwaysPassBranch() {
+    // Compare function 0 reads nothing: a null or 4-byte aligned compare address is accepted and the
+    // then buffer is taken (Unreal titles leave the address uninitialised).
+    alignas(4) static std::uint32_t thenWords[4] = {};
+    for (const std::uint32_t compare : {0u, 4u}) {
+        const auto packet = makePacket(0x3f, {0x1u, compare, 0, 0, 0, 0, 0, low(thenWords), high(thenWords), 4, 0, 0, 0});
+        AgcDriver::Pm4::Validate(packet, 0);
+        const auto target = AgcDriver::Pm4::ResolveBranch(packet);
+        check(target.has_value() && target->address == reinterpret_cast<std::uintptr_t>(thenWords) && target->dwords == 4, "an always-pass branch did not take its then buffer");
+    }
+    // A comparing branch still needs an aligned compare address.
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x3f, {0x301u, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}), 0); }, "compare address");
 }
 
 void testBooleanPredication() {
@@ -144,6 +158,7 @@ void testRegisters() {
     testRegisterBank();
     testConditionalValidation();
     testBooleanPredication();
+    testAlwaysPassBranch();
     AgcDriver::QueueState state;
     execute(state, makePacket(0x79, {0x242, 4}));
     check(state.userConfig.at(0x242) == 4, "primitive type register write was lost");

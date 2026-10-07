@@ -7,9 +7,6 @@
 #include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
-#include <cstring>
-#include <mutex>
-#include <set>
 
 // Hardware keyboards: none are attached, so keyboard sessions open normally, report no devices and
 // never produce events.
@@ -27,6 +24,7 @@ std::set<std::int32_t> keyboardUsers;
 // The host keyboard drives the virtual pad (docs/INPUT_MAPPING.md), so no USB keyboard is attached:
 // opening the keyboard succeeds, as on a console with none plugged in, and it never reports events.
 constexpr int ErrorNotOpened = static_cast<int>(0x80bc0002u);
+constexpr int ErrorConnectionFailed = static_cast<int>(0x80bc0004u);
 constexpr int ErrorInvalidUserId = static_cast<int>(0x80bc0010u);
 constexpr int ErrorInvalidType = static_cast<int>(0x80bc0011u);
 constexpr int ErrorInvalidOption = static_cast<int>(0x80bc0015u);
@@ -72,11 +70,13 @@ int APS5_VABI sceImeKeyboardGetInfo(uint32_t resource_id, KeyboardInfo* info) {
 
 int APS5_VABI sceImeKeyboardGetResourceId(int32_t user_id, KeyboardResourceIdArray* resource_ids) {
  if (resource_ids == nullptr) return IME_ERROR_INVALID_ADDRESS;
- std::lock_guard lock(keyboardMutex);
- if (keyboardUsers.count(user_id) == 0) return IME_ERROR_NOT_OPENED;
- std::memset(resource_ids, 0, sizeof(*resource_ids));
+ if (user_id == UserIdInvalid) return ErrorInvalidUserId;
+ // The array is cleared and given the user. No USB keyboard is reported through the IME, so an
+ // open session fails to connect (upstream 54f0e03c, as shadPS4); an unopened one is NOT_OPENED.
+ *resource_ids = {};
  resource_ids->user_id = user_id;
- return IME_OK;
+ std::lock_guard lock(keyboardMutex);
+ return keyboardUsers.contains(user_id) ? ErrorConnectionFailed : IME_ERROR_NOT_OPENED;
 }
 
 int APS5_VABI sceImeKeyboardOpen(int32_t user_id, const KeyboardParam* param) {

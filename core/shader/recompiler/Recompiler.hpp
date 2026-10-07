@@ -210,6 +210,7 @@ struct SpirvTarget {
     // the difference; 0 or 1 binds every buffer at its base.
     std::uint32_t storageBufferOffsetAlignment = 0;
     bool nonConstantImageOffsets = false;
+    std::uint32_t srgbDecodeFormats = 0;
 };
 
 // The bytes a guest buffer view starts before its V# base so that its descriptor offset meets the
@@ -341,6 +342,7 @@ struct DescriptorBinding {
     // Guest image elements the shader stores to (or updates atomically); the others are only read.
     std::vector<bool> imageWritten;
     std::vector<bool> imageAtomic;
+    std::vector<bool> imageAtomic64;
     // Guest buffer elements the shader updates atomically (one entry per element of a GuestBuffers
     // binding, empty otherwise). An atomic on a host-imported range is a serialized PCIe round trip
     // (~0.4-0.5 us each on NVIDIA), so a driver may keep these elements in device-local memory.
@@ -351,6 +353,9 @@ struct DescriptorBinding {
     // skip the write-back and the pending-write note for the element; an element beyond the vector
     // (a producer that does not fill it) must be treated as written.
     std::vector<bool> bufferWritten;
+    std::vector<bool> samplerUnnormalized;
+    std::vector<bool> imageUnnormalized;
+    std::vector<std::uint32_t> imageSamplers;
 };
 
 struct VertexAttribute {

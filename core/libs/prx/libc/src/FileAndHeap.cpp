@@ -5,12 +5,22 @@
 #include <memory>
 #include <filesystem>
 #include <limits>
+#include <string>
+#include <cstring>
 #include <utility>
 #include <cerrno>
 
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/General.hpp"
+
+static std::string NativeFileMode(const char* mode) {
+    std::string result(mode);
+#ifdef _WIN32
+    if (!result.empty() && result.find('b') == std::string::npos) result.insert(1, 1, 'b');
+#endif
+    return result;
+}
 
 extern "C" {
 
@@ -49,7 +59,7 @@ FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode
     if (!valid) { errno = 22; return nullptr; }
     try {
         const auto path = *filename ? ResolvePath_nid_no_patch(filename).string() : std::string{};
-        if (stream->Reopen(path.c_str(), mode)) return stream;
+        if (stream->Reopen(path.c_str(), NativeFileMode(mode).c_str())) return stream;
         const int error = errno;
         if (stream->IsDynamic()) delete stream;
         errno = error;
@@ -64,7 +74,7 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
     if (!filename || !mode) { errno = 22; return nullptr; }
     try {
         const auto abs_path = ResolvePath_nid_no_patch(filename).string();
-        std::unique_ptr<std::FILE, decltype(&std::fclose)> handle(std::fopen(abs_path.c_str(), mode), std::fclose);
+        std::unique_ptr<std::FILE, decltype(&std::fclose)> handle(std::fopen(abs_path.c_str(), NativeFileMode(mode).c_str()), std::fclose);
         if (!handle) return nullptr;
         auto stream = std::make_unique<FileStream>(handle.get(), true);
         handle.release();
@@ -78,6 +88,33 @@ int APS5_VABI fclose_nid_postfix(FileStream* stream) {
     std::unique_ptr<FileStream> owner(stream->IsDynamic() ? stream : nullptr);
     stream->Close();
     return 0;
+}
+
+int APS5_VABI fseek_nid_postfix(FileStream* stream, std::int64_t offset, int origin);
+
+FileStream* APS5_VABI _ZSt7_FiopenPKcNSt5_IosbIiE9_OpenmodeEi_nid_postfix(const char* filename, int mode, int protection) {
+    static_cast<void>(protection);
+    constexpr int In = 0x01, Out = 0x02, Ate = 0x04, App = 0x08, Trunc = 0x10, Nocreate = 0x20, Noreplace = 0x40,
+        Binary = 0x80;
+    constexpr std::pair<int, const char*> modes[] = {
+        {In, "r"}, {Out, "w"}, {Out | Trunc, "w"}, {Out | App, "a"},
+        {In | Binary, "rb"}, {Out | Binary, "wb"}, {Out | Trunc | Binary, "wb"}, {Out | App | Binary, "ab"},
+        {In | Out, "r+"}, {In | Out | Trunc, "w+"}, {In | Out | App, "a+"},
+        {In | Out | Binary, "r+b"}, {In | Out | Trunc | Binary, "w+b"}, {In | Out | App | Binary, "a+b"}};
+    const int open = (mode & (In | Out | App | Trunc | Binary)) | ((mode & Nocreate) ? In : 0) | ((mode & App) ? Out : 0);
+    const char* openMode = nullptr;
+    for (const auto& [flags, text] : modes) if (flags == open) openMode = text;
+    if (!openMode) return nullptr;
+    if ((mode & Noreplace) && (open & Out)) {
+        if (auto* existing = fopen_nid_postfix(filename, "r")) {
+            fclose_nid_postfix(existing);
+            return nullptr;
+        }
+    }
+    auto* stream = fopen_nid_postfix(filename, openMode);
+    if (!stream || !(mode & Ate) || fseek_nid_postfix(stream, 0, SEEK_END) == 0) return stream;
+    fclose_nid_postfix(stream);
+    return nullptr;
 }
 
 size_t APS5_VABI fread_nid_postfix(void* buffer, size_t size, size_t count, FileStream* stream) {
@@ -169,7 +206,11 @@ void* APS5_VABI calloc_nid_postfix(size_t count, size_t size) {
 }
 
 int APS5_VABI posix_memalign_nid_postfix(void** pointer, size_t alignment, size_t size) {
-    return ApplicationHeapPosixAlign_nid_no_patch(pointer, alignment, size);
+    if (!pointer || alignment < sizeof(void*) || (alignment & (alignment - 1)) != 0) return 22;
+    const int savedError = errno;
+    const int result = ApplicationHeapPosixAlign_nid_no_patch(pointer, alignment, size);
+    errno = savedError;
+    return result;
 }
 
 void* APS5_VABI reallocalign_nid_postfix(void* ptr, size_t size, size_t alignment) {

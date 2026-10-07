@@ -8,6 +8,7 @@
 #include "ShaderDiskCache.hpp"
 #include <list>
 #include <mutex>
+#include <new>
 #include <shared_mutex>
 #include <unordered_map>
 #include "ControlFlow/include/ControlFlow/GraphBuilder.hpp"
@@ -202,10 +203,18 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request) {
     resourceTracker.Track(program);
     deadCodeEliminator.Eliminate(program);
     dumpIr("resources");
+    program.Resources().srgbDecodeFormats = request.target.srgbDecodeFormats;
 
     return program;
 }
 
+
+struct EmissionFailure {
+    std::uint64_t codeAddress;
+    BindingLayout layout;
+    ResourceSpecialization specialization;
+    std::exception_ptr failure;
+};
 
 struct SourceEntry {
     std::mutex mutex;
@@ -220,6 +229,7 @@ struct SourceEntry {
     std::exception_ptr planFailure;
     std::unique_ptr<IrProgram> program;
     std::vector<std::shared_ptr<const CompiledVariant>> variants;
+    std::vector<EmissionFailure> emissionFailures;
 };
 
 namespace {
@@ -245,6 +255,11 @@ struct SourceKeyHash {
         return hash;
     }
 };
+
+bool FailureMemo() {
+    static const bool memo = std::getenv("APS5_NO_FAILURE_MEMO") == nullptr;
+    return memo;
+}
 
 std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     static std::shared_mutex mutex;
@@ -287,14 +302,13 @@ std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request) {
     {
         std::lock_guard lock(source->mutex);
         if (source->plan == nullptr) {
-            static const bool memoFailures = std::getenv("APS5_NO_FAILURE_MEMO") == nullptr;
-            if (memoFailures && source->planFailure) std::rethrow_exception(source->planFailure);
+            if (FailureMemo() && source->planFailure) std::rethrow_exception(source->planFailure);
             try {
                 ResourceProgram resource(request);
                 source->plan = std::move(resource.plan);
                 source->program = std::move(resource.program);
             } catch (...) {
-                if (memoFailures) source->planFailure = std::current_exception();
+                if (FailureMemo()) source->planFailure = std::current_exception();
                 throw;
             }
         }
@@ -311,7 +325,7 @@ std::uint64_t nextVariantId() {
     return variants.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
-CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, const ResourceSnapshot& resourceSnapshot, const ResourceSpecialization& resourceSpecialization) {
+CompiledVariant compileVariant(const RecompileRequest& request, IrProgram program, const ResourceSnapshot& resourceSnapshot, const ResourceSpecialization& resourceSpecialization, std::exception_ptr* emissionFailure = nullptr) {
     const auto inputInfo = RequestInputInfo(request);
     constexpr DeadCodeEliminator deadCodeEliminator;
     constexpr ResourceMaterializer resourceMaterializer;
@@ -347,22 +361,28 @@ CompiledVariant compileVariant(const RecompileRequest& request, IrProgram progra
         }
     }
     result.variantId = nextVariantId();
-    result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
-    // Debug aid: APS5_DUMP_SPIRV=<directory> saves each emitted module as
-    // <directory>/<code address>-<variant>.spv, for spirv-val and spirv-dis.
-    if (const char* directory = std::getenv("APS5_DUMP_SPIRV")) {
-        char path[512];
-        std::snprintf(path, sizeof(path), "%s/%llx-%llu.spv", directory, static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(result.variantId));
-        if (auto* file = std::fopen(path, "wb")) {
-            const auto& words = result.spirv.Words();
-            std::fwrite(words.data(), sizeof(std::uint32_t), words.size(), file);
-            std::fclose(file);
+    try {
+        result.spirv = spirvEmitter.Emit(program, inputInfo, bindings, targetOptions);
+        // Debug aid: APS5_DUMP_SPIRV=<directory> saves each emitted module as
+        // <directory>/<code address>-<variant>.spv, for spirv-val and spirv-dis.
+        if (const char* directory = std::getenv("APS5_DUMP_SPIRV")) {
+            char path[512];
+            std::snprintf(path, sizeof(path), "%s/%llx-%llu.spv", directory, static_cast<unsigned long long>(request.shader.codeAddress), static_cast<unsigned long long>(result.variantId));
+            if (auto* file = std::fopen(path, "wb")) {
+                const auto& words = result.spirv.Words();
+                std::fwrite(words.data(), sizeof(std::uint32_t), words.size(), file);
+                std::fclose(file);
+            }
         }
-    }
-
 #if ANYPS5_ENABLE_SPIRV_TOOLS
-    result.spirv = ValidateAndOptimizeSpirv(result.spirv, request.target.vulkanVersion, request.target.spirvVersion, request.target.nonConstantImageOffsets);
+        result.spirv = ValidateAndOptimizeSpirv(result.spirv, request.target.vulkanVersion, request.target.spirvVersion, request.target.nonConstantImageOffsets);
 #endif
+    } catch (const std::bad_alloc&) {
+        throw;
+    } catch (...) {
+        if (emissionFailure != nullptr) *emissionFailure = std::current_exception();
+        throw;
+    }
 
     result.bdaAbiVersion = program.Info().usesDma ? request.target.bdaAbiVersion : 0u;
     result.bdaWrites = program.Info().bdaWrites;
@@ -418,6 +438,9 @@ std::shared_ptr<const CompiledVariant> findOrCompileVariant(SourceEntry& source,
             return candidate;
         }
     }
+    for (const auto& failure : source.emissionFailures) {
+        if (failure.codeAddress == request.shader.codeAddress && sameLayout(failure.layout, request.layout) && failure.specialization == specialization) std::rethrow_exception(failure.failure);
+    }
     cacheHit = false;
     const bool disk = ShaderDiskCache::Enabled() && !DebugProbeActive();
     std::vector<std::byte> diskKey;
@@ -435,7 +458,13 @@ std::shared_ptr<const CompiledVariant> findOrCompileVariant(SourceEntry& source,
     if (variant == nullptr) {
         auto program = source.program != nullptr ? std::move(*source.program) : PrepareResourceProgram(request);
         source.program.reset();
-        variant = std::make_shared<const CompiledVariant>(compileVariant(request, std::move(program), snapshot, specialization));
+        std::exception_ptr emissionFailure;
+        try {
+            variant = std::make_shared<const CompiledVariant>(compileVariant(request, std::move(program), snapshot, specialization, &emissionFailure));
+        } catch (...) {
+            if (emissionFailure != nullptr && FailureMemo()) source.emissionFailures.push_back({request.shader.codeAddress, request.layout, specialization, emissionFailure});
+            throw;
+        }
         if (disk) ShaderDiskCache::Store(std::move(diskKey), variant);
     }
     source.program.reset();

@@ -371,8 +371,10 @@ private:
                 }
             }
         }
+        const double real = std::strtod(text.c_str(), nullptr);
+        if (!std::isfinite(real)) throw std::runtime_error("sce::Json::Parser::parse: number " + text + " overflows a double; the console's behaviour is unverified");
         out.type = TypeReal;
-        out.real = std::strtod(text.c_str(), nullptr);
+        out.real = real;
         return true;
     }
     bool value(Node& out) {
@@ -601,6 +603,7 @@ void APS5_VABI _ZN3sce4Json6Object8iteratorD1Ev(ObjectIterator* self) { (void)se
 ObjectIterator* APS5_VABI _ZN3sce4Json6Object8iteratorppEv(ObjectIterator* self) { ++self->it; return self; }
 Pair* APS5_VABI _ZNK3sce4Json6Object8iteratordeEv(const ObjectIterator* self) { return &*self->it; }
 bool APS5_VABI _ZNK3sce4Json6Object8iteratorneERKS2_(const ObjectIterator* self, const ObjectIterator* other) { return self->it != other->it; }
+std::size_t APS5_VABI _ZNK3sce4Json6Object4sizeEv(const Object* self) { return self->items->size(); }
 
 void APS5_VABI _ZN3sce4Json5ValueC1Ev(Value* self) { Construct(*self); }
 void APS5_VABI _ZN3sce4Json5ValueC1Eb(Value* self, bool value) { Construct(*self); self->node->type = TypeBoolean; self->node->boolean = value; }
@@ -725,6 +728,25 @@ const Value* APS5_VABI _ZNK3sce4Json5ValueixEm(const Value* self, std::size_t in
     }
     return &NullAccess(TypeNull, self);
 }
+void APS5_VABI _ZN3sce4Json5ValueC1ENS0_9ValueTypeE(Value* self, ValueType type) {
+    Construct(*self);
+    SetType(*self->node, type);
+}
+const Value* APS5_VABI _ZNK3sce4Json5Value8getValueEm(const Value* self, std::size_t index) { return _ZNK3sce4Json5ValueixEm(self, index); }
+const Value* APS5_VABI _ZNK3sce4Json5Value8getValueERKNS0_6StringE(const Value* self, const String* key) {
+    const Node& n = NodeOf(*self);
+    if (key != nullptr && n.type == TypeObject)
+        for (const auto& pair : *n.object.items)
+            if (*pair.key.text == *key->text) return &pair.value;
+    return &NullAccess(TypeNull, self);
+}
+Value* APS5_VABI _ZN3sce4Json5Value10referValueEm(Value* self, std::size_t index) {
+    Node& n = NodeOf(*self);
+    if (n.type != TypeArray || index >= n.array.items->size()) return nullptr;
+    auto it = n.array.items->begin();
+    std::advance(it, static_cast<std::ptrdiff_t>(index));
+    return &*it;
+}
 Value* APS5_VABI _ZN3sce4Json5Value10referValueERKNS0_6StringE(Value* self, const String* key) {
     Node& n = NodeOf(*self);
     if (key == nullptr || n.type != TypeObject) return nullptr;
@@ -766,7 +788,14 @@ int APS5_VABI _ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(Value* out, const char*
     if (text == nullptr) throw std::invalid_argument("sce::Json::Parser::parse: null text");
     Node parsed{};
     Parser parser(text, size);
-    if (!parser.Parse(parsed)) {
+    bool parsedOk = false;
+    try {
+        parsedOk = parser.Parse(parsed);
+    } catch (...) {
+        Clear(parsed);
+        throw;
+    }
+    if (!parsedOk) {
         Clear(parsed);
         return JsonErrorParse;
     }
@@ -781,4 +810,15 @@ int APS5_VABI sceJson2Unknown00(void) {
     NotImplemented_nid_no_patch("6i18OJSvFWk");
     return 0;
 }
+
+int APS5_VABI _ZN3sce4Json5Value5clearEv(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI _ZN3sce4Json12MemAllocator11notifyErrorEimPv(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 }

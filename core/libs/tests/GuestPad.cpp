@@ -13,6 +13,8 @@ int APS5_VABI scePadClose_nid_postfix(int);
 int APS5_VABI scePadGetHandle(int, int, int);
 int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool);
 int APS5_VABI scePadInit_nid_postfix(void);
+int APS5_VABI scePadRead_nid_postfix(int, PadData*, int);
+int APS5_VABI scePadReadState(int, PadData*);
 int APS5_VABI scePadSetTiltCorrectionState(int, bool);
 int APS5_VABI scePadResetOrientation(int);
 int APS5_VABI scePadSetAngularVelocityDeadbandState(int, bool);
@@ -58,6 +60,14 @@ static void CheckTouchContact() {
     Pad::ReadState();
 }
 
+static void CheckReadStateHandle(int handle) {
+    PadData data{};
+    Require(scePadReadState(0, &data) == PAD_ERROR_INVALID_HANDLE);
+    Require(scePadReadState(handle + 1, &data) == PAD_ERROR_INVALID_HANDLE);
+    Require(scePadRead_nid_postfix(0, &data, 1) == PAD_ERROR_INVALID_HANDLE);
+    Require(scePadReadState(handle, &data) == PAD_OK);
+}
+
 int main() {
     constexpr int user = 0x10000000;
 
@@ -75,6 +85,7 @@ int main() {
     Require(scePadOpen_nid_postfix(0xff, 16, 0, nullptr) == handle);
     CheckTiltCorrection(handle);
     CheckTouchContact();
+    CheckReadStateHandle(handle);
     Require(scePadGetHandle(0xff, 16, 0) == handle);
     Require(scePadGetHandle(user, 16, 0) == PAD_ERROR_NO_HANDLE);
     Require(scePadGetHandle(user, 0, 1) == PAD_ERROR_NO_HANDLE);

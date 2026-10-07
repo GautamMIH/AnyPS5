@@ -36,7 +36,7 @@ static constexpr char BACKUP_DIR[] = "_sd_backup";
 static constexpr std::uint32_t SAVE_DATA_EVENT_TYPE_BACKUP = 2;
 
 static std::atomic<std::int32_t> g_transaction_counter{1};
-static bool g_initialized = false;
+static std::atomic<int> g_initializations{0};
 
 // Completion events of asynchronous operations, read back through sceSaveDataGetEventResult.
 static std::mutex g_event_mutex;
@@ -200,12 +200,15 @@ int APS5_VABI sceSaveDataBackup(const SaveDataBackup* backup) {
     // Order and results follow shadPS4: initialization, parameters, then BUSY while the directory
     // is mounted. The copy happens here rather than on a backup thread, so the completion event
     // is ready when the call returns.
-    if (!g_initialized) return SAVE_DATA_ERROR_NOT_INITIALIZED;
+    if (g_initializations == 0) return SAVE_DATA_ERROR_NOT_INITIALIZED;
     if (backup == nullptr || backup->dir_name == nullptr) return SAVE_DATA_ERROR_PARAMETER;
     const std::string dir_name(backup->dir_name->data, strnlen(backup->dir_name->data, sizeof(backup->dir_name->data)));
     const std::filesystem::path source = std::filesystem::path(save_root()) / dir_name;
-    for (const auto& slot : g_slots) {
-        if (slot.used && std::filesystem::path(slot.real_path) == source) return SAVE_DATA_ERROR_BUSY;
+    {
+        std::lock_guard lock(g_slots_mutex);
+        for (const auto& slot : g_slots) {
+            if (slot.used && std::filesystem::path(slot.real_path) == source) return SAVE_DATA_ERROR_BUSY;
+        }
     }
     if (!dir_name.empty() && std::filesystem::is_directory(source)) {
         const std::filesystem::path target = std::filesystem::path(BACKUP_DIR) / dir_name;
@@ -310,7 +313,7 @@ int APS5_VABI sceSaveDataDirNameSearch(const SaveDataDirNameSearchCond* cond, Sa
 
 int APS5_VABI sceSaveDataGetEventResult(const void* event_param, SaveDataEvent* event) {
     (void)event_param;
-    if (!g_initialized) return SAVE_DATA_ERROR_NOT_INITIALIZED;
+    if (g_initializations == 0) return SAVE_DATA_ERROR_NOT_INITIALIZED;
     if (event == nullptr) return SAVE_DATA_ERROR_PARAMETER;
     std::lock_guard lock(g_event_mutex);
     if (g_events.empty()) return SAVE_DATA_ERROR_NOT_FOUND;
@@ -323,6 +326,7 @@ static int getMountInfo(const SaveDataMountPoint* mount_point, SaveDataMountInfo
     if (mount_point == nullptr || info == nullptr) {
         throw std::runtime_error("sceSaveDataGetMountInfo: null argument");
     }
+    std::lock_guard lock(g_slots_mutex);
     if (find_slot_by_mount_point(mount_point->data) == -1) {
         return SAVE_DATA_ERROR_NOT_MOUNTED;
     }
@@ -342,6 +346,7 @@ static int getParam(const SaveDataMountPoint* mount_point, uint32_t param_type, 
     if (mount_point == nullptr || param_buf == nullptr) {
         throw std::runtime_error("sceSaveDataGetParam: null argument");
     }
+    std::lock_guard lock(g_slots_mutex);
     const int slot = find_slot_by_mount_point(mount_point->data);
     if (slot == -1) {
         return SAVE_DATA_ERROR_NOT_MOUNTED;
@@ -368,7 +373,7 @@ static int getSaveDataMemory2(SaveDataMemoryGet2* get_param) {
     if (get_param == nullptr) {
         return SAVE_DATA_ERROR_PARAMETER;
     }
-    if (!g_initialized) {
+    if (g_initializations == 0) {
         return SAVE_DATA_ERROR_NOT_INITIALIZED;
     }
     std::lock_guard<std::mutex> lk(g_mem_mutex);
@@ -411,7 +416,7 @@ int APS5_VABI sceSaveDataGetSaveDataMemory2(SaveDataMemoryGet2* get_param) {
 // Initialization is idempotent (shadPS4).
 int APS5_VABI sceSaveDataInitialize3(const void* init) {
     (void)init;
-    g_initialized = true;
+    ++g_initializations;
     return SAVE_DATA_OK;
 }
 
@@ -420,6 +425,7 @@ int APS5_VABI sceSaveDataLoadIcon(const SaveDataMountPoint* mount_point, SaveDat
     if (mount_point == nullptr) {
         throw std::runtime_error("sceSaveDataLoadIcon: null mount_point");
     }
+    std::lock_guard lock(g_slots_mutex);
     if (find_slot_by_mount_point(mount_point->data) == -1) {
         return SAVE_DATA_ERROR_NOT_MOUNTED;
     }
@@ -451,6 +457,7 @@ static int mount3(const SaveDataMount3* mount, SaveDataMountResult* mount_result
         throw std::runtime_error("sceSaveDataMount3: invalid directory name");
     }
     const std::string real_path = save_root() + "/" + dirName;
+    std::lock_guard lock(g_slots_mutex);
     for (const auto& mounted : g_slots) {
         if (mounted.used && mounted.real_path == real_path) return SAVE_DATA_ERROR_BUSY;
     }
@@ -497,6 +504,7 @@ int APS5_VABI sceSaveDataSaveIcon(const SaveDataMountPoint* mount_point, const S
     if (mount_point == nullptr) {
         throw std::runtime_error("sceSaveDataSaveIcon: null mount_point");
     }
+    std::lock_guard lock(g_slots_mutex);
     if (find_slot_by_mount_point(mount_point->data) == -1) {
         return SAVE_DATA_ERROR_NOT_MOUNTED;
     }
@@ -513,6 +521,7 @@ static int setParam(const SaveDataMountPoint* mount_point, uint32_t param_type, 
     if (mount_point == nullptr || param_buf == nullptr) {
         throw std::runtime_error("sceSaveDataSetParam: null argument");
     }
+    std::lock_guard lock(g_slots_mutex);
     const int slot = find_slot_by_mount_point(mount_point->data);
     if (slot == -1) {
         return SAVE_DATA_ERROR_NOT_MOUNTED;
@@ -548,7 +557,7 @@ static int setSaveDataMemory2(const SaveDataMemorySet2* set_param) {
     if (set_param == nullptr) {
         return SAVE_DATA_ERROR_PARAMETER;
     }
-    if (!g_initialized) {
+    if (g_initializations == 0) {
         return SAVE_DATA_ERROR_NOT_INITIALIZED;
     }
     std::lock_guard<std::mutex> lk(g_mem_mutex);
@@ -606,7 +615,7 @@ static int setupSaveDataMemory2(const SaveDataMemorySetup2* setup_param, SaveDat
     if (setup_param == nullptr) {
         return SAVE_DATA_ERROR_PARAMETER;
     }
-    if (!g_initialized) {
+    if (g_initializations == 0) {
         return SAVE_DATA_ERROR_NOT_INITIALIZED;
     }
     if (setup_param->memory_size == 0 || setup_param->memory_size > MEM_MAX_SIZE) {
@@ -666,13 +675,14 @@ int APS5_VABI sceSaveDataSyncSaveDataMemory(const void* sync_param) {
 }
 
 int APS5_VABI sceSaveDataTerminate(void) {
-    if (!g_initialized) {
+    std::lock_guard lock(g_slots_mutex);
+    if (g_initializations == 0) {
         return SAVE_DATA_ERROR_NOT_INITIALIZED;
     }
-    if (any_slot_used()) {
+    if (g_initializations == 1 && any_slot_used()) {
         return SAVE_DATA_ERROR_BUSY;
     }
-    g_initialized = false;
+    --g_initializations;
     return SAVE_DATA_OK;
 }
 
@@ -696,6 +706,7 @@ static int umount2(uint32_t mode, const SaveDataMountPoint* mount_point) {
     if (mount_point == nullptr) {
         throw std::runtime_error("sceSaveDataUmount2: null mount_point");
     }
+    std::lock_guard lock(g_slots_mutex);
     int slot = find_slot_by_mount_point(mount_point->data);
     if (slot == -1) {
         return SAVE_DATA_ERROR_NOT_MOUNTED;

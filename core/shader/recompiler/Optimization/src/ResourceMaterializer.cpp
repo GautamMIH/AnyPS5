@@ -34,6 +34,7 @@ struct DecodedImage {
     bool depthBits = false;
     bool depthUnorm16 = false;
     IrBufferFormat packedFormat = IrBufferFormat::Invalid;
+    bool srgbDecode = false;
 };
 
 ShaderBufferResource decodeBufferDescriptor(const DescriptorValue& value) {
@@ -119,10 +120,10 @@ std::uint32_t storageMipCount(const ImageResource& base, const DescriptorValue& 
 }
 
 bool sameImageShape(const ResourceSpecialization::Image& left, const ResourceSpecialization::Image& right) {
-    return left.numericClass == right.numericClass && left.dimension == right.dimension && left.mipCount == right.mipCount && left.conversionFormat == right.conversionFormat && left.shaderSwizzle == right.shaderSwizzle && left.cube == right.cube && left.fmask == right.fmask;
+    return left.numericClass == right.numericClass && left.dimension == right.dimension && left.mipCount == right.mipCount && left.conversionFormat == right.conversionFormat && left.shaderSwizzle == right.shaderSwizzle && left.cube == right.cube && left.fmask == right.fmask && left.srgbDecode == right.srgbDecode;
 }
 
-DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const ImageResource& base) {
+DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const ImageResource& base, std::uint32_t srgbDecodeFormats) {
     DecodedImage decoded;
     decoded.mipCount = storageMipCount(base, descriptor);
     if (decoded.mipCount == 0u) {
@@ -143,7 +144,10 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
     decoded.dimension = descriptorDimension(descriptor, base.dimension);
     decoded.cube = descriptorIsCube(descriptor);
     const auto format = rawImageFormat(descriptor);
-    if (base.atomic && format != IrBufferFormat::Format32UInt && format != IrBufferFormat::Format32SInt && format != IrBufferFormat::Format32Float) {
+    if (base.atomic64 && format != IrBufferFormat::Format32_32UInt && format != IrBufferFormat::Format32_32SInt && format != IrBufferFormat::Format32_32Float) {
+        throw std::runtime_error("64-bit atomic image descriptor uses an unsupported format " + std::to_string(static_cast<std::uint32_t>(format)));
+    }
+    if (base.atomic && !base.atomic64 && format != IrBufferFormat::Format32UInt && format != IrBufferFormat::Format32SInt && format != IrBufferFormat::Format32Float) {
         throw std::runtime_error("atomic image descriptor uses an unsupported format " + std::to_string(static_cast<std::uint32_t>(format)));
     }
     const bool storage = base.resourceClass == ImageResourceClass::Storage;
@@ -158,10 +162,13 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
         decoded.packedFormat = format;
     }
     decoded.conversionFormat = RemapTextureFormat(format) != format ? format : IrBufferFormat::Invalid;
+    decoded.srgbDecode = !storage && (srgbDecodeFormats & SrgbDecodeBit(format)) != 0u;
     if (storage || decoded.conversionFormat != IrBufferFormat::Invalid) {
         decoded.shaderSwizzle = descriptorImageSwizzle(descriptor);
     }
-    const bool rawSintStorage = storage && format == IrBufferFormat::Format32SInt && base.written && !base.read && !base.atomic;
+    const bool wideSint = format == IrBufferFormat::Format32SInt || format == IrBufferFormat::Format32_32SInt || format == IrBufferFormat::Format32_32_32_32SInt;
+    const bool narrowSint = format == IrBufferFormat::Format16SInt || format == IrBufferFormat::Format8_8SInt || format == IrBufferFormat::Format16_16SInt || format == IrBufferFormat::Format8_8_8_8SInt || format == IrBufferFormat::Format16_16_16_16SInt;
+    const bool rawSintStorage = storage && (wideSint || (narrowSint && !base.packed)) && base.written && !base.read && !base.atomic;
     decoded.numericClass = base.atomic ? IrTextureNumericClass::Uint : SampledTextureNumericClass(format);
     if (!storage && !base.depthCompare && IsDepthBitsTexture(descriptor.dwords[1], descriptor.dwords[3])) {
         decoded.depthBits = true;
@@ -175,6 +182,9 @@ DecodedImage decodeImageDescriptor(const DescriptorValue& descriptor, const Imag
         }
         if (rawSintStorage) {
             decoded.numericClass = IrTextureNumericClass::Uint;
+        }
+        if ((rawSintStorage || (base.atomic && format == IrBufferFormat::Format32SInt)) && !base.packed) {
+            decoded.conversionFormat = format;
         }
     } else if (decoded.numericClass == IrTextureNumericClass::Unsupported || (base.depthCompare && decoded.numericClass != IrTextureNumericClass::Float)) {
         throw std::runtime_error("sampled image descriptor uses an unsupported format");
@@ -341,7 +351,7 @@ std::uint32_t emulatedCompareState(const IrResourcePlan& plan, const ResourceSna
         const auto clampY = (words[0] >> 3u) & 0x7u;
         const auto function = (words[0] >> 12u) & 0x7u;
         const bool unnormalized = ((words[0] >> 15u) & 0x1u) != 0u;
-        const auto lodBias = words[2] & 0x3fffu;
+        if (((words[0] >> 29u) & 0x3u) != 0u) throw std::runtime_error("comparison sampling of a color texture through a min or max reduction sampler is not implemented");
         const auto magFilter = (words[2] >> 20u) & 0x3u;
         const auto minFilter = (words[2] >> 22u) & 0x3u;
         const auto addressMode = [](std::uint32_t clamp) {
@@ -356,7 +366,7 @@ std::uint32_t emulatedCompareState(const IrResourcePlan& plan, const ResourceSna
         const bool border = addressX == EmulatedCompare::AddressBorder || addressY == EmulatedCompare::AddressBorder;
         if (border && borderType == 3u) throw std::runtime_error("comparison sampling of a color texture with a border color table is not implemented");
         if (magFilter != minFilter || magFilter > 1u) throw std::runtime_error("comparison sampling of a color texture is implemented only with equal point or bilinear minification and magnification filters");
-        if (unnormalized || lodBias != 0u) throw std::runtime_error("comparison sampling of a color texture does not implement unnormalized coordinates or an LOD bias");
+        if (unnormalized) throw std::runtime_error("comparison sampling of a color texture does not implement unnormalized coordinates");
         const auto state = EmulatedCompare::Enabled | (function << EmulatedCompare::FunctionShift) | (magFilter == 1u ? EmulatedCompare::Linear : 0u)
             | (addressX << EmulatedCompare::ClampXShift) | (addressY << EmulatedCompare::ClampYShift) | (border && borderType == 2u ? EmulatedCompare::BorderWhite : 0u);
         if (samplerState.has_value() && *samplerState != state) throw std::runtime_error("comparison sampling of a color texture through samplers that disagree is not implemented");
@@ -397,7 +407,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
     result.images.reserve(plan.info.images.size());
     for (std::uint32_t i = 0; i < plan.info.images.size(); i++) {
         const auto& image = plan.info.images[i];
-        const DecodedImage decoded = decodeImageDescriptor(snapshot.images[i], image);
+        const DecodedImage decoded = decodeImageDescriptor(snapshot.images[i], image, plan.srgbDecodeFormats);
         if (decoded.fmask && std::any_of(plan.info.sampledPairs.begin(), plan.info.sampledPairs.end(), [i](const SampledResourcePair& pair) { return pair.image == i; })) {
             throw std::runtime_error("FMASK requires a direct image load");
         }
@@ -424,6 +434,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
             if (trace) std::fprintf(stderr, "[color-compare] native sampling: %s\n", error.what());
             entry.emulatedCompare = 0u;
         }
+        entry.srgbDecode = decoded.srgbDecode;
         result.images.push_back(entry);
     }
 
@@ -436,7 +447,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
         const auto mappingOffset = static_cast<std::uint32_t>(snapshot.flattenedSrt.size());
         snapshot.flattenedSrt.push_back(static_cast<std::uint32_t>(candidates.size()));
         for (const auto& candidate : candidates) {
-            const DecodedImage decodedCandidate = decodeImageDescriptor(candidate, image);
+            const DecodedImage decodedCandidate = decodeImageDescriptor(candidate, image, plan.srgbDecodeFormats);
             ResourceSpecialization::Image entry;
             entry.numericClass = decodedCandidate.numericClass;
             entry.dimension = decodedCandidate.dimension;
@@ -448,6 +459,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
             entry.indirectSearchIterations = 0u;
             entry.cube = decodedCandidate.cube;
             entry.fmask = decodedCandidate.fmask;
+            entry.srgbDecode = decodedCandidate.srgbDecode;
             std::uint32_t targetIndex = NoRemap;
             for (std::uint32_t search = i; search < result.images.size(); search++) {
                 if (sameImageShape(result.images[search], entry)) {
@@ -523,6 +535,7 @@ void ResourceMaterializer::Apply(IrProgram& program, const ResourceSpecializatio
         image.depthUnorm16 = source.depthUnorm16;
         image.packedFormat = source.packedFormat;
         image.emulatedCompare = source.emulatedCompare;
+        image.srgbDecode = source.srgbDecode;
         if ((source.emulatedCompare & EmulatedCompare::Enabled) != 0u) image.depthCompare = false;
         image.indirectResources.clear();
     }
@@ -781,6 +794,7 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
     plan.shaderHash = source.shaderHash;
     plan.userDataBase = source.userDataBase;
     plan.userDataCount = source.userDataCount;
+    plan.srgbDecodeFormats = source.srgbDecodeFormats;
     plan.memoryInfo = source.memoryInfo;
     plan.descriptorSources = source.descriptorSources;
     plan.controlFlow = source.controlFlow;
@@ -836,7 +850,7 @@ bool ResourceSpecialization::Buffer::operator==(const Buffer& other) const {
 }
 
 bool ResourceSpecialization::Image::operator==(const Image& other) const {
-    return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask && depthBits == other.depthBits && depthUnorm16 == other.depthUnorm16 && packedFormat == other.packedFormat && emulatedCompare == other.emulatedCompare;
+    return numericClass == other.numericClass && dimension == other.dimension && mipCount == other.mipCount && conversionFormat == other.conversionFormat && shaderSwizzle == other.shaderSwizzle && indirectRoot == other.indirectRoot && indirectMappingOffset == other.indirectMappingOffset && indirectSearchIterations == other.indirectSearchIterations && cube == other.cube && fmask == other.fmask && depthBits == other.depthBits && depthUnorm16 == other.depthUnorm16 && packedFormat == other.packedFormat && emulatedCompare == other.emulatedCompare && srgbDecode == other.srgbDecode;
 }
 
 bool ResourceSpecialization::operator==(const ResourceSpecialization& other) const {

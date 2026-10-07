@@ -1,6 +1,7 @@
 #define _GLIBCXX_HAS_GTHREADS 0
 #include "MemoryPool.hpp"
 #include "DirectMemory.hpp"
+#include <algorithm>
 #include <iterator>
 #include <map>
 #include <mutex>
@@ -68,6 +69,24 @@ struct PhysicalMemoryPool {
         return true;
     }
 
+    // Changes the memory type of every block piece in [start, start + len), splitting blocks at the
+    // range's edges.
+    void Retype(uint64_t start, size_t len, int memoryType) {
+        std::lock_guard<std::mutex> lock(_mutex);
+        const uint64_t end = start + len;
+        auto it = _ranges.upper_bound(start);
+        if (it != _ranges.begin() && std::prev(it)->second.end > start) --it;
+        while (it != _ranges.end() && it->first < end) {
+            const DirectMemoryBlock block = it->second;
+            it = _ranges.erase(it);
+            if (block.start < start) _ranges[block.start] = {block.start, start, block.memoryType};
+            const uint64_t low = std::max(block.start, start);
+            const uint64_t high = std::min(block.end, end);
+            _ranges[low] = {low, high, memoryType};
+            if (block.end > end) it = _ranges.emplace(end, DirectMemoryBlock{end, block.end, block.memoryType}).first;
+        }
+    }
+
     size_t FreeRun(uint64_t offset, uint64_t limit) {
         std::lock_guard<std::mutex> lock(_mutex);
         uint64_t cur = offset & ~static_cast<uint64_t>(PS5_PAGE_SIZE - 1);
@@ -115,6 +134,10 @@ bool DirectMemoryAllocated(int64_t start, size_t len) {
 
 bool DirectMemoryFind(int64_t offset, bool findNext, int64_t* start, int64_t* end, int* memoryType) {
     return PhysicalMemoryPool::Instance().Find(static_cast<uint64_t>(offset), findNext, start, end, memoryType);
+}
+
+void DirectMemoryRetype(int64_t start, size_t len, int memoryType) {
+    PhysicalMemoryPool::Instance().Retype(static_cast<uint64_t>(start), len, memoryType);
 }
 
 size_t DirectMemoryFreeRun(uint64_t offset, uint64_t limit) {

@@ -55,6 +55,7 @@ struct IrResourcePlan {
     std::uint64_t shaderHash = 0;
     std::uint32_t userDataBase = 0;
     std::uint32_t userDataCount = 64;
+    std::uint32_t srgbDecodeFormats = 0;
     std::vector<std::unique_ptr<IrValue>> valueStorage;
     // One past the largest id of valueStorage's values when every id is unique, else 0: evaluators
     // then keep per-value state in arrays indexed by id.

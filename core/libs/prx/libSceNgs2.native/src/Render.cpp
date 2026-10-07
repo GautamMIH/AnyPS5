@@ -193,8 +193,8 @@ static std::vector<float>& OutputMix(std::vector<std::vector<float>>& mixes, con
     if (voice.outputId >= numBufferInfo) throw std::invalid_argument("NGS2: mastering output " + std::to_string(voice.outputId) + " has no render buffer");
     const auto& output = bufferInfo[voice.outputId];
     const auto sampleBytes = SampleBytes(output.waveform_type);
-    // Fewer mastering channels than the buffer has fill its first channels (front left and right of
-    // a 7.1 buffer for stereo; Balatro masters stereo into 8 channels); folding more is not done.
+    // Fewer mastering channels than the buffer has fill its first channels (stereo into a 5.1 or 7.1
+    // buffer is front left and right; Balatro masters stereo into 8 channels); folding more is not done.
     if (output.num_channels < voice.channels || output.num_channels == 0) throw std::runtime_error("NGS2: mixing " + std::to_string(voice.channels) + " mastering channels into " + std::to_string(output.num_channels) + " is not implemented");
     if (output.buffer == nullptr || output.buffer_size < static_cast<std::size_t>(grain) * output.num_channels * sampleBytes) {
         throw std::invalid_argument("NGS2: render buffer " + std::to_string(voice.outputId) + " is missing or too small");
@@ -231,11 +231,15 @@ void Ngs2RenderSystem(Ngs2System& system, const Ngs2RenderBufferInfo* bufferInfo
         auto& mix = OutputMix(mixes, bufferInfo, numBufferInfo, *voice, grain);
         const auto stride = bufferInfo[voice->outputId].num_channels;
         for (std::uint32_t channel = 0; channel < voice->channels; channel++) {
-            for (std::uint32_t i = 0; i < grain; i++) mix[i * stride + channel] += voice->samples[channel * grain + i];
+            // The mastering voice's gain: the LFE level applies to channel 3 of a 5.1 or 7.1 voice,
+            // the full-bandwidth level to every other channel.
+            const bool lfe = channel == 3 && (voice->channels == 6 || voice->channels == 8);
+            const float level = lfe ? voice->lfeLevel : voice->fbwLevel;
+            for (std::uint32_t i = 0; i < grain; i++) mix[i * stride + channel] += voice->samples[channel * grain + i] * level;
         }
         // A mono voice into a wider buffer plays on both front channels.
         if (voice->channels == 1 && stride >= 2) {
-            for (std::uint32_t i = 0; i < grain; i++) mix[i * stride + 1] += voice->samples[i];
+            for (std::uint32_t i = 0; i < grain; i++) mix[i * stride + 1] += voice->samples[i] * voice->fbwLevel;
         }
     }
     for (std::uint32_t i = 0; i < numBufferInfo; i++) {

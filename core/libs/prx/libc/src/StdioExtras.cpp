@@ -139,7 +139,15 @@ int APS5_VABI memcpy_s_nid_postfix(void* destination, std::size_t destinationSiz
         std::memset(destination, 0, destinationSize);
         return source == nullptr ? kErrorInvalid : kErrorRange;
     }
-    std::memmove(destination, source, count);
+    // C11 Annex K: overlapping ranges are a runtime-constraint violation.
+    const auto destinationAddress = reinterpret_cast<std::uintptr_t>(destination);
+    const auto sourceAddress = reinterpret_cast<std::uintptr_t>(source);
+    const auto distance = destinationAddress < sourceAddress ? sourceAddress - destinationAddress : destinationAddress - sourceAddress;
+    if (count != 0 && distance < count) {
+        std::memset(destination, 0, destinationSize);
+        return kErrorInvalid;
+    }
+    std::memcpy(destination, source, count);
     return 0;
 }
 

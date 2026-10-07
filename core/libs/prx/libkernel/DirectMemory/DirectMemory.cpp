@@ -120,6 +120,29 @@ int DoMprotect(const void* addr, size_t len, int prot) {
     return result;
 }
 
+// The memory type belongs to the physical memory: it changes for the direct memory behind the
+// (page-widened) range, after its protection changes. Flexible memory has no type to change.
+int DoMtypeprotect(const void* addr, size_t len, int type, int prot) {
+    const int result = DoMprotect(addr, len, prot);
+    if (result != 0) return result;
+    const auto address = reinterpret_cast<std::uintptr_t>(addr);
+    constexpr auto pageMask = static_cast<std::uintptr_t>(PS5_PAGE_SIZE - 1);
+    const auto end = (address + len + pageMask) & ~pageMask;
+    auto cursor = address & ~pageMask;
+    GuestMemoryBacking::Area area{};
+    while (cursor < end && GuestMemoryBacking::GuestVirtualQuery_nid_postfix(reinterpret_cast<const void*>(cursor), true, &area) && area.address < end) {
+        const auto areaEnd = area.address + area.bytes;
+        if (area.kind == Kind::Direct && area.physical >= 0) {
+            const auto low = std::max<std::uint64_t>(area.address, cursor);
+            const auto high = std::min<std::uint64_t>(areaEnd, end);
+            DirectMemoryRetype(area.physical + static_cast<int64_t>(low - area.address), static_cast<size_t>(high - low), type);
+        }
+        cursor = std::max<std::uint64_t>(areaEnd, cursor + PS5_PAGE_SIZE);
+    }
+    TraceMemory("mtypeprotect", reinterpret_cast<const void*>(address & ~pageMask), static_cast<size_t>(end - (address & ~pageMask)), prot, type, 0);
+    return 0;
+}
+
 int DoMunmap(void* addr, size_t len) {
     const auto result = SceResult(GuestMemoryBacking::GuestVirtualUnmap_nid_postfix(addr, len));
     TraceMemory("unmap", addr, len, 0, 0, result);

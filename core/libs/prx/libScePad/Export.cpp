@@ -244,6 +244,16 @@ int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool enab
  return PAD_OK;
 }
 
+int APS5_VABI scePadVrControllerGetDeviceInformation() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI scePadVrControllerRead() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
 APS5_EXPORT("fCWdlnmB1Ks", scePadUnknown_fCWdlnmB1Ks);
 int APS5_VABI scePadUnknown_fCWdlnmB1Ks(void) {
  NotImplemented_nid_no_patch(__func__);

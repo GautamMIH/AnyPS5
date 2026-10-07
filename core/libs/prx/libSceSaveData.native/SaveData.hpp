@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <mutex>
 #include <string>
 
 // Error codes as in shadPS4's savedata_error.h.
@@ -41,6 +42,7 @@ struct MountSlot {
 };
 
 inline std::array<MountSlot, SAVE_DATA_MOUNT_SLOTS> g_slots;
+inline std::mutex g_slots_mutex;
 
 inline int find_slot_by_mount_point(const char* mount_point) {
     for (int i = 0; i < static_cast<int>(SAVE_DATA_MOUNT_SLOTS); i++) {

@@ -379,6 +379,9 @@ int APS5_VABI scePthreadSetcanceltype(int type, int* old_type) {
  return SCE_OK;
 }
 
+void APS5_VABI scePthreadTestcancel() {
+}
+
 int APS5_VABI scePthreadSetprio(Pthread thread, int prio) {
  if (!thread) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
  thread->priority = prio;

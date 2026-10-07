@@ -1,9 +1,12 @@
 #include <relinker/output/SysVDynamicSectionBuilder.hpp>
 #include <algorithm>
+#include <elfpatcher/general/ElfConstants.hpp>
 #include <cstring>
 #include <map>
 
 namespace Relinker {
+
+using namespace Elfpatcher;
 
 void SysVDynamicSectionBuilder::_appendU64(std::vector<std::uint8_t>& buf, std::uint64_t v) const {
     std::size_t pos = buf.size();
@@ -93,6 +96,9 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
     std::vector<const NidReference*> nonPltRefs;
 
     for (const auto& ref : nidReferences) {
+        // Library is the SCE import library (the symbol version); LibraryFile is the module file it
+        // comes from, which Windows import binding needs.
+        if (!ref.LibraryFile.empty()) result.ImportModules.emplace(ref.RelocationAddress, ref.LibraryFile);
         std::uint32_t relType = ref.RelocationTypeValue;
         if (relType == 0) relType = R_X86_64_JUMP_SLOT;
 

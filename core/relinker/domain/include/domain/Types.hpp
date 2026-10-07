@@ -131,6 +131,7 @@ struct SysVDynamicSection {
     std::uint64_t VerdefCount = 0;
     std::uint64_t VerneedCount = 0;
     std::vector<GuestRuntime> GuestModules;
+    std::map<VirtualAddress, std::string> ImportModules;
 };
 
 struct CallRegistryEntry {

@@ -316,7 +316,9 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         case 0x3f:
             if (packet.size() == 14) {
                 require((packet[1] & ~0x703u) == 0 && (packet[1] & 3u) != 0 && (packet[1] & 3u) != 3 && ((packet[1] >> 8u) & 7u) <= 6, "unsupported conditional branch mode or compare function");
-                require((packet[2] & 7u) == 0 && address(packet[2], packet[3]) != 0, "null or misaligned conditional branch compare address");
+                // An always-pass branch (compare function 0) reads nothing: games leave its compare
+                // address uninitialised (upstream 98ed8351; sceAgcCbBranch no longer checks it).
+                require(((packet[1] >> 8u) & 7u) == 0 || ((packet[2] & 7u) == 0 && address(packet[2], packet[3]) != 0), "null or misaligned conditional branch compare address");
                 require((packet[8] & 3u) == 0 && (packet[11] & 3u) == 0, "misaligned conditional branch buffer");
                 require((packet[10] & ~0x300fffffu) == 0 && (packet[13] & ~0x300fffffu) == 0, "unsupported conditional branch buffer fields");
                 break;
@@ -533,7 +535,7 @@ std::optional<BranchTarget> ResolveBranch(std::span<const std::uint32_t> packet)
     Validate(packet, 0x20);
     require(packet.size() == 14, "expected a conditional INDIRECT_BUFFER");
     std::uint64_t value = 0;
-    GuestMemory::Read(address(packet[2], packet[3]), std::as_writable_bytes(std::span(&value, 1)), 8);
+    if (((packet[1] >> 8u) & 7u) != 0) GuestMemory::Read(address(packet[2], packet[3]), std::as_writable_bytes(std::span(&value, 1)), 8);
     const auto masked = value & address(packet[4], packet[5]);
     const auto reference = address(packet[6], packet[7]);
     bool taken = true;

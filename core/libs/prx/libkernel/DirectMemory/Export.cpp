@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <algorithm>
 #include <cstring>
+#include <cstdio>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -13,7 +14,9 @@
 #include <cstdint>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #else
 #include <cerrno>
@@ -238,6 +241,10 @@ int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
  return result;
 }
 
+int APS5_VABI sceKernelReleaseFlexibleMemory(void* addr, size_t len) {
+ return sceKernelMunmap(reinterpret_cast<uint64_t>(addr), len);
+}
+
 int APS5_VABI sceKernelReleaseDirectMemory(int64_t start, size_t len) {
  return DoReleaseDirect(start, len);
 }
@@ -283,7 +290,11 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
   info->is_flexible = area.kind == GuestMemoryBacking::Kind::Flexible || area.kind == GuestMemoryBacking::Kind::Heap;
   if (info->is_direct) {
    info->offset = static_cast<std::uint64_t>(area.physical);
-   info->memory_type = kDefaultMemoryType;
+   // The memory type belongs to the direct memory (sceKernelMtypeprotect retypes it).
+   int64_t blockStart = 0;
+   int64_t blockEnd = 0;
+   int blockType = kDefaultMemoryType;
+   info->memory_type = DirectMemoryFind(area.physical, false, &blockStart, &blockEnd, &blockType) ? blockType : kDefaultMemoryType;
   }
  }
  {
@@ -310,9 +321,7 @@ int APS5_VABI sceKernelCheckedReleaseDirectMemory(int64_t start, size_t len) {
 }
 
 int APS5_VABI sceKernelMtypeprotect(const void* addr, size_t len, int type, int prot) {
- // Memory types only select cache policy, which the host does not model.
- (void)type;
- return DoMprotect(addr, len, prot);
+ return DoMtypeprotect(addr, len, type, prot);
 }
 
 int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** end, int* prot) {
@@ -325,8 +334,41 @@ int APS5_VABI sceKernelQueryMemoryProtection(void* addr, void** start, void** en
  return 0;
 }
 
+namespace {
+
+// Whether the host has accessible memory at the address: memory neither the guest areas nor the
+// image registry describe (the title's own static data, host-allocated blocks) is still mapped
+// memory. A PROT_NONE reservation counts as unmapped.
+bool HostAccessible(const void* addr) {
+#ifdef _WIN32
+ MEMORY_BASIC_INFORMATION host{};
+ return VirtualQuery(addr, &host, sizeof(host)) != 0 && host.State == MEM_COMMIT && (host.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+#else
+ const auto address = reinterpret_cast<std::uintptr_t>(addr);
+ FILE* maps = std::fopen("/proc/self/maps", "r");
+ if (maps == nullptr) return false;
+ char line[512];
+ bool accessible = false;
+ while (std::fgets(line, sizeof(line), maps) != nullptr) {
+  unsigned long long begin = 0;
+  unsigned long long finish = 0;
+  char perms[5] = {};
+  if (std::sscanf(line, "%llx-%llx %4s", &begin, &finish, perms) != 3 || address < begin || address >= finish) continue;
+  accessible = perms[0] == 'r' || perms[1] == 'w' || perms[2] == 'x';
+  break;
+ }
+ std::fclose(maps);
+ return accessible;
+#endif
+}
+
+}
+
 int APS5_VABI sceKernelIsStack(void* addr, void** start, void** end) {
  if (!PthreadStacks::Find(reinterpret_cast<std::uintptr_t>(addr), start, end)) {
+  // An address outside every thread stack is not a stack; one outside mapped memory is an error.
+  VirtualQueryInfo info{};
+  if (sceKernelVirtualQuery(addr, 0, &info, sizeof(info)) != 0 && !HostAccessible(addr)) return SCE_KERNEL_ERROR_EACCES;
   if (start) *start = nullptr;
   if (end) *end = nullptr;
  }
@@ -395,6 +437,11 @@ int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, 
  int result = 0;
  for (; processed < num_entries; ++processed) {
   const auto& entry = entries[processed];
+  // A zero length or unknown operation stops the batch at that entry.
+  if (entry.length == 0 || entry.operation < kOperationMapDirect || entry.operation > kOperationTypeProtect) {
+   result = SCE_KERNEL_ERROR_EINVAL;
+   break;
+  }
   const int protection = static_cast<unsigned char>(entry.protection);
   void* address = entry.start;
   switch (entry.operation) {
@@ -405,8 +452,10 @@ int APS5_VABI sceKernelBatchMap2(KernelBatchMapEntry* entries, int num_entries, 
    result = sceKernelMunmap(reinterpret_cast<uint64_t>(address), entry.length);
    break;
   case kOperationProtect:
-  case kOperationTypeProtect:
    result = DoMprotect(address, entry.length, protection);
+   break;
+  case kOperationTypeProtect:
+   result = DoMtypeprotect(address, entry.length, static_cast<unsigned char>(entry.type), protection);
    break;
   case kOperationMapFlexible:
    result = _mapFlexible(&address, entry.length, protection, flags);

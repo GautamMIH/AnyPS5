@@ -9,7 +9,8 @@
 extern "C" {
 
 int APS5_VABI sceNpTrophy2GetGameInfo(int context, int handle, NpTrophy2GameDetails* details, NpTrophy2GameData* data) {
-    if (details == nullptr || data == nullptr) {
+    // Either output may be null (the title asks for one of them); both null is invalid.
+    if (details == nullptr && data == nullptr) {
         return SCE_NP_TROPHY2_ERROR_INVALID_ARGUMENT;
     }
     (void)context;

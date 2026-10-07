@@ -1,13 +1,17 @@
 #include <algorithm>
 #include <relinker/pipeline/RelinkerPipeline.hpp>
+#include <elfpatcher/general/ElfConstants.hpp>
 #include <relinker/analysis/ValidationPolicy.hpp>
 #include <relinker/analysis/UnusedNidFilter/PltCompactor.hpp>
 #include <sstream>
 #include <iostream>
 #include <cstring>
 #include <map>
+#include <domain/ImportModule.hpp>
 
 namespace Relinker {
+
+using namespace Elfpatcher;
 
 RelinkerPipeline::RelinkerPipeline(std::shared_ptr<IElfReader> elfReader, std::shared_ptr<ISyscallScanner> syscallScanner, std::shared_ptr<ICallSiteResolver> callSiteResolver, std::shared_ptr<IValidationPolicy> validationPolicy, std::shared_ptr<ISysVDynamicSectionBuilder> dynamicSectionBuilder, std::shared_ptr<IUnusedNidFilter> unusedNidFilter, std::uint32_t unusedFilterLevel)
     : _elfReader(std::move(elfReader))
@@ -213,12 +217,16 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
     std::map<std::uint64_t, std::string> moduleFiles;
     std::map<std::uint64_t, std::string> importLibraries;
     std::map<std::uint64_t, std::string> exportLibraries;
+    std::map<std::uint64_t, std::string> importModules;
     {
         std::vector<std::pair<std::uint64_t, std::string>> moduleNames;
         for (const auto& tag : dynTags) {
             const std::uint64_t id = tag.Value >> kSceTableIdShift;
-            if (tag.Tag == DT_SCE_NEEDED_MODULE_PS5 || tag.Tag == DT_SCE_NEEDED_MODULE_PS4)
+            if (tag.Tag == DT_SCE_NEEDED_MODULE_PS5 || tag.Tag == DT_SCE_NEEDED_MODULE_PS4) {
                 moduleNames.emplace_back(id, readCStr(tag.Value & kSceTableNameMask));
+                if (tag.Tag == DT_SCE_NEEDED_MODULE_PS5 && !importModules.emplace(id, moduleNames.back().second).second)
+                    throw RelinkerException("Duplicate import module ID");
+            }
             else if (tag.Tag == DT_SCE_IMPORT_LIB_PS5 || tag.Tag == DT_SCE_IMPORT_LIB_PS4)
                 importLibraries.emplace(id, readCStr(tag.Value & kSceTableNameMask));
             else if (tag.Tag == DT_SCE_EXPORT_LIB_PS5 || tag.Tag == DT_SCE_EXPORT_LIB_PS4)
@@ -259,16 +267,22 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
     };
 
     auto assignImportVersion = [&](NidReference& ref) {
+        // The declared module's dependency file (exact name or alias, Domain::ImportModule) is preferred;
+        // the positional/prefix mapping covers modules it cannot place. A malformed or unknown module ID
+        // and an alias matching two dependencies are errors, as upstream (bf0ee401, e96e9c18).
+        const std::string declaredFile = Domain::ImportModule(ref.Nid, importModules, neededLibraries);
         std::string libraryText, moduleText;
         std::uint64_t libraryId = 0, moduleId = 0;
-        if (!splitSymbolName(ref.Nid, libraryText, moduleText) || !_decodeSceIndex(libraryText, libraryId) || !_decodeSceIndex(moduleText, moduleId) || moduleId == 0)
+        if (!splitSymbolName(ref.Nid, libraryText, moduleText) || !_decodeSceIndex(libraryText, libraryId) || !_decodeSceIndex(moduleText, moduleId) || moduleId == 0) {
+            ref.LibraryFile = declaredFile;
             return;
-        const auto library = importLibraries.find(libraryId);
+        }
         const auto file = moduleFiles.find(moduleId);
-        if (library == importLibraries.end() || file == moduleFiles.end())
+        ref.LibraryFile = !declaredFile.empty() ? declaredFile : file == moduleFiles.end() ? std::string() : file->second;
+        const auto library = importLibraries.find(libraryId);
+        if (library == importLibraries.end() || ref.LibraryFile.empty())
             return;
         ref.Library = library->second;
-        ref.LibraryFile = file->second;
     };
 
     struct SymbolEntry {
@@ -382,8 +396,6 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
 
     _validationPolicy->ValidateSyscallAbsence();
 
-    static constexpr std::uint32_t R_X86_64_JUMP_SLOT = 7;
-
     const std::size_t originalNidCount = nidRefs.size();
     const auto originalNidRefs = nidRefs;
     std::cout << "NID input: " << originalNidCount << " references\n";
@@ -436,8 +448,6 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
         pltCount = compacted.SlotCount;
     }
     auto dynSection = _dynamicSectionBuilder->BuildDynamicSection(dynamicRefs, neededLibraries, dynJmpRelOffset, pltCount);
-
-    static constexpr std::uint32_t R_X86_64_RELATIVE = 8;
 
     auto appendRela = [&](std::vector<std::uint8_t>& buf, std::uint64_t offset, std::uint64_t info, std::int64_t addend) {
         std::size_t pos = buf.size();

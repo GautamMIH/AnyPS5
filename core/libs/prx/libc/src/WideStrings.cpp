@@ -286,9 +286,28 @@ int formatWide(GuestWchar* destination, std::size_t count, const GuestWchar* for
         case u'p':
             appendFormatted(output, prefix + "p", va_arg(arguments, void*));
             break;
-        case u'n':
-            *va_arg(arguments, int*) = static_cast<int>(output.size());
+        case u'n': {
+            // %n stores the UTF-16 units written so far; a flag, width, precision or an unknown
+            // length modifier makes the conversion invalid, as does a null pointer (upstream 99260427).
+            const bool integerLength = length.empty() || length == "hh" || length == "h" || length == "l" || length == "ll" ||
+                                       length == "q" || length == "j" || length == "z" || length == "t";
+            if (!integerLength || prefix != "%") {
+                errno = kErrorInvalid;
+                return -1;
+            }
+            void* pointer = va_arg(arguments, void*);
+            if (pointer == nullptr) {
+                errno = kErrorInvalid;
+                return -1;
+            }
+            const auto [kept, units] = utf8PrefixByUnits(output.c_str(), SIZE_MAX);
+            const int written = static_cast<int>(units);
+            if (length == "hh") *static_cast<signed char*>(pointer) = static_cast<signed char>(written);
+            else if (length == "h") *static_cast<short*>(pointer) = static_cast<short>(written);
+            else if (length.empty()) *static_cast<int*>(pointer) = written;
+            else *static_cast<long long*>(pointer) = written;
             break;
+        }
         default:
             throw std::runtime_error("vswprintf: unsupported conversion");
         }

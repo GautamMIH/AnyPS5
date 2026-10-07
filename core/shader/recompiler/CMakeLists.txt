@@ -218,6 +218,8 @@ function(add_shader_recompiler target runtimeTarget)
             ResourceMaterializer::SpecializationNanoseconds
             SetDebugProbeActive
             ShaderCacheDirectory
+            SrgbDecodeBit
+            SrgbUnormFormat
             ThreadOwned
             WriteFileAtomically
     )
