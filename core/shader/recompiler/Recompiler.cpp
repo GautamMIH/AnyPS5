@@ -542,6 +542,24 @@ std::shared_ptr<const IrResourcePlan> GetResourcePlan(const RecompileRequest& re
     });
 }
 
+std::vector<std::uint32_t> PlanUserDataSlots(const IrResourcePlan& plan) {
+    std::vector<std::uint32_t> slots;
+    for (const auto& value : plan.valueStorage) {
+        if (value == nullptr || value->Opcode() != IrOpcode::GetUserData) continue;
+        if (value->ArgumentCount() != 1 || value->Argument(0)->Type() != IrType::ScalarReg) {
+            // A read the evaluator does not take as a register: every slot may matter.
+            slots.clear();
+            for (std::uint32_t slot = 0; slot < plan.userDataCount; ++slot) slots.push_back(slot);
+            return slots;
+        }
+        const auto reg = RegIndex(static_cast<ScalarReg>(value->Argument(0)->Register().index));
+        if (reg >= plan.userDataBase) slots.push_back(reg - plan.userDataBase);
+    }
+    std::sort(slots.begin(), slots.end());
+    slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
+    return slots;
+}
+
 std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime) {
     return recompileReporting(request, [&]() -> std::shared_ptr<const ResourceCapture> {
         // Validates the stage inputs once per request, as GetResourcePlan and Recompile(request) do.

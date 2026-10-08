@@ -7,6 +7,7 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <iterator>
 #include <limits>
@@ -151,20 +152,41 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     for (const auto word : key) hash = (hash ^ word) * 0x100000001b3ull;
     const auto programHash = hash;
     const auto programWords = key.size();
-    key.insert(key.end(), request.context.userData.begin(), request.context.userData.end());
-    for (const auto word : request.context.userData) hash = (hash ^ word) * 0x100000001b3ull;
     PerformanceTimer timing("Driver.CaptureMemo");
+    // The program's earlier capture (same code, context and owner), whatever its user data.
+    const auto program = programs.find(programHash);
+    const bool sameProgram = program != programs.end() && program->second.owner == owner && program->second.key.size() == programWords && std::equal(program->second.key.begin(), program->second.key.end(), key.begin());
+    static const bool allUserData = std::getenv("ANYPS5_CAPTURE_MEMO_ALL_USER_DATA") != nullptr;
+    const auto& userData = request.context.userData;
+    // Keyed on the user-data slots the plan reads once the program is known (a slot count marks
+    // the form), else on every word.
+    if (sameProgram && !allUserData && program->second.masked) {
+        const auto& slots = program->second.slots;
+        key.push_back(0x51075u + slots.size());
+        for (const auto slot : slots) {
+            const auto word = slot < userData.size() ? static_cast<std::uint64_t>(userData[slot]) : ~0ull;
+            key.push_back(word);
+        }
+    } else {
+        key.insert(key.end(), userData.begin(), userData.end());
+    }
+    for (auto index = programWords; index < key.size(); ++index) hash = (hash ^ key[index]) * 0x100000001b3ull;
     const auto found = entries.find(hash);
     const bool known = found != entries.end() && found->second.key == key && found->second.owner == owner;
     if (known && reusable(found->second, memory)) {
         timing.Mark("hit");
-        return found->second.capture;
+        const auto& capture = found->second.capture;
+        // Only the snapshot's copy of the user data may differ from this draw's.
+        const auto& copied = capture->snapshot.userData;
+        if (copied.size() <= userData.size() && std::equal(copied.begin(), copied.end(), userData.begin())) return capture;
+        auto patched = std::make_shared<ShaderRecompiler::ResourceCapture>(*capture);
+        patched->snapshot.userData.assign(userData.begin(), userData.begin() + static_cast<std::ptrdiff_t>(copied.size()));
+        timing.Mark("hit_patched");
+        return patched;
     }
     // Taken before the capture reads, so a mapping change during it invalidates the entry.
     const auto mappingGeneration = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
     // The same program and context captured with other user data: its source and plan are reused.
-    const auto program = programs.find(programHash);
-    const bool sameProgram = program != programs.end() && program->second.owner == owner && program->second.key.size() == programWords && std::equal(program->second.key.begin(), program->second.key.end(), key.begin());
     timing.Mark("program_lookup");
     auto capture = sameProgram ? memory.Capture(request, *program->second.capture) : memory.Capture(request);
     timing.Mark("materialize");
@@ -174,7 +196,7 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     timing.Mark("captured_words");
     entries[hash] = Entry{owner, key, capture, std::move(words), mappingGeneration};
     timing.Mark("store");
-    if (!sameProgram) programs[programHash] = Program{owner, std::vector<std::uint64_t>(key.begin(), key.begin() + static_cast<std::ptrdiff_t>(programWords)), capture};
+    if (!sameProgram) programs[programHash] = Program{owner, std::vector<std::uint64_t>(key.begin(), key.begin() + static_cast<std::ptrdiff_t>(programWords)), capture, capture->plan ? ShaderRecompiler::PlanUserDataSlots(*capture->plan) : std::vector<std::uint32_t>{}, capture->plan != nullptr};
     timing.Mark(known ? "changed" : sameProgram ? "walk" : "miss");
     return capture;
 }

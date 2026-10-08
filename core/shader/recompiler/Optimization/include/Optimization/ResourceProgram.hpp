@@ -25,6 +25,10 @@ struct ResourceCapture {
 // Captures a request whose code, stage inputs and target are those of an earlier capture (only user
 // data and memory differ): the earlier one's validated inputs, source entry and plan are reused.
 [[nodiscard]] std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& request, const SrtRuntime& runtime, const ResourceCapture& sameProgram);
+// The user-data slots (indices from the plan's userDataBase) the plan's evaluation reads: a capture's
+// descriptors, flattened SRT and uniform fill depend on user data only through these (and on the guest
+// memory they lead to); its snapshot also keeps a copy of the first userDataCount words. Ascending.
+[[nodiscard]] std::vector<std::uint32_t> PlanUserDataSlots(const IrResourcePlan& plan);
 
 }
 

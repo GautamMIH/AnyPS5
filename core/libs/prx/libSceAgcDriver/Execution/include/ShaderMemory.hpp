@@ -39,10 +39,13 @@ private:
 };
 
 // Reuses shader resource captures across draws. A stage whose program (the registered snapshot,
-// held so its code cannot be replaced at the same address), request context and user data match an
-// earlier capture, and whose every guest input dword still holds the value captured, reuses that
-// capture: no source lookup, SRT walk or per-dword guarded read. The dwords are checked with the
-// same range guards the capture's reads had, then compared by value. Cleared with the device.
+// held so its code cannot be replaced at the same address), request context and the user-data slots
+// its resource plan reads match an earlier capture, and whose every guest input dword still holds the
+// value captured, reuses that capture: no source lookup, SRT walk or per-dword guarded read. The
+// dwords are checked with the same range guards the capture's reads had, then compared by value.
+// User data the plan does not read (per-draw constants games change every frame) only differs in the
+// snapshot's copy of it, which a reused capture gets replaced. ANYPS5_CAPTURE_MEMO_ALL_USER_DATA=1 keys
+// on every user-data word, as before. Cleared with the device.
 class CaptureMemo {
 public:
     std::shared_ptr<const ShaderRecompiler::ResourceCapture> Capture(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request, ShaderMemory& memory);
@@ -65,6 +68,9 @@ private:
         std::shared_ptr<const void> owner;
         std::vector<std::uint64_t> key;
         std::shared_ptr<const ShaderRecompiler::ResourceCapture> capture;
+        // PlanUserDataSlots of the capture's plan (masked: it had a plan to read them from).
+        std::vector<std::uint32_t> slots;
+        bool masked = false;
     };
     std::unordered_map<std::uint64_t, Program> programs;
     std::vector<std::uint64_t> key;
