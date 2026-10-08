@@ -124,17 +124,21 @@ int APS5_VABI sceAppContentAppParamGetInt(uint32_t param_id, int32_t* value) {
 
 int APS5_VABI sceAppContentDownloadDataGetAvailableSpaceKb(const AppContentMountPoint* mount_point, size_t* available_space_kb) {
  if (!isMountPoint(mount_point, kDownloadMountPoint)) return APP_CONTENT_ERROR_PARAMETER;
- if (const int result = availableKilobytes(kDownloadMountPoint, available_space_kb); result != 0) return result;
+ if (!available_space_kb) return APP_CONTENT_ERROR_PARAMETER;
  // The title's declared download data size (param.json) caps the space, less what is already stored.
+ // A title that declares no download data area has no space (upstream; the console is unverified).
  const std::uint64_t quotaKb = GetAppDownloadDataSizeMiB_nid_postfix() * 1024u;
- if (quotaKb != 0) {
-  std::uint64_t usedKb = 0;
-  std::error_code error;
-  for (const auto& entry : std::filesystem::recursive_directory_iterator(ResolvePath_nid_no_patch(kDownloadMountPoint), error)) {
-   if (entry.is_regular_file(error)) usedKb += (entry.file_size(error) + 1023u) / 1024u;
-  }
-  *available_space_kb = static_cast<size_t>(std::min<std::uint64_t>(quotaKb - std::min(quotaKb, usedKb), *available_space_kb));
+ if (quotaKb == 0) {
+  *available_space_kb = 0;
+  return 0;
  }
+ if (const int result = availableKilobytes(kDownloadMountPoint, available_space_kb); result != 0) return result;
+ std::uint64_t usedKb = 0;
+ std::error_code error;
+ for (const auto& entry : std::filesystem::recursive_directory_iterator(ResolvePath_nid_no_patch(kDownloadMountPoint), error)) {
+  if (entry.is_regular_file(error)) usedKb += (entry.file_size(error) + 1023u) / 1024u;
+ }
+ *available_space_kb = static_cast<size_t>(std::min<std::uint64_t>(quotaKb - std::min(quotaKb, usedKb), *available_space_kb));
  return 0;
 }
 

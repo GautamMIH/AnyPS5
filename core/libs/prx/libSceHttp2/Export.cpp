@@ -191,9 +191,9 @@ int APS5_VABI sceHttp2SslEnableOption(int id, uint32_t ssl_flags) {
     return 0;
 }
 
-int APS5_VABI sceHttp2SetMinSslVersion(int id, int version) {
+int APS5_VABI sceHttp2SetMinSslVersion(int id, uint32_t ssl_version) {
     (void)id;
-    (void)version;
+    (void)ssl_version;
     return 0;
 }
 

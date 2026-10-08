@@ -23,6 +23,7 @@ std::uint32_t FullArrayLayers(const GuestTextureResource& descriptor) {
         case TextureDimension::k1D:
         case TextureDimension::k2D: return 1u;
         case TextureDimension::k2DArray:
+        case TextureDimension::k1DArray:
         case TextureDimension::kCube:
         case TextureDimension::k3D: return descriptor.depthOrLastArray + 1u;
     }
@@ -30,7 +31,7 @@ std::uint32_t FullArrayLayers(const GuestTextureResource& descriptor) {
 }
 
 VkImageType ImageTypeFor(TextureDimension dimension) {
-    return dimension == TextureDimension::k1D ? VK_IMAGE_TYPE_1D : dimension == TextureDimension::k3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    return dimension == TextureDimension::k1D || dimension == TextureDimension::k1DArray ? VK_IMAGE_TYPE_1D : dimension == TextureDimension::k3D ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
 }
 
 VkImageViewType ViewTypeFor(TextureDimension dimension, std::uint32_t viewLayerCount) {
@@ -40,6 +41,7 @@ VkImageViewType ViewTypeFor(TextureDimension dimension, std::uint32_t viewLayerC
         case TextureDimension::k2DArray: return VK_IMAGE_VIEW_TYPE_2D_ARRAY;
         case TextureDimension::kCube: return viewLayerCount == 6u ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
         case TextureDimension::k3D: return VK_IMAGE_VIEW_TYPE_3D;
+        case TextureDimension::k1DArray: return VK_IMAGE_VIEW_TYPE_1D_ARRAY;
     }
     throw std::runtime_error("AGC graphics: Texture encountered an unknown guest texture dimension");
 }
@@ -226,7 +228,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                         auto* out = destination.data() + layer * convertedSliceBytes + convertedMipOffsets[level];
                         for (std::uint32_t y = 0; y < height; ++y) {
                             for (std::uint32_t x = 0; x < width; ++x) {
-                                const auto source = static_cast<std::uint64_t>(layer) * guestSliceBytes + TexelOffset(descriptor.tileMode, elementBytes, mips[level], x, y, layer);
+                                const auto source = static_cast<std::uint64_t>(layer) * guestSliceBytes + (TexelOffset(descriptor.tileMode, elementBytes, mips[level], x, y, layer) ^ (volume ? VolumeSliceXor(descriptor.tileMode, elementBytes, layer) : 0u));
                                 Require(source + elementBytes <= snapshot.size(), "comparison texel lies outside the texture snapshot");
                                 const float value = decodeChannel(snapshot.data() + source);
                                 std::memcpy(out + (static_cast<std::size_t>(y) * width + x) * sizeof(float), &value, sizeof(value));
@@ -251,7 +253,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                     const auto guestLayerOffset = static_cast<std::uint64_t>(layer) * guestSliceBytes;
                     const auto linearLayerOffset = static_cast<std::uint64_t>(layer) * sliceLinearBytes;
                     for (const auto& mip : mips) {
-                        detiler.Dispatch(commands, descriptor.tileMode, elementBytes, staging.Handle(), guestLayerOffset + mip.tiledOffset, linear.Handle(), linearLayerOffset + mip.linearOffset, mip, layer, false, uploadPool);
+                        detiler.Dispatch(commands, descriptor.tileMode, elementBytes, staging.Handle(), guestLayerOffset + mip.tiledOffset, linear.Handle(), linearLayerOffset + mip.linearOffset, mip, layer, false, uploadPool, volume ? VolumeSliceXor(descriptor.tileMode, elementBytes, layer) : 0u);
                     }
                 }
             }
@@ -287,8 +289,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                     region.bufferRowLength = decodeChannel ? 0u : mip.pitchBytes / elementBytes * BlockWidth(descriptor.format);
                     region.bufferImageHeight = 0;
                     region.imageSubresource = {aspect, level, volume ? 0u : layer, 1};
-                    if (volume) region.imageOffset.z = static_cast<std::int32_t>(layer);
-                    region.imageOffset = {0, 0, 0};
+                    region.imageOffset = {0, 0, volume ? static_cast<std::int32_t>(layer) : 0};
                     region.imageExtent = {std::max(descriptor.width >> level, 1u), std::max(descriptor.height >> level, 1u), 1u};
                     regions.push_back(region);
                 }

@@ -219,6 +219,7 @@ target_include_directories(agc_driver_pm4_tests PRIVATE
 target_link_libraries(agc_driver_pm4_tests PRIVATE
         libSceAgcDriver
         libc
+        libkernel
 )
 
 set_target_properties(agc_driver_pm4_tests PROPERTIES CXX_EXTENSIONS OFF)
@@ -342,6 +343,7 @@ target_include_directories(agc_driver_graphics_tests PRIVATE
 target_link_libraries(agc_driver_graphics_tests PRIVATE
         shader_recompiler_agc_driver
         libc
+        libkernel
 )
 
 set_target_properties(agc_driver_graphics_tests PROPERTIES CXX_EXTENSIONS OFF)
@@ -382,6 +384,9 @@ list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(EmulatedColorCompare|ImageS
 # Open issue: image_sample_d on a 3D texture returns a wrong value with this driver (lane 0 0x447a5000,
 # expected 0x3fa00000); excluded until investigated.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/ImageSampleDerivatives\\.cpp$")
+# DccKeysFirstWrite checks upstream's DCC key stores (Recorder, DccMetadata, GuestArena): this driver
+# keeps surfaces uncompressed and models no DCC keys, so there is nothing of its to test here.
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/DccKeysFirstWrite\\.cpp$")
 set(agcExecutionTests)
 foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
     get_filename_component(agcExecutionTestName ${agcExecutionTestSource} NAME_WE)

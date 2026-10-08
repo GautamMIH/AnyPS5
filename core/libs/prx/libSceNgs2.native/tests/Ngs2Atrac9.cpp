@@ -188,9 +188,9 @@ static void TestParsePcm() {
     Require(info.num_samples == 1000 && info.data_size == 4000 && info.data_offset == file.size() - 4000);
     Require(info.audio_unit_size == 4 && info.num_audio_unit_samples == 1 && info.audio_frame_size == 4 && info.num_audio_frame_samples == 1);
     Require(info.num_blocks == 1 && info.block[0].data_offset == info.data_offset && info.block[0].num_samples == 1000);
-    // 8-bit samples are no voice format: refused, not thrown.
+    // 8-bit samples are no voice format: refused as an invalid format (as upstream), not thrown.
     const auto bytes = PcmFile(10, 8);
-    Require(sceNgs2ParseWaveformData(bytes.data(), bytes.size(), &info) == SCE_NGS2_ERROR_UNKNOWN_WAVEFORM_FORMAT);
+    Require(sceNgs2ParseWaveformData(bytes.data(), bytes.size(), &info) == SCE_NGS2_ERROR_INVALID_WAVEFORM_FORMAT);
 }
 
 static void TestParse() {

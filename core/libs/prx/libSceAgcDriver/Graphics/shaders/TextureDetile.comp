@@ -5,6 +5,24 @@ layout(constant_id = 1) const uint BLOCK_BYTES = 256u;
 layout(constant_id = 2) const uint TILE_FAMILY = 0u;
 // 0 detiles (tiled input, linear output); 1 tiles (linear input, tiled output).
 layout(constant_id = 3) const uint TILE_DIRECTION = 0u;
+// TILE_FAMILY 4: XOR swizzle given per byte-address bit as masks of x (bits 0-11), y (12-23) and
+// slice (24-31) element-coordinate bits (TextureTiling.hpp, FindTextureSwizzleEquation).
+layout(constant_id = 4) const uint EQ0 = 0u;
+layout(constant_id = 5) const uint EQ1 = 0u;
+layout(constant_id = 6) const uint EQ2 = 0u;
+layout(constant_id = 7) const uint EQ3 = 0u;
+layout(constant_id = 8) const uint EQ4 = 0u;
+layout(constant_id = 9) const uint EQ5 = 0u;
+layout(constant_id = 10) const uint EQ6 = 0u;
+layout(constant_id = 11) const uint EQ7 = 0u;
+layout(constant_id = 12) const uint EQ8 = 0u;
+layout(constant_id = 13) const uint EQ9 = 0u;
+layout(constant_id = 14) const uint EQ10 = 0u;
+layout(constant_id = 15) const uint EQ11 = 0u;
+layout(constant_id = 16) const uint EQ12 = 0u;
+layout(constant_id = 17) const uint EQ13 = 0u;
+layout(constant_id = 18) const uint EQ14 = 0u;
+layout(constant_id = 19) const uint EQ15 = 0u;
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -23,7 +41,23 @@ layout(push_constant) uniform Push {
     uint tailY;
     uint elementBytes;
     uint arrayLayer;
+    // XORed into every in-block offset: a thin volume slice's term the mode's formula lacks.
+    uint sliceXor;
 } params;
+
+uint equationBit(uint mask, uvec2 p) {
+    uint selected = (p.x & (mask & 0xfffu)) ^ ((p.y << 12) & (mask & 0xfff000u)) ^ ((params.arrayLayer << 24) & (mask & 0xff000000u));
+    return bitCount(selected) & 1u;
+}
+
+uint equationOffset(uvec2 p) {
+    const uint eq[16] = uint[16](EQ0, EQ1, EQ2, EQ3, EQ4, EQ5, EQ6, EQ7, EQ8, EQ9, EQ10, EQ11, EQ12, EQ13, EQ14, EQ15);
+    uint offset = 0u;
+    for (uint bit = 0u; bit < 16u; ++bit) {
+        offset |= equationBit(eq[bit], p) << bit;
+    }
+    return offset;
+}
 
 uint standardOffset(uint x, uint y) {
     switch (ELEMENT_BYTES) {
@@ -158,6 +192,9 @@ uint depthOffset(uint x, uint y) {
 }
 
 uint blockOffset(uvec2 p) {
+    if (TILE_FAMILY == 4u) {
+        return equationOffset(p) & (BLOCK_BYTES - 1u);
+    }
     if (TILE_FAMILY == 2u) {
         return renderTargetOffset(p.x, p.y);
     }
@@ -221,7 +258,7 @@ void main() {
     }
 
     uint blockIndex = block.y * params.blocksPerRow + block.x;
-    uint tiledOffset = blockIndex * BLOCK_BYTES + blockOffset(swizzle);
+    uint tiledOffset = blockIndex * BLOCK_BYTES + (blockOffset(swizzle) ^ params.sliceXor);
 
     if (TILE_DIRECTION == 0u) {
         copyElement(params.srcBase + tiledOffset, params.dstBase + linearOffset);

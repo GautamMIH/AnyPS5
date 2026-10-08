@@ -4,7 +4,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <array>
+#include <span>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
@@ -64,6 +66,48 @@ GuestTextureResource decode(const Descriptor& d) {
 }
 
 // Views past MAX_MIP (upstream 3d3e6879; the layouts are addrlib's for these surfaces).
+struct ElementAddress {
+    std::uint32_t mip;
+    std::uint32_t x;
+    std::uint32_t y;
+    std::uint32_t z;
+    std::uint64_t address;
+};
+
+// Upstream's addrlib reference addresses for the display, T and 4 KiB XOR swizzles (ace10fdb),
+// checked through this driver's mip layout and TexelOffset (the CPU counterpart of the detiler's
+// equation family): slices are whole mip chains laid end to end.
+void requireThinAddresses(TextureTileMode tileMode, std::uint32_t format, std::uint32_t width, std::uint32_t height, std::uint32_t mipCount, std::uint32_t slices, std::uint64_t guestBytes, std::uint64_t layerBytes, std::span<const ElementAddress> expected, const std::string& what) {
+    const auto mips = ComputeMipLayout(tileMode, format, width, height, mipCount);
+    const auto sliceBytes = ComputeSurfaceSize(mips, 1);
+    Require(sliceBytes * slices == guestBytes && sliceBytes == layerBytes, what + ": surface or slice size differs from addrlib");
+    const auto bytesPerElement = BytesPerElement(format);
+    for (const auto& element : expected) {
+        const auto address = element.z * sliceBytes + TexelOffset(tileMode, bytesPerElement, mips.at(element.mip), element.x, element.y, element.z);
+        Require(address == element.address, what + ": mip " + std::to_string(element.mip) + " element (" + std::to_string(element.x) + ", " + std::to_string(element.y) + ", " + std::to_string(element.z) + ") detiles from " + std::to_string(address) + " instead of addrlib's " + std::to_string(element.address));
+    }
+}
+
+// Upstream's addrlib reference addresses for the display, T and 4 KiB XOR swizzles (ace10fdb).
+// Mipmapped volumes (upstream's thick and Z_X volume chains) are not modelled by this driver; the
+// single-level XOR volumes are covered by the ImageXorSwizzleVolume execution test.
+void equationSwizzles() {
+    constexpr ElementAddress atD256B[] = {{0, 0, 0, 0, 0x300}, {0, 39, 19, 0, 0x81f}, {0, 20, 6, 0, 0x42c}, {0, 39, 0, 0, 0x507}, {0, 0, 19, 0, 0x618}, {1, 0, 0, 0, 0x100}, {1, 19, 9, 0, 0x293}, {1, 10, 3, 0, 0x15a}, {1, 19, 0, 0, 0x203}, {1, 0, 9, 0, 0x190}, {2, 0, 0, 0, 0x0}, {2, 9, 4, 0, 0x61}, {2, 5, 1, 0, 0x15}, {2, 9, 0, 0, 0x41}, {2, 0, 4, 0, 0x20}};
+    requireThinAddresses(TextureTileMode::kD256B, 1, 40, 20, 3, 1, 2304, 2304, atD256B, "swizzle mode 2, 1 bytes, 40x20, 3 levels, 1 slices");
+    constexpr ElementAddress atD4KB[] = {{0, 0, 0, 0, 0x6000}, {0, 99, 59, 0, 0x154b8}, {0, 50, 20, 0, 0xb920}, {0, 99, 0, 0, 0x9028}, {0, 0, 59, 0, 0x12490}, {1, 0, 0, 0, 0x2000}, {1, 49, 29, 0, 0x5d18}, {1, 25, 10, 0, 0x2e88}, {1, 49, 0, 0, 0x3808}, {1, 0, 29, 0, 0x4510}, {2, 0, 0, 0, 0x1000}, {2, 24, 14, 0, 0x1f80}, {2, 12, 5, 0, 0x1350}, {2, 24, 0, 0, 0x1a00}, {2, 0, 14, 0, 0x1580}, {3, 0, 0, 0, 0x800}, {3, 11, 6, 0, 0xba8}, {3, 6, 2, 0, 0x8e0}, {3, 11, 0, 0, 0xa28}, {3, 0, 6, 0, 0x980}, {4, 0, 0, 0, 0x600}, {4, 5, 2, 0, 0x6c8}, {4, 3, 1, 0, 0x638}, {4, 5, 0, 0, 0x648}, {4, 0, 2, 0, 0x680}, {5, 0, 0, 0, 0x500}, {5, 2, 0, 0, 0x520}, {5, 1, 0, 0, 0x508}, {5, 2, 0, 0, 0x520}, {5, 0, 0, 0, 0x500}, {6, 0, 0, 0, 0x400}, {6, 0, 0, 0, 0x400}, {6, 0, 0, 0, 0x400}, {6, 0, 0, 0, 0x400}, {6, 0, 0, 0, 0x400}};
+    requireThinAddresses(TextureTileMode::kD4KB, 71, 100, 60, 7, 1, 90112, 90112, atD4KB, "swizzle mode 6, 8 bytes, 100x60, 7 levels, 1 slices");
+    constexpr ElementAddress atD64KB[] = {{0, 0, 0, 0, 0x20000}, {0, 199, 149, 0, 0x584dc}, {0, 100, 50, 0, 0x2b4a0}, {0, 199, 0, 0, 0x3808c}, {0, 0, 149, 0, 0x40450}, {1, 0, 0, 0, 0x10000}, {1, 99, 74, 0, 0x1e12c}, {1, 50, 25, 0, 0x12d18}, {1, 99, 0, 0, 0x1a00c}, {1, 0, 74, 0, 0x14120}, {2, 0, 0, 0, 0x8000}, {2, 49, 36, 0, 0xb844}, {2, 25, 12, 0, 0x8b44}, {2, 49, 0, 0, 0xa804}, {2, 0, 36, 0, 0x9040}, {3, 0, 0, 0, 0x4000}, {3, 24, 17, 0, 0x4e10}, {3, 12, 6, 0, 0x42e0}, {3, 24, 0, 0, 0x4a00}, {3, 0, 17, 0, 0x4410}, {4, 0, 0, 0, 0x2000}, {4, 11, 8, 0, 0x230c}, {4, 6, 3, 0, 0x20b8}, {4, 11, 0, 0, 0x220c}, {4, 0, 8, 0, 0x2100}, {5, 0, 0, 0, 0x1000}, {5, 5, 3, 0, 0x10b4}, {5, 3, 1, 0, 0x101c}, {5, 5, 0, 0, 0x1084}, {5, 0, 3, 0, 0x1030}};
+    requireThinAddresses(TextureTileMode::kD64KB, 56, 200, 150, 6, 1, 393216, 393216, atD64KB, "swizzle mode 10, 4 bytes, 200x150, 6 levels, 1 slices");
+    constexpr ElementAddress atS64KBT[] = {{0, 0, 0, 0, 0x90000}, {0, 519, 259, 0, 0x1700bc}, {0, 260, 86, 0, 0xb46e0}, {0, 519, 0, 0, 0xd008c}, {0, 0, 259, 0, 0x130030}, {0, 0, 0, 1, 0x210000}, {0, 519, 259, 1, 0x2f00bc}, {0, 260, 86, 1, 0x2346e0}, {0, 519, 0, 1, 0x25008c}, {0, 0, 259, 1, 0x2b0030}, {0, 0, 0, 2, 0x390000}, {0, 519, 259, 2, 0x4700bc}, {0, 260, 86, 2, 0x3b46e0}, {0, 519, 0, 2, 0x3d008c}, {0, 0, 259, 2, 0x430030}, {1, 0, 0, 0, 0x30000}, {1, 259, 129, 0, 0x8001c}, {1, 130, 43, 0, 0x41938}, {1, 259, 0, 0, 0x5000c}, {1, 0, 129, 0, 0x60010}, {1, 0, 0, 1, 0x1b0000}, {1, 259, 129, 1, 0x20001c}, {1, 130, 43, 1, 0x1c1938}, {1, 259, 0, 1, 0x1d000c}, {1, 0, 129, 1, 0x1e0010}, {1, 0, 0, 2, 0x330000}, {1, 259, 129, 2, 0x38001c}, {1, 130, 43, 2, 0x341938}, {1, 259, 0, 2, 0x35000c}, {1, 0, 129, 2, 0x360010}, {2, 0, 0, 0, 0x10000}, {2, 129, 64, 0, 0x24204}, {2, 65, 21, 0, 0x18554}, {2, 129, 0, 0, 0x20004}, {2, 0, 64, 0, 0x14200}, {2, 0, 0, 1, 0x190000}, {2, 129, 64, 1, 0x1a4204}, {2, 65, 21, 1, 0x198554}, {2, 129, 0, 1, 0x1a0004}, {2, 0, 64, 1, 0x194200}, {2, 0, 0, 2, 0x310000}, {2, 129, 64, 2, 0x324204}, {2, 65, 21, 2, 0x318554}, {2, 129, 0, 2, 0x320004}, {2, 0, 64, 2, 0x314200}, {3, 0, 0, 0, 0x0}, {3, 64, 31, 0, 0x8470}, {3, 32, 10, 0, 0x2520}, {3, 64, 0, 0, 0x8100}, {3, 0, 31, 0, 0x570}, {3, 0, 0, 1, 0x180000}, {3, 64, 31, 1, 0x188470}, {3, 32, 10, 1, 0x182520}, {3, 64, 0, 1, 0x188100}, {3, 0, 31, 1, 0x180570}, {3, 0, 0, 2, 0x300000}, {3, 64, 31, 2, 0x308470}, {3, 32, 10, 2, 0x302520}, {3, 64, 0, 2, 0x308100}, {3, 0, 31, 2, 0x300570}};
+    requireThinAddresses(TextureTileMode::kS64KBT, 56, 520, 260, 4, 3, 4718592, 1572864, atS64KBT, "swizzle mode 17, 4 bytes, 520x260, 4 levels, 3 slices");
+    constexpr ElementAddress atD64KBT[] = {{0, 0, 0, 0, 0x10000}, {0, 63, 39, 0, 0x1ecf0}, {0, 32, 13, 0, 0x18420}, {0, 63, 0, 0, 0x1af50}, {0, 0, 39, 0, 0x143a0}, {0, 0, 0, 1, 0x30000}, {0, 63, 39, 1, 0x3ecf0}, {0, 32, 13, 1, 0x38420}, {0, 63, 0, 1, 0x3af50}, {0, 0, 39, 1, 0x343a0}, {1, 0, 0, 0, 0x8100}, {1, 31, 19, 0, 0xb7f0}, {1, 16, 6, 0, 0xa480}, {1, 31, 0, 0, 0xaf50}, {1, 0, 19, 0, 0x99a0}, {1, 0, 0, 1, 0x28100}, {1, 31, 19, 1, 0x2b7f0}, {1, 16, 6, 1, 0x2a480}, {1, 31, 0, 1, 0x2af50}, {1, 0, 19, 1, 0x299a0}, {2, 0, 0, 0, 0x4200}, {2, 15, 9, 0, 0x4c70}, {2, 8, 3, 0, 0x4aa0}, {2, 15, 0, 0, 0x4850}, {2, 0, 9, 0, 0x4620}, {2, 0, 0, 1, 0x24200}, {2, 15, 9, 1, 0x24c70}, {2, 8, 3, 1, 0x24aa0}, {2, 15, 0, 1, 0x24850}, {2, 0, 9, 1, 0x24620}, {3, 0, 0, 0, 0x2400}, {3, 7, 4, 0, 0x2750}, {3, 4, 1, 0, 0x2620}, {3, 7, 0, 0, 0x2650}, {3, 0, 4, 0, 0x2500}, {3, 0, 0, 1, 0x22400}, {3, 7, 4, 1, 0x22750}, {3, 4, 1, 1, 0x22620}, {3, 7, 0, 1, 0x22650}, {3, 0, 4, 1, 0x22500}, {4, 0, 0, 0, 0x1800}, {4, 3, 1, 0, 0x1870}, {4, 2, 0, 0, 0x1840}, {4, 3, 0, 0, 0x1850}, {4, 0, 1, 0, 0x1820}, {4, 0, 0, 1, 0x21800}, {4, 3, 1, 1, 0x21870}, {4, 2, 0, 1, 0x21840}, {4, 3, 0, 1, 0x21850}, {4, 0, 1, 1, 0x21820}};
+    requireThinAddresses(TextureTileMode::kD64KBT, 77, 64, 40, 5, 2, 262144, 131072, atD64KBT, "swizzle mode 18, 16 bytes, 64x40, 5 levels, 2 slices");
+    constexpr ElementAddress atS4KBX[] = {{0, 0, 0, 0, 0x2000}, {0, 99, 69, 0, 0x5453}, {0, 50, 23, 0, 0x2b72}, {0, 99, 0, 0, 0x3c03}, {0, 0, 69, 0, 0x4850}, {0, 0, 0, 1, 0x8800}, {0, 99, 69, 1, 0xbc53}, {0, 50, 23, 1, 0x8372}, {0, 99, 0, 1, 0x9403}, {0, 0, 69, 1, 0xa050}, {0, 0, 0, 2, 0xe400}, {0, 99, 69, 2, 0x11053}, {0, 50, 23, 2, 0xef72}, {0, 99, 0, 2, 0xf803}, {0, 0, 69, 2, 0x10c50}, {1, 0, 0, 0, 0x1000}, {1, 49, 34, 0, 0x1e21}, {1, 25, 11, 0, 0x12b9}, {1, 49, 0, 0, 0x1a01}, {1, 0, 34, 0, 0x1420}, {1, 0, 0, 1, 0x7800}, {1, 49, 34, 1, 0x7621}, {1, 25, 11, 1, 0x7ab9}, {1, 49, 0, 1, 0x7201}, {1, 0, 34, 1, 0x7c20}, {1, 0, 0, 2, 0xd400}, {1, 49, 34, 2, 0xda21}, {1, 25, 11, 2, 0xd6b9}, {1, 49, 0, 2, 0xde01}, {1, 0, 34, 2, 0xd020}, {2, 0, 0, 0, 0x800}, {2, 24, 16, 0, 0xb08}, {2, 12, 5, 0, 0x85c}, {2, 24, 0, 0, 0xa08}, {2, 0, 16, 0, 0x900}, {2, 0, 0, 1, 0x6000}, {2, 24, 16, 1, 0x6308}, {2, 12, 5, 1, 0x605c}, {2, 24, 0, 1, 0x6208}, {2, 0, 16, 1, 0x6100}, {2, 0, 0, 2, 0xcc00}, {2, 24, 16, 2, 0xcf08}, {2, 12, 5, 2, 0xcc5c}, {2, 24, 0, 2, 0xce08}, {2, 0, 16, 2, 0xcd00}, {3, 0, 0, 0, 0x600}, {3, 11, 7, 0, 0x67b}, {3, 6, 2, 0, 0x626}, {3, 11, 0, 0, 0x60b}, {3, 0, 7, 0, 0x670}, {3, 0, 0, 1, 0x6e00}, {3, 11, 7, 1, 0x6e7b}, {3, 6, 2, 1, 0x6e26}, {3, 11, 0, 1, 0x6e0b}, {3, 0, 7, 1, 0x6e70}, {3, 0, 0, 2, 0xc200}, {3, 11, 7, 2, 0xc27b}, {3, 6, 2, 2, 0xc226}, {3, 11, 0, 2, 0xc20b}, {3, 0, 7, 2, 0xc270}, {4, 0, 0, 0, 0x500}, {4, 5, 3, 0, 0x535}, {4, 3, 1, 0, 0x513}, {4, 5, 0, 0, 0x505}, {4, 0, 3, 0, 0x530}, {4, 0, 0, 1, 0x6d00}, {4, 5, 3, 1, 0x6d35}, {4, 3, 1, 1, 0x6d13}, {4, 5, 0, 1, 0x6d05}, {4, 0, 3, 1, 0x6d30}, {4, 0, 0, 2, 0xc100}, {4, 5, 3, 2, 0xc135}, {4, 3, 1, 2, 0xc113}, {4, 5, 0, 2, 0xc105}, {4, 0, 3, 2, 0xc130}, {5, 0, 0, 0, 0x400}, {5, 2, 1, 0, 0x412}, {5, 1, 0, 0, 0x401}, {5, 2, 0, 0, 0x402}, {5, 0, 1, 0, 0x410}, {5, 0, 0, 1, 0x6c00}, {5, 2, 1, 1, 0x6c12}, {5, 1, 0, 1, 0x6c01}, {5, 2, 0, 1, 0x6c02}, {5, 0, 1, 1, 0x6c10}, {5, 0, 0, 2, 0xc000}, {5, 2, 1, 2, 0xc012}, {5, 1, 0, 2, 0xc001}, {5, 2, 0, 2, 0xc002}, {5, 0, 1, 2, 0xc010}};
+    requireThinAddresses(TextureTileMode::kS4KBX, 1, 100, 70, 6, 3, 73728, 24576, atS4KBX, "swizzle mode 21, 1 bytes, 100x70, 6 levels, 3 slices");
+    constexpr ElementAddress atD4KBX[] = {{0, 0, 0, 0, 0x2000}, {0, 32, 19, 0, 0x3030}, {0, 16, 6, 0, 0x2860}, {0, 32, 0, 0, 0x3400}, {0, 0, 19, 0, 0x2430}, {0, 0, 0, 1, 0x6800}, {0, 32, 19, 1, 0x7830}, {0, 16, 6, 1, 0x6060}, {0, 32, 0, 1, 0x7c00}, {0, 0, 19, 1, 0x6c30}, {1, 0, 0, 0, 0x1000}, {1, 15, 9, 0, 0x139c}, {1, 8, 3, 0, 0x1230}, {1, 15, 0, 0, 0x128c}, {1, 0, 9, 0, 0x1110}, {1, 0, 0, 1, 0x5800}, {1, 15, 9, 1, 0x5b9c}, {1, 8, 3, 1, 0x5a30}, {1, 15, 0, 1, 0x5a8c}, {1, 0, 9, 1, 0x5910}, {2, 0, 0, 0, 0x800}, {2, 7, 4, 0, 0x8cc}, {2, 4, 1, 0, 0x890}, {2, 7, 0, 0, 0x88c}, {2, 0, 4, 0, 0x840}, {2, 0, 0, 1, 0x4000}, {2, 7, 4, 1, 0x40cc}, {2, 4, 1, 1, 0x4090}, {2, 7, 0, 1, 0x408c}, {2, 0, 4, 1, 0x4040}, {3, 0, 0, 0, 0x600}, {3, 3, 1, 0, 0x61c}, {3, 2, 0, 0, 0x608}, {3, 3, 0, 0, 0x60c}, {3, 0, 1, 0, 0x610}, {3, 0, 0, 1, 0x4e00}, {3, 3, 1, 1, 0x4e1c}, {3, 2, 0, 1, 0x4e08}, {3, 3, 0, 1, 0x4e0c}, {3, 0, 1, 1, 0x4e10}};
+    requireThinAddresses(TextureTileMode::kD4KBX, 56, 33, 20, 4, 2, 32768, 16384, atD4KBX, "swizzle mode 22, 4 bytes, 33x20, 4 levels, 2 slices");
+}
+
 void viewsPastLastMip() {
     Descriptor bloom;
     bloom.format = 71;  // RGBA16F, 8 bytes per element
@@ -156,6 +200,7 @@ void standardColorTargets() {
 int main() {
     try {
         viewsPastLastMip();
+        equationSwizzles();
         standardColorTargets();
         std::puts("AGC driver texture layout tests passed");
         return 0;

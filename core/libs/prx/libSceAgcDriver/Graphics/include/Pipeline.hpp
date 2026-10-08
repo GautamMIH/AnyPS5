@@ -109,9 +109,11 @@ struct ShaderDeviceFeatures {
     bool viewportIndexLayer = false;
     // VK_EXT_shader_image_atomic_int64: Int64Atomics, Int64ImageEXT and SPV_EXT_shader_image_int64.
     bool imageInt64Atomics = false;
+    // sampleRateShading: the SampleRateShading capability, used by pixel shaders reading SampleId.
+    bool sampleRateShading = false;
 
     static ShaderDeviceFeatures Of(const Context& context) {
-        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance, context.viewportIndexLayer, context.imageInt64Atomics};
+        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance, context.viewportIndexLayer, context.imageInt64Atomics, context.sampleRateShading};
     }
 };
 

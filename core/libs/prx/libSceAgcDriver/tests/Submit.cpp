@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Submit/include/Acb.hpp"
 #include "prx/libSceAgcDriver/Eq/include/Query.hpp"
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -51,6 +52,15 @@ void testEvents() {
     expectFailure([&] { sceAgcDriverGetEqEventType(&event); });
     expectFailure([] { sceAgcDriverGetEqEventType(nullptr); });
     expectFailure([&] { sceAgcDriverGetEqEventType(reinterpret_cast<const KernelEvent*>(reinterpret_cast<const std::byte*>(&event) + 1)); });
+    event.ident = 0x29;
+    check(sceAgcDriverGetEqContextId(&event) == 0x29, "graphics event context id uses wrong field");
+    event.ident = std::numeric_limits<std::uintptr_t>::max();
+    expectFailure([&] { sceAgcDriverGetEqContextId(&event); });
+    event.ident = 1;
+    event.filter = -1;
+    expectFailure([&] { sceAgcDriverGetEqContextId(&event); });
+    expectFailure([] { sceAgcDriverGetEqContextId(nullptr); });
+    expectFailure([&] { sceAgcDriverGetEqContextId(reinterpret_cast<const KernelEvent*>(reinterpret_cast<const std::byte*>(&event) + 1)); });
 }
 
 void testValidation() {
@@ -217,6 +227,81 @@ void testWorkerFailure() {
     check(expectFailure([&] { sceAgcDriverSubmitAcb(0x20, &packet); }) == messages[0], "subsequent ACB lost worker failure");
 }
 
+std::array<std::uint32_t, 5> writeData(volatile std::uint32_t* address, std::uint32_t value) {
+    const auto target = reinterpret_cast<std::uintptr_t>(address);
+    return {0xc0033700, 0x00100200, static_cast<std::uint32_t>(target), static_cast<std::uint32_t>(static_cast<std::uint64_t>(target) >> 32u), value};
+}
+
+std::array<std::uint32_t, 7> waitEqual(volatile std::uint32_t* address, std::uint32_t value) {
+    const auto target = reinterpret_cast<std::uintptr_t>(address);
+    return {0xc0053c00, 0x13, static_cast<std::uint32_t>(target), static_cast<std::uint32_t>(static_cast<std::uint64_t>(target) >> 32u), value, 0xffffffffu, 0x19};
+}
+
+void submit(std::uint32_t queue, const std::vector<std::uint32_t>& words) {
+    Packet packet{const_cast<std::uint32_t*>(words.data()), static_cast<std::uint32_t>(words.size()), 0, {}};
+    check((queue == 0 ? sceAgcDriverSubmitDcb(&packet) : sceAgcDriverSubmitAcb(queue, &packet)) == 0, "label submit failed");
+}
+
+std::chrono::milliseconds waitFor(volatile std::uint32_t* address, std::uint32_t value, const char* message) {
+    const auto start = std::chrono::steady_clock::now();
+    while (*address != value) {
+        check(std::chrono::steady_clock::now() - start < std::chrono::seconds(10), message);
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start);
+}
+
+template<std::size_t... N>
+std::vector<std::uint32_t> commands(const std::array<std::uint32_t, N>&... packets) {
+    std::vector<std::uint32_t> words;
+    (words.insert(words.end(), packets.begin(), packets.end()), ...);
+    return words;
+}
+
+// sceAgcDriverSubmitMultiAcbs (upstream 78193c10): compute queues 0x20-0x57 only, the ACBs run in
+// order and before a later submission on the same queue.
+void testMultiAcbs() {
+    alignas(64) static volatile std::uint32_t value = 0, done = 0, gate = 0;
+    check(sceAgcDriverSubmitMultiAcbs(0x20, nullptr, nullptr, 0) == 0, "empty multi-ACB submit failed");
+    auto write = writeData(&value, 1);
+    std::array<std::uint32_t*, 1> addresses{write.data()};
+    std::array<std::uint32_t, 1> sizes{static_cast<std::uint32_t>(write.size())};
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0x1f, addresses.data(), sizes.data(), 1); });
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0x58, addresses.data(), sizes.data(), 1); });
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0, addresses.data(), sizes.data(), 1); });
+    check(sceAgcDriverSubmitMultiAcbs(0, nullptr, nullptr, 0) == 0, "empty multi-ACB submit checked its queue");
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0x20, nullptr, sizes.data(), 1); });
+    expectFailure([&] { sceAgcDriverSubmitMultiAcbs(0x20, addresses.data(), nullptr, 1); });
+    check(value == 0, "a rejected multi-ACB submit ran a command buffer");
+    for (std::uint32_t queue : {0x20u, 0x57u}) {
+        value = 0;
+        done = 0;
+        auto first = writeData(&value, 1);
+        auto second = writeData(&value, 2);
+        auto third = writeData(&done, 1);
+        std::array<std::uint32_t*, 3> buffers{first.data(), second.data(), third.data()};
+        std::array<std::uint32_t, 3> lengths{static_cast<std::uint32_t>(first.size()), static_cast<std::uint32_t>(second.size()), static_cast<std::uint32_t>(third.size())};
+        check(sceAgcDriverSubmitMultiAcbs(queue, buffers.data(), lengths.data(), 3) == 0, "multi-ACB submit failed");
+        waitFor(&done, 1, "the last ACB of a multi-ACB submit never ran");
+        check(value == 2, "multi-ACB submit did not run its ACBs in order");
+        AgcDriverWaitIdle_nid_postfix();
+    }
+    done = 0;
+    value = 0;
+    auto wait = waitEqual(&gate, 1);
+    auto finish = writeData(&done, 1);
+    std::array<std::uint32_t*, 2> buffers{wait.data(), finish.data()};
+    std::array<std::uint32_t, 2> lengths{static_cast<std::uint32_t>(wait.size()), static_cast<std::uint32_t>(finish.size())};
+    check(sceAgcDriverSubmitMultiAcbs(0x21, buffers.data(), lengths.data(), 2) == 0, "waiting multi-ACB submit failed");
+    submit(0x21, commands(writeData(&value, 1)));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    check(value == 0 && done == 0, "a later submission on the same compute queue overtook a multi-ACB submit");
+    gate = 1;
+    waitFor(&value, 1, "a submission queued behind a multi-ACB submit never ran");
+    check(done == 1, "a multi-ACB submit did not run before a later submission on its queue");
+    AgcDriverWaitIdle_nid_postfix();
+}
+
 }
 
 void testShaderHeaderAlignment() {
@@ -254,6 +339,7 @@ int main() {
         testClearState();
         testSubmissions();
         testConditionalExecution();
+        testMultiAcbs();
         testShaderHeaderAlignment();
         testWorkerFailure();
         check(expectFailure([] { LibcRunShutdown_nid_postfix(); }).find("required shader register") != std::string::npos, "shutdown lost worker failure");

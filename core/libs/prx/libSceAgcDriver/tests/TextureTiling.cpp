@@ -1,7 +1,10 @@
 #include "GraphicsTests.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureAddressing.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include <algorithm>
 #include <array>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,6 +24,7 @@ void reject(TAction action, std::string_view reason) {
     }
     throw std::runtime_error(std::string("expected texture tiling rejection: ") + std::string(reason));
 }
+
 
 }
 
@@ -118,6 +122,7 @@ void RunTextureTilingTests() {
     reject([] { ComputeMipLayout(TextureTileMode::kLinear, 1, 4, 0, 1); }, "zero-sized texture");
     reject([] { ComputeMipLayout(TextureTileMode::kLinear, 1, 4, 4, 0); }, "mip count is out of range");
     reject([] { ComputeMipLayout(TextureTileMode::kLinear, 1, 4, 4, 17); }, "mip count is out of range");
+
 
     reject([] { ComputeSurfaceSize({}, 1); }, "empty mip chain");
     reject([] { ComputeSurfaceSize(ComputeMipLayout(TextureTileMode::kLinear, 1, 4, 4, 1), 0); }, "zero array layers");

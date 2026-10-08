@@ -532,7 +532,7 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateComputePipelines(VkDevice, VkPipelineCa
     Require(count == 1, "mock expects exactly one compute pipeline per call");
     Require(infos[0].stage.pSpecializationInfo != nullptr, "compute pipeline must provide specialization data");
     std::array<std::uint32_t, 3> values{};
-    Require(infos[0].stage.pSpecializationInfo->dataSize == sizeof(values), "compute pipeline specialization data has an unexpected size");
+    Require(infos[0].stage.pSpecializationInfo->dataSize >= sizeof(values), "compute pipeline specialization data has an unexpected size");
     std::memcpy(values.data(), infos[0].stage.pSpecializationInfo->pData, sizeof(values));
     *pipelines = makeHandle<VkPipeline>();
     mock.pipelineSpecializations.push_back(values);
@@ -796,7 +796,8 @@ void resourceTests() {
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::SampledImage; }), "sampled and storage image resources are not implemented");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestImages; binding.kind = Kind::StorageImage; }), "sampled and storage image resources are not implemented");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::GuestSamplers; binding.kind = Kind::Sampler; }), "sampled and storage image resources are not implemented");
-    expectSingleFailure(changed([](auto& binding) { binding.role = Role::Gds; binding.guestDescriptor.clear(); }), "unsupported descriptor role Gds");
+    // The GDS binds the driver-owned guest range (upstream a68b3481) and names no guest descriptor.
+    expectSingleFailure(changed([](auto& binding) { binding.role = Role::Gds; }), "invalid GDS descriptor contract");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::BdaPagetable; binding.guestDescriptor.clear(); }), "BDA table and fault descriptors");
     expectSingleFailure(changed([](auto& binding) { binding.role = Role::FaultBuffer; binding.guestDescriptor.clear(); }), "BDA table and fault descriptors");
     expectSingleFailure(changed([](auto& binding) { binding.kind = Kind::UniformBuffer; }), "unsupported descriptor kind UniformBuffer");
@@ -869,6 +870,10 @@ struct ModuleShape {
     std::uint32_t perVertexLength = 3;
     bool parameterOutput = false;
     bool rectParameters = false;
+    bool sampleId = false;
+    bool layer = false;
+    bool fragDepth = false;
+    std::uint32_t sampleMaskLength = 0;
 };
 
 void emit(std::vector<std::uint32_t>& out, spv::Op op, std::initializer_list<std::uint32_t> operands) {
@@ -926,6 +931,40 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
         emit(declarations, spv::OpTypePointer, {pointer, spv::StorageClassInput, vector});
         emit(declarations, spv::OpVariable, {pointer, variable, spv::StorageClassInput});
         emit(annotations, spv::OpDecorate, {variable, spv::DecorationBuiltIn, shape.barycentricNoPerspective ? spv::BuiltInBaryCoordNoPerspKHR : spv::BuiltInBaryCoordKHR});
+        extraInterface.push_back(variable);
+    }
+    if (shape.sampleId || shape.layer) {
+        const auto intType = id();
+        const auto pointer = id();
+        emit(declarations, spv::OpTypeInt, {intType, 32, 1});
+        emit(declarations, spv::OpTypePointer, {pointer, spv::StorageClassInput, intType});
+        for (const auto [wanted, builtin] : {std::pair{shape.sampleId, spv::BuiltInSampleId}, std::pair{shape.layer, spv::BuiltInLayer}}) {
+            if (!wanted) continue;
+            const auto variable = id();
+            emit(declarations, spv::OpVariable, {pointer, variable, spv::StorageClassInput});
+            emit(annotations, spv::OpDecorate, {variable, spv::DecorationBuiltIn, static_cast<std::uint32_t>(builtin)});
+            emit(annotations, spv::OpDecorate, {variable, spv::DecorationFlat});
+            extraInterface.push_back(variable);
+        }
+    }
+    if (shape.fragDepth) {
+        const auto pointer = id();
+        const auto variable = id();
+        emit(declarations, spv::OpTypePointer, {pointer, spv::StorageClassOutput, floatType});
+        emit(declarations, spv::OpVariable, {pointer, variable, spv::StorageClassOutput});
+        emit(annotations, spv::OpDecorate, {variable, spv::DecorationBuiltIn, spv::BuiltInFragDepth});
+        extraInterface.push_back(variable);
+    }
+    if (shape.sampleMaskLength != 0) {
+        const auto length = id();
+        const auto array = id();
+        const auto pointer = id();
+        const auto variable = id();
+        emit(declarations, spv::OpConstant, {uintType, length, shape.sampleMaskLength});
+        emit(declarations, spv::OpTypeArray, {array, uintType, length});
+        emit(declarations, spv::OpTypePointer, {pointer, spv::StorageClassOutput, array});
+        emit(declarations, spv::OpVariable, {pointer, variable, spv::StorageClassOutput});
+        emit(annotations, spv::OpDecorate, {variable, spv::DecorationBuiltIn, spv::BuiltInSampleMask});
         extraInterface.push_back(variable);
     }
     if (shape.perVertex) {
@@ -995,6 +1034,8 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
     emit(function, spv::OpFunctionEnd, {});
     std::vector<std::uint32_t> words{spv::MagicNumber, 0x10300, 0, next, 0};
     emit(words, spv::OpCapability, {spv::CapabilityShader});
+    if (shape.sampleId) emit(words, spv::OpCapability, {spv::CapabilitySampleRateShading});
+    if (shape.layer) emit(words, spv::OpCapability, {spv::CapabilityGeometry});
     if (shape.barycentric) {
         emit(words, spv::OpCapability, {spv::CapabilityFragmentBarycentricKHR});
         const std::string extension = "SPV_KHR_fragment_shader_barycentric";
@@ -1011,6 +1052,7 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
     words[entryPointOffset] += static_cast<std::uint32_t>(extraInterface.size()) << 16u;
     words.insert(words.end(), extraInterface.begin(), extraInterface.end());
     if (shape.fragment) emit(words, spv::OpExecutionMode, {main, spv::ExecutionModeOriginUpperLeft});
+    if (shape.fragDepth) emit(words, spv::OpExecutionMode, {main, spv::ExecutionModeDepthReplacing});
     words.insert(words.end(), annotations.begin(), annotations.end());
     words.insert(words.end(), declarations.begin(), declarations.end());
     words.insert(words.end(), function.begin(), function.end());
@@ -1095,6 +1137,23 @@ void validationTests() {
             AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, true);
             expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false); }, "fragmentShaderBarycentric");
         }
+        pixel.spirv = makeModule({.fragment = true, .sampleId = true, .layer = true, .fragDepth = true, .sampleMaskLength = 1});
+        // Geometry (2) and SampleRateShading (35) only when the device enabled them (upstream 29aa2756).
+        AgcDriver::Graphics::ShaderDeviceFeatures layerAndSample{};
+        layerAndSample.geometryShader = true;
+        layerAndSample.sampleRateShading = true;
+        AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, layerAndSample);
+        auto noGeometry = layerAndSample;
+        noGeometry.geometryShader = false;
+        expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, noGeometry); }, "unsupported device capability 2");
+        auto noSampleRate = layerAndSample;
+        noSampleRate.sampleRateShading = false;
+        expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, noSampleRate); }, "unsupported device capability 35");
+        pixel.spirv = makeModule({.fragment = true, .sampleMaskLength = 2});
+        expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false); }, "unsupported fragment built-in");
+        vertex.spirv = makeModule({.parameterOutput = true, .sampleId = true});
+        expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false); }, "unsupported device capability 35");
+        vertex.spirv = makeModule({.parameterOutput = true});
         pixel.spirv = makeModule({.fragment = true, .barycentric = true, .barycentricComponents = 4});
         expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, true); }, "invalid barycentric built-in");
         pixel.spirv = makeModule({.fragment = true, .barycentric = true, .perVertex = true, .perVertexLength = 2});

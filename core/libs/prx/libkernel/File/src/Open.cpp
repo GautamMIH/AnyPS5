@@ -80,10 +80,17 @@ static std::int64_t NativePwrite(int fd, const void* buf, std::size_t n, std::in
     errno = error;
     return result;
 }
+// The CRT reports a descriptor that is not open through the invalid parameter handler, which
+// aborts by default; ignore it so _close returns -1 with EBADF.
+extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
+static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
 static int NativeClose(int fd) {
     if (fd >= 0 && fd < 3) return 0;
     File::ForgetDirectoryDescriptor(fd);
-    return ::_close(fd);
+    const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
+    const int result = ::_close(fd);
+    _set_thread_local_invalid_parameter_handler(previous);
+    return result;
 }
 static int NativeUnlink(const std::filesystem::path& p) { return ::_wunlink(p.wstring().c_str()); }
 static int NativeMkdir(const std::filesystem::path& p, int) { return ::_wmkdir(p.wstring().c_str()); }

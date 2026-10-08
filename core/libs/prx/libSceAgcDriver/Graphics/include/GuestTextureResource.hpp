@@ -15,16 +15,63 @@ enum class TextureTileMode {
     kStandard64KB,
     RenderTarget64KB,
     // SW_64KB_Z_X: depth and stencil planes written by the depth block (see DepthTargetLayout).
-    Depth64KB
+    Depth64KB,
+    // Swizzles addressed by an equation table (TextureTiling.hpp, FindTextureSwizzleEquation,
+    // generated from AMD addrlib's GFX10 patterns, ported from upstream ace10fdb and c10401e3):
+    // the display (D) swizzles, the thin (T) and XOR (X) swizzles other than Z_X and R_X. They share
+    // the block shape and mip tail of the standard mode of their block size.
+    kS64KBX,
+    kD64KBX,
+    kD256B,
+    kD4KB,
+    kD64KB,
+    kS64KBT,
+    kD64KBT,
+    kS4KBX,
+    kD4KBX,
+    // Upstream's names for SW_64KB_Z_X (tile mode 0x18) and SW_64KB_R_X (0x1b).
+    kZ64KBX = Depth64KB,
+    kR64KBX = RenderTarget64KB
 };
+
+// The hardware SW_MODE of an XOR or T swizzle tile mode, or 0 for the other modes.
+constexpr std::uint32_t XorSwizzleMode(TextureTileMode mode) {
+    switch (mode) {
+        case TextureTileMode::Depth64KB: return 24u;
+        case TextureTileMode::kS64KBX: return 25u;
+        case TextureTileMode::kD64KBX: return 26u;
+        case TextureTileMode::RenderTarget64KB: return 27u;
+        case TextureTileMode::kS64KBT: return 17u;
+        case TextureTileMode::kD64KBT: return 18u;
+        case TextureTileMode::kS4KBX: return 21u;
+        case TextureTileMode::kD4KBX: return 22u;
+        default: return 0u;
+    }
+}
+
+// The SW_MODE whose equation addresses the mode in the equation family of the detiler, or 0 for the
+// modes with their own formula (linear, standard, Z_X, R_X).
+constexpr std::uint32_t EquationSwizzleMode(TextureTileMode mode) {
+    switch (mode) {
+        case TextureTileMode::kD256B: return 2u;
+        case TextureTileMode::kD4KB: return 6u;
+        case TextureTileMode::kD64KB: return 10u;
+        case TextureTileMode::Depth64KB:
+        case TextureTileMode::RenderTarget64KB: return 0u;
+        default: return XorSwizzleMode(mode);
+    }
+}
 
 enum class TextureDimension {
     k1D,
     k2D,
     k2DArray,
     kCube,
-    // Volume; its slices are addressed like array layers (thin tilings only).
-    k3D
+    // Volume; its slices are addressed like array layers (thin tilings), or interleaved in thick
+    // blocks (SW_4KB_S, SW_64KB_S, SW_64KB_S_X; see IsThickVolume).
+    k3D,
+    // 1D array (T# type 12): height 1, depth + 1 layers laid out as a 2D array's (upstream fef66c14).
+    k1DArray
 };
 
 struct GuestTextureResource {

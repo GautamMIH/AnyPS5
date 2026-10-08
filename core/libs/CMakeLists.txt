@@ -34,6 +34,12 @@ function(configure_windows_unwind target)
     endif()
 endfunction()
 
+if(MINGW)
+    foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
+        string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
+    endforeach()
+endif()
+
 set(LIBC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/prx/libc)
 add_library(libc SHARED EXCLUDE_FROM_ALL)
 set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
@@ -293,9 +299,3 @@ target_include_directories(ampr_packet_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 add_test_executable(ampr_container_tests EXCLUDE_FROM_ALL tests/AmprContainer.cpp prx/libc/src/AmprContainer.cpp)
 target_include_directories(ampr_container_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 set_target_properties(ampr_container_tests PROPERTIES CXX_EXTENSIONS OFF)
-
-if(MINGW)
-    foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
-        string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
-    endforeach()
-endif()

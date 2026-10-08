@@ -78,6 +78,8 @@ struct Context {
     bool depthBiasClamp = false;
     bool independentBlend = false;
     bool geometryShader = false;
+    // sampleRateShading enabled: pixel shaders may declare SampleRateShading (SampleId).
+    bool sampleRateShading = false;
     bool imageGatherExtended = false;
     bool shaderResourceMinLod = false;
     // VK_EXT_image_view_min_lod enabled (texture MIN_LOD clamps).

@@ -128,7 +128,7 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
     for (std::uint32_t layer = 0; layer < layers; ++layer) {
         for (std::uint32_t y = 0; y < mip.height; ++y) {
             for (std::uint32_t x = 0; x < mip.width; ++x) {
-                const auto source = thick ? ThickVolumeOffset(resource.tileMode, elementBytes, resource.width, resource.height, x, y, layer) : layer * sliceBytes + TexelOffset(resource.tileMode, elementBytes, mip, x, y, layer + resource.baseArray);
+                const auto source = thick ? ThickVolumeOffset(resource.tileMode, elementBytes, resource.width, resource.height, x, y, layer) : layer * sliceBytes + (TexelOffset(resource.tileMode, elementBytes, mip, x, y, layer + resource.baseArray) ^ (volume ? VolumeSliceXor(resource.tileMode, elementBytes, layer + resource.baseArray) : 0u));
                 std::memcpy(linear.data() + layer * layerBytes + (static_cast<std::size_t>(y) * mip.width + x) * elementBytes, tiled.data() + source, elementBytes);
             }
         }
@@ -259,7 +259,7 @@ void StorageImage::recordGpuUpload(VkCommandBuffer commands) {
     earlier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &earlier, 0, nullptr, 0, nullptr);
     for (std::uint32_t layer = 0; layer < layers; ++layer) {
-        context.detiler->Dispatch(commands, resource.tileMode, elementBytes, guest->buffer, guest->offset + layer * sliceBytes + mip.tiledOffset, staging->Handle(), layer * mip.linearSize, mip, layer + resource.baseArray, false, tilingPool);
+        context.detiler->Dispatch(commands, resource.tileMode, elementBytes, guest->buffer, guest->offset + layer * sliceBytes + mip.tiledOffset, staging->Handle(), layer * mip.linearSize, mip, layer + resource.baseArray, false, tilingPool, volume ? VolumeSliceXor(resource.tileMode, elementBytes, layer + resource.baseArray) : 0u);
     }
     VkMemoryBarrier detiled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     detiled.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -310,8 +310,8 @@ void StorageImage::recordGpuDownload(VkCommandBuffer commands) {
     barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &linear, 0, nullptr, 0, nullptr);
     for (std::uint32_t layer = 0; layer < layers; ++layer) {
         const auto tiledOffset = layer * sliceBytes + mip.tiledOffset;
-        context.detiler->Dispatch(commands, resource.tileMode, elementBytes, staging->Handle(), layer * mip.linearSize, tiledStaging->Handle(), tiledOffset, mip, layer + resource.baseArray, true, tilingPool);
-        context.detiler->Dispatch(commands, resource.tileMode, elementBytes, ones->Handle(), layer * mip.linearSize, tiledMask->Handle(), tiledOffset, mip, layer + resource.baseArray, true, tilingPool);
+        context.detiler->Dispatch(commands, resource.tileMode, elementBytes, staging->Handle(), layer * mip.linearSize, tiledStaging->Handle(), tiledOffset, mip, layer + resource.baseArray, true, tilingPool, volume ? VolumeSliceXor(resource.tileMode, elementBytes, layer + resource.baseArray) : 0u);
+        context.detiler->Dispatch(commands, resource.tileMode, elementBytes, ones->Handle(), layer * mip.linearSize, tiledMask->Handle(), tiledOffset, mip, layer + resource.baseArray, true, tilingPool, volume ? VolumeSliceXor(resource.tileMode, elementBytes, layer + resource.baseArray) : 0u);
     }
     VkMemoryBarrier tiledBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     tiledBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
@@ -395,7 +395,7 @@ void StorageImage::WriteBack() {
                 for (std::uint32_t x = 0; x < mip.width; ++x) {
                     // Only this mip's texels: bytes around them (a shared mip tail) may have been
                     // written by earlier work after the reference copy was taken.
-                    const auto destination = layer * sliceBytes + TexelOffset(resource.tileMode, elementBytes, mip, x, y, layer + resource.baseArray);
+                    const auto destination = layer * sliceBytes + (TexelOffset(resource.tileMode, elementBytes, mip, x, y, layer + resource.baseArray) ^ (volume ? VolumeSliceXor(resource.tileMode, elementBytes, layer + resource.baseArray) : 0u));
                     const auto* written = reinterpret_cast<const std::byte*>(guestBase + destination);
                     mismatches += std::memcmp(written, linear.data() + layer * mip.linearSize + static_cast<std::size_t>(y) * mip.pitchBytes + static_cast<std::size_t>(x) * elementBytes, elementBytes) != 0;
                 }
@@ -411,7 +411,7 @@ void StorageImage::WriteBack() {
     for (std::uint32_t layer = 0; layer < layers; ++layer) {
         for (std::uint32_t y = 0; y < mip.height; ++y) {
             for (std::uint32_t x = 0; x < mip.width; ++x) {
-                const auto destination = thick ? ThickVolumeOffset(resource.tileMode, elementBytes, resource.width, resource.height, x, y, layer) : layer * sliceBytes + TexelOffset(resource.tileMode, elementBytes, mip, x, y, layer + resource.baseArray);
+                const auto destination = thick ? ThickVolumeOffset(resource.tileMode, elementBytes, resource.width, resource.height, x, y, layer) : layer * sliceBytes + (TexelOffset(resource.tileMode, elementBytes, mip, x, y, layer + resource.baseArray) ^ (volume ? VolumeSliceXor(resource.tileMode, elementBytes, layer + resource.baseArray) : 0u));
                 std::memcpy(tiled.data() + destination, linear.data() + layer * layerBytes + (static_cast<std::size_t>(y) * mip.width + x) * elementBytes, elementBytes);
             }
         }

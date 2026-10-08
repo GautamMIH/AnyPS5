@@ -1,4 +1,5 @@
 #include "prx/libkernel/Time/include/StallWatch.hpp"
+#include "prx/libkernel/Time/include/TimedWait.hpp"
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
 #include "../include/PthreadStacks.hpp"
@@ -94,6 +95,7 @@ static void RunThread(std::unique_ptr<ThreadArgs> args) {
     const auto entry = args->entry;
     void* arg = args->arg;
     PthreadPrivate* self = args->self;
+    TimedWait::BindThreadWaitState(&self->waitCount);
     args.reset();
 #ifndef _WIN32
     currentLinuxThread = self;
@@ -290,6 +292,7 @@ Pthread APS5_VABI scePthreadSelf() {
         adopted->threadId = std::this_thread::get_id();
         adopted->_detached = true;
         adopted->references.store(1, std::memory_order_relaxed);
+        TimedWait::BindThreadWaitState(&adopted->waitCount);
         SetStackFromHost(adopted.get());
         currentThread = adopted.release();
     }

@@ -62,6 +62,11 @@ struct Module {
         if (op == spv::OpTypeInt && type.size() == 4 && type[2] == 32 && type[3] <= 1) return type[3] != 0 ? "i32" : "u32";
         if (op == spv::OpTypeBool && type.size() == 2) return "bool";
         if (op == spv::OpTypeVector && type.size() == 4 && type[3] >= 2 && type[3] <= 4) return Signature(type[2], depth + 1) + "x" + std::to_string(type[3]);
+        if (op == spv::OpTypeArray && type.size() == 4) {
+            const auto length = constants.find(type[3]);
+            Require(length != constants.end(), "SPIR-V interface array length is not a constant");
+            return Signature(type[2], depth + 1) + "[" + std::to_string(length->second) + "]";
+        }
         throw std::runtime_error("AGC graphics: unsupported SPIR-V interface type");
     }
 
@@ -138,8 +143,11 @@ struct Module {
             Require(value == spv::BuiltInPosition && signature == "f32x4" && !position, "unsupported or duplicate vertex built-in output");
             position = true;
         } else {
-            const bool depthOutput = storage == spv::StorageClassOutput && value == spv::BuiltInFragDepth && signature == "f32";
-            Require(depthOutput || (storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || ((value == spv::BuiltInFrontFacing || value == spv::BuiltInHelperInvocation) && signature == "bool") || (value == spv::BuiltInLayer && (signature == "u32" || signature == "i32")))), "unsupported fragment built-in");
+            // Inputs: SampleId and Layer (pixel ancillary data) as int or uint; outputs: FragDepth
+            // (depth export) and a one-element SampleMask (coverage export).
+            const bool fragmentOutput = storage == spv::StorageClassOutput && ((value == spv::BuiltInFragDepth && signature == "f32") || (value == spv::BuiltInSampleMask && (signature == "i32[1]" || signature == "u32[1]")));
+            const bool fragmentInput = storage == spv::StorageClassInput && ((value == spv::BuiltInFragCoord && signature == "f32x4") || ((value == spv::BuiltInFrontFacing || value == spv::BuiltInHelperInvocation) && signature == "bool") || ((value == spv::BuiltInSampleId || value == spv::BuiltInLayer) && (signature == "u32" || signature == "i32")));
+            Require(fragmentOutput || fragmentInput, "unsupported fragment built-in");
         }
     }
 };
@@ -237,8 +245,11 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     mesh &&
                     capability == spv::CapabilityMeshShadingEXT;
 
+                // Pixel shaders reading their layer need Geometry, reading SampleId SampleRateShading;
+                // both only when the device enabled the feature.
                 const bool isLayerCapability =
                     (fragment && features.geometryShader && capability == spv::CapabilityGeometry) ||
+                    (fragment && features.sampleRateShading && capability == spv::CapabilitySampleRateShading) ||
                     (!fragment && features.viewportIndexLayer && capability == spv::CapabilityShaderViewportIndexLayerEXT);
 
                 Require(
@@ -478,7 +489,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             Require(binding->kind == ShaderRecompiler::DescriptorKind::StorageBuffer, "SPIR-V descriptor type disagrees with recompiler binding metadata");
             Require(!binding->readOnly, "read-only descriptor metadata is unsupported because the recompiler emits no NonWritable decoration");
             const bool array = binding->role == ShaderRecompiler::DescriptorRole::GuestBuffers;
-            Require(array || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (binding->role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding->role == ShaderRecompiler::DescriptorRole::FaultBuffer)) || binding->role == ShaderRecompiler::DescriptorRole::ShaderData || binding->role == ShaderRecompiler::DescriptorRole::FlattenedSrt, "SPIR-V descriptor role is unsupported");
+            Require(array || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (binding->role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding->role == ShaderRecompiler::DescriptorRole::FaultBuffer)) || binding->role == ShaderRecompiler::DescriptorRole::ShaderData || binding->role == ShaderRecompiler::DescriptorRole::FlattenedSrt || binding->role == ShaderRecompiler::DescriptorRole::Gds, "SPIR-V descriptor role is unsupported");
             auto blockId = typeId;
             if (array) {
                 Require(type.size() == 4 && (type[0] & 0xffffu) == spv::OpTypeArray, "guest buffer descriptors must be declared as a descriptor array");
@@ -556,6 +567,8 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
     append(features.storageImageWriteWithoutFormat);
     append(features.clipDistance);
     append(features.cullDistance);
+    append(features.geometryShader);
+    append(features.sampleRateShading);
     append(shader.bdaAbiVersion);
     append(shader.pushConstants.empty());
     append(shader.bindings.size());
@@ -634,7 +647,7 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
     }
     key.push_back(subgroup.subgroupSize | (static_cast<std::uint64_t>(subgroup.supportedStages) << 32u));
     key.push_back(subgroup.supportedOperations | (static_cast<std::uint64_t>(subgroup.quadOperationsInAllStages) << 32u));
-    key.push_back(static_cast<std::uint64_t>(fragmentShaderBarycentric) | (static_cast<std::uint64_t>(features.imageGatherExtended) << 1u) | (static_cast<std::uint64_t>(features.storageImageReadWithoutFormat) << 2u) | (static_cast<std::uint64_t>(features.storageImageWriteWithoutFormat) << 3u) | (static_cast<std::uint64_t>(features.geometryShader) << 4u) | (static_cast<std::uint64_t>(features.minLod) << 5u) | (static_cast<std::uint64_t>(features.clipDistance) << 6u) | (static_cast<std::uint64_t>(features.cullDistance) << 7u));
+    key.push_back(static_cast<std::uint64_t>(fragmentShaderBarycentric) | (static_cast<std::uint64_t>(features.imageGatherExtended) << 1u) | (static_cast<std::uint64_t>(features.storageImageReadWithoutFormat) << 2u) | (static_cast<std::uint64_t>(features.storageImageWriteWithoutFormat) << 3u) | (static_cast<std::uint64_t>(features.geometryShader) << 4u) | (static_cast<std::uint64_t>(features.minLod) << 5u) | (static_cast<std::uint64_t>(features.clipDistance) << 6u) | (static_cast<std::uint64_t>(features.cullDistance) << 7u) | (static_cast<std::uint64_t>(features.sampleRateShading) << 8u));
     struct KeyHash {
         std::size_t operator()(const std::vector<std::uint64_t>& value) const {
             std::uint64_t hash = 0xcbf29ce484222325ull;

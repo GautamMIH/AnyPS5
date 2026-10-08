@@ -92,6 +92,8 @@ struct PthreadPrivate {
 #endif
     void* stackAddress = nullptr;
     std::size_t stackSize = 0;
+    // Alertable waits in progress (TimedWait), read by Windows exception delivery.
+    std::atomic<int> waitCount{0};
     KernelCpumask affinity = kDefaultThreadAffinity;
     int priority = kDefaultThreadPriority;
     int policy = 1;

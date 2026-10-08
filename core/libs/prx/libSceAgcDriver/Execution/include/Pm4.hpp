@@ -27,6 +27,11 @@ std::optional<DmaCopy> DecodeDmaCopy(std::span<const std::uint32_t> packet);
 // The memory write a validated WRITE_DATA performs (one address: only its last dword lands).
 std::optional<DmaCopy> DecodeWriteData(std::span<const std::uint32_t> packet);
 
+// The 64 KiB global data share: driver-owned guest memory (outside the flexible budget) that
+// DMA_DATA and shader GDS bindings share.
+constexpr std::size_t GdsBytes = 0x10000;
+std::uint64_t GdsAddress();
+
 struct DrawParameters {
     std::uint64_t indexAddress;
     std::uint32_t indexCount;

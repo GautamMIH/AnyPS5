@@ -3,6 +3,7 @@
 #include <bit>
 #include <limits>
 #include <stdexcept>
+#include <string>
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -117,17 +118,27 @@ ThickBlock thickBlock(TextureTileMode mode, std::uint32_t elementBytes) {
     static constexpr Log2 thick64KB[5] = {{6, 5, 5}, {5, 5, 5}, {5, 5, 4}, {5, 4, 4}, {4, 4, 4}};
     if (elementBytes == 0 || elementBytes > 16 || (elementBytes & (elementBytes - 1u)) != 0) throw std::runtime_error("AGC graphics: unsupported thick volume element size");
     const auto index = static_cast<std::size_t>(std::countr_zero(elementBytes));
+    // SW_64KB_S_X volumes take the standard 64 KiB thick block (upstream c10401e3).
     const auto& shape = mode == TextureTileMode::kStandard4KB ? thick4KB[index] : thick64KB[index];
     return {1u << shape.width, 1u << shape.height, 1u << shape.depth, mode == TextureTileMode::kStandard4KB ? 4096u : 65536u};
 }
 
 std::uint32_t blockBytes(TextureTileMode mode) {
     switch (mode) {
-        case TextureTileMode::kStandard256B: return 256u;
-        case TextureTileMode::kStandard4KB: return 4096u;
+        case TextureTileMode::kStandard256B:
+        case TextureTileMode::kD256B: return 256u;
+        case TextureTileMode::kStandard4KB:
+        case TextureTileMode::kD4KB:
+        case TextureTileMode::kS4KBX:
+        case TextureTileMode::kD4KBX: return 4096u;
         case TextureTileMode::kStandard64KB:
         case TextureTileMode::RenderTarget64KB:
-        case TextureTileMode::Depth64KB: return 65536u;
+        case TextureTileMode::Depth64KB:
+        case TextureTileMode::kD64KB:
+        case TextureTileMode::kS64KBT:
+        case TextureTileMode::kD64KBT:
+        case TextureTileMode::kS64KBX:
+        case TextureTileMode::kD64KBX: return 65536u;
         case TextureTileMode::kLinear: break;
     }
     throw std::runtime_error("AGC graphics: TexelOffset needs a tiled mode");
@@ -150,7 +161,11 @@ std::uint64_t TexelOffset(TextureTileMode mode, std::uint32_t elementBytes, cons
         block = static_cast<std::uint64_t>(y / height) * mip.blocksPerRow + x / width;
     }
     std::uint32_t inner = 0;
-    if (mode == TextureTileMode::RenderTarget64KB) {
+    if (const auto equationMode = EquationSwizzleMode(mode); equationMode != 0) {
+        const auto* equation = FindTextureSwizzleEquation(equationMode, elementBytes);
+        if (equation == nullptr) throw std::runtime_error("AGC graphics: no swizzle equation for tile mode " + std::to_string(equationMode) + " at " + std::to_string(elementBytes) + " bytes per element");
+        inner = EquationOffset(*equation, sx, sy, arrayLayer) & (bytes - 1u);
+    } else if (mode == TextureTileMode::RenderTarget64KB) {
         inner = renderTargetOffset(sx, sy, elementBytes, arrayLayer);
     } else if (mode == TextureTileMode::Depth64KB) {
         inner = depthOffset(sx, sy, elementBytes) & 0xffffu;
@@ -163,7 +178,14 @@ std::uint64_t TexelOffset(TextureTileMode mode, std::uint32_t elementBytes, cons
 }
 
 bool IsThickVolume(const GuestTextureResource& resource) {
-    return resource.dimension == TextureDimension::k3D && (resource.tileMode == TextureTileMode::kStandard4KB || resource.tileMode == TextureTileMode::kStandard64KB);
+    return resource.dimension == TextureDimension::k3D && (resource.tileMode == TextureTileMode::kStandard4KB || resource.tileMode == TextureTileMode::kStandard64KB || resource.tileMode == TextureTileMode::kS64KBX);
+}
+
+std::uint32_t VolumeSliceXor(TextureTileMode mode, std::uint32_t elementBytes, std::uint32_t z) {
+    if (mode != TextureTileMode::Depth64KB) return 0;
+    const auto* equation = FindTextureSwizzleEquation(XorSwizzleMode(mode), elementBytes);
+    if (equation == nullptr) throw std::runtime_error("AGC graphics: no SW_64KB_Z_X swizzle equation at " + std::to_string(elementBytes) + " bytes per element");
+    return EquationOffset(*equation, 0, 0, z);
 }
 
 std::uint64_t ThickVolumeOffset(TextureTileMode mode, std::uint32_t elementBytes, std::uint32_t width, std::uint32_t height, std::uint32_t x, std::uint32_t y, std::uint32_t z) {
@@ -171,12 +193,22 @@ std::uint64_t ThickVolumeOffset(TextureTileMode mode, std::uint32_t elementBytes
     const auto columns = static_cast<std::uint64_t>((width + block.width - 1u) / block.width);
     const auto rows = static_cast<std::uint64_t>((height + block.height - 1u) / block.height);
     const auto index = (static_cast<std::uint64_t>(z / block.depth) * rows + y / block.height) * columns + x / block.width;
-    const auto inner = mode == TextureTileMode::kStandard4KB ? standard4KBVolumeOffset(x % block.width, y % block.height, z % block.depth, elementBytes) : standard64KBVolumeOffset(x % block.width, y % block.height, z % block.depth, elementBytes);
+    std::uint32_t inner = 0;
+    if (mode == TextureTileMode::kS64KBX) {
+        // The S3 XOR equation (0x100 | SW_64KB_S_X), generated from addrlib (upstream c10401e3).
+        const auto* equation = FindTextureSwizzleEquation(0x119u, elementBytes);
+        if (equation == nullptr) throw std::runtime_error("AGC graphics: no thick SW_64KB_S_X swizzle equation");
+        // The XOR terms take coordinate bits above the block (pipe and bank bits), so the equation
+        // sees the whole coordinates.
+        inner = EquationOffset(*equation, x, y, z);
+    } else {
+        inner = mode == TextureTileMode::kStandard4KB ? standard4KBVolumeOffset(x % block.width, y % block.height, z % block.depth, elementBytes) : standard64KBVolumeOffset(x % block.width, y % block.height, z % block.depth, elementBytes);
+    }
     return index * block.bytes + inner;
 }
 
 std::uint64_t GuestTextureBytes(const GuestTextureResource& resource) {
-    const auto slices = resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::kCube || resource.dimension == TextureDimension::k3D ? resource.depthOrLastArray + 1u : 1u;
+    const auto slices = resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::k1DArray || resource.dimension == TextureDimension::kCube || resource.dimension == TextureDimension::k3D ? resource.depthOrLastArray + 1u : 1u;
     if (IsThickVolume(resource)) {
         const auto block = thickBlock(resource.tileMode, BytesPerElement(resource.format));
         const auto columns = static_cast<std::uint64_t>((resource.width + block.width - 1u) / block.width);

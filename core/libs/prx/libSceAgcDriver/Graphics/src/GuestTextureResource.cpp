@@ -17,9 +17,18 @@ TextureTileMode resolveTileMode(std::uint32_t raw) {
     switch (raw) {
         case 0x00: return TextureTileMode::kLinear;
         case 0x01: return TextureTileMode::kStandard256B;
+        case 0x02: return TextureTileMode::kD256B;
         case 0x05: return TextureTileMode::kStandard4KB;
+        case 0x06: return TextureTileMode::kD4KB;
         case 0x09: return TextureTileMode::kStandard64KB;
+        case 0x0a: return TextureTileMode::kD64KB;
+        case 0x11: return TextureTileMode::kS64KBT;
+        case 0x12: return TextureTileMode::kD64KBT;
+        case 0x15: return TextureTileMode::kS4KBX;
+        case 0x16: return TextureTileMode::kD4KBX;
         case 0x18: return TextureTileMode::Depth64KB;
+        case 0x19: return TextureTileMode::kS64KBX;
+        case 0x1a: return TextureTileMode::kD64KBX;
         case 0x1b: return TextureTileMode::RenderTarget64KB;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported tile mode " + std::to_string(raw));
     }
@@ -31,6 +40,7 @@ TextureDimension resolveDimension(std::uint32_t raw) {
         case 9: return TextureDimension::k2D;
         case 10: return TextureDimension::k3D;
         case 11: return TextureDimension::kCube;
+        case 12: return TextureDimension::k1DArray;
         case 13: return TextureDimension::k2DArray;
         default: throw std::runtime_error("AGC graphics: guest texture descriptor uses an unsupported image type " + std::to_string(raw));
     }
@@ -122,17 +132,34 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
             Require(baseArray <= depth, "guest 2D array texture descriptor has a base array past its last array slice");
             break;
         case TextureDimension::k3D:
-            // Thin tilings store a volume's slices like array layers and standard tilings use
-            // thick blocks (KytyPS5); mip chains, whose depth shrinks per level, are not modelled.
+            // Thin tilings store a volume's slices like array layers (SW_64KB_Z_X too, with its
+            // equation's slice term; upstream c10401e3) and standard tilings and SW_64KB_S_X use
+            // thick blocks (KytyPS5, addrlib); mip chains, whose depth shrinks per level, are not
+            // modelled.
             Require(baseArray == 0, "guest 3D texture descriptor has a nonzero base slice");
-            Require(tileMode != TextureTileMode::kStandard256B && tileMode != TextureTileMode::Depth64KB, "3D textures in 256-byte or depth tiling are invalid");
+            Require(tileMode != TextureTileMode::kStandard256B && tileMode != TextureTileMode::kD256B, "3D textures in 256-byte tiling are invalid");
+            Require(tileMode == TextureTileMode::kLinear || tileMode == TextureTileMode::kStandard4KB || tileMode == TextureTileMode::kStandard64KB || tileMode == TextureTileMode::kS64KBX || tileMode == TextureTileMode::Depth64KB || tileMode == TextureTileMode::RenderTarget64KB || tileMode == TextureTileMode::kD64KBX, "3D textures are implemented linear, in SW_4KB_S, SW_64KB_S or SW_64KB_S_X (thick) and in SW_64KB_Z_X, SW_64KB_D_X or SW_64KB_R_X (thin) only");
             Require(maxMip == 0, "mipmapped 3D textures are not implemented");
+            break;
+        case TextureDimension::k1DArray:
+            // Laid out as a 2D array of height 1; addrlib allows only the linear, Z and R swizzles
+            // for 1D resources, whose S and D layouts differ from a 2D array's (upstream eb30830d).
+            Require(height == 1, "guest 1D array texture descriptor has a nonzero height");
+            Require(baseArray <= depth, "guest 1D array texture descriptor has a base array past its last array slice");
+            Require(tileMode == TextureTileMode::kLinear || tileMode == TextureTileMode::Depth64KB || tileMode == TextureTileMode::RenderTarget64KB, "guest 1D array texture descriptor uses a tile mode other than linear, Z or R, which 1D resources cannot use");
             break;
         case TextureDimension::kCube:
             Require(width == height, "guest cube texture descriptor is not square");
             Require(baseArray <= depth, "guest cube texture descriptor has a base array past its last array slice");
             Require((depth - baseArray + 1u) % 6u == 0, "guest cube texture descriptor does not contain a multiple of 6 array slices");
             break;
+    }
+
+    // The equation XOR and T swizzles fold a pipe/bank XOR into the low address bits; only bases
+    // aligned to the block are modelled (SW_64KB_Z_X and R_X keep their own formula and accept any).
+    if (EquationSwizzleMode(tileMode) != 0 && XorSwizzleMode(tileMode) != 0) {
+        const auto blockMask = tileMode == TextureTileMode::kS4KBX || tileMode == TextureTileMode::kD4KBX ? 0xfffu : 0xffffu;
+        Require((baseAddress & blockMask) == 0, "guest texture descriptor combines an XOR swizzle with a pipe/bank XOR base which is not implemented");
     }
 
     // Views may name levels past MAX_MIP. One that starts inside the surface ends at its last level
@@ -184,6 +211,7 @@ bool MatchesGuestDimension(ShaderRecompiler::DescriptorImageShape shape, Texture
         case ShaderRecompiler::DescriptorImageShape::Image2DArray: return dimension == TextureDimension::k2DArray || dimension == TextureDimension::kCube;
         case ShaderRecompiler::DescriptorImageShape::ImageCube: return dimension == TextureDimension::kCube;
         case ShaderRecompiler::DescriptorImageShape::Image3D: return dimension == TextureDimension::k3D;
+        case ShaderRecompiler::DescriptorImageShape::Image1DArray: return dimension == TextureDimension::k1DArray;
     }
     throw std::runtime_error("AGC graphics: MatchesGuestDimension encountered an unknown descriptor image shape");
 }
@@ -192,7 +220,8 @@ std::optional<TextureDimension> SampledViewDimension(ShaderRecompiler::Descripto
     using Shape = ShaderRecompiler::DescriptorImageShape;
     const bool layered = dimension == TextureDimension::k2D || dimension == TextureDimension::k2DArray || dimension == TextureDimension::kCube;
     switch (shape) {
-        case Shape::Image1D: return dimension == TextureDimension::k1D ? std::optional(TextureDimension::k1D) : std::nullopt;
+        case Shape::Image1D: return dimension == TextureDimension::k1D || dimension == TextureDimension::k1DArray ? std::optional(TextureDimension::k1D) : std::nullopt;
+        case Shape::Image1DArray: return dimension == TextureDimension::k1D || dimension == TextureDimension::k1DArray ? std::optional(TextureDimension::k1DArray) : std::nullopt;
         case Shape::Image2D: return layered ? std::optional(TextureDimension::k2D) : std::nullopt;
         case Shape::Image2DArray: return layered ? std::optional(TextureDimension::k2DArray) : std::nullopt;
         case Shape::ImageCube: return dimension == TextureDimension::kCube ? std::optional(TextureDimension::kCube) : std::nullopt;

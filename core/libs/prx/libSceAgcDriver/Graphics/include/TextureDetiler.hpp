@@ -21,18 +21,20 @@ namespace AgcDriver::Graphics {
         // Detiles (or, with tile, tiles) one mip layer between buffers. Descriptor sets come from the
         // detiler's batch pools, which BeginBatch recycles, or from pool when the caller owns one
         // that outlives the command buffer.
-        void Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile = false, VkDescriptorPool pool = VK_NULL_HANDLE);
+        // sliceXor is XORed into every element's in-block offset: the slice term of a thin volume's
+        // swizzle equation where the mode's own formula has none (SW_64KB_Z_X volumes).
+        void Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile = false, VkDescriptorPool pool = VK_NULL_HANDLE, std::uint32_t sliceXor = 0);
         // A pass prepared once (its descriptor set allocated from pool and written) and recorded any
         // number of times while its buffers live: per-frame passes allocate nothing and never
         // rewrite a set a pending command buffer may still use.
         struct PreparedPass {
             VkPipeline pipeline = VK_NULL_HANDLE;
             VkDescriptorSet set = VK_NULL_HANDLE;
-            std::array<std::uint32_t, 11> push{};
+            std::array<std::uint32_t, 12> push{};
             std::uint32_t groupsX = 0;
             std::uint32_t groupsY = 0;
         };
-        PreparedPass Prepare(TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool);
+        PreparedPass Prepare(TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool, std::uint32_t sliceXor = 0);
         void Record(VkCommandBuffer commands, const PreparedPass& pass);
         void BeginBatch();
         // Copies bytes of source into guest where mask bytes are set (one pass per dword).

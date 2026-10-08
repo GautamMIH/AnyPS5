@@ -115,6 +115,8 @@ struct VulkanDevice::State {
     bool tessellationShader = false;
     bool meshShader = false;
     bool fragmentShaderBarycentric = false;
+    // sampleRateShading enabled: pixel shaders may declare SampleRateShading (SampleId reads).
+    bool sampleRateShading = false;
     bool depthClipControl = false;
     bool primitiveListRestart = false;
     bool occlusionQueryPrecise = false;
@@ -683,6 +685,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
     state->storageImageReadWithoutFormat = enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
     state->storageImageWriteWithoutFormat = enabled.shaderStorageImageWriteWithoutFormat == VK_TRUE;
+    // Pixel shaders reading SampleId declare SampleRateShading; the validator accepts it only
+    // when the feature is enabled (upstream 29aa2756).
+    enabled.sampleRateShading = available.sampleRateShading;
+    state->sampleRateShading = enabled.sampleRateShading == VK_TRUE;
     state->samplerAnisotropy = true;
     state->textureCompressionBC = true;
     deviceInfo.pEnabledFeatures = &enabled;
@@ -1171,6 +1177,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.independentBlend = state->independentBlend;
     context.geometryShader = state->geometryShader;
     context.imageGatherExtended = state->imageGatherExtended;
+    context.sampleRateShading = state->sampleRateShading;
     context.primitiveListRestart = state->primitiveListRestart;
     context.shaderResourceMinLod = state->shaderResourceMinLod;
     context.imageViewMinLod = state->imageViewMinLod;

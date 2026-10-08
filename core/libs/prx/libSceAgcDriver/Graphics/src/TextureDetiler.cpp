@@ -25,16 +25,26 @@ struct Push {
     std::uint32_t tailY;
     std::uint32_t elementBytes;
     std::uint32_t arrayLayer;
+    std::uint32_t sliceXor;
 };
 
 std::uint32_t BlockBytesFor(TextureTileMode tileMode) {
     switch (tileMode) {
         case TextureTileMode::kLinear: return 0u;
-        case TextureTileMode::kStandard256B: return 256u;
-        case TextureTileMode::kStandard4KB: return 4096u;
+        case TextureTileMode::kStandard256B:
+        case TextureTileMode::kD256B: return 256u;
+        case TextureTileMode::kStandard4KB:
+        case TextureTileMode::kD4KB:
+        case TextureTileMode::kS4KBX:
+        case TextureTileMode::kD4KBX: return 4096u;
         case TextureTileMode::RenderTarget64KB:
         case TextureTileMode::Depth64KB:
-        case TextureTileMode::kStandard64KB: return 65536u;
+        case TextureTileMode::kStandard64KB:
+        case TextureTileMode::kD64KB:
+        case TextureTileMode::kS64KBT:
+        case TextureTileMode::kD64KBT:
+        case TextureTileMode::kS64KBX:
+        case TextureTileMode::kD64KBX: return 65536u;
     }
     throw std::runtime_error("AGC graphics: TextureDetiler encountered an unknown tile mode");
 }
@@ -162,13 +172,23 @@ VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elem
     for (const auto& entry : pipelines) {
         if (entry.first == key) return entry.second;
     }
-    const std::uint32_t values[4] = {elementBytes, BlockBytesFor(tileMode), tileMode == TextureTileMode::kLinear ? 0u : tileMode == TextureTileMode::RenderTarget64KB ? 2u : tileMode == TextureTileMode::Depth64KB ? 3u : 1u, tile ? 1u : 0u};
-    const VkSpecializationMapEntry entries[4] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}, {3, 12, 4}};
+    // Constants 0-3 select element size, block size, addressing family (0 linear, 1 standard, 2
+    // SW_64KB_R_X, 3 SW_64KB_Z_X, 4 equation) and direction; 4-19 carry the per-bit XOR equation of
+    // the equation family (the display, T and other XOR swizzles; upstream ace10fdb).
+    std::array<std::uint32_t, 20> values{elementBytes, BlockBytesFor(tileMode), tileMode == TextureTileMode::kLinear ? 0u : tileMode == TextureTileMode::RenderTarget64KB ? 2u : tileMode == TextureTileMode::Depth64KB ? 3u : 1u, tile ? 1u : 0u};
+    if (const auto mode = EquationSwizzleMode(tileMode); mode != 0) {
+        const auto* equation = FindTextureSwizzleEquation(mode, elementBytes);
+        Require(equation != nullptr, "no swizzle equation for tile mode " + std::to_string(mode) + " at " + std::to_string(elementBytes) + " bytes per element");
+        values[2] = 4u;
+        for (std::size_t bit = 0; bit < 16; ++bit) values[4 + bit] = equation->bits[bit];
+    }
+    std::array<VkSpecializationMapEntry, 20> entries{};
+    for (std::uint32_t index = 0; index < entries.size(); ++index) entries[index] = {index, index * 4u, 4u};
     VkSpecializationInfo specialization{};
-    specialization.mapEntryCount = 4;
-    specialization.pMapEntries = entries;
+    specialization.mapEntryCount = static_cast<std::uint32_t>(entries.size());
+    specialization.pMapEntries = entries.data();
     specialization.dataSize = sizeof(values);
-    specialization.pData = values;
+    specialization.pData = values.data();
     VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
     stage.module = module;
@@ -183,12 +203,12 @@ VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elem
     return result;
 }
 
-void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool) {
+void TextureDetiler::Dispatch(VkCommandBuffer commands, TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool, std::uint32_t sliceXor) {
     Require(commands != VK_NULL_HANDLE, "texture detiling requires an active command buffer");
-    Record(commands, Prepare(tileMode, elementBytes, source, sourceOffset, destination, destinationOffset, layout, arrayLayer, tile, pool));
+    Record(commands, Prepare(tileMode, elementBytes, source, sourceOffset, destination, destinationOffset, layout, arrayLayer, tile, pool, sliceXor));
 }
 
-TextureDetiler::PreparedPass TextureDetiler::Prepare(TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool) {
+TextureDetiler::PreparedPass TextureDetiler::Prepare(TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool, std::uint32_t sliceXor) {
     Require(source != VK_NULL_HANDLE && destination != VK_NULL_HANDLE, "texture detiling requires source and destination buffers");
     Require(layout.width != 0 && layout.height != 0, "texture detiling requires a non-empty mip layout");
     Require(layout.tiledSize != 0 && layout.linearSize != 0, "texture detiling requires a non-empty mip layout");
@@ -232,6 +252,7 @@ TextureDetiler::PreparedPass TextureDetiler::Prepare(TextureTileMode tileMode, s
     push.tailY = layout.tailY;
     push.elementBytes = elementBytes;
     push.arrayLayer = arrayLayer;
+    push.sliceXor = sliceXor;
     static_assert(sizeof(Push) == sizeof(pass.push));
     std::memcpy(pass.push.data(), &push, sizeof(push));
     pass.groupsX = (layout.width + 7u) / 8u;

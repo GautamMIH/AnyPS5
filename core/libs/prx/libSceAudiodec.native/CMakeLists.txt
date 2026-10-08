@@ -24,9 +24,3 @@ target_compile_definitions(libSceAudiodec.native PRIVATE APS5_HAVE_FFMPEG=1)
 
 target_link_libraries(libSceAudiodec.native PRIVATE atrac9 libc libkernel)
 configure_windows_unwind(libSceAudiodec.native)
-
-if(MINGW)
-    foreach(runtimeLinkFlag IN ITEMS -static-libgcc -static-libstdc++ -static)
-        string(REPLACE "${runtimeLinkFlag}" "" CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS}")
-    endforeach()
-endif()
