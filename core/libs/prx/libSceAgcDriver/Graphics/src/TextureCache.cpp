@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <cstring>
 #include <limits>
 
@@ -89,7 +90,12 @@ struct TextureWatch {
 namespace {
 
 bool TextureWatchesEnabled() {
-    static const bool enabled = std::getenv("ANYPS5_TEXTURE_WATCH") != nullptr;
+    // On by default: they spare the per-epoch CPU-write scans (~1.4 ms of a heavy Zorro frame on the
+    // device thread); ANYPS5_TEXTURE_WATCH=0 turns them off.
+    static const bool enabled = [] {
+        const char* setting = std::getenv("ANYPS5_TEXTURE_WATCH");
+        return setting == nullptr || std::string(setting) != "0";
+    }();
     return enabled;
 }
 

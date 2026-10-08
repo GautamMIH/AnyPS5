@@ -5,6 +5,7 @@
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 #include <dlfcn.h>
 #include <exception>
 #include <fstream>
@@ -155,8 +156,11 @@ static bool queryGuestAreas(std::uint64_t address, std::size_t bytes, std::vecto
 }
 
 std::vector<Region> Query(std::uint64_t address, std::size_t bytes) {
-    // Opt-in with the driver's texture watches (ANYPS5_TEXTURE_WATCH=1) until measured.
-    static const bool fast = std::getenv("ANYPS5_TEXTURE_WATCH") != nullptr;
+    // On with the driver's texture watches (ANYPS5_TEXTURE_WATCH=0 turns both off).
+    static const bool fast = [] {
+        const char* setting = std::getenv("ANYPS5_TEXTURE_WATCH");
+        return setting == nullptr || std::string(setting) != "0";
+    }();
     if (fast) {
         std::vector<Region> regions;
         if (queryGuestAreas(address, bytes, regions)) return regions;

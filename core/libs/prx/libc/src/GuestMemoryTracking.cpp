@@ -31,8 +31,51 @@ struct Registry {
     std::multimap<std::uint64_t, std::shared_ptr<Entry>> entries;
     // The longest entry: entries overlapping an address start at most this far before it.
     std::size_t largest = 0;
+    // The entries Resolve acts on, by protection (None: any access; Read: writes), each with its
+    // longest size. Resolve runs for thousands of guest range checks a frame: scanning every entry
+    // back over the longest one visited many it never acts on (texture watches are read-only and
+    // most checks are reads).
+    struct Index {
+        std::multimap<std::uint64_t, Entry*> entries;
+        std::size_t largest = 0;
+    };
+    Index noAccess;
+    Index readOnly;
     bool installed = false;
 };
+
+Registry::Index* indexFor(Registry& registryValue, Protection protection) {
+    if (protection == Protection::None) return &registryValue.noAccess;
+    if (protection == Protection::Read) return &registryValue.readOnly;
+    return nullptr;
+}
+
+// Moves the entry between the protection indexes for a protection change.
+void indexProtection(Registry& registryValue, Entry& entry, Protection from, Protection to) {
+    if (auto* index = indexFor(registryValue, from)) {
+        for (auto [it, end] = index->entries.equal_range(entry.address); it != end; ++it) {
+            if (it->second != &entry) continue;
+            index->entries.erase(it);
+            break;
+        }
+        if (entry.bytes == index->largest) {
+            index->largest = 0;
+            for (const auto& [address, other] : index->entries) index->largest = std::max(index->largest, other->bytes);
+        }
+    }
+    if (auto* index = indexFor(registryValue, to)) {
+        index->entries.emplace(entry.address, &entry);
+        index->largest = std::max(index->largest, entry.bytes);
+    }
+}
+
+// Whether an entry of the index overlaps [address, end).
+bool overlapsIndexed(const Registry::Index& index, std::uint64_t address, std::uint64_t end) {
+    for (auto it = index.entries.lower_bound(address > index.largest ? address - index.largest : 0); it != index.entries.end() && it->first < end; ++it) {
+        if (it->first + it->second->bytes > address) return true;
+    }
+    return false;
+}
 
 Registry& registry() {
     static auto* value = new Registry;
@@ -188,6 +231,7 @@ void GuestMemoryTrackingDestroy_nid_postfix(void* handle) noexcept {
         entries.erase(it);
         break;
     }
+    indexProtection(registry(), const_cast<Entry&>(entry), entry.protection, Protection::ReadWrite);
     if (entry.protection != Protection::ReadWrite) apply(entry.address, entry.address + entry.bytes, entry.original);
 }
 
@@ -197,6 +241,7 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
     auto& entry = **static_cast<std::shared_ptr<Entry>*>(handle);
     if (entry.protection == protection) return;
     if (protection != Protection::ReadWrite) entry.active = true;
+    indexProtection(registry(), entry, entry.protection, protection);
     entry.protection = protection;
     apply(entry.address, entry.address + entry.bytes, entry.original);
 }
@@ -205,14 +250,10 @@ void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t b
     if (bytes == 0) return;
     const auto end = checkedEnd(address, bytes);
     std::lock_guard lock(registry().mutex);
+    auto& registryValue = registry();
     // Checked thousands of times a frame: find whether a watch needs resolving before copying the
     // overlapping entries (resolving may change the registry).
-    const auto& entries = registry().entries;
-    bool needed = false;
-    for (auto it = firstCandidate(address); it != entries.end() && it->first < end && !needed; ++it) {
-        const auto& entry = *it->second;
-        needed = it->first + entry.bytes > address && (entry.protection == Protection::None || (writable && entry.protection == Protection::Read));
-    }
+    const bool needed = overlapsIndexed(registryValue.noAccess, address, end) || (writable && overlapsIndexed(registryValue.readOnly, address, end));
     if (!needed) return;
     for (const auto& entry : overlapping(address, bytes)) {
         if (entry->protection == Protection::None || (writable && entry->protection == Protection::Read)) resolve(entry, writable ? Access::Write : Access::Read);
