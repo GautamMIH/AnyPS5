@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <filesystem>
+#include <vector>
 
 #include "general/LogMacros.hpp"
 #include "general/VabiMacros.hpp"
@@ -22,6 +23,10 @@ extern "C" void UnmountGuestPath_nid_no_patch(const char* mountPoint);
 // directory instead of the run directory; the prefix matches whole path components only.
 extern "C" void AddPathAlias_nid_no_patch(const char* guestPrefix, const char* hostPath);
 extern "C" void RemovePathAlias_nid_no_patch(const char* guestPrefix);
+extern "C" void RecordWrittenPath_nid_no_patch(const std::filesystem::path& path);
+extern "C" std::vector<std::filesystem::path> WrittenPaths_nid_no_patch();
+extern "C" void SyncWrittenPaths_nid_no_patch();
+extern "C" void BlockPathAlias_nid_no_patch(const char* guestPrefix);
 
 #define APS5_INVALID_ARG_EX throw std::invalid_argument(std::string(__func__) + ": invalid argument")
 

@@ -236,4 +236,6 @@ unsigned int APS5_VABI _ZNSt6thread20hardware_concurrencyEv_nid_postfix() {
     return std::thread::hardware_concurrency();
 }
 
+// The sized aligned delete is defined with the other operators in NewDelete.cpp.
+
 }

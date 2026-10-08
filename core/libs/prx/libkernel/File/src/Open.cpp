@@ -256,6 +256,14 @@ int openFile(const char* path, int flags, int mode) {
     }
 #endif
     trace("open", path, host, result);
+    if (result >= 0 && ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY || (flags & (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC))))
+        RecordWrittenPath_nid_no_patch(host);
+    return result;
+}
+
+// Paths the guest changed are recorded for sceKernelSync (see RecordWrittenPath_nid_no_patch).
+int recordIfDone(const int result, const std::filesystem::path& host) {
+    if (result >= 0) RecordWrittenPath_nid_no_patch(host);
     return result;
 }
 
@@ -373,21 +381,26 @@ int APS5_VABI sceKernelCheckReachability(const char* path) {
 
 int APS5_VABI sceKernelUnlink(const char* path) {
     if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    return sceResult(NativeUnlink(ResolvePath_nid_no_patch(path)));
+    return sceResult(recordIfDone(NativeUnlink(ResolvePath_nid_no_patch(path)), ResolvePath_nid_no_patch(path)));
 }
 
 int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
     if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    return sceResult(NativeMkdir(ResolvePath_nid_no_patch(path), mode));
+    return sceResult(recordIfDone(NativeMkdir(ResolvePath_nid_no_patch(path), mode), ResolvePath_nid_no_patch(path)));
 }
 
 int APS5_VABI sceKernelRmdir(const char* path) {
     if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    return sceResult(NativeRmdir(ResolvePath_nid_no_patch(path)));
+    return sceResult(recordIfDone(NativeRmdir(ResolvePath_nid_no_patch(path)), ResolvePath_nid_no_patch(path)));
 }
 
 int APS5_VABI sceKernelRename(const char* from, const char* to) {
-    return sceResult(renamePath(from, to));
+    const int result = renamePath(from, to);
+    if (result >= 0) {
+        RecordWrittenPath_nid_no_patch(ResolvePath_nid_no_patch(from));
+        RecordWrittenPath_nid_no_patch(ResolvePath_nid_no_patch(to));
+    }
+    return sceResult(result);
 }
 
 int APS5_VABI sceKernelFsync(int fd) {
@@ -400,7 +413,7 @@ int APS5_VABI sceKernelFtruncate(int fd, std::int64_t length) {
 
 int APS5_VABI sceKernelChmod(const char* path, uint16_t mode) {
     if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    return sceResult(NativeChmod(ResolvePath_nid_no_patch(path), mode));
+    return sceResult(recordIfDone(NativeChmod(ResolvePath_nid_no_patch(path), mode), ResolvePath_nid_no_patch(path)));
 }
 
 int APS5_VABI sceKernelFchmod(int fd, uint16_t mode) {

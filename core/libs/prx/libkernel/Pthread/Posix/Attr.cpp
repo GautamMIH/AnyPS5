@@ -29,6 +29,7 @@ int APS5_VABI scePthreadAttrSetinheritsched(PthreadAttr* attr, int inherit_sched
 int APS5_VABI scePthreadAttrSetschedparam(PthreadAttr* attr, const KernelSchedParam* param);
 int APS5_VABI scePthreadAttrSetschedpolicy(PthreadAttr* attr, int policy);
 int APS5_VABI scePthreadAttrSetstacksize(PthreadAttr* attr, std::size_t stacksize);
+int APS5_VABI scePthreadAttrSetstack(PthreadAttr* attr, void* addr, std::size_t size);
 
 int APS5_VABI pthread_attr_init_nid_postfix(PthreadAttr* attr) {
     return posixFromSce(scePthreadAttrInit(attr));
@@ -92,6 +93,11 @@ int APS5_VABI pthread_attr_setschedpolicy_nid_postfix(PthreadAttr* attr, int pol
 int APS5_VABI pthread_attr_setstacksize_nid_postfix(PthreadAttr* attr, size_t stack_size) {
     if (stack_size < 16384) return PthreadSync::kErrorInvalid;
     return posixFromSce(scePthreadAttrSetstacksize(attr, stack_size));
+}
+
+int APS5_VABI pthread_attr_setstack_nid_postfix(PthreadAttr* attr, void* stack_addr, size_t stack_size) {
+    if (!attr || !*attr || !stack_addr || stack_size < 16384) return PthreadSync::kErrorInvalid;
+    return posixFromSce(scePthreadAttrSetstack(attr, stack_addr, stack_size));
 }
 
 int APS5_VABI pthread_attr_setsolosched_np_nid_postfix() {

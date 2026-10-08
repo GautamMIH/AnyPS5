@@ -11,7 +11,9 @@
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <cstdarg>
+#include <deque>
 #include <filesystem>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -174,8 +176,11 @@ std::int64_t APS5_VABI _write_nid_postfix(int descriptor, const void* buffer, st
 int APS5_VABI sceKernelChmod_nid_postfix(const char* path, std::uint16_t mode) {
     if (path == nullptr) return FileErrors::Sce(EFAULT);
     std::error_code error;
-    std::filesystem::permissions(ResolvePath_nid_no_patch(path), static_cast<std::filesystem::perms>(mode & 07777u), std::filesystem::perm_options::replace, error);
-    return error ? FileErrors::Sce(error.value()) : 0;
+    const auto native = ResolvePath_nid_no_patch(path);
+    std::filesystem::permissions(native, static_cast<std::filesystem::perms>(mode & 07777u), std::filesystem::perm_options::replace, error);
+    if (error) return FileErrors::Sce(error.value());
+    RecordWrittenPath_nid_no_patch(native);
+    return 0;
 }
 
 int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t length) {
@@ -185,7 +190,9 @@ int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t lengt
     std::error_code error;
     if (!std::filesystem::exists(native, error)) return FileErrors::Sce(ENOENT);
     std::filesystem::resize_file(native, static_cast<std::uintmax_t>(length), error);
-    return error ? FileErrors::Sce(error.value()) : 0;
+    if (error) return FileErrors::Sce(error.value());
+    RecordWrittenPath_nid_no_patch(native);
+    return 0;
 }
 
 int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval* times) {
@@ -244,6 +251,16 @@ std::int64_t sceResult64(const std::int64_t result) {
 extern "C" int APS5_VABI sceKernelFsync(int fd);
 
 extern "C" {
+
+// The write throttling counters (upstream): nothing is throttled.
+int APS5_VABI sceKernelWriteThrottlingStatus(std::uint64_t* status) {
+    if (status == nullptr) throw std::invalid_argument("sceKernelWriteThrottlingStatus: status is null");
+    status[0] = std::numeric_limits<std::uint32_t>::max();
+    status[1] = 0;
+    status[2] = 0;
+    status[3] = 0;
+    return 0;
+}
 
 #ifdef _WIN32
 

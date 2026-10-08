@@ -401,6 +401,7 @@ void buildResourceSpecialization(const IrResourcePlan& plan, ResourceSnapshot& s
         entry.descriptorFormat = buffer.formatted ? decoded.Format() : IrBufferFormat::Invalid;
         entry.descriptorSwizzle = buffer.formatted ? decoded.DstSelXYZW() : DstSel(4, 5, 6, 7);
         entry.empty = decoded.GetSize() == 0u || decoded.Base48() == 0u;
+        entry.baseMisalignment = entry.empty ? 0u : static_cast<std::uint8_t>(decoded.Base48() & 3u);
         result.buffers.push_back(entry);
     }
 
@@ -509,6 +510,7 @@ void ResourceMaterializer::Apply(IrProgram& program, const ResourceSpecializatio
         buffers[i].descriptorFormat = specialization.buffers[i].descriptorFormat;
         buffers[i].descriptorSwizzle = specialization.buffers[i].descriptorSwizzle;
         buffers[i].empty = specialization.buffers[i].empty;
+        buffers[i].baseMisalignment = specialization.buffers[i].baseMisalignment;
     }
 
     auto images = resources.info.images;
@@ -588,6 +590,7 @@ void ResourceMaterializer::Apply(IrProgram& program, const ResourceSpecializatio
             }
             auto sampler = samplers[index];
             sampler.forcePointFiltering = true;
+            sampler.copyOf = index;
             samplers.push_back(sampler);
         }
     }
@@ -846,7 +849,7 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
 }
 
 bool ResourceSpecialization::Buffer::operator==(const Buffer& other) const {
-    return packedStride == other.packedStride && descriptorFormat == other.descriptorFormat && descriptorSwizzle == other.descriptorSwizzle && empty == other.empty;
+    return packedStride == other.packedStride && descriptorFormat == other.descriptorFormat && descriptorSwizzle == other.descriptorSwizzle && empty == other.empty && baseMisalignment == other.baseMisalignment;
 }
 
 bool ResourceSpecialization::Image::operator==(const Image& other) const {

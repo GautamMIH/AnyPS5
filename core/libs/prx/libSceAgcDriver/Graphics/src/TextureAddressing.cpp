@@ -211,8 +211,11 @@ std::uint64_t GuestTextureBytes(const GuestTextureResource& resource) {
     const auto slices = resource.dimension == TextureDimension::k2DArray || resource.dimension == TextureDimension::k1DArray || resource.dimension == TextureDimension::kCube || resource.dimension == TextureDimension::k3D ? resource.depthOrLastArray + 1u : 1u;
     if (IsThickVolume(resource)) {
         const auto block = thickBlock(resource.tileMode, BytesPerElement(resource.format));
-        const auto columns = static_cast<std::uint64_t>((resource.width + block.width - 1u) / block.width);
-        const auto rows = static_cast<std::uint64_t>((resource.height + block.height - 1u) / block.height);
+        // Block-compressed volumes are tiled in blocks of texels (upstream 2191d603).
+        const auto elementsWidth = (resource.width + BlockWidth(resource.format) - 1u) / BlockWidth(resource.format);
+        const auto elementsHeight = (resource.height + BlockHeight(resource.format) - 1u) / BlockHeight(resource.format);
+        const auto columns = static_cast<std::uint64_t>((elementsWidth + block.width - 1u) / block.width);
+        const auto rows = static_cast<std::uint64_t>((elementsHeight + block.height - 1u) / block.height);
         const auto depth = static_cast<std::uint64_t>((slices + block.depth - 1u) / block.depth);
         return columns * rows * depth * block.bytes;
     }

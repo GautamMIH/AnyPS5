@@ -96,9 +96,10 @@ constexpr auto MakeFormatLookupTable() {
 constexpr auto kFormatLookupTable = MakeFormatLookupTable();
 
 // Formats without a Vulkan equivalent that the shader reads and writes through R32_UINT, converting
-// each field itself: 10_11_11_UNORM (30, upstream baa202d2) and 10_11_11_UINT (34).
+// each field itself: 10_11_11_UNORM (30, upstream baa202d2), 10_11_11_UINT (34) and
+// 10_11_11_FLOAT (43, upstream ede33d56; image loads and stores only).
 std::uint32_t remapGuestFormat(std::uint32_t guestFormat) {
-    return guestFormat == 30 || guestFormat == 34 ? 20 : guestFormat;
+    return guestFormat == 30 || guestFormat == 34 || guestFormat == 43 ? 20 : guestFormat;
 }
 
 const FormatEntry& findFormatEntry(std::uint32_t guestFormat) {

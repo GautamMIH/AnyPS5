@@ -23,6 +23,7 @@
 extern "C" {
 void* APS5_VABI mmap_nid_postfix(void*, std::size_t, int, int, int, std::int64_t) noexcept;
 int APS5_VABI munmap_nid_postfix(void*, std::size_t) noexcept;
+int APS5_VABI mprotect_nid_postfix(void*, std::size_t, int) noexcept;
 int* APS5_VABI __error_nid_postfix();
 int APS5_VABI sceKernelAllocateMainDirectMemory(std::size_t, std::size_t, int, std::int64_t*);
 int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
@@ -97,6 +98,13 @@ static void CheckInternalNamedFlexibleMapping() {
     Require(std::strcmp(NameAt(mapped), "internal mapping") == 0);
     Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available == before - length);
     Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(mapped), length) == 0);
+    Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available == before);
+    void* flagged = nullptr;
+    Require(sceKernelMapNamedFlexibleMemoryInternal(&flagged, length, 3, 0x8000, "internal flag") == 0 && flagged != nullptr);
+    Require(std::strcmp(NameAt(flagged), "internal flag") == 0);
+    static_cast<volatile unsigned char*>(flagged)[length - 1] = 1;
+    Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available == before - length);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(flagged), length) == 0);
     Require(sceKernelAvailableFlexibleMemorySize(&available) == 0 && available == before);
 }
 
@@ -187,6 +195,27 @@ static void CheckReleaseDirectMemoryClearsMappings() {
     VirtualQueryInfo cleared{};
     Require(sceKernelVirtualQuery(mapped, 0, &cleared, sizeof(cleared)) != 0 || !cleared.is_direct);
     Require(Unmap(mapped, page * 2) == 0);
+}
+
+static void CheckFixedMappingReplacesPartialOverlap() {
+    constexpr std::size_t page = 0x4000;
+    std::int64_t phys = 0;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page * 3, 0, 0, &phys) == 0);
+    void* reserved = nullptr;
+    Require(sceKernelMapDirectMemory(&reserved, page * 3, 3, 0, phys, 0) == 0);
+    Require(Unmap(reserved, page * 3) == 0);
+    void* head = reserved;
+    Require(sceKernelMapDirectMemory(&head, page, 3, 0x10, phys, 0) == 0 && head == reserved);
+    void* fixed = reserved;
+    Require(sceKernelMapDirectMemory(&fixed, page * 3, 3, 0x10, phys, 0) == 0);
+    Require(fixed == reserved);
+    static_cast<unsigned char*>(fixed)[page * 2 + 7] = 0x5c;
+    VirtualQueryInfo info{};
+    Require(sceKernelVirtualQuery(fixed, 0, &info, sizeof(info)) == 0);
+    Require(info.is_direct && info.offset == static_cast<std::uint64_t>(phys));
+    Require(static_cast<unsigned char*>(fixed)[page * 2 + 7] == 0x5c);
+    Require(Unmap(fixed, page * 3) == 0);
+    Require(sceKernelReleaseDirectMemory(phys, page * 3) == 0);
 }
 
 static void CheckGetDirectMemoryType() {
@@ -699,6 +728,7 @@ int main() {
     CheckDirectMemoryFollowsPhysicalPages();
     CheckReleaseDirectMemoryClearsMappings();
     CheckFixedReservationReplacesMappings();
+    CheckFixedMappingReplacesPartialOverlap();
     CheckReservedRangeIsNotCommitted();
     CheckMlock();
     CheckSharedDirectMemoryLifecycle();
@@ -736,6 +766,20 @@ int main() {
         const auto range = mutation.Find(memory);
         Require(range.bytes == page * 3 && range.readable && range.writable);
     }
+    Require(mprotect_nid_postfix(memory, 0, 1) == 0);
+    Require(mprotect_nid_postfix(nullptr, page, 1) == -1 && *__error_nid_postfix() == 22);
+    Require(mprotect_nid_postfix(memory + 1, 1, 1) == 0);
+    {
+        GuestAllocations::Mutation mutation;
+        const auto range = mutation.Find(memory);
+        Require(range.readable && !range.writable);
+    }
+    Require(memory[0] == 42);
+    Require(mprotect_nid_postfix(memory, page, 3) == 0);
+    {
+        GuestAllocations::Mutation mutation;
+        Require(mutation.Find(memory).writable);
+    }
     Require(munmap_nid_postfix(memory + 1, page) == -1 && *__error_nid_postfix() == 22);
     Require(munmap_nid_postfix(memory, 0) == -1 && *__error_nid_postfix() == 22);
     Require(memory[0] == 42);
@@ -748,6 +792,9 @@ int main() {
     Require(munmap_nid_postfix(memory, page) == 0);
     // Flexible memory cannot be executable.
     reject(page, 5, 0x1002, -1, 0, 13);
+    *__error_nid_postfix() = 0;
+    Require(mprotect_nid_postfix(memory, std::numeric_limits<std::size_t>::max(), 1) == -1 &&
+            *__error_nid_postfix() == 22);
     for (int protection : {0, 1, 3}) {
         void* mapped = mmap_nid_postfix(memory, 1, protection, 0x1002, -1, 0);
         Require(mapped != failed);

@@ -163,14 +163,14 @@ void viewsPastLastMip() {
 
 // SW_4KB_S colour targets (upstream d7d7c142) address every level of a chain, mip-tail levels
 // included, where the texture path (TexelOffset, checked against addrlib) puts them; SW_64KB_R_X
-// targets likewise.
+// targets and SW_64KB_S targets (upstream 6aa8e58d) likewise.
 void standardColorTargets() {
     Require(DecodeColorTileMode(0x4dc14000u) == ColorTileMode::Standard4KB, "a SW_4KB_S colour descriptor was rejected");
-    reject([] { DecodeColorTileMode(0x4dc24000u); }, "unsupported color tile mode");
-    for (const auto mode : {ColorTileMode::Standard4KB, ColorTileMode::RenderTarget}) {
+    Require(DecodeColorTileMode(0x4dc24000u) == ColorTileMode::Standard64KB, "a SW_64KB_S colour descriptor was rejected");
+    for (const auto mode : {ColorTileMode::Standard4KB, ColorTileMode::Standard64KB, ColorTileMode::RenderTarget}) {
         const auto tileMode = ColorTextureTileMode(mode);
         for (const std::uint32_t elementBytes : {1u, 2u, 4u, 8u, 16u}) {
-            const auto what = std::string(mode == ColorTileMode::Standard4KB ? "SW_4KB_S" : "SW_64KB_R_X") + " " + std::to_string(elementBytes) + " B";
+            const auto what = std::string(mode == ColorTileMode::Standard4KB ? "SW_4KB_S" : mode == ColorTileMode::Standard64KB ? "SW_64KB_S" : "SW_64KB_R_X") + " " + std::to_string(elementBytes) + " B";
             const auto single = ComputeElementMipLayout(tileMode, elementBytes, 100, 70, 1);
             const ColorTargetLayout whole(100, 70, mode, elementBytes);
             Require(whole.Bytes() == ComputeSurfaceSize(single, 1), what + ": a 100x70 target's size differs from the texture layout");

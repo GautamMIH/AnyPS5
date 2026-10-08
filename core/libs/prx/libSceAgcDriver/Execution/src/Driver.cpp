@@ -81,6 +81,9 @@ struct Submission {
     std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>> shaders;
     std::map<std::size_t, std::shared_ptr<IFlipRequest>> flips;
     std::map<std::size_t, std::shared_ptr<IRenderingWait>> renderingWaits;
+    // Indirect register lists (SET_*_REG_INDIRECT) read when their command buffer is submitted
+    // (upstream de651c62): titles reuse the list memory once the submit returns.
+    std::map<std::size_t, std::vector<std::uint32_t>> registerLists;
     bool suspend = false;
     std::size_t cursor = 0;
     bool started = false;
@@ -160,6 +163,7 @@ public:
         }
         submission.copied = FrameTiming::Clock::now();
         validate(submission.commands, queue);
+        readRegisterLists(submission, 0, submission.commands.size());
         submission.validated = FrameTiming::Clock::now();
         {
             std::lock_guard lock(mutex);
@@ -787,13 +791,34 @@ private:
         };
         shift(submission.flips);
         shift(submission.renderingWaits);
+        shift(submission.registerLists);
         auto& commands = submission.commands;
         const auto tail = chain ? commands.end() : commands.begin() + static_cast<std::ptrdiff_t>(after);
         commands.erase(commands.begin() + static_cast<std::ptrdiff_t>(cursor), tail);
         commands.insert(commands.begin() + static_cast<std::ptrdiff_t>(cursor), nested.begin(), nested.end());
+        readRegisterLists(submission, cursor, cursor + nested.size());
         // Flips in nested buffers are known only now, so they are reserved when reached.
         std::lock_guard lock(mutex);
         registerDisplayPackets(submission, cursor, cursor + nested.size());
+    }
+
+    // Reads the lists of the indirect register packets in [begin, end). A list that cannot be read
+    // now (libSceAgc emits null lists for titles that only measure packet sizes) is read, and fails,
+    // when its packet executes, as before.
+    static void readRegisterLists(Submission& submission, std::size_t begin, std::size_t end) {
+        const std::span<const std::uint32_t> commands(submission.commands);
+        for (auto cursor = begin; cursor < end && cursor < commands.size();) {
+            const auto header = commands[cursor];
+            const auto count = static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2;
+            if (Pm4::IndirectRegisterOpcode((header >> 8u) & 0xffu) && count == 5) {
+                try {
+                    submission.registerLists.insert_or_assign(cursor, Pm4::ReadIndirectRegisters(commands.subspan(cursor, count)));
+                } catch (const std::exception&) {
+                    submission.registerLists.erase(cursor);
+                }
+            }
+            cursor += count;
+        }
     }
 
     static void validate(std::span<const std::uint32_t> commands, std::uint32_t queue) {
@@ -854,7 +879,7 @@ private:
         for (std::uint32_t i = 0; i < userCount; ++i) {
             userData.push_back(queue.shader.userData(0x240 + i));
         }
-        auto compute = Graphics::DecodeComputeStageInfo(queue.shader);
+        auto compute = Graphics::DecodeComputeStageInfo(queue.shader, snapshot.header);
         // USE_THREAD_DIMENSIONS (direct dispatches only, Pm4::Validate): the packet counts threads.
         // The host launches whole groups; a size that is no whole number of groups compiles the
         // partial-group variant, which retires the threads past it.
@@ -1025,7 +1050,7 @@ private:
             // The translated mesh program fetches indices through a V# in hidden user words 4-7.
             auto& words = programs.front().userData;
             require(programs.front().firstUserSgpr == 0 && words.size() >= ShaderRecompiler::MeshIndexBufferUserWord + 4, "mesh program lacks the hidden user words");
-            const auto descriptor = Graphics::MeshIndexBufferDescriptor(drawParameters, programs.front().binary.codeAddress);
+            const auto descriptor = Graphics::MeshIndexBufferDescriptor(drawParameters);
             std::copy(descriptor.begin(), descriptor.end(), words.begin() + ShaderRecompiler::MeshIndexBufferUserWord);
         } else {
             append(0xc8, 2, Stage::Vertex, 0x8b, 0x8c, Role::Main);
@@ -1469,7 +1494,9 @@ private:
                     Completion completion;
                     completion.release.assign(packet.begin(), packet.end());
                     completion.eventQueue = static_cast<int>(submission.queue);
-                    if (((packet[2] >> 24u) & 7u) != 0) completion.interrupt = packet[7];
+                    // INT_SEL 3 (send data after write confirm) raises no interrupt (upstream 9e4e3a89).
+                    const auto interruptSelect = (packet[2] >> 24u) & 7u;
+                    if (interruptSelect != 0 && interruptSelect != 3) completion.interrupt = packet[7];
                     completion.received = submission.received;
                     completion.deferredAt = std::chrono::steady_clock::now();
                     if (TraceRelease()) std::fprintf(stderr, "[agc-release] queued serial=%llu queue=0x%x label=0x%llx data=0x%08x%08x select=%u interrupt=%u context=0x%x\n", static_cast<unsigned long long>(submission.serial), static_cast<unsigned>(submission.queue), static_cast<unsigned long long>(packet[3] | (static_cast<std::uint64_t>(packet[4]) << 32u)), packet[6], packet[5], packet[2] >> 29u, (packet[2] >> 24u) & 7u, packet[7]);
@@ -1598,7 +1625,9 @@ private:
                         return names;
                     }();
                     const GuestMemory::AccessSite accessSite(siteNames[opcode].c_str());
-                    withContext([&] { Pm4::Execute(packet, queue); });
+                    const auto registerList = Pm4::IndirectRegisterOpcode(opcode) ? submission.registerLists.find(cursor) : submission.registerLists.end();
+                    if (registerList != submission.registerLists.end()) withContext([&] { Pm4::ExecuteIndirectRegisters(packet, registerList->second, queue); });
+                    else withContext([&] { Pm4::Execute(packet, queue); });
                     timing.Mark("pm4_execute");
                 }
             }

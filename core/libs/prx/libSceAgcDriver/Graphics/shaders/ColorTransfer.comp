@@ -46,6 +46,17 @@ uint standardOffset(uint x, uint y, uint elementBytes) {
     }
 }
 
+// The SW_64KB_S bits above the 4 KiB standard offset (ColorTargetLayout.cpp).
+uint standard64Extra(uint x, uint y, uint elementBytes) {
+    switch (elementBytes) {
+        case 1u: return ((x << 7u) & 0x2000u) ^ ((x << 8u) & 0x8000u) ^ ((y << 6u) & 0x1000u) ^ ((y << 7u) & 0x4000u);
+        case 2u: return ((x << 7u) & 0x2000u) ^ ((x << 8u) & 0x8000u) ^ ((y << 7u) & 0x1000u) ^ ((y << 8u) & 0x4000u);
+        case 4u: return ((x << 8u) & 0x2000u) ^ ((x << 9u) & 0x8000u) ^ ((y << 7u) & 0x1000u) ^ ((y << 8u) & 0x4000u);
+        case 8u: return ((x << 8u) & 0x2000u) ^ ((x << 9u) & 0x8000u) ^ ((y << 8u) & 0x1000u) ^ ((y << 9u) & 0x4000u);
+        default: return ((x << 9u) & 0x2000u) ^ ((x << 10u) & 0x8000u) ^ ((y << 8u) & 0x1000u) ^ ((y << 9u) & 0x4000u);
+    }
+}
+
 uint readByteWord(bool fromLinear, uint byteOffset) {
     return fromLinear ? linear[byteOffset >> 2u] : tiled[byteOffset >> 2u];
 }
@@ -76,9 +87,17 @@ void main() {
     // A linear surface's rows are padded to 256 bytes (ColorTargetLayout).
     uint tiledByte = (y * parameters.blocksPerRow + x) * elementBytes;
     bool standard = (parameters.mode & 16u) != 0u;
+    bool standard64 = (parameters.mode & 32u) != 0u;
     if ((parameters.mode & 8u) != 0u) {
         // A mip-tail level: one tile block, addressed from the level's origin inside it.
-        tiledByte = standard ? standardOffset(x + parameters.tailX, y + parameters.tailY, elementBytes) & 0xfffu : renderTargetOffset(x + parameters.tailX, y + parameters.tailY, elementBytes) & 0xffffu;
+        uint tailX = x + parameters.tailX;
+        uint tailY = y + parameters.tailY;
+        tiledByte = standard ? standardOffset(tailX, tailY, elementBytes) & 0xfffu : standard64 ? (standardOffset(tailX, tailY, elementBytes) ^ standard64Extra(tailX, tailY, elementBytes)) & 0xffffu : renderTargetOffset(tailX, tailY, elementBytes) & 0xffffu;
+    } else if (standard64) {
+        // 64 KiB standard blocks: 256x256, 256x128, 128x128, 128x64 or 64x64 elements.
+        uint blockWidth = elementBytes <= 2u ? 256u : (elementBytes <= 8u ? 128u : 64u);
+        uint blockHeight = 65536u / (blockWidth * elementBytes);
+        tiledByte = ((y / blockHeight) * parameters.blocksPerRow + x / blockWidth) * 65536u + ((standardOffset(x, y, elementBytes) ^ standard64Extra(x, y, elementBytes)) & 0xffffu);
     } else if (standard) {
         // 4 KiB blocks: 64x64, 64x32, 32x32, 32x16 or 16x16 elements.
         uint blockWidth = elementBytes <= 2u ? 64u : (elementBytes <= 8u ? 32u : 16u);

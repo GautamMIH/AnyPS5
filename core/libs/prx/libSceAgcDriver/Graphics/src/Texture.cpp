@@ -237,13 +237,14 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
                     }
                 }
             } else if (thick) {
-                // Thick blocks span slices, which the 2D detile shader cannot address.
+                // Thick blocks span slices, which the 2D detile shader cannot address. Block-compressed
+                // volumes are laid out in their blocks (upstream 2191d603): mip widths count elements.
                 const auto& mip = mips.front();
                 auto destination = linear.Bytes();
                 for (std::uint32_t z = 0; z < arrayLayers; ++z) {
                     for (std::uint32_t y = 0; y < mip.height; ++y) {
                         for (std::uint32_t x = 0; x < mip.width; ++x) {
-                            const auto source = ThickVolumeOffset(descriptor.tileMode, elementBytes, descriptor.width, descriptor.height, x, y, z);
+                            const auto source = ThickVolumeOffset(descriptor.tileMode, elementBytes, mip.width, mip.height, x, y, z);
                             std::memcpy(destination.data() + z * sliceLinearBytes + mip.linearOffset + (static_cast<std::size_t>(y) * mip.width + x) * elementBytes, snapshot.data() + source, elementBytes);
                         }
                     }

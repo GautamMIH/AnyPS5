@@ -9,6 +9,9 @@
 
 static constexpr int NP_ERROR_INVALID_ARGUMENT = static_cast<int>(0x80550003);
 static constexpr int NP_ERROR_SIGNED_OUT = static_cast<int>(0x80550006);
+
+// PSN is not emulated: the user is reported as signed out and online queries fail.
+static constexpr int SCE_NP_ERROR_CALLBACK_NOT_REGISTERED = static_cast<int>(0x80550009);
 static constexpr uint32_t NP_STATE_SIGNED_OUT = 1;
 static constexpr uint32_t NP_REACHABILITY_STATE_UNAVAILABLE = 0;
 static constexpr int NP_ERROR_CALLBACK_ALREADY_REGISTERED = static_cast<int>(0x80550008);
@@ -32,6 +35,12 @@ std::vector<StateCallback> stateCallbacks;
 // Requests carry no state offline: every request finishes at once with the signed-out error.
 std::atomic<int> nextRequest{1};
 
+}
+
+namespace {
+std::mutex reachabilityMutex;
+void* reachabilityCallback = nullptr;
+void* reachabilityUserdata = nullptr;
 }
 
 extern "C" {
@@ -173,9 +182,19 @@ void APS5_VABI sceNpRegisterGamePresenceCallback(void* callback, void* userdata)
 }
 
 int APS5_VABI sceNpRegisterNpReachabilityStateCallback(void* callback, void* userdata) {
-    (void)userdata;
-    // The signed-out state never changes, so registered callbacks never fire.
     if (!callback) return NP_ERROR_INVALID_ARGUMENT;
+    std::lock_guard lock(reachabilityMutex);
+    if (reachabilityCallback) return NP_ERROR_CALLBACK_ALREADY_REGISTERED;
+    reachabilityCallback = callback;
+    reachabilityUserdata = userdata;
+    return 0;
+}
+
+int APS5_VABI sceNpUnregisterNpReachabilityStateCallback(void) {
+    std::lock_guard lock(reachabilityMutex);
+    if (!reachabilityCallback) return SCE_NP_ERROR_CALLBACK_NOT_REGISTERED;
+    reachabilityCallback = nullptr;
+    reachabilityUserdata = nullptr;
     return 0;
 }
 

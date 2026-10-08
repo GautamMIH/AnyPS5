@@ -504,7 +504,11 @@ int APS5_VABI sceKernelAddAmprSystemEvent(KernelEqueue eq, int id, void* udata) 
 }
 
 int APS5_VABI sceKernelDeleteAmprEvent(KernelEqueue eq, int id) {
-    return EqueueDeleteEvent_nid_postfix(eq, static_cast<uintptr_t>(id), EVFILT_AMPR);
+    if (eq == 0) {
+        return EQUEUE_OK;
+    }
+    EqueueDeleteEvent_nid_postfix(eq, static_cast<uintptr_t>(id), EVFILT_AMPR);
+    return EQUEUE_OK;
 }
 
 int APS5_VABI sceKernelDeleteAmprSystemEvent(KernelEqueue eq, int id) {

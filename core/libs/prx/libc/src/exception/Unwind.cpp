@@ -7,13 +7,19 @@
 #ifdef _WIN32
 #include <windows.h>
 #endif
+#ifdef __APPLE__
+#include <dlfcn.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
+#endif
 
-#if defined(__linux__) || defined(_WIN32)
+#if defined(__linux__) || defined(_WIN32) || defined(__APPLE__)
 
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
+extern "C" _Unwind_Reason_Code __gcc_personality_v0(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
 
 namespace LibcUnwind {
-bool OwnPersonality(Word personality) {
+Word ResolvePersonality(Word personality) {
 #ifdef _WIN32
     const auto* code = reinterpret_cast<const Byte*>(personality);
     if (code[0] == 0xff && code[1] == 0x25) {
@@ -22,14 +28,27 @@ bool OwnPersonality(Word personality) {
         std::memcpy(&personality, code + 6 + displacement, sizeof(personality));
     }
 #endif
-    if (personality == reinterpret_cast<Word>(__gxx_personality_v0_nid_postfix)) return true;
-    // This library's own frames reference its host-name personality (see Personality.cpp).
-    if (personality == reinterpret_cast<Word>(__gxx_personality_v0)) return true;
-    return false;
+    return personality;
+}
+
+// This library's own frames reference its host-name personalities (see Personality.cpp).
+bool OwnPersonality(Word personality) {
+    personality = ResolvePersonality(personality);
+    return personality == reinterpret_cast<Word>(__gxx_personality_v0_nid_postfix) || personality == reinterpret_cast<Word>(__gxx_personality_v0) ||
+           personality == reinterpret_cast<Word>(__gcc_personality_v0_nid_postfix) || personality == reinterpret_cast<Word>(__gcc_personality_v0);
+}
+
+_Unwind_Reason_Code CallPersonality(Word personality, _Unwind_Action actions, _Unwind_Exception* exception, _Unwind_Context* context) {
+    personality = ResolvePersonality(personality);
+    if (personality == reinterpret_cast<Word>(__gxx_personality_v0_nid_postfix) || personality == reinterpret_cast<Word>(__gxx_personality_v0))
+        return __gxx_personality_v0_nid_postfix(1, actions, exception->exception_class, exception, context);
+    if (personality == reinterpret_cast<Word>(__gcc_personality_v0_nid_postfix) || personality == reinterpret_cast<Word>(__gcc_personality_v0))
+        return __gcc_personality_v0_nid_postfix(1, actions, exception->exception_class, exception, context);
+    return (actions & _UA_SEARCH_PHASE) ? _URC_FATAL_PHASE1_ERROR : _URC_FATAL_PHASE2_ERROR;
 }
 struct Lookup { Word pc; const Byte* fde {}; Word text {}; Word data {}; };
 
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
 int FindFrame(dl_phdr_info* info, std::size_t, void* argument) {
     auto& query = *static_cast<Lookup*>(argument);
     const Byte* header = nullptr;
@@ -139,8 +158,32 @@ bool DecodeCandidate(_Unwind_Context& context, Frame& frame, const Lookup& query
 
 bool DecodeFrame(_Unwind_Context& context, Frame& frame) {
     Lookup query {context.registers[16] - !context.signalFrame};
-#ifdef __linux__
+#if defined(__linux__) || defined(__APPLE__)
     dl_iterate_phdr(FindFrame, &query);
+#ifdef __APPLE__
+    if (!query.fde) {
+        Dl_info image {};
+        if (!dladdr(reinterpret_cast<void*>(query.pc), &image) || !image.dli_fbase) return false;
+        unsigned long size = 0;
+        const Byte* p = getsectiondata(static_cast<const mach_header_64*>(image.dli_fbase), "__TEXT", "__eh_frame", &size);
+        if (!p) return false;
+        const Byte* end = p + size;
+        while (end - p >= 8) {
+            const Byte* record = p;
+            const auto length = Read<std::uint32_t>(p);
+            if (length == 0) return false;
+            if (length == 0xffffffff || length < 4 || Word(end - p) < length) return false;
+            const Byte* next = p + length;
+            if (Read<std::uint32_t>(p)) {
+                query.fde = record;
+                frame = {};
+                if (DecodeCandidate(context, frame, query)) return true;
+            }
+            p = next;
+        }
+        return false;
+    }
+#endif
     return DecodeCandidate(context, frame, query);
 #else
     MEMORY_BASIC_INFORMATION memory{};
@@ -392,8 +435,7 @@ _Unwind_Reason_Code PhaseTwo(_Unwind_Context context, _Unwind_Exception* excepti
                 if (result != _URC_NO_REASON) return result;
             } else if (context.cfa == exception->private_2) actions = _Unwind_Action(actions | _UA_HANDLER_FRAME);
             if (frame.personality) {
-                if (!OwnPersonality(frame.personality)) return _URC_FATAL_PHASE2_ERROR;
-                auto result = __gxx_personality_v0_nid_postfix(1, actions, exception->exception_class, exception, &context);
+                auto result = CallPersonality(frame.personality, actions, exception, &context);
                 if (result == _URC_INSTALL_CONTEXT) LibcRestoreRegisters(context.registers);
                 if (result != _URC_CONTINUE_UNWIND) return _URC_FATAL_PHASE2_ERROR;
             }
@@ -446,7 +488,7 @@ _Unwind_Reason_Code APS5_VABI _Unwind_RaiseException_nid_postfix(_Unwind_Excepti
                 LibcUnwind::Trace("foreign-personality", context, &frame);
                 return _URC_FATAL_PHASE1_ERROR;
             }
-            auto result = __gxx_personality_v0_nid_postfix(1, _UA_SEARCH_PHASE, exception->exception_class, exception, &context);
+            auto result = LibcUnwind::CallPersonality(frame.personality, _UA_SEARCH_PHASE, exception, &context);
             LibcUnwind::Trace("search", context, &frame, result);
             if (result == _URC_HANDLER_FOUND) {
                 exception->private_2 = context.cfa;

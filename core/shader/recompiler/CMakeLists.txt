@@ -204,6 +204,10 @@ function(add_shader_recompiler target runtimeTarget)
     set(shaderCacheExtra "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} ${CMAKE_BUILD_TYPE} spirv-tools=${ANYPS5_ENABLE_SPIRV_TOOLS} ${CMAKE_SYSTEM_PROCESSOR} flags=${CMAKE_CXX_FLAGS} ${CMAKE_CXX_FLAGS_${shaderCacheBuildType}}")
     set(shaderCacheReviewedNames
             BuildRectListShaders
+            # This branch's driver: BufferViewMisalignment follows the target's
+            # storageBufferOffsetAlignment (keyed); RecompileCacheKey::BuildContext only keys the
+            # driver's capture memo; SpliceGeometryHalves rewrites guest code that the request carries.
+            BufferViewMisalignment
             CaptureResources
             DebugProbeActive
             DepthBitsTextureWidth
@@ -212,12 +216,14 @@ function(add_shader_recompiler target runtimeTarget)
             PixelInputBit
             ReadWholeFile
             Recompile
+            RecompileCacheKey::BuildContext
             RecompileCacheKey::ContextHash
             RecompileResult
             ResolveSource
             ResourceMaterializer::SpecializationNanoseconds
             SetDebugProbeActive
             ShaderCacheDirectory
+            SpliceGeometryHalves
             SrgbDecodeBit
             SrgbUnormFormat
             ThreadOwned

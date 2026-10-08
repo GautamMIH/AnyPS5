@@ -67,6 +67,7 @@ std::string makeKey(const Context& context, const State& state, const ShaderReso
     append(key, state.primitiveRestart);
     append(key, state.negativeOneToOne);
     append(key, state.depthClamp);
+    append(key, state.conservativeRasterization);
     append(key, state.cullMode);
     append(key, state.frontFace);
     for (std::uint32_t slot = 0; slot < state.ColorSlotCount(); ++slot) {

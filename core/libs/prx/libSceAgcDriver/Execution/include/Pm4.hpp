@@ -54,6 +54,9 @@ std::string Name(std::uint32_t header);
 std::string_view UnsupportedReason(std::uint32_t header);
 void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue);
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue);
+inline bool IndirectRegisterOpcode(std::uint32_t opcode) { return opcode == 0x63 || opcode == 0x64 || opcode == 0x9f; }
+std::vector<std::uint32_t> ReadIndirectRegisters(std::span<const std::uint32_t> packet);
+void ExecuteIndirectRegisters(std::span<const std::uint32_t> packet, std::span<const std::uint32_t> pairs, QueueState& queue);
 bool AccessesMemory(std::uint32_t header);
 // Evaluates a memory WAIT_REG_MEM (32- or 64-bit) against current guest memory.
 bool WaitSatisfied(std::span<const std::uint32_t> packet);

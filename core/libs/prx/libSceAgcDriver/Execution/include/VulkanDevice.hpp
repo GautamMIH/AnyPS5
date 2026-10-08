@@ -56,6 +56,7 @@ public:
     bool PrimitiveListRestart() const;
     // VK_EXT_sampler_filter_minmax: min and max sampler reduction modes (S# FILTER_MODE 1 and 2).
     bool SamplerFilterMinmax() const;
+    bool ConservativeRasterization() const;
     void PresentClear(std::uint32_t width, std::uint32_t height, bool opaque);
     void PresentPixels(std::uint32_t width, std::uint32_t height, std::span<const std::byte> pixels);
     void PresentDisplayBuffer(const DisplayBuffer& buffer);

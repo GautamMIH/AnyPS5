@@ -9,6 +9,7 @@
 #include <cstring>
 #include <utility>
 #include <cerrno>
+#include <cstring>
 
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
@@ -20,6 +21,10 @@ static std::string NativeFileMode(const char* mode) {
     if (!result.empty() && result.find('b') == std::string::npos) result.insert(1, 1, 'b');
 #endif
     return result;
+}
+
+static bool WritesFile(const char* mode) {
+    return std::strpbrk(mode, "wa+") != nullptr;
 }
 
 extern "C" {
@@ -59,7 +64,10 @@ FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode
     if (!valid) { errno = 22; return nullptr; }
     try {
         const auto path = *filename ? ResolvePath_nid_no_patch(filename).string() : std::string{};
-        if (stream->Reopen(path.c_str(), NativeFileMode(mode).c_str())) return stream;
+        if (stream->Reopen(path.c_str(), NativeFileMode(mode).c_str())) {
+            if (!path.empty() && WritesFile(mode)) RecordWrittenPath_nid_no_patch(path);
+            return stream;
+        }
         const int error = errno;
         if (stream->IsDynamic()) delete stream;
         errno = error;
@@ -73,9 +81,11 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
     // errno set; the guest decides whether that is fatal.
     if (!filename || !mode) { errno = 22; return nullptr; }
     try {
-        const auto abs_path = ResolvePath_nid_no_patch(filename).string();
+        const std::filesystem::path fpath = ResolvePath_nid_no_patch(filename);
+        const auto abs_path = fpath.string();
         std::unique_ptr<std::FILE, decltype(&std::fclose)> handle(std::fopen(abs_path.c_str(), NativeFileMode(mode).c_str()), std::fclose);
         if (!handle) return nullptr;
+        if (WritesFile(mode)) RecordWrittenPath_nid_no_patch(fpath);
         auto stream = std::make_unique<FileStream>(handle.get(), true);
         handle.release();
         return stream.release();

@@ -34,7 +34,7 @@ void expectFailure(TAction action, const char* text) {
         check(std::string(error.what()).find(text) != std::string::npos, error.what());
         return;
     }
-    throw std::runtime_error("expected PM4 rejection");
+    throw std::runtime_error(std::string("expected PM4 rejection: ") + text);
 }
 
 std::vector<std::uint32_t> makePacket(std::uint32_t opcode, std::initializer_list<std::uint32_t> payload, std::uint32_t flags = 0) {
@@ -404,6 +404,15 @@ void testCopies() {
     check(destination[0] == 11 && destination[1] == 12 && destination[2] == 0, "64-bit COPY_DATA failed");
     execute(state, makePacket(0x40, {0x105, 0x12345678, 0, low(destination.data()), high(destination.data())}));
     check(destination[0] == 0x12345678, "immediate COPY_DATA failed");
+    alignas(8) std::array<std::uint64_t, 2> clock{};
+    const auto clockCopy = [&](std::uint64_t* target) { return makePacket(0x40, {0x06016209, 0, 0, low(target), high(target)}); };
+    execute(state, clockCopy(&clock[0]));
+    execute(state, clockCopy(&clock[1]));
+    check(clock[0] != 0 && clock[1] >= clock[0], "GPU clock COPY_DATA failed");
+    alignas(8) std::array<std::uint32_t, 2> clock32{0, 0xdeadbeef};
+    execute(state, makePacket(0x40, {0x06006209, 0, 0, low(clock32.data()), high(clock32.data())}));
+    check(clock32[0] != 0 && clock32[1] == 0xdeadbeef, "32-bit GPU clock COPY_DATA did not write only the low half");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x40, {0x1020a, 0, 0, low(&clock[0]), high(&clock[0])}), 0); }, "reference-clock");
     execute(state, makePacket(0x50, {0x60000000, low(source.data()), high(source.data()), low(destination.data()), high(destination.data()), 16}));
     check(source == destination, "DMA_DATA copy failed");
     execute(state, makePacket(0x50, {0x40000000, 0x44332211, 0, low(destination.data()), high(destination.data()), 6}));
@@ -657,6 +666,44 @@ void testDriverSubmission() {
     check(destination[0] == 0, "rejected submission executed a prefix");
 }
 
+std::vector<std::uint32_t> joinPackets(std::initializer_list<std::vector<std::uint32_t>> packets) {
+    std::vector<std::uint32_t> words;
+    for (const auto& packet : packets) words.insert(words.end(), packet.begin(), packet.end());
+    return words;
+}
+
+std::vector<std::uint32_t> writeWord(std::uint32_t& target, std::uint32_t value) {
+    return makePacket(0x37, {0x00100200, low(&target), high(&target), value});
+}
+
+std::vector<std::uint32_t> conditional(const std::uint32_t& condition, std::uint32_t words, std::uint32_t control = 0) {
+    return makePacket(0x22, {low(&condition), high(&condition), control, words});
+}
+
+std::vector<std::uint32_t> indirectBuffer(const std::vector<std::uint32_t>& target, bool chain = false) {
+    return makePacket(0x3f, {low(target.data()), high(target.data()), static_cast<std::uint32_t>(target.size()) | (chain ? 1u << 20u : 0u)});
+}
+
+void submitWords(std::vector<std::uint32_t>& words, std::uint32_t queue = 0) {
+    Packet packet{words.data(), static_cast<std::uint32_t>(words.size()), 0, {}};
+    check((queue == 0 ? sceAgcDriverSubmitDcb(&packet) : sceAgcDriverSubmitAcb(queue, &packet)) == 0, "conditional submission failed");
+}
+
+void testRegisterListsReadAtSubmission() {
+    alignas(8) static std::uint32_t gate = 0;
+    static std::uint32_t done = 0;
+    static std::array<std::uint32_t, 2> registers{0x10, 74};
+    auto words = joinPackets({
+        makePacket(0x3c, {0x13, low(&gate), high(&gate), 1, 0xffffffffu, 0x19}),
+        makePacket(0x9f, {low(registers.data()), high(registers.data()), 0x80000000, 1}),
+        writeWord(done, 1)});
+    submitWords(words);
+    registers[0] = 0x3a888889;
+    std::atomic_ref<std::uint32_t>(gate).store(1);
+    AgcDriverWaitIdle_nid_postfix();
+    check(std::atomic_ref<std::uint32_t>(done).load() == 1, "register list rewritten after submission was read by the worker");
+}
+
 std::vector<std::uint32_t> condWrite(std::uint32_t control, const std::uint32_t& poll, std::uint32_t reference, std::uint32_t mask, std::uint32_t& target, std::uint32_t value) {
     return makePacket(0x45, {control, low(&poll), high(&poll), reference, mask, low(&target), high(&target), value});
 }
@@ -783,6 +830,7 @@ int main(int argc, char** argv) {
         testUnwrittenUserData();
         testDriverSubmission();
         testConditionalWriteSubmission();
+        testRegisterListsReadAtSubmission();
         LibcRunShutdown_nid_postfix();
         std::puts("PM4 catalog, registers, state, memory and submission tests passed");
         return 0;

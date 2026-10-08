@@ -95,8 +95,12 @@ DecodedColorFormat decodeColorFormat(std::uint32_t info) {
     // A one-component format stores the exported component COMP_SWAP names: R, G, B or A (an A8
     // target is COLOR_8 with SWAP_ALT_REV), as in upstream 2476bfd.
     const bool single = format == 1 || format == 2 || format == 4;
-    if (!single && (swap > 1 || (swap == 1 && format != 9 && format != 10))) return fail();
+    // 8_8_8_8 and 16_16_16_16 also take the reversed orders SWAP_STD_REV (A, B, G, R in attachment
+    // components 0-3) and SWAP_ALT_REV (A, R, G, B) (upstream 5b10200b, 9ebc907b).
+    const bool reversible = format == 10 || format == 12;
+    if (!single && (swap > 1 ? !reversible : swap == 1 && format != 9 && format != 10)) return fail();
     const bool alternate = swap == 1;
+    const auto reversed = static_cast<std::uint8_t>(swap == 2 ? 0x1bu : swap == 3 ? 0x93u : 0xe4u);
     const auto one = [&](VkFormat vkFormat, std::uint32_t bytes) { return DecodedColorFormat{vkFormat, bytes, static_cast<std::uint8_t>((0xe4u & ~3u) | swap)}; };
     switch (format) {
         case 1:
@@ -123,15 +127,15 @@ DecodedColorFormat decodeColorFormat(std::uint32_t info) {
         // COLOR_2_10_10_10 keeps red in the low bits, the Vulkan A2B10G10R10 packing.
         case 9: if (number == unorm) return {alternate ? VK_FORMAT_A2R10G10B10_UNORM_PACK32 : VK_FORMAT_A2B10G10R10_UNORM_PACK32, 4}; break;
         case 10:
-            if (number == unorm) return {alternate ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM, 4};
-            if (number == snorm) return {alternate ? VK_FORMAT_B8G8R8A8_SNORM : VK_FORMAT_R8G8B8A8_SNORM, 4};
-            if (number == srgb) return {alternate ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_R8G8B8A8_SRGB, 4};
+            if (number == unorm) return {alternate ? VK_FORMAT_B8G8R8A8_UNORM : VK_FORMAT_R8G8B8A8_UNORM, 4, reversed};
+            if (number == snorm) return {alternate ? VK_FORMAT_B8G8R8A8_SNORM : VK_FORMAT_R8G8B8A8_SNORM, 4, reversed};
+            if (number == srgb) return {alternate ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_R8G8B8A8_SRGB, 4, reversed};
             break;
         case 11: if (number == floating) return {VK_FORMAT_R32G32_SFLOAT, 8}; break;
         case 12:
-            if (number == floating) return {VK_FORMAT_R16G16B16A16_SFLOAT, 8};
-            if (number == unorm) return {VK_FORMAT_R16G16B16A16_UNORM, 8};
-            if (number == snorm) return {VK_FORMAT_R16G16B16A16_SNORM, 8};
+            if (number == floating) return {VK_FORMAT_R16G16B16A16_SFLOAT, 8, reversed};
+            if (number == unorm) return {VK_FORMAT_R16G16B16A16_UNORM, 8, reversed};
+            if (number == snorm) return {VK_FORMAT_R16G16B16A16_SNORM, 8, reversed};
             break;
         case 14: if (number == floating) return {VK_FORMAT_R32G32B32A32_SFLOAT, 16}; break;
         default: break;
@@ -329,6 +333,81 @@ void decodeDepth(const Registers& cx, State& result) {
     }
 }
 
+void requireConservativeTriangles(bool triangles, const char* primitive, const char* source, std::uint32_t value) {
+    if (triangles) return;
+    std::ostringstream message;
+    message << "AGC graphics: conservative rasterization of " << primitive << " is unsupported (" << source << "=0x" << std::hex << value << "): only triangles are overestimated";
+    throw std::runtime_error(message.str());
+}
+
+// PA_SC_CONSERVATIVE_RASTERIZATION_CNTL (upstream 29c22442): 0x6000 is off and 0x6001 overestimates
+// triangles (VK_EXT_conservative_rasterization; the pipeline rejects it on a device without it).
+VkConservativeRasterizationModeEXT decodeConservativeRasterization(const QueueState& queue) {
+    const auto& cx = queue.context;
+    const auto control = read(cx, 0x313);
+    if (control == 0x6000u) return VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
+    if (control != 0x6001u) {
+        std::ostringstream message;
+        message << "AGC graphics: PA_SC_CONSERVATIVE_RASTERIZATION_CNTL=0x" << std::hex << control << ": only 0x6000 (off) and 0x6001 (overestimation) are supported";
+        throw std::runtime_error(message.str());
+    }
+    const auto stages = read(cx, 0x2d5);
+    if ((stages & 0x20u) != 0) {
+        const auto output = read(cx, 0x29b);
+        const auto type = output & 0x3fu;
+        const bool perStream = (output & 0x80000000u) != 0;
+        requireConservativeTriangles(!perStream && type == 2u, perStream ? "per-stream primitive types" : type == 0u ? "points" : type == 1u ? "lines" : "other primitive types", "VGT_GS_OUT_PRIM_TYPE", output);
+    } else if ((stages & 4u) != 0) {
+        const auto parameters = read(cx, 0x2db);
+        const auto domain = parameters & 3u;
+        const auto topology = (parameters >> 5u) & 7u;
+        requireConservativeTriangles((domain == 1u || domain == 2u) && (topology == 2u || topology == 3u), topology == 0u ? "points" : topology == 1u || domain == 0u ? "lines" : "other primitive types", "VGT_TF_PARAM", parameters);
+    } else {
+        const auto primitive = read(queue.userConfig, 0x242, "user-config");
+        requireConservativeTriangles(primitive == 4u || primitive == 5u || primitive == 6u, primitive == 1u ? "points" : primitive == 2u || primitive == 3u ? "lines" : primitive == 7u || primitive == 17u ? "rectangles" : "other primitive types", "VGT_PRIMITIVE_TYPE", primitive);
+    }
+    Require((read(cx, 0x1b3) & 0x44u) == 0, "conservative rasterization with centroid interpolation is unsupported");
+    return VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT;
+}
+
+// DB_SHADER_CONTROL bits that make the pixel stage run without colour or depth output: KILL_ENABLE,
+// EXEC_ON_HIER_FAIL, EXEC_ON_NOOP, EXEC_IF_OVERLAPPED and the export enables (upstream 98405e8f).
+constexpr std::uint32_t PixelStageRunsMask = 0x00020747u;
+
+// A bound pixel program the hardware never launches: no colour is written, no depth, stencil or mask
+// is exported and nothing forces the stage to run (a depth-only pass with a stale PS address).
+bool pixelStageInert(const Registers& cx) {
+    const auto targetMask = cx.find(0x8e);
+    const auto shaderMask = cx.find(0x8f);
+    const auto zFormat = cx.find(0x1c4);
+    const auto shaderControl = cx.find(0x203);
+    if (targetMask == cx.end() || shaderMask == cx.end() || zFormat == cx.end() || shaderControl == cx.end()) return false;
+    return (targetMask->second & shaderMask->second) == 0 && zFormat->second == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
+}
+
+}
+
+std::string DepthMaintenanceRejection(const QueueState& queue) {
+    // DB_RENDER_CONTROL depth copy, resummarize or decompress passes are rejected before any shader
+    // is compiled, whether or not depth is active (upstream f2fe3f71).
+    const auto control = queue.context.find(0x000);
+    if (control == queue.context.end() || (control->second & ~0x2063u) == 0) return {};
+    std::ostringstream message;
+    message << "AGC graphics: DB_RENDER_CONTROL depth copy, resummarize or decompress is unsupported (context register 0x0 = 0x" << std::hex << control->second << ")";
+    return message.str();
+}
+
+std::uint32_t ColorWriteMask(const Registers& context) {
+    // Components both CB_TARGET_MASK and CB_SHADER_MASK enable, without the slots whose CB_COLOR_INFO
+    // format is INVALID: the colour block writes nothing there (upstream 1841f3c6).
+    auto mask = read(context, 0x8e) & read(context, 0x8f);
+    for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
+        const auto channels = 0xfu << (slot * 4u);
+        if ((mask & channels) == 0) continue;
+        const auto info = context.find(0x31c + slot * 0xfu);
+        if (info != context.end() && ((info->second >> 2u) & 0x1fu) == 0) mask &= ~channels;
+    }
+    return mask;
 }
 
 ShaderStages DecodeShaderStages(const QueueState& queue) {
@@ -351,7 +430,8 @@ ShaderStages DecodeShaderStages(const QueueState& queue) {
     ShaderStages result{path, value, (value & 0x00400000u) != 0 ? 32u : 64u, (read(queue.context, 0x1b6) & 0x8000u) != 0 ? 32u : 64u, {}, {}};
     if (path == ShaderPath::Vertex) {
         validate((value & 0x2000u) != 0, "legacy vertex routing without PRIMGEN_EN is unsupported");
-        validate((value & ~0x02402010u) == 0, "unsupported vertex routing, scheduling or wave-ID state");
+        // MAX_PRIMGRP_IN_WAVE (bits 15-18) only tunes wave packing (upstream 831ba5d2).
+        validate((value & ~0x0247a010u) == 0, "unsupported vertex routing, scheduling or wave-ID state");
     } else if (path == ShaderPath::Tessellation) {
         validate((value & 0x00600020u) == 0, "wave32 tessellation or geometry amplification is unsupported");
         validate((value & ~0x0007ed0du) == 0 && (value & 3u) == 1u && ((value >> 3u) & 3u) == 1u, "unsupported tessellation routing");
@@ -387,8 +467,10 @@ ShaderStages DecodeShaderStages(const QueueState& queue) {
 }
 
 State DecodeState(const QueueState& queue) {
+    if (auto reason = DepthMaintenanceRejection(queue); !reason.empty()) throw std::runtime_error(reason);
     const auto& cx = queue.context;
     State result{};
+    result.conservativeRasterization = decodeConservativeRasterization(queue);
     result.stages = DecodeShaderStages(queue);
     const auto primitive = read(queue.userConfig, 0x242, "user-config");
     switch (primitive) {
@@ -424,10 +506,13 @@ State DecodeState(const QueueState& queue) {
         throw std::runtime_error(message.str());
     }
     // Z_EXPORT_ENABLE (bit 0): the pixel shader writes depth (recompiled to gl_FragDepth).
-    zero(cx, 0x203, ~0x00009871u, "stencil or mask export, shader coverage or ordered fragment execution");
+    // PRIMITIVE_ORDERED_PIXEL_SHADER (bit 16) runs the pixel shader under fragment shader interlock
+    // (upstream e1d4e699, DecodePixelStageInfo).
+    zero(cx, 0x203, ~0x00019871u, "stencil or mask export or shader coverage");
     zero(cx, 0x2dc, ~0x0001ff00u, "alpha-to-coverage");
     zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
-    zero(cx, 0x292, ~2u, "scan conversion mode");
+    // ALTERNATE_RBS_PER_TILE (bit 5) only distributes tiles between render backends (upstream 831ba5d2).
+    zero(cx, 0x292, ~0x22u, "scan conversion mode");
     // PA_SC_MODE_CNTL_1: walk order, hierarchical-Z kill, primitive discard and multi-GPU fields only
     // affect performance; in-order rasterization is a valid result of out-of-order mode, and sample
     // iteration equals pixel shading at the single sample count enforced above.
@@ -437,7 +522,6 @@ State DecodeState(const QueueState& queue) {
     Require(read(cx, 0x83) == 0xffffu, "clip rectangles are unsupported");
     Require((read(cx, 0x8c) & 0xfu) == 0xau, "nonstandard triangle edge rules are unsupported");
     Require(read(cx, 0x2f9) == 0x2du, "nonstandard pixel center or vertex quantization is unsupported");
-    Require(read(cx, 0x313) == 0x6000u, "conservative rasterization is unsupported");
     Require(read(cx, 0x30e) == 0xffffffffu && read(cx, 0x30f) == 0xffffffffu, "sample masks are unsupported");
     const auto viewportControl = read(cx, 0x206);
     if (viewportControl != 0x43fu) {
@@ -470,16 +554,22 @@ State DecodeState(const QueueState& queue) {
     const auto psLow = queue.shader.find(0x8);
     const auto psHigh = queue.shader.find(0x9);
     result.hasFragmentShader = (psLow != queue.shader.end() && psLow->second != 0) || (psHigh != queue.shader.end() && psHigh->second != 0);
+    // An inert pixel stage is not launched by the hardware: the draw runs without its program.
+    if (result.hasFragmentShader && pixelStageInert(cx)) result.hasFragmentShader = false;
     // CB_COLOR_CONTROL: MODE (bits 4-6) is NORMAL, or DISABLE for draws without color targets; copy ROP.
     // ELIMINATE_FAST_CLEAR (2) and DCC_DECOMPRESS (6) passes only rewrite the target's compression
     // metadata: fast-cleared pixels get the clear value and no shader output lands, so they need no
     // pixel shader. With surfaces kept uncompressed (DCC is not modelled), both resolve the fast
     // clear and nothing else.
-    const auto colorControl = read(cx, 0x202);
+    // DISABLE_DUAL_QUAD (bit 0) only tunes the render backends (upstream 831ba5d2).
+    const auto colorControl = read(cx, 0x202) & ~1u;
     const bool metadataPass = colorControl == 0xcc0020u || colorControl == 0xcc0060u;
+    // MODE DISABLE turns colour writes off whatever the ROP: the draw renders without colour
+    // (upstream 550920a1).
+    const bool colorDisabled = ((colorControl >> 4u) & 7u) == 0u;
     // The colour block writes a component only when both CB_TARGET_MASK and CB_SHADER_MASK enable it,
     // and only a pixel shader produces colour; a metadata pass works on the targets CB_TARGET_MASK enables.
-    const auto writeMask = metadataPass ? targetMask : result.hasFragmentShader ? targetMask & shaderMask : 0u;
+    const auto writeMask = metadataPass ? targetMask : result.hasFragmentShader && !colorDisabled ? ColorWriteMask(cx) : 0u;
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         if (((writeMask >> (4u * slot)) & 0xfu) != 0) result.colorTargetMask |= 1u << slot;
     }
@@ -497,7 +587,7 @@ State DecodeState(const QueueState& queue) {
         }
     }
     result.eliminateFastClear = metadataPass && result.HasColorTarget();
-    if (!(colorControl == 0xcc0010u || result.eliminateFastClear || (colorControl == 0xcc0000u && !result.HasColorTarget()))) {
+    if (!(colorControl == 0xcc0010u || result.eliminateFastClear || colorDisabled || ((colorControl & ~0x70u) == 0xcc0000u && !result.HasColorTarget()))) {
         std::ostringstream message;
         message << "AGC graphics: CB_COLOR_CONTROL=0x" << std::hex << colorControl << ": only normal color rendering, fast-clear elimination, DCC decompression, or disabled color without targets, with copy ROP, is supported";
         throw std::runtime_error(message.str());
@@ -566,7 +656,7 @@ State DecodeState(const QueueState& queue) {
         color.tileMode = DecodeColorTileMode(attrib3);
         // A volume in a standard swizzle uses thick blocks that interleave its slices (addrlib
         // IsThick; textures: IsThickVolume), which the slice-per-layer targets below do not model.
-        Require(((attrib3 >> 24u) & 3u) != 2u || color.tileMode != ColorTileMode::Standard4KB, "3D SW_4KB_S color targets (thick blocks) are not modelled");
+        Require(((attrib3 >> 24u) & 3u) != 2u || (color.tileMode != ColorTileMode::Standard4KB && color.tileMode != ColorTileMode::Standard64KB), "3D SW_4KB_S and SW_64KB_S color targets (thick blocks) are not modelled");
         color.extent = {((attrib2 >> 14u) & 0x3fffu) + 1u, (attrib2 & 0x3fffu) + 1u};
         color.surfaceExtent = color.extent;
         color.mipLevel = viewMip;
@@ -682,6 +772,7 @@ State DecodeState(const QueueState& queue) {
             if (((exportedMask >> ((mapping >> (2u * component)) & 3u)) & 1u) != 0) state.colorWriteMask |= 1u << component;
         }
         state.blendEnable = (blend >> 30u) & 1u;
+        if (state.blendEnable && (mapping == 0x1bu || mapping == 0x93u)) throw std::runtime_error("AGC graphics: blending into a color target with a reversed component order is not implemented");
         if (state.blendEnable) {
             Require((read(cx, 0x31c + 0xfu * slot) & 0x10000u) == 0, "blend bypass conflicts with enabled blending");
             state.srcColorBlendFactor = blendFactor(blend & 0x1fu);

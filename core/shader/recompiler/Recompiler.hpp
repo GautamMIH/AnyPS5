@@ -47,6 +47,7 @@ struct ShaderComputeStageInfo {
     // its size per axis, the last workgroup partial; zero otherwise. Variants key on whether it
     // is set only; the size reaches the shader as shader data.
     std::array<std::uint32_t, 3> partialThreads;
+    std::uint32_t scratchDwords = 0;
 
     [[nodiscard]] bool PartialGroups() const {
         return partialThreads != std::array<std::uint32_t, 3>{};
@@ -132,6 +133,7 @@ struct ShaderPixelStageInfo {
     bool earlyZ;
     bool executeOnNoop;
     ConservativeZExport conservativeZExport;
+    bool orderedPixelShader;
     std::array<std::uint8_t, 8> targetOutputMode;
     std::array<std::uint8_t, 8> targetExportMapping;
 };
@@ -211,6 +213,7 @@ struct SpirvTarget {
     std::uint32_t storageBufferOffsetAlignment = 0;
     bool nonConstantImageOffsets = false;
     std::uint32_t srgbDecodeFormats = 0;
+    bool narrowSubgroupClock = false;
 };
 
 // The bytes a guest buffer view starts before its V# base so that its descriptor offset meets the

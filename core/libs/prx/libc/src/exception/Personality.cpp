@@ -77,12 +77,49 @@ extern "C" _Unwind_Reason_Code APS5_VABI __gxx_personality_v0_nid_postfix(
     return _URC_CONTINUE_UNWIND;
 }
 
+extern "C" _Unwind_Reason_Code APS5_VABI __gcc_personality_v0_nid_postfix(
+    int version, _Unwind_Action actions, std::uint64_t,
+    _Unwind_Exception* exception, _Unwind_Context* context
+) {
+    using namespace LibcUnwind;
+    if (version != 1) return _URC_FATAL_PHASE1_ERROR;
+    if (!(actions & _UA_CLEANUP_PHASE) || !context->lsda) return _URC_CONTINUE_UNWIND;
+    const Byte* p = reinterpret_cast<const Byte*>(context->lsda);
+    Byte landingEncoding = *p++;
+    Word landingBase = landingEncoding == 255 ? context->region : Encoded(p, landingEncoding, context->dataBase, context->region, context->textBase);
+    if (*p++ != 255) Uleb(p);
+    Byte callEncoding = *p++;
+    Word length = Uleb(p);
+    const Byte* callEnd = p + length;
+    Word ip = context->registers[16] - !context->signalFrame;
+    while (p < callEnd) {
+        Word start = Encoded(p, callEncoding);
+        Word size = Encoded(p, callEncoding);
+        Word landing = Encoded(p, callEncoding);
+        Uleb(p);
+        if (ip < context->region + start || ip - context->region - start >= size) continue;
+        if (!landing) return _URC_CONTINUE_UNWIND;
+        context->registers[0] = reinterpret_cast<Word>(exception);
+        context->registers[1] = 0;
+        context->registers[16] = landingBase + landing;
+        return _URC_INSTALL_CONTEXT;
+    }
+    return _URC_CONTINUE_UNWIND;
+}
+
 #ifdef _WIN32
 extern "C" _Unwind_Reason_Code __gxx_personality_v0(
     int version, _Unwind_Action actions, std::uint64_t exceptionClass,
     _Unwind_Exception* exception, _Unwind_Context* context
 ) {
     return __gxx_personality_v0_nid_postfix(version, actions, exceptionClass, exception, context);
+}
+
+extern "C" _Unwind_Reason_Code __gcc_personality_v0(
+    int version, _Unwind_Action actions, std::uint64_t exceptionClass,
+    _Unwind_Exception* exception, _Unwind_Context* context
+) {
+    return __gcc_personality_v0_nid_postfix(version, actions, exceptionClass, exception, context);
 }
 #else
 // Every frame in this library shares one personality reference. The guest unwinder recognises this
@@ -96,6 +133,18 @@ extern "C" __attribute__((visibility("hidden"))) _Unwind_Reason_Code __gxx_perso
     using Personality = _Unwind_Reason_Code (*)(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
     static const auto host = reinterpret_cast<Personality>(dlsym(RTLD_DEFAULT, "__gxx_personality_v0"));
     if (host == nullptr || host == &__gxx_personality_v0) std::abort();
+    return host(version, actions, exceptionClass, exception, context);
+}
+
+// The C personality, likewise: guest frames dispatch to __gcc_personality_v0_nid_postfix, the host
+// unwinder reaches this body and is forwarded to the host runtime's.
+extern "C" __attribute__((visibility("hidden"))) _Unwind_Reason_Code __gcc_personality_v0(
+    int version, _Unwind_Action actions, std::uint64_t exceptionClass,
+    _Unwind_Exception* exception, _Unwind_Context* context
+) {
+    using Personality = _Unwind_Reason_Code (*)(int, _Unwind_Action, std::uint64_t, _Unwind_Exception*, _Unwind_Context*);
+    static const auto host = reinterpret_cast<Personality>(dlsym(RTLD_DEFAULT, "__gcc_personality_v0"));
+    if (host == nullptr || host == &__gcc_personality_v0) std::abort();
     return host(version, actions, exceptionClass, exception, context);
 }
 #endif

@@ -83,7 +83,7 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         computeStorage.groupId[1] = compute.groupIdEnable[1];
         computeStorage.groupId[2] = compute.groupIdEnable[2];
         computeStorage.tgSizeEn = compute.tgSizeEnable;
-        // Hardware loads the workgroup IDs (and TG_SIZE) into the SGPRs right after the user data.
+        computeStorage.scratchSizeDwords = compute.scratchDwords;
         computeStorage.partialGroups = compute.PartialGroups();
         computeStorage.workgroupRegister = static_cast<int>(context.userDataBaseRegister + context.userData.size());
         computeStorage.threadIdsNum = static_cast<int>(compute.threadIdComponentCount);
@@ -138,6 +138,7 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         pixelStorage.psEarlyZ = pixel.earlyZ;
         pixelStorage.psExecuteOnNoop = pixel.executeOnNoop;
         pixelStorage.psConservativeZExport = pixel.conservativeZExport;
+        pixelStorage.psOrderedPixelShader = pixel.orderedPixelShader;
         ShaderStageInputInfo result;
         result.pixel = &pixelStorage;
         return result;

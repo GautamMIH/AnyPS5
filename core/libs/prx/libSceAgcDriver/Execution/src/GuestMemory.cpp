@@ -19,8 +19,42 @@
 #include <windows.h>
 #else
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include <cerrno>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <fstream>
+#include <optional>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#if __has_include(<linux/fs.h>)
+#include <linux/fs.h>
+#endif
+#if !defined(PROCMAP_QUERY)
+struct procmap_query {
+    std::uint64_t size;
+    std::uint64_t query_flags;
+    std::uint64_t query_addr;
+    std::uint64_t vma_start;
+    std::uint64_t vma_end;
+    std::uint64_t vma_flags;
+    std::uint64_t vma_page_size;
+    std::uint64_t vma_offset;
+    std::uint64_t inode;
+    std::uint32_t dev_major;
+    std::uint32_t dev_minor;
+    std::uint32_t vma_name_size;
+    std::uint32_t build_id_size;
+    std::uint64_t vma_name_addr;
+    std::uint64_t build_id_addr;
+};
+static_assert(sizeof(procmap_query) == 104);
+enum : std::uint64_t {
+    PROCMAP_QUERY_VMA_READABLE = 0x01,
+    PROCMAP_QUERY_VMA_WRITABLE = 0x02,
+    PROCMAP_QUERY_COVERING_OR_NEXT_VMA = 0x10,
+};
+#define PROCMAP_QUERY _IOWR('f', 17, struct procmap_query)
+#endif
 #include <map>
 #include <mutex>
 #include <sstream>
@@ -82,6 +116,62 @@ std::string checkMappings(const std::vector<MappingEntry>& entries, std::uintptr
         cursor = std::min(end, it->last);
     }
     return cursor == end ? std::string() : std::string("guest address range is not mapped");
+}
+
+// Linux 6.11+ answers one VMA per PROCMAP_QUERY ioctl (upstream 3bea1154/18bc4b6d), so a range the
+// snapshot does not cover is checked without re-reading all of /proc/self/maps (~20 ms). The fd is
+// opened once; APS5_NO_PROCMAP_QUERY=1 forces the snapshot path.
+int procMapsQueryFd() {
+    static const int fd = [] {
+        if (std::getenv("APS5_NO_PROCMAP_QUERY") != nullptr) return -1;
+        const int opened = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+        if (opened < 0) return -1;
+        procmap_query probe{};
+        probe.size = sizeof(probe);
+        probe.query_flags = PROCMAP_QUERY_COVERING_OR_NEXT_VMA;
+        if (ioctl(opened, PROCMAP_QUERY, &probe) == 0 || errno == ENOENT) return opened;
+        close(opened);
+        return -1;
+    }();
+    return fd;
+}
+
+// The checkMappings verdict for [address, end) from PROCMAP_QUERY, or nullopt when the query is
+// unavailable or fails (a failed query is reported to the caller, which falls back to the snapshot).
+std::optional<std::string> queryMappings(std::uintptr_t address, std::uintptr_t end, bool writable) {
+    const int fd = procMapsQueryFd();
+    if (fd < 0) return std::nullopt;
+    auto cursor = address;
+    const auto unmapped = [&] {
+        char detail[160]{};
+        std::snprintf(detail, sizeof(detail), "guest address range is not mapped (range 0x%llx+0x%llx, at 0x%llx)", static_cast<unsigned long long>(address), static_cast<unsigned long long>(end - address), static_cast<unsigned long long>(cursor));
+        return std::string(detail);
+    };
+    while (cursor < end) {
+        procmap_query query{};
+        query.size = sizeof(query);
+        query.query_flags = PROCMAP_QUERY_COVERING_OR_NEXT_VMA;
+        query.query_addr = cursor;
+        if (ioctl(fd, PROCMAP_QUERY, &query) != 0) {
+            if (errno == ENOENT) return unmapped();
+            return std::nullopt;
+        }
+        if (query.vma_end <= cursor || query.vma_start >= query.vma_end) return std::nullopt;
+        if (query.vma_start > cursor) {
+            // A gap before the next mapping, worded as checkMappings words it.
+            char detail[160]{};
+            std::snprintf(detail, sizeof(detail), "guest memory is not readable (range 0x%llx+0x%llx, at 0x%llx: next mapping 0x%llx-0x%llx)", static_cast<unsigned long long>(address), static_cast<unsigned long long>(end - address), static_cast<unsigned long long>(cursor), static_cast<unsigned long long>(query.vma_start), static_cast<unsigned long long>(query.vma_end));
+            return std::string(detail);
+        }
+        if ((query.vma_flags & PROCMAP_QUERY_VMA_READABLE) == 0) {
+            char detail[160]{};
+            std::snprintf(detail, sizeof(detail), "guest memory is not readable (range 0x%llx+0x%llx, at 0x%llx: mapping 0x%llx-0x%llx)", static_cast<unsigned long long>(address), static_cast<unsigned long long>(end - address), static_cast<unsigned long long>(cursor), static_cast<unsigned long long>(query.vma_start), static_cast<unsigned long long>(query.vma_end));
+            return std::string(detail);
+        }
+        if (writable && (query.vma_flags & PROCMAP_QUERY_VMA_WRITABLE) == 0) return std::string("guest memory has no write permission");
+        cursor = std::min<std::uintptr_t>(end, query.vma_end);
+    }
+    return std::string();
 }
 #endif
 }
@@ -147,6 +237,12 @@ void CheckRange(const void* pointer, std::size_t bytes, std::size_t alignment, b
     if (cache.generation == generation && failedBefore != cache.failed.end()) {
         const auto failure = checkMappings(cache.entries, cursor, end, writable);
         require(false, failure.empty() ? "guest address range is not mapped" : failure.c_str());
+    }
+    if (const auto verdict = queryMappings(cursor, end, writable)) {
+        timing.Mark("procmap_query");
+        if (!verdict->empty() && cache.generation == generation && cache.failed.size() < 256) cache.failed.emplace_back(cursor, end, writable);
+        require(verdict->empty(), verdict->c_str());
+        return;
     }
     loadMappings(cache.entries);
     timing.Mark(cache.generation == generation ? "reload_uncovered" : "reload_changed");

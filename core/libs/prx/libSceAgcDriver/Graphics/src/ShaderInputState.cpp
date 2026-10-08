@@ -57,7 +57,7 @@ template <typename T> void _readHeaderArray(std::span<const std::byte> header, s
 
 }
 
-ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers& shader) {
+ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers& shader, std::span<const std::byte> header) {
     const auto numThreadX = read(shader, computeNumThreadX);
     const auto numThreadY = read(shader, computeNumThreadY);
     const auto numThreadZ = read(shader, computeNumThreadZ);
@@ -65,15 +65,24 @@ ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers&
         throw std::runtime_error("AGC graphics: COMPUTE_NUM_THREAD_X/Y/Z must be nonzero");
     }
     const auto rsrc2 = read(shader, computePgmRsrc2);
+    // SCRATCH_EN: the per-lane private size comes from the AGC shader header; the translator lowers
+    // scratch accesses to a per-invocation array of that many dwords (upstream 20e055c2).
+    std::uint32_t scratchDwords = 0;
     if ((rsrc2 & 0x1u) != 0) {
-        throw std::runtime_error("AGC graphics: COMPUTE_PGM_RSRC2.SCRATCH_EN is unsupported");
+        if (header.size() < sizeof(Shader)) throw std::runtime_error("AGC graphics: COMPUTE_PGM_RSRC2.SCRATCH_EN without an AGC shader header");
+        Shader agcShader;
+        std::memcpy(&agcShader, header.data(), sizeof(Shader));
+        scratchDwords = agcShader.scratch_size_dw_per_thread;
+        if (scratchDwords == 0) throw std::runtime_error("AGC graphics: COMPUTE_PGM_RSRC2.SCRATCH_EN with a zero scratch size");
     }
     return ShaderRecompiler::ShaderComputeStageInfo{
         {numThreadX, numThreadY, numThreadZ},
         ((rsrc2 >> 15u) & 0x1FFu) * 128u,
         {((rsrc2 >> 7u) & 0x1u) != 0, ((rsrc2 >> 8u) & 0x1u) != 0, ((rsrc2 >> 9u) & 0x1u) != 0},
         ((rsrc2 >> 10u) & 0x1u) != 0,
-        ((rsrc2 >> 11u) & 0x3u) + 1u
+        ((rsrc2 >> 11u) & 0x3u) + 1u,
+        {},
+        scratchDwords
     };
 }
 
@@ -142,6 +151,8 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         .sampleMaskExportEnable = sampleMaskExportEnable,
         .earlyZ = zOrder == 1u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable,
         .executeOnNoop = ((shaderControl >> 10u) & 0x1u) != 0,
+        // PRIMITIVE_ORDERED_PIXEL_SHADER: the body runs under fragment shader interlock (e1d4e699).
+        .orderedPixelShader = ((shaderControl >> 16u) & 0x1u) != 0,
         .targetOutputMode = targetOutputMode,
         .targetExportMapping = colorComponentMappings
     };

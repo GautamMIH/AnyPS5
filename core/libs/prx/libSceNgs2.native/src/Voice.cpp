@@ -26,6 +26,7 @@ void Ngs2Voice::SetEvent(std::uint32_t eventId) {
             if (state == Ngs2PlayState::Empty || state == Ngs2PlayState::Stopped) {
                 state = Ngs2PlayState::Playing;
                 stateFlags |= SCE_NGS2_VOICE_STATE_FLAG_INUSE;
+                if (userFxHandler) userFxFlags = 1;
             }
             break;
         case SCE_NGS2_VOICE_EVENT_STOP:
@@ -63,12 +64,26 @@ void Ngs2Voice::ResetSetup() {
     decodedSamples = 0;
     decodedBytes = 0;
     waveformEnd = nullptr;
+    userFxHandler = nullptr;
+    userFxData = {};
+    userFxFlags = 0;
+}
+
+const std::uint8_t* Ngs2StreamEnd(const Ngs2Voice& voice, const Ngs2Block& block) {
+    const auto& last = block.pieces.back();
+    return last.data + last.frames * voice.channels * sizeof(std::int16_t);
 }
 
 const std::uint8_t* Ngs2Voice::WaveformData() const {
     if (blocks.empty()) return waveformEnd;
     const auto& block = blocks.front();
     if (waveformType == SCE_NGS2_WAVEFORM_TYPE_ATRAC9) return block.data + block.dataCursor;
+    if (block.streaming) {
+        for (const auto& piece : block.pieces) {
+            if (block.cursor >= piece.firstFrame && block.cursor - piece.firstFrame < piece.frames) return piece.data + (block.cursor - piece.firstFrame) * channels * sizeof(std::int16_t);
+        }
+        return Ngs2StreamEnd(*this, block);
+    }
     return block.data + (static_cast<std::size_t>(block.info.num_skip_samples) + block.cursor) * channels * sizeof(std::int16_t);
 }
 
@@ -151,19 +166,23 @@ static void SetupSampler(Ngs2Voice& voice, const Ngs2WaveformFormat& format) {
     if (format.waveform_type == SCE_NGS2_WAVEFORM_TYPE_ATRAC9) Ngs2SetupAtrac9(voice, format);
 }
 
-static void AddWaveformBlocks(Ngs2Voice& voice, const Ngs2SamplerVoiceWaveformBlocksParam& param) {
-    // Bit 1 (0x2) is undocumented here; Balatro sets it with CONTINUE when it refills a streamed
-    // waveform, so it is taken as appending the blocks (what happens without RESET anyway).
-    constexpr std::uint32_t appendFlag = 0x2;
-    constexpr std::uint32_t knownFlags = SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE | SCE_NGS2_WAVEFORM_BLOCKS_FLAG_RESET | appendFlag;
-    if ((param.flags & ~knownFlags) != 0) throw std::runtime_error("NGS2: waveform block flags " + Ngs2Hex(param.flags) + " are not implemented");
-    if ((param.flags & appendFlag) != 0) {
-        static bool reported = false;
-        if (!reported) {
-            reported = true;
-            std::fprintf(stderr, "[NGS2] waveform block flag 0x2 taken as appending the blocks\n");
+static void AppendStreamData(Ngs2Voice& voice, const Ngs2SamplerVoiceWaveformBlocksParam& param, std::size_t frameBytes) {
+    if (voice.blocks.empty() || !voice.blocks.back().streaming) throw std::runtime_error("NGS2: appending waveform data to a voice without a streaming waveform is not implemented");
+    auto& stream = voice.blocks.back();
+    for (std::uint32_t i = 0; i < param.num_blocks; i++) {
+        const auto& block = param.blocks[i];
+        if (block.data_size == 0) continue;
+        if (block.data_size % frameBytes != 0 || block.num_skip_samples != 0 || block.num_repeats != 0) {
+            throw std::runtime_error("NGS2: appending a waveform block with skipped samples, repeats or a partial frame is not implemented");
         }
+        stream.pieces.push_back({static_cast<const std::uint8_t*>(param.data) + block.data_offset, stream.availableFrames, block.data_size / frameBytes});
+        stream.availableFrames += block.data_size / frameBytes;
     }
+}
+
+static void AddWaveformBlocks(Ngs2Voice& voice, const Ngs2SamplerVoiceWaveformBlocksParam& param) {
+    constexpr std::uint32_t knownFlags = SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE | SCE_NGS2_WAVEFORM_BLOCKS_FLAG_APPEND | SCE_NGS2_WAVEFORM_BLOCKS_FLAG_RESET;
+    if ((param.flags & ~knownFlags) != 0) throw std::runtime_error("NGS2: waveform block flags " + Ngs2Hex(param.flags) + " are not implemented");
     if (voice.channels == 0 || (param.num_blocks != 0 && (param.blocks == nullptr || param.data == nullptr))) APS5_INVALID_ARG_EX;
     const bool reset = (param.flags & SCE_NGS2_WAVEFORM_BLOCKS_FLAG_RESET) != 0;
     if (!voice.acceptsBlocks && !reset) throw std::invalid_argument("NGS2: the voice waveform was already closed");
@@ -173,30 +192,31 @@ static void AddWaveformBlocks(Ngs2Voice& voice, const Ngs2SamplerVoiceWaveformBl
         voice.waveformEnd = nullptr;
         if (voice.waveformType == SCE_NGS2_WAVEFORM_TYPE_ATRAC9) Ngs2RestartAtrac9(voice);
     }
-    voice.acceptsBlocks = (param.flags & SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE) != 0;
     const std::size_t frameBytes = voice.channels * sizeof(std::int16_t);
+    if ((param.flags & SCE_NGS2_WAVEFORM_BLOCKS_FLAG_APPEND) != 0) {
+        if (voice.waveformType != SCE_NGS2_WAVEFORM_TYPE_PCM_I16L) throw std::runtime_error("NGS2: appending waveform data to a voice that is not 16-bit PCM is not implemented");
+        AppendStreamData(voice, param, frameBytes);
+        voice.acceptsBlocks = (param.flags & SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE) != 0;
+        return;
+    }
+    voice.acceptsBlocks = (param.flags & SCE_NGS2_WAVEFORM_BLOCKS_FLAG_CONTINUE) != 0;
     for (std::uint32_t i = 0; i < param.num_blocks; i++) {
         const auto& block = param.blocks[i];
         if (block.num_samples == 0 && block.data_size == 0) continue;
         const std::uint64_t bytes = voice.waveformType == SCE_NGS2_WAVEFORM_TYPE_ATRAC9 ? Ngs2Atrac9BlockBytes(voice, block)
                                   : (static_cast<std::uint64_t>(block.num_skip_samples) + block.num_samples) * frameBytes;
-        auto accepted = block;
-        if (voice.waveformType != SCE_NGS2_WAVEFORM_TYPE_ATRAC9 && block.num_samples != 0 && bytes > block.data_size) {
-            // A PCM block counting more samples than its data holds: games streaming music give a
-            // track's length with a refill buffer (Balatro: 8.3 M samples in 16 KiB). Refilled
-            // streaming is not modelled; the block plays the samples its data holds.
-            const auto held = block.data_size / frameBytes;
-            if (held <= block.num_skip_samples) continue;
-            accepted.num_samples = static_cast<std::uint32_t>(held - block.num_skip_samples);
-            static bool reported = false;
-            if (!reported) {
-                reported = true;
-                std::fprintf(stderr, "[NGS2] waveform block of %u samples in %llu bytes: playing the %u samples it holds (streamed waveforms are not modelled)\n", block.num_samples, static_cast<unsigned long long>(block.data_size), accepted.num_samples);
-            }
-        } else if (block.num_samples == 0 || bytes > block.data_size) {
+        const bool streaming = block.num_samples != 0 && bytes > block.data_size && voice.waveformType == SCE_NGS2_WAVEFORM_TYPE_PCM_I16L &&
+                               block.num_skip_samples == 0 && block.num_repeats == 0 && block.data_size >= frameBytes && block.data_size % frameBytes == 0;
+        if (!streaming && (block.num_samples == 0 || bytes > block.data_size)) {
             throw std::invalid_argument("NGS2: waveform block " + std::to_string(i) + " does not fit its data (" + std::to_string(block.num_skip_samples) + " skipped and " + std::to_string(block.num_samples) + " samples of " + std::to_string(voice.channels) + " channels in " + std::to_string(block.data_size) + " bytes at " + std::to_string(block.data_offset) + ")");
         }
-        voice.blocks.push_back({static_cast<const std::uint8_t*>(param.data) + block.data_offset, accepted});
+        voice.blocks.push_back({static_cast<const std::uint8_t*>(param.data) + block.data_offset, block});
+        if (streaming) {
+            auto& stream = voice.blocks.back();
+            stream.streaming = true;
+            stream.availableFrames = block.data_size / frameBytes;
+            stream.pieces.push_back({stream.data, 0, stream.availableFrames});
+        }
     }
 }
 
@@ -274,6 +294,13 @@ static void ApplyParam(Ngs2Voice& voice, const Ngs2VoiceParamHeader& param) {
     switch (rackId) {
         case SCE_NGS2_RACK_ID_SAMPLER: ApplySamplerParam(voice, param); return;
         case SCE_NGS2_RACK_ID_SUBMIXER:
+            if (param.id == SCE_NGS2_SUBMIXER_VOICE_PARAM_USER_FX) {
+                const auto& fx = ParamAs<Ngs2SubmixerVoiceUserFxParam>(param);
+                voice.userFxHandler = fx.handler;
+                voice.userFxData = {fx.user_data0, fx.user_data1, fx.user_data2};
+                voice.userFxFlags = fx.handler ? 1 : 0;
+                return;
+            }
             if (param.id != SCE_NGS2_SUBMIXER_VOICE_PARAM_SETUP) break;
             if (ParamAs<Ngs2SubmixerVoiceSetupParam>(param).flags != 0) throw std::runtime_error("NGS2: submixer setup flags are not implemented");
             SetupMixer(voice, ParamAs<Ngs2SubmixerVoiceSetupParam>(param).num_io_channels);

@@ -931,8 +931,14 @@ void EmitProgram(SpirvEmitterState& state) {
     if (state.pixelValidMaskVariable != 0u) {
         state.module.AddFunction(spv::OpStore, state.pixelValidMaskVariable, ConstantU32(state, 1u));
     }
+    if (OrderedPixelShader(state)) {
+        state.module.AddFunction(spv::OpBeginInvocationInterlockEXT);
+    }
     EmitMemoryOffsets(state);
     if (program.BlockOrder().empty()) {
+        if (OrderedPixelShader(state)) {
+            state.module.AddFunction(spv::OpEndInvocationInterlockEXT);
+        }
         if (state.pixelValidMaskVariable != 0u) {
             const auto maskValue = state.module.AllocateId();
             const auto active = state.module.AllocateId();
@@ -1168,7 +1174,7 @@ std::uint32_t EmitReadClock(SpirvValueEmitContext& ctx, const IrValue& inst, spv
 }
 
 std::uint32_t EmitShaderClock(SpirvValueEmitContext& ctx, const IrValue& inst) {
-    return EmitReadClock(ctx, inst, spv::ScopeSubgroup);
+    return EmitReadClock(ctx, inst, ctx.state.narrowSubgroupClock ? spv::ScopeDevice : spv::ScopeSubgroup);
 }
 
 std::uint32_t EmitRealtimeClock(SpirvValueEmitContext& ctx, const IrValue& inst) {

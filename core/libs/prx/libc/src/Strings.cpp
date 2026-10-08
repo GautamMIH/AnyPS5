@@ -6,6 +6,7 @@
 #include <cwchar>
 #include <cstdio>
 #include <limits>
+#include <string>
 
 #include "prx/libc/include/General.hpp"
 

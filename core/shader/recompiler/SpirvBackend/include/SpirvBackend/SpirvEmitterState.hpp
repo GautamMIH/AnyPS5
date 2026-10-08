@@ -68,6 +68,7 @@ struct MemoryResourceAccess {
     bool addIndexOffset = false;
     // Memory operands of the loads and stores: Volatile for a coherent access (MemoryInfo::coherent).
     std::uint32_t memoryAccess = 0;
+    std::uint32_t misalignment = 0;
 };
 
 struct SpirvEmitterState {
@@ -84,6 +85,7 @@ struct SpirvEmitterState {
     std::uint32_t laneCount = 1;
     std::uint32_t hostSubgroupSize = 0;
     bool splitSubgroup = false;
+    bool narrowSubgroupClock = false;
     std::unordered_set<const IrValue*> sharedLaneValues;
     std::uint32_t laneHalf = 0;
     // The target's SPIR-V version and what the device accepts, for capabilities an emitter adds

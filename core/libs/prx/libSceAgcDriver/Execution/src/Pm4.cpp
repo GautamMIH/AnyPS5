@@ -82,6 +82,30 @@ void copyMemory(std::uint64_t source, std::uint64_t destination, std::size_t byt
     GuestMemory::Write(destination, data);
 }
 
+// COPY_DATA source 18 (upstream 23e0363e): the GPU clock counter, a free-running 100 MHz count.
+constexpr std::uint32_t CopyDataGpuClockSource = 18;
+// Source and destination cache policies only steer GPU cache allocation.
+constexpr std::uint32_t CopyDataCachePolicy = (3u << 13u) | (3u << 25u);
+
+std::uint64_t gpuClockCount() {
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() / 10);
+}
+
+void copyData(std::span<const std::uint32_t> packet) {
+    const std::size_t bytes = (packet[1] & 0x10000u) != 0 ? 8 : 4;
+    const auto source = ((packet[1] & 0xfu) << 1u) | ((packet[1] >> 30u) & 1u);
+    const auto destination = address(packet[4], packet[5]);
+    if (source != CopyDataGpuClockSource) {
+        copyMemory(address(packet[2], packet[3]), destination, bytes, source >= 10);
+        return;
+    }
+    const auto value = gpuClockCount();
+    std::vector<std::byte> data(bytes);
+    for (std::size_t i = 0; i < bytes; ++i) data[i] = static_cast<std::byte>(value >> (i * 8));
+    GuestMemory::CheckRange(reinterpret_cast<void*>(destination), data.size(), 1, true);
+    GuestMemory::Write(destination, data);
+}
+
 // DMA_DATA selector 1: the 64 KiB global data share, shared by every queue.
 constexpr std::uint32_t DmaSelectGds = 1;
 
@@ -441,12 +465,12 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         }
         case 0x40: {
             size(6);
-            require((packet[1] & ~0x40110f0fu) == 0, "COPY_DATA engine, cache or reserved fields are not implemented");
+            require((packet[1] & ~(0x40110f0fu | CopyDataCachePolicy)) == 0, "COPY_DATA engine or reserved fields are not implemented");
             const auto source = ((packet[1] & 0xfu) << 1u) | ((packet[1] >> 30u) & 1u);
             const auto destination = ((packet[1] >> 8u) & 0xfu) << 1u;
             require(destination == 2 || destination == 4, "COPY_DATA register or GDS destination is not implemented");
-            require(source == 2 || source == 4 || source == 5 || source == 10 || source == 11, "COPY_DATA register, GDS or reference-clock source is not implemented");
-            require(source < 10 || ((packet[1] & 0x10000u) == 0 && packet[3] == 0), "64-bit immediate COPY_DATA is not implemented");
+            require(source == 2 || source == 4 || source == 5 || source == 10 || source == 11 || source == CopyDataGpuClockSource, "COPY_DATA register, GDS or reference-clock source is not implemented");
+            require(source < 10 || source == CopyDataGpuClockSource || ((packet[1] & 0x10000u) == 0 && packet[3] == 0), "64-bit immediate COPY_DATA is not implemented");
             break;
         }
         case 0x50:
@@ -692,6 +716,21 @@ std::vector<IndirectDraw> ResolveIndirectDraws(std::span<const std::uint32_t> pa
     return draws;
 }
 
+std::vector<std::uint32_t> ReadIndirectRegisters(std::span<const std::uint32_t> packet) {
+    require(packet.size() == 5 && IndirectRegisterOpcode((packet[0] >> 8u) & 0xffu), "expected indirect register packet");
+    std::vector<std::uint32_t> pairs(static_cast<std::size_t>(packet[4]) * 2);
+    if (!pairs.empty()) GuestMemory::Read(address(packet[1], packet[2]), std::as_writable_bytes(std::span(pairs)), 4);
+    return pairs;
+}
+
+void ExecuteIndirectRegisters(std::span<const std::uint32_t> packet, std::span<const std::uint32_t> pairs, QueueState& queue) {
+    const auto opcode = (packet[0] >> 8u) & 0xffu;
+    require(packet.size() == 5 && IndirectRegisterOpcode(opcode), "expected indirect register packet");
+    require(pairs.size() == static_cast<std::size_t>(packet[4]) * 2, "indirect register list does not match its packet");
+    for (std::size_t i = 0; i < pairs.size(); i += 2) registerOffset(pairs[i]);
+    for (std::size_t i = 0; i < pairs.size(); i += 2) writeRegister(queue, opcode, registerOffset(pairs[i]), pairs[i + 1]);
+}
+
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
     const auto opcode = (packet[0] >> 8u) & 0xffu;
     switch (opcode) {
@@ -759,13 +798,9 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
         case 0x26: queue.indexBase = address(packet[1], packet[2]); return;
         case 0x2a: queue.indexType = packet[1]; return;
         case 0x2f: queue.instanceCount = packet[1]; return;
-        case 0x63: case 0x64: case 0x9f: {
-            std::vector<std::uint32_t> pairs(static_cast<std::size_t>(packet[4]) * 2);
-            GuestMemory::Read(address(packet[1], packet[2]), std::as_writable_bytes(std::span(pairs)), 4);
-            for (std::size_t i = 0; i < pairs.size(); i += 2) registerOffset(pairs[i]);
-            for (std::size_t i = 0; i < pairs.size(); i += 2) writeRegister(queue, opcode, registerOffset(pairs[i]), pairs[i + 1]);
+        case 0x63: case 0x64: case 0x9f:
+            ExecuteIndirectRegisters(packet, ReadIndirectRegisters(packet), queue);
             return;
-        }
         case 0x69: case 0x76: case 0x79: case 0x7a: {
             const auto offset = registerOffset(packet[1]);
             for (std::size_t i = 2; i < packet.size(); ++i) writeRegister(queue, opcode, offset + static_cast<std::uint32_t>(i - 2), packet[i]);
@@ -790,11 +825,9 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             } else GuestMemory::Write(destination, std::as_bytes(packet.subspan(4)), 4);
             return;
         }
-        case 0x40: {
-            const auto source = ((packet[1] & 0xfu) << 1u) | ((packet[1] >> 30u) & 1u);
-            copyMemory(address(packet[2], packet[3]), address(packet[4], packet[5]), (packet[1] & 0x10000u) != 0 ? 8 : 4, source >= 10);
+        case 0x40:
+            copyData(packet);
             return;
-        }
         case 0x50:
             dmaData(packet);
             return;

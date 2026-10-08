@@ -9,6 +9,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include "Recompiler.hpp"
 
 namespace AgcDriver::Graphics {
@@ -122,6 +123,8 @@ struct State {
     bool negativeOneToOne;
     // PA_CL_CLIP_CNTL ZCLIP_NEAR/FAR_DISABLE: no depth clipping, depth clamped to the viewport range.
     bool depthClamp = false;
+    // PA_SC_CONSERVATIVE_RASTERIZATION_CNTL overestimation (upstream 29c22442).
+    VkConservativeRasterizationModeEXT conservativeRasterization = VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
     VkRect2D scissor;
     VkCullModeFlags cullMode;
     VkFrontFace frontFace;
@@ -131,6 +134,10 @@ struct State {
 
 ShaderStages DecodeShaderStages(const QueueState& queue);
 State DecodeState(const QueueState& queue);
+// The DB_RENDER_CONTROL depth maintenance passes DecodeState rejects; empty when there are none.
+std::string DepthMaintenanceRejection(const QueueState& queue);
+// CB_TARGET_MASK & CB_SHADER_MASK without the slots whose colour format is INVALID.
+std::uint32_t ColorWriteMask(const Registers& context);
 
 }
 

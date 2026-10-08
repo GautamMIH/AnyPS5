@@ -152,11 +152,12 @@ std::vector<std::uint32_t> GuestImagesDescriptor(const std::vector<std::uint32_t
     return result;
 }
 
-std::vector<std::uint32_t> GuestSamplersDescriptor(const std::vector<std::uint32_t>& resources, const ResourceSnapshot& snapshot) {
+std::vector<std::uint32_t> GuestSamplersDescriptor(const ShaderInfo& info, const std::vector<std::uint32_t>& resources, const ResourceSnapshot& snapshot) {
     std::vector<std::uint32_t> result;
     std::uint32_t dwordCount = 0;
     for (std::size_t i = 0; i < resources.size(); i++) {
-        const std::uint32_t r = resources[i];
+        const std::uint32_t copyOf = info.samplers.at(resources[i]).copyOf;
+        const std::uint32_t r = copyOf != SamplerResource::NoCopy ? copyOf : resources[i];
         if (r >= snapshot.samplers.size()) {
             fail("DescriptorBindingBuilder::Populate guest sampler index is out of range");
         }
@@ -215,13 +216,17 @@ struct UnnormalizedProof {
 UnnormalizedProof ProveUnnormalized(const ShaderInfo& info, const ResourceSnapshot& snapshot) {
     UnnormalizedProof proof;
     for (std::uint32_t r = 0; r < info.samplers.size(); r++) {
-        if (r >= snapshot.samplers.size()) {
+        // Reads the first word in place (no descriptor vector per sampler); a sampler copied from
+        // another (copyOf) proves through the source's S#, as GuestSamplersDescriptor reads it.
+        const std::uint32_t copyOf = info.samplers[r].copyOf;
+        const std::uint32_t source = copyOf != SamplerResource::NoCopy ? copyOf : r;
+        if (source >= snapshot.samplers.size()) {
             fail("DescriptorBindingBuilder::Populate guest sampler index is out of range");
         }
-        if (snapshot.samplers[r].dwordCount == 0u) {
+        if (snapshot.samplers[source].dwordCount == 0u) {
             fail("DescriptorBindingBuilder::Populate guest sampler descriptor is empty");
         }
-        if ((snapshot.samplers[r].dwords[0] & ForceUnnormalizedBit) == 0u) {
+        if ((snapshot.samplers[source].dwords[0] & ForceUnnormalizedBit) == 0u) {
             continue;
         }
         if (proof.samplers.empty()) {
@@ -389,7 +394,7 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             }
             break;
         case DescriptorRole::GuestSamplers:
-            physical.guestDescriptor = GuestSamplersDescriptor(logical.resources, snapshot);
+            physical.guestDescriptor = GuestSamplersDescriptor(info, logical.resources, snapshot);
             physical.samplerDepthCompare.reserve(logical.resources.size());
             for (std::size_t element = 0; element < logical.resources.size(); ++element) {
                 const auto& sampler = info.samplers.at(logical.resources[element]);

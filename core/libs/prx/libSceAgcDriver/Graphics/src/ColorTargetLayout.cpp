@@ -42,6 +42,17 @@ std::uint32_t standardOffset(std::uint32_t x, std::uint32_t y, std::uint32_t ele
     }
 }
 
+// The SW_64KB_S bits above the 4 KiB standard offset (as the texture detiler has them).
+std::uint32_t standard64Extra(std::uint32_t x, std::uint32_t y, std::uint32_t elementBytes) {
+    switch (elementBytes) {
+        case 1u: return ((x << 7) & 0x2000u) ^ ((x << 8) & 0x8000u) ^ ((y << 6) & 0x1000u) ^ ((y << 7) & 0x4000u);
+        case 2u: return ((x << 7) & 0x2000u) ^ ((x << 8) & 0x8000u) ^ ((y << 7) & 0x1000u) ^ ((y << 8) & 0x4000u);
+        case 4u: return ((x << 8) & 0x2000u) ^ ((x << 9) & 0x8000u) ^ ((y << 7) & 0x1000u) ^ ((y << 8) & 0x4000u);
+        case 8u: return ((x << 8) & 0x2000u) ^ ((x << 9) & 0x8000u) ^ ((y << 8) & 0x1000u) ^ ((y << 9) & 0x4000u);
+        default: return ((x << 9) & 0x2000u) ^ ((x << 10) & 0x8000u) ^ ((y << 8) & 0x1000u) ^ ((y << 9) & 0x4000u);
+    }
+}
+
 }
 
 ColorTileMode DecodeColorTileMode(std::uint32_t attrib3) {
@@ -52,7 +63,7 @@ ColorTileMode DecodeColorTileMode(std::uint32_t attrib3) {
     const auto mode = (attrib3 >> 14u) & 0x1fu;
     const auto fmaskMode = (attrib3 >> 19u) & 0x1fu;
     require(fmaskMode == 0 || fmaskMode == 0x18, "AGC graphics: unsupported color FMASK swizzle mode");
-    require(mode == 0 || mode == 5 || mode == 0x1b, "AGC graphics: unsupported color tile mode");
+    require(mode == 0 || mode == 5 || mode == 9 || mode == 0x1b, "AGC graphics: unsupported color tile mode");
     return static_cast<ColorTileMode>(mode);
 }
 
@@ -68,6 +79,7 @@ ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, 
             break;
         }
         case ColorTileMode::RenderTarget:
+        case ColorTileMode::Standard64KB:
             // 64 KiB blocks: 256x256, 256x128, 128x128, 128x64 or 64x64 elements.
             blockWidth = elementBytes <= 2u ? 256u : elementBytes <= 8u ? 128u : 64u;
             blockHeight = 65536u / (blockWidth * elementBytes);
@@ -97,7 +109,12 @@ ColorTargetLayout::ColorTargetLayout(std::uint32_t width, std::uint32_t height, 
 std::size_t ColorTargetLayout::offset(std::uint32_t x, std::uint32_t y) const {
     if (mode == ColorTileMode::Linear) return (static_cast<std::size_t>(y) * pitch + x) * elementBytes;
     const bool standard = mode == ColorTileMode::Standard4KB;
-    const auto inner = [&](std::uint32_t bx, std::uint32_t by) -> std::size_t { return standard ? standardOffset(bx, by, elementBytes) & 0xfffu : blockOffset(bx, by, elementBytes) & 0xffffu; };
+    const bool standard64 = mode == ColorTileMode::Standard64KB;
+    const auto inner = [&](std::uint32_t bx, std::uint32_t by) -> std::size_t {
+        if (standard) return standardOffset(bx, by, elementBytes) & 0xfffu;
+        if (standard64) return (standardOffset(bx, by, elementBytes) ^ standard64Extra(bx, by, elementBytes)) & 0xffffu;
+        return blockOffset(bx, by, elementBytes) & 0xffffu;
+    };
     if (tail.present) return inner(x + tail.x, y + tail.y);
     const auto block = static_cast<std::size_t>(y / blockHeight) * (pitch / blockWidth) + x / blockWidth;
     return block * Alignment() + inner(x, y);

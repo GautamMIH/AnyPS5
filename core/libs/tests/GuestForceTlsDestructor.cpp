@@ -3,6 +3,7 @@
 #include <cstring>
 #include <link.h>
 #include <cstdlib>
+#include <dlfcn.h>
 #include <stdexcept>
 #include <vector>
 

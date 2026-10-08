@@ -257,9 +257,13 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     const auto alignment = static_cast<std::uint32_t>(context.limits.minStorageBufferOffsetAlignment);
     const auto below = ShaderRecompiler::BufferViewMisalignment(address, alignment);
     if (alignment > 1u && address % alignment != 0u && below == 0u) {
-        // The shader was given no misalignment: the view needs a buffer starting at its base.
-        guestMemory.AddDetached(address, size);
-        allocations.push_back({address, size, true, nullptr});
+        // The shader was given no misalignment: the view needs a buffer of its own. A base off a
+        // DWORD boundary is read by the shader from the DWORD below it (it joins two dwords per
+        // access, upstream 38e89df1), so that buffer starts and ends on DWORD boundaries.
+        const auto begin = address & ~std::uint64_t{3};
+        const auto bytes = static_cast<std::size_t>(((address + size + 3u) & ~std::uint64_t{3}) - begin);
+        guestMemory.AddDetached(begin, bytes);
+        allocations.push_back({begin, bytes, true, nullptr});
         return allocations.size() - 1;
     }
     // The range was checked above (writable when written).

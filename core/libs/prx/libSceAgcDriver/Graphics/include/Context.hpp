@@ -92,6 +92,8 @@ struct Context {
     bool imageInt64Atomics = false;
     // VK_EXT_sampler_filter_minmax enabled: min and max sampler reduction modes.
     bool samplerFilterMinmax = false;
+    // VK_EXT_conservative_rasterization overestimating by at most 1/256 pixel (upstream 29c22442).
+    bool conservativeRasterization = false;
     // The 8 and 8_8 sRGB formats sampled through UNORM views and decoded in the shader
     // (SrgbDecodeFormats); the shader target carries the same set.
     std::uint32_t srgbDecodeFormats = 0;

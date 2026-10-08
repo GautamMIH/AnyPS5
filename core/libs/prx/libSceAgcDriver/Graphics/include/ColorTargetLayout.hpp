@@ -12,12 +12,14 @@ enum class ColorTileMode : std::uint32_t {
     Linear = 0,
     // SW_4KB_S: 4 KiB blocks in the standard element order textures use.
     Standard4KB = 5,
+    // SW_64KB_S: 64 KiB blocks, the 4 KiB standard order extended by the 64 KiB bits (upstream 6aa8e58d).
+    Standard64KB = 9,
     RenderTarget = 0x1b
 };
 
 // The texture tiling that lays out a colour surface's mip chain and array slices.
 constexpr TextureTileMode ColorTextureTileMode(ColorTileMode mode) {
-    return mode == ColorTileMode::Linear ? TextureTileMode::kLinear : mode == ColorTileMode::Standard4KB ? TextureTileMode::kStandard4KB : TextureTileMode::RenderTarget64KB;
+    return mode == ColorTileMode::Linear ? TextureTileMode::kLinear : mode == ColorTileMode::Standard4KB ? TextureTileMode::kStandard4KB : mode == ColorTileMode::Standard64KB ? TextureTileMode::kStandard64KB : TextureTileMode::RenderTarget64KB;
 }
 
 ColorTileMode DecodeColorTileMode(std::uint32_t attrib3);

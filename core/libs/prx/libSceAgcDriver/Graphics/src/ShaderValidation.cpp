@@ -205,6 +205,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     case spv::CapabilityGroupNonUniform: subgroupOperations = VK_SUBGROUP_FEATURE_BASIC_BIT; break;
                     case spv::CapabilityGroupNonUniformBallot: subgroupOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT; break;
                     case spv::CapabilityGroupNonUniformShuffle: subgroupOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_SHUFFLE_BIT; break;
+                    case spv::CapabilityGroupNonUniformArithmetic: subgroupOperations = VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT; break;
                     default: break;
                 }
                 const bool isSubgroupCapability = subgroupOperations != 0;
@@ -245,6 +246,12 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     mesh &&
                     capability == spv::CapabilityMeshShadingEXT;
 
+                // Primitive-ordered pixel shaders (upstream e1d4e699); the recompiler declares it only
+                // when the device enabled fragmentShaderPixelInterlock.
+                const bool isInterlockCapability =
+                    fragment &&
+                    capability == spv::CapabilityFragmentShaderPixelInterlockEXT;
+
                 // Pixel shaders reading their layer need Geometry, reading SampleId SampleRateShading;
                 // both only when the device enabled the feature.
                 const bool isLayerCapability =
@@ -259,6 +266,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     isBdaCapability ||
                     isTessellationCapability ||
                     isMeshCapability ||
+                    isInterlockCapability ||
                     isLayerCapability,
                     std::string("SPIR-V requires unsupported device capability ") +
                         std::to_string(static_cast<std::uint32_t>(capability)));
@@ -274,6 +282,10 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 const std::string_view extension(text, static_cast<std::size_t>(end - text));
                 if (extension == "SPV_EXT_shader_viewport_index_layer") {
                     Require(!fragment && features.viewportIndexLayer, "SPV_EXT_shader_viewport_index_layer requires VK_EXT_shader_viewport_index_layer in a vertex-pipeline stage");
+                    break;
+                }
+                if (extension == "SPV_EXT_fragment_shader_interlock") {
+                    Require(fragment, "SPV_EXT_fragment_shader_interlock requires a fragment shader");
                     break;
                 }
                 if (extension == "SPV_KHR_fragment_shader_barycentric") {
@@ -403,7 +415,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
     } else if (fragment) {
         // Depth modes come from shaders that export depth (DB_SHADER_CONTROL.Z_EXPORT_ENABLE).
         const auto allowed = [](std::uint32_t name) {
-            return name == spv::ExecutionModeOriginUpperLeft || name == spv::ExecutionModeEarlyFragmentTests || name == spv::ExecutionModeDepthReplacing || name == spv::ExecutionModeDepthGreater || name == spv::ExecutionModeDepthLess || name == spv::ExecutionModeDepthUnchanged;
+            return name == spv::ExecutionModeOriginUpperLeft || name == spv::ExecutionModeEarlyFragmentTests || name == spv::ExecutionModeDepthReplacing || name == spv::ExecutionModeDepthGreater || name == spv::ExecutionModeDepthLess || name == spv::ExecutionModeDepthUnchanged || name == spv::ExecutionModePixelInterlockOrderedEXT;
         };
         for (const auto& [name, operands] : module.modes) Require(operands.empty() && allowed(name), "unsupported fragment execution mode");
     } else Require(module.modes.empty(), "unsupported vertex execution mode");
@@ -688,7 +700,12 @@ void validateShaders(std::span<const CompiledShader> shaders, const State& state
         if (i != 0) {
             for (const auto& [location, signature] : current->inputs) {
                 const auto output = previous->outputs.find(location);
-                Require(output != previous->outputs.end() && output->second == signature, "graphics interfaces disagree at location " + std::to_string(location));
+                if (output == previous->outputs.end() || output->second != signature) {
+                    Require(false, "graphics interfaces disagree at location " + std::to_string(location) +
+                        " (stage " + std::to_string(i - 1) + " output " +
+                        (output == previous->outputs.end() ? std::string("missing") : std::string(output->second)) +
+                        ", stage " + std::to_string(i) + " input " + std::string(signature) + ")");
+                }
             }
         }
         previous = current;
