@@ -131,6 +131,14 @@ int main() {
     Require(stream != nullptr && std::fgetc(stream->GetHandle()) == 'k');
     fclose_nid_postfix(stream);
 
+#ifndef _WIN32
+    auto* full = std::fopen("/dev/full", "wb");
+    Require(full != nullptr);
+    auto* fullStream = new FileStream(full, true);
+    Require(std::fwrite("buffered", 1, 8, full) == 8);
+    Require(fclose_nid_postfix(fullStream) == EOF);
+#endif
+
     std::filesystem::remove_all(dir);
     return 0;
 }

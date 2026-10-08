@@ -119,8 +119,7 @@ FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) 
 int APS5_VABI fclose_nid_postfix(FileStream* stream) {
     GetNativeStream(stream);
     std::unique_ptr<FileStream> owner(stream->IsDynamic() ? stream : nullptr);
-    stream->Close();
-    return 0;
+    return stream->Close();
 }
 
 int APS5_VABI fseek_nid_postfix(FileStream* stream, std::int64_t offset, int origin);
