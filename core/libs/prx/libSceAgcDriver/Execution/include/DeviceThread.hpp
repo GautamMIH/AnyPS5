@@ -13,6 +13,7 @@
 #include <deque>
 #include <exception>
 #include <functional>
+#include <memory>
 #include <mutex>
 #ifndef _WIN32
 #include <pthread.h>
@@ -22,6 +23,61 @@
 #include <vector>
 
 namespace AgcDriver {
+
+// Frees what finished device jobs held (a draw's recompile results and captured shader memory) on a
+// thread of its own, in batches: freeing it after each job cost the device thread ~2.7 ms of a heavy
+// Zorro frame. Items must not own the device or anything whose destruction others wait for.
+class Reaper {
+public:
+    Reaper() : thread([this] { run(); }) {}
+
+    ~Reaper() {
+        {
+            std::lock_guard lock(mutex);
+            stopping = true;
+        }
+        wake.notify_one();
+        thread.join();
+    }
+
+    Reaper(const Reaper&) = delete;
+    Reaper& operator=(const Reaper&) = delete;
+
+    void Retire(std::shared_ptr<void> item) {
+        bool full = false;
+        {
+            std::lock_guard lock(mutex);
+            items.push_back(std::move(item));
+            full = items.size() >= Batch;
+        }
+        if (full) wake.notify_one();
+    }
+
+private:
+    static constexpr std::size_t Batch = 64;
+
+    void run() {
+#ifndef _WIN32
+        pthread_setname_np(pthread_self(), "AgcReaper");
+#endif
+        std::vector<std::shared_ptr<void>> batch;
+        for (;;) {
+            {
+                std::unique_lock lock(mutex);
+                wake.wait(lock, [&] { return stopping || items.size() >= Batch; });
+                if (stopping && items.empty()) return;
+                batch.swap(items);
+            }
+            batch.clear();
+        }
+    }
+
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::vector<std::shared_ptr<void>> items;
+    bool stopping = false;
+    std::thread thread;
+};
 
 // The second stage of the pipelined driver (the default; ANYPS5_PIPELINED_DRIVER=0 turns it off): device work (recording
 // draws, GPU barriers) runs in order on its own thread, under the tracking mutex, while the worker

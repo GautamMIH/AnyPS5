@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <map>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
@@ -334,6 +337,28 @@ int APS5_VABI sceKernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int
     }
     if (timo == nullptr || *timo != 0) {
         KernelTraceWait_nid_postfix("equeue", __builtin_return_address(0), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count()), *out == 0);
+    }
+    // Debug aid: APS5_TRACE_EQUEUE=1 counts, every 10 s, the events blocking waits returned (filter,
+    // ident) and the time spent waiting for them: what a game paces its frames on.
+    static const bool traceEvents = std::getenv("APS5_TRACE_EQUEUE") != nullptr;
+    if (traceEvents && (timo == nullptr || *timo != 0) && *out > 0) {
+        static std::mutex traceMutex;
+        static std::map<std::pair<int, std::uintptr_t>, std::pair<std::uint64_t, double>> seen;
+        static auto window = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        const double waited = std::chrono::duration<double, std::milli>(now - waitStart).count();
+        std::lock_guard traceLock(traceMutex);
+        for (int i = 0; i < *out; ++i) {
+            auto& entry = seen[{static_cast<int>(ev[i].filter), static_cast<std::uintptr_t>(ev[i].ident)}];
+            ++entry.first;
+            if (i == 0) entry.second += waited;
+        }
+        if (now - window >= std::chrono::seconds(10)) {
+            for (const auto& [key, value] : seen) std::fprintf(stderr, "[equeue] filter %d ident 0x%llx: %llu events, %.0f ms waited\n", key.first, static_cast<unsigned long long>(key.second), static_cast<unsigned long long>(value.first), value.second);
+            std::fprintf(stderr, "[equeue] ---\n");
+            seen.clear();
+            window = now;
+        }
     }
     if (*out == SCE_KERNEL_ERROR_EBADF) {
         return SCE_KERNEL_ERROR_EBADF;

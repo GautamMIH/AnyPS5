@@ -364,6 +364,8 @@ private:
     bool resetGraphics = false;
     std::shared_ptr<FrameTiming> frameTiming;
     std::uint64_t frameSerial = 0;
+    // Frees finished draw jobs' data (declared before the pipeline: destroyed after its last job).
+    Reaper reaper;
     // The pipelined driver's device thread (ANYPS5_PIPELINED_DRIVER=0 turns it off), or null: device work runs
     // on the worker.
     std::unique_ptr<DeviceThread> pipeline = makePipeline();
@@ -502,7 +504,33 @@ private:
         // A flip whose frame is ready on the GPU once the completion is reached (AsyncFlip).
         std::shared_ptr<IFlipRequest> flip;
         std::shared_ptr<FrameTiming> flipTiming;
+        // APS5_TRACE_COMPLETION: when the release's submission arrived, when the worker deferred it and
+        // when the device thread queued it behind the GPU work.
+        std::chrono::steady_clock::time_point received{}, deferredAt{}, queuedAt{};
     };
+    // Debug aid: APS5_TRACE_COMPLETION=1 prints every 10 s how long interrupting releases took from
+    // their submission's arrival to the worker (decode), to the device thread queueing them (device
+    // queue) and to their GPU work completing (GPU).
+    static void noteCompletion(const Completion& completion) {
+        static const bool trace = std::getenv("APS5_TRACE_COMPLETION") != nullptr;
+        if (!trace || !completion.interrupt || completion.deferredAt == std::chrono::steady_clock::time_point{}) return;
+        static std::mutex traceMutex;
+        static double decode = 0, deviceQueue = 0, gpu = 0;
+        static std::uint64_t count = 0;
+        static auto window = std::chrono::steady_clock::now();
+        const auto now = std::chrono::steady_clock::now();
+        const auto ms = [](auto from, auto to) { return std::chrono::duration<double, std::milli>(to - from).count(); };
+        std::lock_guard lock(traceMutex);
+        decode += ms(completion.received, completion.deferredAt);
+        deviceQueue += ms(completion.deferredAt, completion.queuedAt);
+        gpu += ms(completion.queuedAt, now);
+        ++count;
+        if (now - window < std::chrono::seconds(10)) return;
+        std::fprintf(stderr, "[completion] %llu interrupts, mean ms: arrival->worker %.2f, worker->device queued %.2f, queued->GPU done %.2f\n", static_cast<unsigned long long>(count), decode / count, deviceQueue / count, gpu / count);
+        decode = deviceQueue = gpu = 0;
+        count = 0;
+        window = now;
+    }
     struct Completed {
         std::vector<std::pair<int, std::uint32_t>> interrupts;
         std::vector<std::uint64_t> serials;
@@ -577,6 +605,7 @@ private:
 
     // Caller holds gpuMutex. The marker orders the completion after all GPU work submitted so far.
     void queueCompletion(Completion completion) {
+        completion.queuedAt = std::chrono::steady_clock::now();
         if (device != nullptr) completion.marker = device->SubmitMarker();
         completions.push_back(std::move(completion));
         completionsPending = true;
@@ -623,6 +652,7 @@ private:
             }
             if (next.flip) done.flips.emplace_back(std::move(next.flip), std::move(next.flipTiming));
             if (next.interrupt) done.interrupts.emplace_back(next.eventQueue, *next.interrupt);
+            noteCompletion(next);
             if (next.serial != 0) done.serials.push_back(next.serial);
             if (!next.release.empty()) releasesCompleted.fetch_add(1, std::memory_order_release);
             completions.pop_front();
@@ -1192,12 +1222,18 @@ private:
             std::shared_ptr<FrameTiming> timing;
         };
         auto job = std::make_shared<Job>(Job{device, graphics, parameters, std::move(results), std::move(stages), std::move(shaderMemory), std::move(memory), std::move(snapshots), frameTiming});
-        pipeline->Post([this, job] {
-            PerformanceContext timingContext(job->timing.get());
-            const auto deferred = WriteTracker::DeferredGpuWrites();
-            job->device->EnqueueDraw(job->graphics, job->parameters, job->stages, job->snapshots);
-            // Writes noted at recording are in the write tracker; ones that land at completion are not.
-            if (WriteTracker::DeferredGpuWrites() != deferred) pipeline->NoteUnknownGpuWrites();
+        pipeline->Post([this, job]() mutable {
+            {
+                PerformanceContext timingContext(job->timing.get());
+                const auto deferred = WriteTracker::DeferredGpuWrites();
+                job->device->EnqueueDraw(job->graphics, job->parameters, job->stages, job->snapshots);
+                // Writes noted at recording are in the write tracker; ones that land at completion are not.
+                if (WriteTracker::DeferredGpuWrites() != deferred) pipeline->NoteUnknownGpuWrites();
+            }
+            // The device and frame timing are released here, as before; the rest is freed by the reaper.
+            job->device.reset();
+            job->timing.reset();
+            reaper.Retire(std::move(job));
         }, std::move(writes), anyWrite);
     }
 
@@ -1434,6 +1470,8 @@ private:
                     completion.release.assign(packet.begin(), packet.end());
                     completion.eventQueue = static_cast<int>(submission.queue);
                     if (((packet[2] >> 24u) & 7u) != 0) completion.interrupt = packet[7];
+                    completion.received = submission.received;
+                    completion.deferredAt = std::chrono::steady_clock::now();
                     if (TraceRelease()) std::fprintf(stderr, "[agc-release] queued serial=%llu queue=0x%x label=0x%llx data=0x%08x%08x select=%u interrupt=%u context=0x%x\n", static_cast<unsigned long long>(submission.serial), static_cast<unsigned>(submission.queue), static_cast<unsigned long long>(packet[3] | (static_cast<std::uint64_t>(packet[4]) << 32u)), packet[6], packet[5], packet[2] >> 29u, (packet[2] >> 24u) & 7u, packet[7]);
                     deferredReleases.emplace_back(++releasesDeferred, completion.release);
                     deferCompletion(std::move(completion));
