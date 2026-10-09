@@ -388,15 +388,18 @@ void DefineDescriptors(SpirvEmitterState& state) {
         switch (binding.kind) {
         case DescriptorBindingKind::Buffers:
             state.storageBufferVariable = Define(ArrayType(StorageBufferBlockType(state)), "buffers");
-            if (state.requirements.bufferInt64Atomics) {
-                state.storageBufferU64Variable = Define(ArrayType(StorageBufferU64BlockType(state)), "buffers_u64");
-                state.module.AddAnnotation(spv::OpDecorate, state.storageBufferVariable, spv::DecorationAliased);
-                state.module.AddAnnotation(spv::OpDecorate, state.storageBufferU64Variable, spv::DecorationAliased);
+            if (state.requirements.coherentBufferAlias) state.storageBufferCoherentVariable = Define(ArrayType(StorageBufferBlockType(state)), "buffers_coherent");
+            if (state.requirements.bufferInt64Atomics) state.storageBufferU64Variable = Define(ArrayType(StorageBufferU64BlockType(state)), "buffers_u64");
+            if (state.storageBufferU64Variable != 0u || state.storageBufferCoherentVariable != 0u) {
+                for (const auto variable : {state.storageBufferVariable, state.storageBufferCoherentVariable, state.storageBufferU64Variable}) {
+                    if (variable != 0u) state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationAliased);
+                }
             }
             if (state.requirements.coherentBuffers) {
                 // A coherent load polls what other workgroups store (RDNA stores reach L2 without
-                // GLC too): every alias of the buffers takes part in device-scope visibility.
-                state.module.AddAnnotation(spv::OpDecorate, state.storageBufferVariable, spv::DecorationCoherent);
+                // GLC too): GLC/DLC accesses go through the coherent alias, or the whole array is
+                // coherent when the program invalidates a cache.
+                state.module.AddAnnotation(spv::OpDecorate, state.storageBufferCoherentVariable != 0u ? state.storageBufferCoherentVariable : state.storageBufferVariable, spv::DecorationCoherent);
                 if (state.storageBufferU64Variable != 0u) state.module.AddAnnotation(spv::OpDecorate, state.storageBufferU64Variable, spv::DecorationCoherent);
             }
             break;

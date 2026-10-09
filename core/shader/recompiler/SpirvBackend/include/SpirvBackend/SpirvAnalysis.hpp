@@ -30,6 +30,7 @@ struct SpirvRequirements {
     // A buffer load or store is coherent (MemoryInfo::coherent): the guest buffers are Coherent.
     bool float64 = false;
     bool coherentBuffers = false;
+    bool coherentBufferAlias = false;
     std::vector<std::uint32_t> capabilities;
     std::vector<std::string> extensions;
 };
