@@ -330,6 +330,12 @@ int main() {
     Require(sceNetEpollWait(epoll, &ready, 1, 1000000) == 1 && (ready.events & 1) && ready.ident == static_cast<std::uint64_t>(accepted));
     Require(sceNetShutdown(accepted, 1) == 0);
     Require(Failed(sceNetSend(accepted, request, sizeof(request), 0), 32));
+    registration.data.u32 = 78;
+    Require(sceNetEpollControl(epoll, 2, accepted, &registration) == 0);
+    Require(Failed(sceNetEpollControl(epoll, 2, accepted, nullptr), 22));
+    Require(sceNetEpollControl(epoll, 3, accepted, nullptr) == 0);
+    Require(Failed(sceNetEpollControl(epoll, 3, accepted, nullptr), 2));
+    Require(Failed(sceNetEpollControl(epoll, 2, accepted, &registration), 2));
     Require(sceNetEpollDestroy(epoll) == 0);
     Require(sceNetSocketClose(accepted) == 0);
     bool send_failed = false;

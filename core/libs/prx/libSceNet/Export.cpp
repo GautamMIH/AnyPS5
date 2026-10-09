@@ -70,6 +70,9 @@ constexpr int NET_AF_INET6 = 28;
 constexpr int NET_SOCK_STREAM = 1;
 constexpr int NET_SOCK_DGRAM = 2;
 constexpr int NET_SOCK_RAW = 3;
+constexpr int NET_EPOLL_CTL_ADD = 1;
+constexpr int NET_EPOLL_CTL_MOD = 2;
+constexpr int NET_EPOLL_CTL_DEL = 3;
 constexpr int NET_SOL_SOCKET = 0xFFFF;
 constexpr int NET_SO_SNDTIMEO = 0x1005;
 constexpr int NET_SO_RCVTIMEO = 0x1006;
@@ -951,13 +954,13 @@ int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* e
     if (g_epolls.count(eid) == 0) {
         return fail(NET_EBADF);
     }
-    if (op < 1 || op > 3) return fail(NET_EINVAL);
-    if (op != 2 && !event) return fail(NET_EINVAL);
-    if (op != 2 && g_socks.count(id) == 0) return fail(NET_EBADF);
+    if (op != NET_EPOLL_CTL_ADD && op != NET_EPOLL_CTL_MOD && op != NET_EPOLL_CTL_DEL) return fail(NET_EINVAL);
+    if (op != NET_EPOLL_CTL_DEL && !event) return fail(NET_EINVAL);
+    if (op != NET_EPOLL_CTL_DEL && g_socks.count(id) == 0) return fail(NET_EBADF);
     auto& registrations = g_epoll_socks[eid];
-    if (op == 1) {
+    if (op == NET_EPOLL_CTL_ADD) {
         if (!registrations.emplace(id, *event).second) return fail(NET_EADDRINUSE);
-    } else if (op == 2) {
+    } else if (op == NET_EPOLL_CTL_DEL) {
         if (registrations.erase(id) == 0) return fail(NET_ENOENT);
     } else {
         auto registration = registrations.find(id);
