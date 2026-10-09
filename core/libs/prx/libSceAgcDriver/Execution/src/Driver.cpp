@@ -1,4 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
+#include "prx/libSceAgcDriver/Execution/include/ShaderPreparationScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
@@ -101,6 +103,15 @@ void NameThread(const char* name) {
 #else
     static_cast<void>(name);
 #endif
+}
+
+// The float mode a stage's SPI_SHADER_PGM_RSRC1 (or COMPUTE_PGM_RSRC1) sets: FLOAT_MODE, DX10_CLAMP,
+// IEEE_MODE and FP16_OVFL (whose bit differs per stage). None when the register was not written.
+std::optional<ShaderRecompiler::ShaderFloatMode> floatModeOf(const Registers& registers, std::uint32_t rsrc1, std::uint32_t fp16OverflowBit) {
+    const auto found = registers.find(rsrc1);
+    if (found == registers.end()) return std::nullopt;
+    const auto value = found->second;
+    return ShaderRecompiler::ShaderFloatMode{(value >> 12u) & 0xffu, ((value >> 21u) & 1u) != 0u, ((value >> 23u) & 1u) != 0u, ((value >> fp16OverflowBit) & 1u) != 0u};
 }
 
 std::uint32_t readRegister(const Registers& registers, std::uint32_t offset) {
@@ -268,15 +279,7 @@ public:
                 std::lock_guard lock(gpuMutex);
                 timing.Mark("gpu_mutex_wait");
                 if (device == nullptr || device->Window() == nullptr) {
-                    if (device) {
-                        stashCompletions(pollCompletions(true));
-                        device->WaitIdle();
-                        // Cached textures and pipelines may still reference the old device's handles.
-                        static std::vector<std::shared_ptr<VulkanDevice>> replacedDevices;
-                        replacedDevices.push_back(device);
-                    }
-                    device = std::make_shared<VulkanDevice>(&window);
-                    captureMemo.Clear();
+                    replaceDevice(window);
                 }
                 require(device->Window() == window.context, "presentation window does not match device surface");
                 presenting = device;
@@ -308,6 +311,19 @@ public:
             ReportFailure(std::current_exception());
             throw;
         }
+    }
+
+    // VideoOut creates its window and the device that presents to it when it starts (upstream
+    // 1a2bbc5d), before the first VideoOut call returns: the windowless device the GPU work may have
+    // created first is replaced. Present keeps its own fallback for a window attached otherwise.
+    void AttachWindow(const PresentationWindow& window) {
+        CheckFailure();
+        {
+            const auto gpuLock = lockDevice();
+            require(device == nullptr || device->Window() == nullptr, "a window is already attached to the device");
+            replaceDevice(window);
+        }
+        publishCompletions();
     }
 
     void ReleaseWindow(void* window) {
@@ -400,6 +416,20 @@ private:
         }
         return std::unique_lock(gpuMutex);
     }
+
+    // Caller holds gpuMutex (the device thread drained). The windowless or previous device is
+    // replaced by one presenting to `window`; it is kept alive, as cached textures and pipelines
+    // may still reference its handles.
+    void replaceDevice(const PresentationWindow& window) {
+        if (device) {
+            stashCompletions(pollCompletions(true));
+            device->WaitIdle();
+            replacedDevices.push_back(device);
+        }
+        device = std::make_shared<VulkanDevice>(&window);
+        captureMemo.Clear();
+    }
+    std::vector<std::shared_ptr<VulkanDevice>> replacedDevices;
 
     // Debug aid: APS5_TRACE_DRAINS=1 totals the worker's waits for the device thread per caller
     // (module+offset, for addr2line) and prints them every 2000 frames' worth of calls.
@@ -904,7 +934,7 @@ private:
         const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
         ShaderRecompiler::RecompileRequest request{
             {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
-            {(packet[4] & 0x8000u) != 0 ? 32u : 64u, 0, userData, compute, std::nullopt, std::nullopt, memory},
+            {(packet[4] & 0x8000u) != 0 ? 32u : 64u, 0, userData, compute, std::nullopt, std::nullopt, memory, floatModeOf(queue.shader, 0x212, 26)},
             device->Target(),
             {0, 0, 0, 128}
         };
@@ -915,7 +945,7 @@ private:
         const auto captured = shaderMemory.Regions();
         request.context.memory = captured;
         timing.Mark("request_memory");
-        const auto compiled = [&] {
+        const auto compiledResult = [&] {
             try {
                 return ShaderRecompiler::Recompile(request, *capture);
             } catch (const std::exception& error) {
@@ -925,6 +955,7 @@ private:
                 throw std::runtime_error(std::string(context) + error.what());
             }
         }();
+        const auto& compiled = *compiledResult;
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
@@ -977,6 +1008,8 @@ private:
             std::uint32_t systemSgprs = 0;
             // The registered shader the code belongs to (identifies it for the capture memo).
             std::shared_ptr<const ShaderSnapshot> owner;
+            // The stage's float mode (SPI_SHADER_PGM_RSRC1, the register before RSRC2).
+            std::optional<ShaderRecompiler::ShaderFloatMode> floatMode;
         };
         const auto programAddress = [&](std::uint32_t base) {
             const auto high = readRegister(queue.shader, base + 1);
@@ -1003,6 +1036,9 @@ private:
             };
             for (std::uint32_t i = 0; i < userCount; ++i) result.userData.push_back(queue.shader.userData(userDataBase + i));
             result.owner = it->second;
+            // FP16_OVFL: bit 29 for pixel, 31 for ES/GS (RSRC1 0x08a), 30 for LS/HS (RSRC1 0x10a).
+            const auto rsrc1 = rsrc2 - 1u;
+            result.floatMode = floatModeOf(queue.shader, rsrc1, rsrc1 == 0x00a ? 29u : rsrc1 == 0x10a ? 30u : 31u);
             return result;
         };
         using Stage = ShaderRecompiler::ShaderStage;
@@ -1084,7 +1120,8 @@ private:
         const GuestMemory::MemoryAccessScope memoryScope(accessContext(), accessResolver(), pipeline != nullptr);
         const GuestMemory::AccessSite accessSite("draw_capture");
         ShaderMemory shaderMemory(memory);
-        std::vector<ShaderRecompiler::RecompileResult> results;
+        // Shared with the recompiler's result memo (immutable): stage pointers stay valid as the list grows.
+        std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results;
         std::vector<Graphics::CompiledShader> stages;
         results.reserve(programs.size() + (graphics.rectList ? 2u : 0u));
         stages.reserve(programs.size());
@@ -1113,7 +1150,7 @@ private:
             if (roles[i] == Role::Main && !splicedGeometry.empty()) binary.code = splicedGeometry;
             ShaderRecompiler::RecompileRequest request{
                 binary,
-                {waveSize, program.firstUserSgpr, program.userData, std::nullopt, program.binary.stage == Stage::Fragment ? pixel : std::nullopt, program.binary.stage == Stage::Fragment ? std::nullopt : std::optional(vertexStageInfo(program)), memory},
+                {waveSize, program.firstUserSgpr, program.userData, std::nullopt, program.binary.stage == Stage::Fragment ? pixel : std::nullopt, program.binary.stage == Stage::Fragment ? std::nullopt : std::optional(vertexStageInfo(program)), memory, program.floatMode},
                 device->Target(),
                 {0, 0, pushCursorBytes, pushLimitBytes - pushCursorBytes},
                 ShaderRecompiler::GraphicsCompileContext{program.firstUserSgpr, linked, graphics.stages.mesh, graphics.stages.tessellation, {drawParameters.indexAddress, drawParameters.indexCount, drawParameters.indexSize, drawParameters.instanceCount}}
@@ -1127,8 +1164,8 @@ private:
             request.context.memory = memory;
             shaderTiming.Mark("request_memory");
             results.push_back(ShaderRecompiler::Recompile(request, *capture));
-            shaderTiming.Mark(results.back().cacheHit ? "cache_hit" : "compile");
-            const auto& result = results.back();
+            shaderTiming.Mark(results.back()->cacheHit ? "cache_hit" : "compile");
+            const auto& result = *results.back();
             // Mesh draws read indices in-shader and take no indexed offsets.
             if (i == 0 && !(drawParameters.indexed && graphics.stages.mesh)) {
                 const auto offsetValue = [&](std::int32_t sgpr) {
@@ -1149,11 +1186,11 @@ private:
             require(stages.size() == (graphics.hasFragmentShader ? 2u : 1u), "rect-list requires a vertex program and at most one fragment program");
             // Without a pixel shader no parameters are interpolated.
             const ShaderRecompiler::RecompileResult noFragment{};
-            auto rectangle = ShaderRecompiler::BuildRectListShaders(results[0], graphics.hasFragmentShader ? results[1] : noFragment, device->Target());
-            results.push_back(std::move(rectangle.control));
-            results.push_back(std::move(rectangle.evaluation));
+            auto rectangle = ShaderRecompiler::BuildRectListShaders(*results[0], graphics.hasFragmentShader ? *results[1] : noFragment, device->Target());
+            results.push_back(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.control)));
+            results.push_back(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.evaluation)));
             const auto control = results.size() - 2;
-            stages.insert(stages.begin() + 1, {{Stage::TessellationControl, &results[control], 0}, {Stage::TessellationEvaluation, &results[control + 1], 0}});
+            stages.insert(stages.begin() + 1, {{Stage::TessellationControl, results[control].get(), 0}, {Stage::TessellationEvaluation, results[control + 1].get(), 0}});
         }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : memory) snapshots.push_back({region.guestAddress, region.bytes});
@@ -1175,7 +1212,7 @@ private:
 
     // Queues a draw's device half (pipelined). The job owns what it reads: the compiled stages (the
     // stage list points into the results) and the captured shader memory (the snapshots view it).
-    void queueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& parameters, std::vector<ShaderRecompiler::RecompileResult> results, std::vector<Graphics::CompiledShader> stages, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots) {
+    void queueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& parameters, std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results, std::vector<Graphics::CompiledShader> stages, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots) {
         DeviceThread::Ranges writes;
         for (std::uint32_t slot = 0; slot < graphics.colors.size(); ++slot) {
             if ((graphics.colorTargetMask & (1u << slot)) == 0) continue;
@@ -1189,7 +1226,8 @@ private:
         // Shader stores (storage buffers and images, address-table stores) may reach anywhere.
         bool anyWrite = false;
         bool addressStores = false;
-        for (const auto& result : results) {
+        for (const auto& resultPointer : results) {
+            const auto& result = *resultPointer;
             addressStores = addressStores || result.bdaWrites;
             for (const auto& binding : result.bindings) {
                 if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) anyWrite = true;
@@ -1225,7 +1263,7 @@ private:
             static std::uint64_t draws = 0, images = 0, texels = 0, stores = 0;
             bool image = false, texel = false;
             for (const auto& result : results)
-                for (const auto& binding : result.bindings) {
+                for (const auto& binding : result->bindings) {
                     image = image || binding.kind == ShaderRecompiler::DescriptorKind::StorageImage;
                     texel = texel || (binding.kind == ShaderRecompiler::DescriptorKind::StorageTexelBuffer && !binding.readOnly);
                 }
@@ -1239,7 +1277,7 @@ private:
             std::shared_ptr<VulkanDevice> device;
             Graphics::State graphics;
             Pm4::DrawParameters parameters;
-            std::vector<ShaderRecompiler::RecompileResult> results;
+            std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results;
             std::vector<Graphics::CompiledShader> stages;
             ShaderMemory shaderMemory;
             std::vector<ShaderRecompiler::MemoryRegion> memory;
@@ -1835,6 +1873,14 @@ void ReleaseWindow(void* window) {
     Driver::Get().ReleaseWindow(window);
 }
 
+void AttachWindow(const PresentationWindow& window) {
+    Driver::Get().AttachWindow(window);
+}
+
+void CheckFailure() {
+    Driver::Get().CheckFailure();
+}
+
 void ReportFailure(std::exception_ptr error) {
     Driver::Get().ReportFailure(error);
 }
@@ -1892,4 +1938,62 @@ extern "C" void AgcDriverReleaseWindow_nid_postfix(void* window) {
 
 extern "C" void AgcDriverReportFailure_nid_postfix(std::exception_ptr error) {
     AgcDriver::ReportFailure(error);
+}
+
+extern "C" void AgcDriverAttachWindow_nid_postfix(const AgcDriver::PresentationWindow& window) {
+    AgcDriver::AttachWindow(window);
+}
+
+// Registration-time shader preparation (upstream f524bbed). libSceAgc resolves each static ABI as
+// the game links stages or builds primitive state, inside a preparation scope. This driver prepares
+// a shader's artifact (ShaderRecompiler's source entry and compiled variant, which hold no resource
+// values) at its first draw or dispatch through Recompile(request, capture), and keeps no prepared
+// state per registration: the scope only commits, and resolving an ABI checks the driver's failure
+// state (as upstream's entry points do first) so a failed GPU is reported to the linking thread.
+namespace AgcDriver::DriverDetail {
+
+class ShaderPreparationTransaction {
+public:
+    void Commit() {
+        if (committed) throw std::runtime_error("AGC driver: shader preparation transaction is already committed");
+        committed = true;
+    }
+
+private:
+    bool committed = false;
+};
+
+}
+
+extern "C" AgcDriver::DriverDetail::ShaderPreparationTransaction* AgcDriverBeginShaderPreparation_nid_postfix() {
+    return new AgcDriver::DriverDetail::ShaderPreparationTransaction();
+}
+
+extern "C" void AgcDriverCommitShaderPreparation_nid_postfix(AgcDriver::DriverDetail::ShaderPreparationTransaction* transaction) {
+    transaction->Commit();
+}
+
+extern "C" void AgcDriverEndShaderPreparation_nid_postfix(AgcDriver::DriverDetail::ShaderPreparationTransaction* transaction) noexcept {
+    delete transaction;
+}
+
+extern "C" void AgcDriverResolveShaderAbi_nid_postfix(const Shader* shader, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive) {
+    static_cast<void>(context);
+    static_cast<void>(primitive);
+    if (shader == nullptr) throw std::runtime_error("AGC driver: static ABI has no shader");
+    AgcDriver::CheckFailure();
+}
+
+extern "C" void AgcDriverResolveGraphicsStagesAbi_nid_postfix(std::span<const Shader* const> stages, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive) {
+    static_cast<void>(context);
+    static_cast<void>(primitive);
+    if (stages.empty()) throw std::runtime_error("AGC driver: graphics ABI has no shader headers");
+    AgcDriver::CheckFailure();
+}
+
+extern "C" void AgcDriverResolveGraphicsAbi_nid_postfix(const Shader* vertex, const Shader* pixel, std::uint32_t primitiveType) {
+    static_cast<void>(vertex);
+    static_cast<void>(pixel);
+    static_cast<void>(primitiveType);
+    AgcDriver::CheckFailure();
 }

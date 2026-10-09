@@ -158,6 +158,10 @@ bool Evaluator::EvaluateRawRead(IrValue& inst, std::uint64_t& result) {
             return false;
         }
     }
+    if (auto* trace = _runtime.readTrace; trace != nullptr) {
+        if (&inst == trace->leaf) trace->leaves.emplace_back(trace->leafSlot, address);
+        else trace->otherReads.push_back(address);
+    }
     std::uint32_t word = 0;
     if (_runtime.readMemory != nullptr) {
         if (!_runtime.readMemory(_runtime.userContext, address, &word)) {

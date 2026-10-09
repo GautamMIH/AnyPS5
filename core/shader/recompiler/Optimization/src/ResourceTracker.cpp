@@ -1,5 +1,7 @@
 #include "Optimization/ResourceTracker.hpp"
 #include "Optimization/SrtWalker.hpp"
+#include "Optimization/ResourceMaterializer.hpp"
+#include "SpirvBackend/SpirvBufferFormat.hpp"
 #include "IntermediateRepresentation/IrBuilder.hpp"
 #include "Optimization/SrtWalker/SrtInstructionPredicates.hpp"
 
@@ -43,7 +45,7 @@ std::string formatHex32(std::uint32_t value) {
 std::string describeValueChain(const IrValue* value, std::uint32_t depth) {
     value = value->Resolve();
     if (value->HasImmediate()) {
-        return value->Type() == IrType::U32 ? "0x" + formatHex32(value->ImmediateU32()) : "Immediate";
+        return "Immediate";
     }
     std::string text = std::string(IrOpcodeName(value->Opcode()));
     if (value->Opcode() == IrOpcode::LoadAddressU32 || value->Opcode() == IrOpcode::ReadConstBuffer) {
@@ -129,7 +131,7 @@ public:
         for (const auto& plan : m_indirectImages) {
             plan.handle->ReplaceArgument(0, plan.key);
             for (std::uint32_t dword = 0; dword < 4u; dword++) {
-                plan.handle->ReplaceArgument(dword + 1u, plan.roots[dword + 4u]);
+                plan.handle->ReplaceArgument(dword + 1u, plan.roots[dword]);
             }
             for (std::uint32_t dword = 5u; dword < plan.roots.size(); dword++) {
                 plan.handle->ReplaceArgument(dword, plan.key);
@@ -327,7 +329,49 @@ private:
         return stride != 0u && selector->Opcode() == IrOpcode::ReadFirstLane;
     }
 
-    bool TryMakeIndirectImage(IrValue& handle, IndirectImagePlan& plan) {
+    // The table entry offset `key * 32` (a shift or a multiply), optionally plus an immediate.
+    static bool MatchTableOffset(IrValue* value, IrValue*& key, std::uint32_t& entryOffset) {
+        value = value->Resolve();
+        entryOffset = 0;
+        if (value->Opcode() == IrOpcode::IAdd32 && value->ArgumentCount() == 2u) {
+            std::uint32_t immediate = 0;
+            if (immediateU32(value->Argument(0), immediate)) {
+                value = value->Argument(1)->Resolve();
+            } else if (immediateU32(value->Argument(1), immediate)) {
+                value = value->Argument(0)->Resolve();
+            } else {
+                return false;
+            }
+            entryOffset = immediate;
+        }
+        if (value->ArgumentCount() != 2u) {
+            return false;
+        }
+        std::uint32_t scale = 0;
+        if (value->Opcode() == IrOpcode::ShiftLeftLogical32) {
+            if (!immediateU32(value->Argument(1), scale) || scale != 5u) {
+                return false;
+            }
+            key = value->Argument(0)->Resolve();
+            return true;
+        }
+        if (value->Opcode() != IrOpcode::IMul32) {
+            return false;
+        }
+        if (immediateU32(value->Argument(1), scale)) {
+            key = value->Argument(0)->Resolve();
+        } else if (immediateU32(value->Argument(0), scale)) {
+            key = value->Argument(1)->Resolve();
+        } else {
+            return false;
+        }
+        return scale == 32u;
+    }
+
+    // A T# whose eight dwords are scalar reads of one V# (the table) at `entryOffset + key * 32`
+    // with a wave-uniform runtime key: a bindless image table. The key stays an ordinary value
+    // (the SPIR-V selects the bound slot from it); the eight reads become planning-only.
+    bool TryMakeTableImage(IrValue& handle, IndirectImagePlan& plan) {
         if (handle.Opcode() != IrOpcode::GetImageResource || handle.ArgumentCount() != 8u) {
             return false;
         }
@@ -335,11 +379,17 @@ private:
         std::array<IrValue*, 8> heapReads {};
         IrValue* heapHandle = nullptr;
         IrValue* heapOffset = nullptr;
+        std::uint32_t immediateOffset = 0;
         for (std::uint32_t dword = 0; dword < heapReads.size(); dword++) {
             heapReads[dword] = handle.Argument(dword)->Resolve();
             std::uint32_t memoryIndex = 0;
             const MemoryInfo* memory = ScalarReadMemory(*heapReads[dword], memoryIndex);
-            if (memory == nullptr || memory->offset != dword * sizeof(std::uint32_t) || !MemoryIndexBelongsTo(memoryIndex, *heapReads[dword])) {
+            if (memory == nullptr || !MemoryIndexBelongsTo(memoryIndex, *heapReads[dword])) {
+                return false;
+            }
+            if (dword == 0u) {
+                immediateOffset = memory->offset;
+            } else if (memory->offset != immediateOffset + dword * sizeof(std::uint32_t)) {
                 return false;
             }
             IrValue* currentHandle = heapReads[dword]->Argument(0)->Resolve();
@@ -356,56 +406,57 @@ private:
             plan.reads[dword] = heapReads[dword];
         }
 
-        IrValue* shift = heapOffset;
-        std::uint32_t shiftAmount = 0;
-        if (shift->Opcode() != IrOpcode::ShiftLeftLogical32 || shift->ArgumentCount() != 2u || !immediateU32(shift->Argument(1), shiftAmount) || shiftAmount != 5u) {
+        IrValue* key = nullptr;
+        std::uint32_t entryOffset = 0;
+        if (!MatchTableOffset(heapOffset, key, entryOffset) || key->Type() != IrType::U32) {
             return false;
         }
-        IrValue* materialRead = shift->Argument(0)->Resolve();
-        std::uint32_t materialMemoryIndex = 0;
-        const MemoryInfo* materialMemory = ScalarReadMemory(*materialRead, materialMemoryIndex);
-        if (materialMemory == nullptr || materialMemory->offset != 0u || !MemoryIndexBelongsTo(materialMemoryIndex, *materialRead)) {
-            return false;
-        }
-        IrValue* materialHandle = materialRead->Argument(0)->Resolve();
+        entryOffset += immediateOffset;
 
-        IrValue* selector = nullptr;
-        std::uint32_t selectorStride = 0;
-        std::uint32_t selectorOffset = 0;
-        if (!MatchMaterialOffset(materialRead->Argument(1), selector, selectorStride, selectorOffset)) {
-            return false;
-        }
-
-        const std::array<const IrValue*, 1> materialUsers {shift};
-        std::array<const IrValue*, 8> heapUsers {};
-        std::copy(heapReads.begin(), heapReads.end(), heapUsers.begin());
         const std::array<const IrValue*, 1> imageUsers {&handle};
-        if (!usesOnly(*materialRead, materialUsers) || !usesOnly(*shift, heapUsers)) {
-            return false;
-        }
         for (const auto* read : heapReads) {
             if (!usesOnly(*read, imageUsers)) {
                 return false;
             }
         }
 
-        DescriptorSource materialSource;
         DescriptorSource heapSource;
-        std::uint32_t materialSourceIndex = 0;
         std::uint32_t heapSourceIndex = 0;
-        if (!MakeRuntimeBufferSource(*materialHandle, materialSourceIndex, materialSource) || !MakeRuntimeBufferSource(*heapHandle, heapSourceIndex, heapSource)) {
+        if (!MakeRuntimeBufferSource(*heapHandle, heapSourceIndex, heapSource)) {
             return false;
+        }
+
+        DescriptorSource::IndirectImage table;
+        table.heapSource = heapSourceIndex;
+        table.materialSource = heapSourceIndex;
+        table.entryOffset = entryOffset;
+        DescriptorSource materialSource = heapSource;
+        std::uint32_t materialMemoryIndex = 0;
+        const MemoryInfo* materialMemory = ScalarReadMemory(*key, materialMemoryIndex);
+        if (materialMemory != nullptr && MemoryIndexBelongsTo(materialMemoryIndex, *key)) {
+            IrValue* selector = nullptr;
+            std::uint32_t selectorStride = 0;
+            std::uint32_t selectorOffset = 0;
+            DescriptorSource candidateSource;
+            std::uint32_t candidateIndex = 0;
+            if (MatchMaterialOffset(key->Argument(1), selector, selectorStride, selectorOffset) && MakeRuntimeBufferSource(*key->Argument(0)->Resolve(), candidateIndex, candidateSource)) {
+                table.hasMaterial = true;
+                table.materialSource = candidateIndex;
+                table.selectorStride = selectorStride;
+                table.selectorOffset = selectorOffset + materialMemory->offset;
+                materialSource = candidateSource;
+            }
         }
 
         DescriptorSource imageSource;
         imageSource.dwordCount = 8u;
-        std::copy(materialSource.dwords.begin(), materialSource.dwords.begin() + 4u, imageSource.dwords.begin());
-        std::copy(heapSource.dwords.begin(), heapSource.dwords.begin() + 4u, imageSource.dwords.begin() + 4u);
-        imageSource.indirectImage = DescriptorSource::IndirectImage {materialSourceIndex, heapSourceIndex, selectorStride, selectorOffset, 0u};
+        std::copy(heapSource.dwords.begin(), heapSource.dwords.begin() + 4u, imageSource.dwords.begin());
+        std::copy(materialSource.dwords.begin(), materialSource.dwords.begin() + 4u, imageSource.dwords.begin() + 4u);
+        imageSource.indirectImage = table;
 
         plan.handle = &handle;
         plan.source = InternSource(imageSource);
-        plan.key = materialRead;
+        plan.key = key;
         plan.roots = imageSource.dwords;
         return true;
     }
@@ -687,17 +738,30 @@ private:
     }
 
     void PlanIndirectImages() {
+        // Kill switch: APS5_NO_BINDLESS_IMAGES=1 leaves table-loaded T#s unplanned (GetHandle then
+        // rejects them as before).
+        static const bool enabled = std::getenv("APS5_NO_BINDLESS_IMAGES") == nullptr;
+        if (!enabled) {
+            return;
+        }
         for (auto& block : m_program.Blocks()) {
             for (IrValue* inst : block->Instructions()) {
-                if (ImageOpcodeInfoOf(inst->Opcode()).access == ImageAccess::None || inst->ArgumentCount() == 0u) {
+                const auto imageInfo = ImageOpcodeInfoOf(inst->Opcode());
+                if (imageInfo.access == ImageAccess::None || inst->ArgumentCount() == 0u) {
                     continue;
                 }
                 IrValue* handle = inst->Argument(0)->Resolve();
-                if (FindIndirectImage(*handle) != nullptr) {
+                const IndirectImagePlan* planned = FindIndirectImage(*handle);
+                IndirectImagePlan plan;
+                if (planned == nullptr && !TryMakeTableImage(*handle, plan)) {
                     continue;
                 }
-                IndirectImagePlan plan;
-                if (TryMakeIndirectImage(*handle, plan)) {
+                // A store through a table would mark every bound slot pending write-back.
+                if (imageInfo.resourceClass == ImageResourceClass::Storage) {
+                    ResourceMaterializer::CountBindlessRejection(BindlessRejection::Storage);
+                    fail("bindless storage image tables are unsupported");
+                }
+                if (planned == nullptr) {
                     m_indirectImages.push_back(std::move(plan));
                 }
             }
@@ -727,10 +791,6 @@ private:
         source = InternSource(descriptor);
     }
 
-    // A raw dword load or store (1-4 dwords, or a scalar dword load) through a V# the SRT walker
-    // cannot compute: the program loads it at a GPU-computed offset (a descriptor heap) or builds
-    // it. No binding holds such a V#, so the shader decodes it and accesses memory through the BDA
-    // page table (MemoryInfo::gpuDescriptor). Other accesses keep failing in GetHandle.
     bool TakeGpuDescriptor(IrValue& inst, std::uint32_t memoryIndex) {
         const IrValue* handle = inst.Argument(0)->Resolve();
         if (handle->Opcode() != IrOpcode::GetBufferResource || handle->ArgumentCount() != 4u) {
@@ -739,20 +799,20 @@ private:
         DescriptorSource descriptor;
         MakeSource(*handle, 4u, false, false, descriptor);
         std::uint32_t badDword = 0;
-        if (ValidateSource(descriptor, badDword)) {
-            return false;
-        }
-        const auto op = inst.Opcode();
-        // A scalar buffer load (s_buffer_load) reads one dword per ReadConstBuffer.
-        const bool load = op == IrOpcode::LoadBufferU32 || op == IrOpcode::LoadBufferU32x2 || op == IrOpcode::LoadBufferU32x3 || op == IrOpcode::LoadBufferU32x4 || op == IrOpcode::ReadConstBuffer;
-        const bool store = op == IrOpcode::StoreBufferU32 || op == IrOpcode::StoreBufferU32x2 || op == IrOpcode::StoreBufferU32x3 || op == IrOpcode::StoreBufferU32x4;
         auto& memory = m_program.Resources().memoryInfo[memoryIndex];
-        if ((!load && !store) || memory.formatted || memory.typed || memory.dataBits != 32u) {
-            return false;
+        const auto access = BufferAccessOf(inst.Opcode());
+        if (ValidateSource(descriptor, badDword)) {
+            const auto source = InternSource(descriptor);
+            const auto resource = AddBuffer(source, memory, inst.Opcode(), inst.Flags<MemoryFlags>().pc);
+            if (resource == std::numeric_limits<std::uint32_t>::max()) fail("buffer resource limit exceeded");
+            AddMemoryPatch(memoryIndex, resource, 0u, false);
+            memory.gpuDescriptor = false;
+            m_info.usesDma = m_info.usesDma || access == BufferAccess::Atomic;
+            return true;
         }
         memory.gpuDescriptor = true;
         m_info.usesDma = true;
-        m_info.bdaWrites = m_info.bdaWrites || store;
+        m_info.bdaWrites = m_info.bdaWrites || access == BufferAccess::Write || access == BufferAccess::Atomic;
         return true;
     }
 
@@ -791,6 +851,13 @@ private:
         resource.written = resource.written || write;
         resource.atomic = resource.atomic || atomic;
         resource.formatted = resource.formatted || memory.formatted;
+        resource.descriptorFormatted = resource.descriptorFormatted || (memory.formatted && !memory.typed);
+        if (memory.formatted && memory.typed) {
+            const auto format = GetFormatInfo(DecodeTBufferFormat(memory.dataFormat, memory.numberFormat));
+            if (format.byteSize == 0u) fail("typed buffer instruction has an invalid format");
+            resource.typedAlignment = std::max(resource.typedAlignment, static_cast<std::uint8_t>(std::min(format.byteSize, 4u)));
+        }
+        if (memory.formatted && !memory.typed && !write) resource.formattedReadMask |= (1u << std::min(memory.dataDwords, 4u)) - 1u;
         resource.scalar = resource.scalar || op == IrOpcode::ReadConstBuffer || memory.kind == ResourceKind::ScalarBuffer;
     }
 
@@ -800,8 +867,8 @@ private:
         const bool depth = (memory.imageSampleFlags & RdnaImageSampleFlagCompare) != 0;
         for (std::uint32_t i = 0; i < m_info.images.size(); i++) {
             auto& image = m_info.images[i];
-            if (image.source == source && image.resourceClass == resourceClass && image.dimension == memory.imageDimension && image.mipMode == mip && image.depthCompare == depth && image.r128 == memory.imageR128 && image.packed == memory.imagePacked) {
-                Merge(image, op, pc);
+            if (image.source == source && image.resourceClass == resourceClass && image.dimension == memory.imageDimension && image.mipMode == mip && image.depthCompare == depth && image.r128 == memory.imageR128 && image.packed == memory.imagePacked && image.byElements == memory.imageByElements && image.byComponents == (memory.imageByElements != 0u ? memory.dataDwords / memory.imageByElements : 0u)) {
+                Merge(image, memory, op, pc);
                 return i;
             }
         }
@@ -817,12 +884,14 @@ private:
         image.depthCompare = depth;
         image.r128 = memory.imageR128;
         image.packed = memory.imagePacked;
-        Merge(image, op, pc);
+        image.byElements = memory.imageByElements;
+        image.byComponents = memory.imageByElements != 0u ? memory.dataDwords / memory.imageByElements : 0u;
+        Merge(image, memory, op, pc);
         m_info.images.push_back(image);
         return static_cast<std::uint32_t>(m_info.images.size() - 1);
     }
 
-    static void Merge(ImageResource& image, IrOpcode op, std::uint32_t pc) {
+    static void Merge(ImageResource& image, const MemoryInfo& memory, IrOpcode op, std::uint32_t pc) {
         const auto access = ImageOpcodeInfoOf(op).access;
         const bool atomic = access == ImageAccess::Atomic;
         const bool write = access == ImageAccess::Write || atomic;
@@ -835,6 +904,14 @@ private:
         image.read = image.read || !write || atomic;
         image.written = image.written || write;
         image.atomic = image.atomic || atomic;
+        image.srgbDecodeCompatible = image.srgbDecodeCompatible && !ImageOpcodeInfoOf(op).needsSampler;
+        image.fmaskCompatible = image.fmaskCompatible && op == IrOpcode::ImageRead && memory.dataBits == 32u;
+        image.depthBitsCompatible = image.depthBitsCompatible && memory.dataBits == 32u;
+        if ((memory.imageSampleFlags & RdnaImageSampleFlagCompare) != 0u) {
+            constexpr auto unsupported = RdnaImageSampleFlagLod | RdnaImageSampleFlagDerivative;
+            if (op == IrOpcode::ImageGatherRaw || (memory.imageSampleFlags & unsupported) != 0u) image.emulatedCompare |= EmulatedCompare::Unsupported;
+            if ((memory.imageSampleFlags & RdnaImageSampleFlagLevelZero) == 0u) image.emulatedCompare |= EmulatedCompare::RequiresSingleLevel;
+        }
     }
 
     std::uint32_t AddSampler(std::uint32_t source, std::uint32_t pc) {
@@ -896,7 +973,6 @@ private:
     void Collect(IrValue& inst) {
         const auto op = inst.Opcode();
         if (op == IrOpcode::ImageBvhIntersectRay) {
-            // A ray query reads its node through the BDA page table (its T# is a run-time value).
             m_info.usesDma = true;
             return;
         }
@@ -922,13 +998,7 @@ private:
         std::uint32_t resource = 0;
 
         if (buffer != BufferAccess::None) {
-            if (TakeGpuDescriptor(inst, flags.index)) {
-                return;
-            }
-            GetHandle(inst.Argument(0), IrOpcode::GetBufferResource, 4, handle, source);
-            resource = AddBuffer(source, memory, op, flags.pc);
-            AddHandlePatch(handle, resource);
-            AddMemoryPatch(flags.index, resource, 0, false);
+            if (!TakeGpuDescriptor(inst, flags.index)) fail("buffer operation requires a four-dword runtime V#");
             return;
         }
         if (addressInfo.access != AddressAccess::None) {
@@ -958,8 +1028,6 @@ private:
                 std::fprintf(stderr, "[bda] %s at pc 0x%08x: %s access, offset %s%s\n", std::string(IrOpcodeName(op)).c_str(), flags.pc, kind, immediateOffset ? "immediate" : "dynamic", memory.kind == ResourceKind::ScalarAddress && !immediateOffset ? " (a register offset is not planned by the SRT walker)" : "");
             }
             m_info.usesDma = true;
-            // Global and flat stores and atomics write through the table too: the draw must lease
-            // registered memory writable, or the writes land in a read-only copy.
             m_info.bdaWrites = m_info.bdaWrites || addressInfo.access == AddressAccess::Write || addressInfo.access == AddressAccess::Atomic;
             return;
         }

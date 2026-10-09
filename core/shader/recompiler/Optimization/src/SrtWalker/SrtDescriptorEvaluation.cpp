@@ -122,7 +122,18 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
         for (const auto& read : program.srtReads) {
             const bool clean = read.flatOffset < cleanFlatSlots.size() && cleanFlatSlots[read.flatOffset] != 0u;
             auto& selected = clean ? cleanEvaluator : evaluator;
-            if (read.flatOffset >= flattened.size() || !selected.Evaluate(read.value, flattened[read.flatOffset])) {
+            // A pure slot's raw read is reachable from no root, so it was not evaluated (nor
+            // cached) before this loop: its dereference happens here, once, and is recorded as
+            // the slot's leaf; reads nested in its address cone land among the other reads.
+            auto* trace = runtime.readTrace;
+            const bool pure = trace != nullptr && read.flatOffset < program.pureFlatSlots.size() && program.pureFlatSlots[read.flatOffset] != 0u;
+            if (pure) {
+                trace->leaf = read.value->Resolve();
+                trace->leafSlot = read.flatOffset;
+            }
+            const bool evaluated = read.flatOffset < flattened.size() && selected.Evaluate(read.value, flattened[read.flatOffset]);
+            if (pure) trace->leaf = nullptr;
+            if (!evaluated) {
                 return Fail(std::string(clean ? "clean " : "") + "SRT read at flat offset " + std::to_string(read.flatOffset) + ": " + DescribeValue(read.value, 4));
             }
         }

@@ -13,7 +13,7 @@
 #include "prx/libc/include/General.hpp"
 #include "src/VideoDecoder.hpp"
 
-// libSceVideodec2 decodes H.264/HEVC access units on the CPU. Structures, error codes and the output
+// libSceVideodec2 decodes H.264/HEVC/VP9 access units on the CPU. Structures, error codes and the output
 // layout (NV12 frame followed by the picture information) follow shadPS4's videodec2; see
 // docs/research-notes.md.
 namespace {
@@ -34,6 +34,7 @@ constexpr int kErrorCodecType = static_cast<int>(0x811D0204);
 
 constexpr std::uint32_t kCodecAvc = 1;
 constexpr std::uint32_t kCodecHevc = 974921;
+constexpr std::uint32_t kCodecVp9 = 2382845;
 // Memory the library asks for; decoding runs on the host, so the amounts only need to be plausible.
 constexpr std::uint64_t kWorkMemoryBytes = 16ull << 20;
 
@@ -296,8 +297,17 @@ bool outputInfoSize(const OutputInfo& info) {
     return info.thisSize == sizeof(OutputInfo) || info.thisSize == offsetof(OutputInfo, frameFormat);
 }
 
+bool supportedCodec(std::uint32_t codec) {
+    return codec == kCodecAvc || codec == kCodecHevc || codec == kCodecVp9;
+}
+
+Videodec2::Codec hostCodec(std::uint32_t codec) {
+    return codec == kCodecAvc ? Videodec2::Codec::Avc : codec == kCodecHevc ? Videodec2::Codec::Hevc : Videodec2::Codec::Vp9;
+}
+
+// No VP9 picture information is stored yet.
 std::uint64_t pictureInfoBytes(std::uint32_t codec) {
-    return codec == kCodecAvc ? sizeof(AvcPictureInfo) : sizeof(HevcPictureInfo);
+    return codec == kCodecAvc ? sizeof(AvcPictureInfo) : codec == kCodecHevc ? sizeof(HevcPictureInfo) : 0;
 }
 
 bool tracing() {
@@ -336,7 +346,7 @@ void publish(const Decoder& decoder, const Videodec2::Picture& picture, FrameBuf
         avc.frame_cropping_flag = cropRight != 0 || cropBottom != 0;
         avc.frame_crop_right_offset = cropRight;
         avc.frame_crop_bottom_offset = cropBottom;
-    } else {
+    } else if (decoder.codec == kCodecHevc) {
         auto& hevc = *reinterpret_cast<HevcPictureInfo*>(info);
         hevc = {};
         hevc.this_size = sizeof(HevcPictureInfo);
@@ -409,7 +419,7 @@ int32_t APS5_VABI sceVideodec2ReleaseComputeQueue(void* queue) {
 int32_t APS5_VABI sceVideodec2QueryDecoderMemoryInfo(const DecoderConfigInfo* config, DecoderMemoryInfo* memory) {
     if (config == nullptr || memory == nullptr) return kErrorArgumentPointer;
     if (config->thisSize != sizeof(DecoderConfigInfo) || memory->thisSize != sizeof(DecoderMemoryInfo)) return kErrorStructSize;
-    if (config->codecType != kCodecAvc && config->codecType != kCodecHevc) return kErrorCodecType;
+    if (!supportedCodec(config->codecType)) return kErrorCodecType;
     // The largest picture the configuration allows, as NV12 plus its picture information (shadPS4).
     auto width = config->maxFrameWidth;
     auto height = config->maxFrameHeight;
@@ -432,11 +442,11 @@ int32_t APS5_VABI sceVideodec2QueryDecoderMemoryInfo(const DecoderConfigInfo* co
 int32_t APS5_VABI sceVideodec2CreateDecoder(const DecoderConfigInfo* config, const DecoderMemoryInfo* memory, Decoder** decoder) {
     if (config == nullptr || memory == nullptr || decoder == nullptr) return kErrorArgumentPointer;
     if (config->thisSize != sizeof(DecoderConfigInfo) || memory->thisSize != sizeof(DecoderMemoryInfo)) return kErrorStructSize;
-    if (config->codecType != kCodecAvc && config->codecType != kCodecHevc) return kErrorCodecType;
+    if (!supportedCodec(config->codecType)) return kErrorCodecType;
     auto created = std::make_unique<Decoder>();
     created->codec = config->codecType;
     try {
-        created->video = Videodec2::CreateVideoDecoder(config->codecType == kCodecAvc ? Videodec2::Codec::Avc : Videodec2::Codec::Hevc);
+        created->video = Videodec2::CreateVideoDecoder(hostCodec(config->codecType));
     } catch (const std::runtime_error& error) {
         if (tracing()) std::fprintf(stderr, "[videodec2] %s\n", error.what());
         return kErrorApiFail;
@@ -493,6 +503,10 @@ int32_t APS5_VABI sceVideodec2GetPictureInfo(const OutputInfo* output, void* fir
     if (!outputInfoSize(*output)) return kErrorStructSize;
     if (output->pictureCount == 0 || firstPicture == nullptr) return 0;
     const auto available = pictureInfoBytes(output->codecType);
+    if (available == 0) {
+        NotImplemented_nid_no_patch("sceVideodec2GetPictureInfo (VP9 picture information)");
+        return kErrorApiFail;
+    }
     const auto requested = *static_cast<const std::uint64_t*>(firstPicture);
     const auto bytes = std::min<std::uint64_t>(requested, available);
     if (bytes <= sizeof(std::uint64_t)) return kErrorStructSize;

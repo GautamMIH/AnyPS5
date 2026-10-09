@@ -22,6 +22,8 @@ public:
     VulkanDevice& operator=(const VulkanDevice&) = delete;
     // The selected physical device's name (ANYPS5_GPU selects by name).
     std::string DeviceName() const;
+    // Which device of the process this is: 1 for the first one created, counting replaced devices.
+    std::uint64_t Serial() const;
     ShaderRecompiler::SpirvTarget Target() const;
     // The target for a compute program of the given wave size (upstream's API). Subgroup size control
     // is not enabled, so the device's subgroup size stands (32 on NVIDIA).

@@ -222,7 +222,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         std::string key = "draw";
         char part[64];
         for (const auto& shader : shaders) {
-            std::snprintf(part, sizeof(part), " %u:%016llx", static_cast<unsigned>(shader.stage), static_cast<unsigned long long>(shader.program->variantId));
+            std::snprintf(part, sizeof(part), " %u:%016llx", static_cast<unsigned>(shader.stage), static_cast<unsigned long long>(shader.program->PipelineVariantId()));
             key += part;
         }
         std::snprintf(part, sizeof(part), " %ux%u rt%x%s", state.renderExtent.width, state.renderExtent.height, state.colorTargetMask, state.hasDepthTarget ? " depth" : "");

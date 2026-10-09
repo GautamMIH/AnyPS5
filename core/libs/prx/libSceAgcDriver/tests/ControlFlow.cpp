@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
-#include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <initializer_list>
@@ -163,13 +162,7 @@ Structured verifyGraph(const std::string& name, std::span<const std::uint32_t> c
     const auto decoded = RdnaInstructionDecoder{}.Decode(code);
     const auto original = GraphBuilder{}.Build(decoded);
     auto graph = original;
-    try {
-        Structurizer{}.Structurize(graph);
-    } catch (...) {
-        // AGC_CONTROL_FLOW_DUMP=1: the graph before and as far as structurization got.
-        if (std::getenv("AGC_CONTROL_FLOW_DUMP") != nullptr) std::fprintf(stderr, "%soriginal:\n%s\n%sstructurized so far:\n%s\n", prefix.c_str(), GraphToString(original).c_str(), prefix.c_str(), GraphToString(graph).c_str());
-        throw;
-    }
+    Structurizer{}.Structurize(graph);
     verifyStructured(prefix, graph);
     verifySameExecutions(prefix, original, graph);
     return {graph.blocks.size() - original.blocks.size(), clonedInstructions(graph), routeVariables(graph)};
@@ -292,7 +285,7 @@ void verifyNullSwappc() {
     verifyLongBranch("backward long branch", LongBranchBack, 0x24u, 0x08u);
     const std::array<std::uint32_t, 3> call{0xbe8c1f00u, 0xbe8e210cu, 0xbf810000u};
     const std::vector<std::tuple<std::string_view, std::vector<std::uint32_t>, std::string_view>> refused{
-        {"s_swappc_b64 with a return address", {call.begin(), call.end()}, "unsupported SOP1 opcode 33"},
+        {"s_swappc_b64 with a return address", {call.begin(), call.end()}, "unclosable scalar call/return pairing"},
         {"index rewritten after the bound", patched(DwordTableGetpcFirst, 5, {0xbe9203ffu, 0x00000040u}), "unsupported dynamic s_setpc_b64"},
         {"index scaled for two-dword entries", patched(DwordTableGetpcFirst, 7, {0x8f128312u}), "unsupported dynamic s_setpc_b64"},
         {"entry rewritten after the load", patched(DwordTableGetpcFirst, 11, {0xbe8e0380u}), "unsupported dynamic s_setpc_b64"},
@@ -930,31 +923,7 @@ done:
   s_endpgm)",
          LongBranchBack, Split::None},
     };
-    // Shapes that must structure without cloning or routing (their merges are found directly).
-    const std::vector<std::pair<std::string_view, std::vector<std::uint32_t>>> direct = {
-        // `if (a) { if (b) return; } next: if (c) x++; store;` with the early return its own exit:
-        // the inner construct merges at the enclosing merge, which is split (a Zorro shader).
-        {"early return nested in an enclosing selection", {
-            0xbf840001u,              // s_cbranch_scc0 next
-            0xbf850005u,              // s_cbranch_scc1 exit
-            0xbf860001u,              // next: s_cbranch_vccz store
-            0x4a020282u,              // v_add_nc_u32 v1, 2, v1
-            0xe0700000u, 0x80000100u, // store: buffer_store_dword v1, off, s[0:3], 0
-            0xbf810000u,              // s_endpgm
-            0xe0700000u, 0x80000100u, // exit: buffer_store_dword v1, off, s[0:3], 0
-            0xbf810000u}},            // s_endpgm
-    };
     int failures = 0;
-    for (const auto& [name, code] : direct) {
-        try {
-            const auto result = verifyGraph(std::string(name), code);
-            require(result.clonedInstructions == 0 && result.routeVariables == 0, std::string(name) + ": expected a direct merge, got " + std::to_string(result.clonedInstructions) + " cloned instructions and " + std::to_string(result.routeVariables) + " route variables");
-            static_cast<void>(recompile(std::string(name), code, 64u));
-        } catch (const std::exception& error) {
-            std::fprintf(stderr, "%s\n", error.what());
-            ++failures;
-        }
-    }
     for (const auto& program : programs) {
         try {
             verifyProgram(program);

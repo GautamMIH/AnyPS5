@@ -78,12 +78,9 @@ ShaderRecompiler::SrtRuntime ShaderMemory::runtime(const ShaderRecompiler::Recom
     return result;
 }
 
-std::shared_ptr<const ShaderRecompiler::ResourceCapture> ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request) {
+std::shared_ptr<const ShaderRecompiler::ResourceCapture> ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::SourceHandle* handle) {
+    if (handle != nullptr) return ShaderRecompiler::CaptureResources(request, runtime(request), *handle);
     return ShaderRecompiler::CaptureResources(request, runtime(request));
-}
-
-std::shared_ptr<const ShaderRecompiler::ResourceCapture> ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::ResourceCapture& sameProgram) {
-    return ShaderRecompiler::CaptureResources(request, runtime(request), sameProgram);
 }
 
 std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::Regions() const {
@@ -153,7 +150,7 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     const auto programHash = hash;
     const auto programWords = key.size();
     PerformanceTimer timing("Driver.CaptureMemo");
-    // The program's earlier capture (same code, context and owner), whatever its user data.
+    // The program's resolved source (same code, context and owner), whatever its user data.
     const auto program = programs.find(programHash);
     const bool sameProgram = program != programs.end() && program->second.owner == owner && program->second.key.size() == programWords && std::equal(program->second.key.begin(), program->second.key.end(), key.begin());
     static const bool allUserData = std::getenv("ANYPS5_CAPTURE_MEMO_ALL_USER_DATA") != nullptr;
@@ -188,7 +185,7 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     const auto mappingGeneration = GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix();
     // The same program and context captured with other user data: its source and plan are reused.
     timing.Mark("program_lookup");
-    auto capture = sameProgram ? memory.Capture(request, *program->second.capture) : memory.Capture(request);
+    auto capture = sameProgram ? memory.Capture(request, program->second.handle.get()) : memory.Capture(request);
     timing.Mark("materialize");
     if (entries.size() >= 16384) entries.clear();
     if (programs.size() >= 4096) programs.clear();
@@ -196,7 +193,10 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     timing.Mark("captured_words");
     entries[hash] = Entry{owner, key, capture, std::move(words), mappingGeneration};
     timing.Mark("store");
-    if (!sameProgram) programs[programHash] = Program{owner, std::vector<std::uint64_t>(key.begin(), key.begin() + static_cast<std::ptrdiff_t>(programWords)), capture, capture->plan ? ShaderRecompiler::PlanUserDataSlots(*capture->plan) : std::vector<std::uint32_t>{}, capture->plan != nullptr};
+    if (!sameProgram) {
+        auto handle = capture->source != nullptr ? std::make_shared<const ShaderRecompiler::SourceHandle>(ShaderRecompiler::SourceHandle{capture->source, nullptr, {}}) : nullptr;
+        programs[programHash] = Program{owner, std::vector<std::uint64_t>(key.begin(), key.begin() + static_cast<std::ptrdiff_t>(programWords)), std::move(handle), capture->plan ? ShaderRecompiler::PlanUserDataSlots(*capture->plan) : std::vector<std::uint32_t>{}, capture->plan != nullptr};
+    }
     timing.Mark(known ? "changed" : sameProgram ? "walk" : "miss");
     return capture;
 }

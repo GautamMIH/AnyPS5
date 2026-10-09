@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineSpecialization.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include <algorithm>
 #include <array>
@@ -189,6 +190,10 @@ GraphicsPipeline::GraphicsPipeline(const Context& context, const State& state, c
     Require(pushStages == 0 || context.limits.maxPushConstantsSize >= PipelinePushConstantBytes, "graphics push constant range exceeds device limit");
     try {
         std::vector<VkPipelineShaderStageCreateInfo> stages(shaders.size());
+        // The invocation's specialization constants (empty when the recompiler already specialized
+        // the module); held until the pipeline is created.
+        std::vector<PipelineSpecialization> specializations;
+        specializations.reserve(shaders.size());
         for (std::uint32_t i = 0; i < shaders.size(); ++i) {
             const auto& shader = *shaders[i].program;
             VkShaderModuleCreateInfo module{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -200,6 +205,8 @@ GraphicsPipeline::GraphicsPipeline(const Context& context, const State& state, c
             stages[i].stage = stage;
             stages[i].module = _modules[i];
             stages[i].pName = "main";
+            specializations.emplace_back(shader);
+            stages[i].pSpecializationInfo = specializations.back().Info();
         }
         const auto setLayout = resources.Layout();
         const VkPushConstantRange push{pushStages, 0, PipelinePushConstantBytes};

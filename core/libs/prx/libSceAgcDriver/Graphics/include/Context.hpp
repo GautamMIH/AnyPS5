@@ -104,6 +104,14 @@ struct Context {
     bool cullDistance = false;
     // VK_EXT_shader_viewport_index_layer: vertex-pipeline stages may write the layer and viewport index.
     bool viewportIndexLayer = false;
+    // shader{Sampled,Storage}ImageArrayDynamicIndexing: image heaps indexed at run time (bindless
+    // tables); descriptorIndexing: non-uniformly (VK_EXT_descriptor_indexing).
+    bool imageArrayDynamicIndexing = false;
+    bool descriptorIndexing = false;
+    // VK_EXT_robustness2 nullDescriptor: null guest storage images bind no view.
+    bool nullDescriptors = false;
+    // shaderFloat64: the Float64 capability.
+    bool float64 = false;
     bool externalMemoryHost = false;
     GuestGpuMemory* guestGpuMemory = nullptr;
 

@@ -4,13 +4,22 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <cstddef>
+#include <new>
 #include <stdexcept>
+#include <spirv/unified1/spirv.hpp>
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <memory>
 
 constexpr int VulkanTestSkipped = 77;
+
+inline bool TargetHasCapability(const ShaderRecompiler::SpirvTarget& target, spv::Capability capability) {
+    const auto& capabilities = target.supportedCapabilities;
+    return std::find(capabilities.begin(), capabilities.end(), static_cast<std::uint32_t>(capability)) != capabilities.end();
+}
 
 inline std::unique_ptr<AgcDriver::VulkanDevice> OpenVulkanTestDevice() {
     try {
@@ -42,5 +51,15 @@ private:
     void* address = nullptr;
     std::size_t bytes;
 };
+
+// A value-initialized T in guest memory of its own, for buffers this driver reaches only through
+// guest memory (runtime buffer descriptors and the BDA table map guest allocations, not the host
+// heap or host statics). Tag tells apart objects of one type.
+template<typename T, int Tag = 0>
+T& GuestStatic() {
+    static GuestTestMemory memory(sizeof(T));
+    static T* object = new (memory.As<void>()) T{};
+    return *object;
+}
 
 #endif

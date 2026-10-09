@@ -1,6 +1,8 @@
 #ifndef CORE_SHADER_RECOMPILIER_INCLUDE_SHADER_RECOMPILIER_RECOMPILER_HPP
 #define CORE_SHADER_RECOMPILIER_INCLUDE_SHADER_RECOMPILIER_RECOMPILER_HPP
 
+#include "RuntimeAbi.hpp"
+#include "PipelineSpecialization.hpp"
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -43,9 +45,6 @@ struct ShaderComputeStageInfo {
     std::array<bool, 3> groupIdEnable;
     bool tgSizeEnable;
     std::uint32_t threadIdComponentCount;
-    // A dispatch sized in threads (USE_THREAD_DIMENSIONS) that is no whole number of workgroups:
-    // its size per axis, the last workgroup partial; zero otherwise. Variants key on whether it
-    // is set only; the size reaches the shader as shader data.
     std::array<std::uint32_t, 3> partialThreads;
     std::uint32_t scratchDwords = 0;
 
@@ -112,9 +111,6 @@ struct ShaderPixelStageInfo {
     std::uint32_t interpolatorCount;
     std::array<std::uint32_t, 32> interpolatorSettings;
     bool wave32;
-    // SPI_PS_INPUT_ADDR: every input it names takes its VGPRs in SPI order (two per I/J pair, three
-    // for the pull model, one otherwise), loaded or not (PixelInputVgpr); the flags below are the
-    // loaded ones (ENA & ADDR).
     std::uint32_t inputAddr;
     bool hasPerspectiveCenterVgpr;
     bool perspectiveCentroid;
@@ -162,6 +158,19 @@ struct ShaderVertexStageInfo {
     std::uint32_t paClVsOutCntl = 0;
 };
 
+struct ShaderFloatMode {
+    std::uint32_t floatMode = 0;
+    bool dx10Clamp = false;
+    bool ieeeMode = false;
+    bool fp16Overflow = false;
+
+    bool operator==(const ShaderFloatMode&) const = default;
+};
+
+inline constexpr std::uint32_t InterpolationQuiet = 1u;
+inline constexpr std::uint32_t InterpolationFlush32 = 2u;
+inline constexpr std::uint32_t InterpolationFlush16 = 4u;
+
 struct GuestContext {
     std::uint32_t waveSize;
     std::uint32_t userDataBaseRegister;
@@ -170,6 +179,7 @@ struct GuestContext {
     std::optional<ShaderPixelStageInfo> pixel;
     std::optional<ShaderVertexStageInfo> vertex;
     std::span<const MemoryRegion> memory;
+    std::optional<ShaderFloatMode> floatMode;
 };
 
 struct MeshTargetLimits {
@@ -207,18 +217,24 @@ struct SpirvTarget {
     std::uint32_t maxWorkgroupSharedMemoryBytes;
     std::optional<MeshTargetLimits> mesh;
     std::optional<TessellationTargetLimits> tessellation;
-    // minStorageBufferOffsetAlignment of the device. A guest buffer whose base is not a multiple
-    // of it is bound from the aligned address below (BufferViewMisalignment), and the shader adds
-    // the difference; 0 or 1 binds every buffer at its base.
-    std::uint32_t storageBufferOffsetAlignment = 0;
     bool nonConstantImageOffsets = false;
     std::uint32_t srgbDecodeFormats = 0;
     bool narrowSubgroupClock = false;
+    // f32 arithmetic follows the device: FLOAT_MODE denormal flushing and the hardware's choice of
+    // NaN result bits (TechnicalDebt.md, "f32 denormals" and "Signaling NaN inputs") are not
+    // emitted. Emulating them on the bits costs tens of instructions per v_add/v_mul/v_fma and made
+    // game shaders ~1.5x slower on the GPU; results differ only in denormal and NaN bit patterns.
+    // Off (the exact lowering) unless the driver asks for it.
+    bool hostFloatSemantics = false;
+    // minStorageBufferOffsetAlignment of the device. A guest buffer whose base is not a multiple
+    // of it is bound from the aligned address below (BufferViewMisalignment), and the shader data's
+    // buffer offsets carry the difference; 0 or 1 binds every buffer at its base.
+    std::uint32_t storageBufferOffsetAlignment = 0;
 };
 
 // The bytes a guest buffer view starts before its V# base so that its descriptor offset meets the
 // device alignment. Only dword multiples below 256 can be carried to the shader (a byte per
-// buffer, applied in dwords); other bases are bound unmodified.
+// buffer); other bases are bound unmodified.
 [[nodiscard]] inline std::uint32_t BufferViewMisalignment(std::uint64_t base, std::uint32_t alignment) {
     if (alignment <= 1u) return 0u;
     const auto misalignment = static_cast<std::uint32_t>(base % alignment);
@@ -341,10 +357,9 @@ struct DescriptorBinding {
     bool readOnly = false;
     std::optional<DescriptorImageShape> imageShape;
     std::vector<bool> samplerDepthCompare;
-    // Guest images sampled with a depth comparison (they need a depth-format view).
-    std::vector<bool> imageDepthCompare;
     // Guest image elements the shader stores to (or updates atomically); the others are only read.
     std::vector<bool> imageWritten;
+    std::vector<bool> imageDepthCompare;
     std::vector<bool> imageAtomic;
     std::vector<bool> imageAtomic64;
     // Guest buffer elements the shader updates atomically (one entry per element of a GuestBuffers
@@ -367,6 +382,7 @@ struct VertexAttribute {
     std::uint32_t components;
     ShaderVertexBufferResource resource;
     std::uint32_t fetchIndex;
+    std::uint32_t formatComponents = 0;
 };
 
 struct FragmentParameter {
@@ -422,21 +438,36 @@ private:
     std::shared_ptr<std::vector<std::uint32_t>> words;
 };
 
-struct RecompileResult {
+struct VertexInput {
+    std::uint32_t location;
+    std::uint32_t components;
+    std::uint32_t fetchIndex;
+    std::uint32_t outputMask = 0;
+
+    bool operator==(const VertexInput& other) const = default;
+};
+
+struct VertexInputPatch {
+    std::uint32_t location;
+    std::uint32_t word;
+    std::array<std::uint32_t, 3> values;
+
+    bool operator==(const VertexInputPatch& other) const = default;
+};
+
+struct CompiledShaderArtifact {
+    std::vector<VertexInputPatch> vertexInputPatches;
     SharedSpirv spirv;
-    std::vector<DescriptorBinding> bindings;
-    std::vector<std::byte> pushConstants;
     std::uint32_t memoryOffsetDword = 0;
+    std::uint32_t shaderDataDwords = 0;
+    std::uint32_t imageMetadataDword = 0;
+    std::uint32_t runtimeImageCount = 0;
+    std::vector<std::uint32_t> runtimeImageResources;
     std::uint32_t bdaAbiVersion = 0;
-    // Some access may store through the BDA table (ShaderInfo::bdaWrites). False proves the program
-    // only reads through it, so a driver may expose the table's memory read-only; a producer that
-    // does not set it leaves the conservative default.
-    bool bdaWrites = true;
-    std::vector<VertexAttribute> vertexAttributes;
+    std::uint32_t runtimeAbiVersion = RuntimeAbi::Version;
+    std::vector<VertexInput> vertexInputs;
     std::int32_t vertexOffsetSgpr = -1;
     std::int32_t instanceOffsetSgpr = -1;
-    // The offset SGPR is also read elsewhere in the program (so a value folded into the draw's
-    // first vertex / instance cannot stand in for it), or two SGPRs were added (the SGPR is -1).
     bool vertexOffsetShared = false;
     bool instanceOffsetShared = false;
     bool vertexOffsetConflict = false;
@@ -444,13 +475,27 @@ struct RecompileResult {
     std::uint32_t hostSubgroupSize = 0;
     std::vector<std::uint32_t> parameterExports;
     std::vector<FragmentParameter> fragmentParameters;
-    bool cacheHit = false;
-    // The program computes an XOR. shadPS4 treats a shader that writes a surface's metadata
-    // without XOR address math as a clear rather than an encode (FastClear.hpp).
-    bool usesBitwiseXor = false;
-    // Identifies the compiled variant the result came from: equal ids mean identical SPIR-V and
-    // bindings, so drivers can reuse pipeline objects. Zero when unknown.
     std::uint64_t variantId = 0;
+};
+
+struct ShaderInvocation {
+    std::vector<PipelineSpecializationConstant> specialization;
+    std::uint64_t specializationId = 0;
+    std::vector<DescriptorBinding> bindings;
+    std::vector<std::byte> pushConstants;
+    std::vector<VertexAttribute> vertexAttributes;
+};
+
+struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
+    bool cacheHit = false;
+    // Some access may store through the BDA table (ShaderInfo::bdaWrites). False proves the program
+    // only reads through it, so a driver may expose the table's memory read-only; a producer that
+    // does not set it leaves the conservative default.
+    bool bdaWrites = true;
+    // The program computes an XOR (ShaderInfo::hasBitwiseXor). A driver may treat a shader that
+    // writes a surface's metadata without XOR address math as a clear rather than an encode.
+    bool usesBitwiseXor = false;
+    [[nodiscard]] std::uint64_t PipelineVariantId() const { return specializationId != 0 ? specializationId : variantId; }
 };
 
 [[nodiscard]] RecompileResult Recompile(const RecompileRequest& request);
@@ -461,11 +506,8 @@ struct RecompileResult {
 // constants resolve within the returned code).
 [[nodiscard]] std::vector<std::uint32_t> SpliceGeometryHalves(std::span<const std::uint32_t> front, std::span<const std::uint32_t> back);
 
-// The resource plan, snapshot and specialization a driver captured for the request (see
-// CaptureResources in Optimization/ResourceProgram.hpp): this overload reuses them instead of
-// materializing the request's memory regions again, and is otherwise Recompile(request).
 struct ResourceCapture;
-[[nodiscard]] RecompileResult Recompile(const RecompileRequest& request, const ResourceCapture& capture);
+[[nodiscard]] std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit = nullptr);
 
 // Debug aid (see DebugProbe in Translation/TranslationContext.hpp): the APS5_PROBE register probe is
 // only applied while a driver has it active, so it can be limited to one dispatch; the recompile

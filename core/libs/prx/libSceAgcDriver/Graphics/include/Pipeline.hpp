@@ -111,9 +111,13 @@ struct ShaderDeviceFeatures {
     bool imageInt64Atomics = false;
     // sampleRateShading: the SampleRateShading capability, used by pixel shaders reading SampleId.
     bool sampleRateShading = false;
+    // Image arrays indexed at run time, and non-uniformly (VK_EXT_descriptor_indexing).
+    bool imageArrayDynamicIndexing = false;
+    bool descriptorIndexing = false;
+    bool float64 = false;
 
     static ShaderDeviceFeatures Of(const Context& context) {
-        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance, context.viewportIndexLayer, context.imageInt64Atomics, context.sampleRateShading};
+        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance, context.viewportIndexLayer, context.imageInt64Atomics, context.sampleRateShading, context.imageArrayDynamicIndexing, context.descriptorIndexing, context.float64};
     }
 };
 

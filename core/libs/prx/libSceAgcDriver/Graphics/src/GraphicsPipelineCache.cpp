@@ -129,8 +129,8 @@ std::string makeKey(const Context& context, const State& state, const ShaderReso
         append(key, shader.stage);
         // A compiled variant's id stands for its SPIR-V (copying kilobytes of code into every
         // draw's key cost several microseconds); results without one key by their code.
-        append(key, shader.program->variantId);
-        if (shader.program->variantId != 0) continue;
+        append(key, shader.program->PipelineVariantId());
+        if (shader.program->PipelineVariantId() != 0) continue;
         append(key, shader.program->spirv.size());
         const auto bytes = std::as_bytes(std::span(shader.program->spirv));
         if (!bytes.empty()) key.append(reinterpret_cast<const char*>(bytes.data()), bytes.size());

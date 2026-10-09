@@ -21,6 +21,9 @@
 namespace AgcDriver::Graphics {
 namespace {
 
+// The image allocation of a null storage image element (bound as a null descriptor).
+constexpr std::size_t NullStorageImage = std::numeric_limits<std::size_t>::max();
+
 bool overlap(std::uint64_t first, std::size_t firstSize, std::uint64_t second, std::size_t secondSize) {
     return first < second + secondSize && second < first + firstSize;
 }
@@ -64,6 +67,34 @@ const char* kindName(ShaderRecompiler::DescriptorKind kind) {
     throw std::runtime_error("AGC graphics: unknown descriptor kind");
 }
 
+// The runtime image metadata of the shader data (bindless images, ShaderRecompiler::RuntimeAbi):
+// every entry names a heap the shader binds and elements within it, as upstream's driver checks.
+void ValidateRuntimeResources(const ShaderRecompiler::RecompileResult& program, std::span<const std::uint32_t> words) {
+    constexpr auto bindingCount = static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count);
+    std::array<const ShaderRecompiler::DescriptorBinding*, bindingCount> heaps{};
+    if (program.runtimeImageCount != 0u) {
+        for (const auto& binding : program.bindings) {
+            if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages) continue;
+            auto& heap = heaps[binding.binding % bindingCount];
+            Require(heap == nullptr, "duplicate runtime image binding");
+            heap = &binding;
+        }
+    }
+    Require(words.size() == program.shaderDataDwords, "invalid compact shader data size");
+    constexpr auto metadataWords = sizeof(ShaderRecompiler::RuntimeAbi::ResourceMetadata) / sizeof(std::uint32_t);
+    Require(program.imageMetadataDword <= words.size() && program.runtimeImageCount <= (words.size() - program.imageMetadataDword) / metadataWords, "runtime image metadata exceeds shader data");
+    for (const auto index : program.runtimeImageResources) {
+        Require(index < program.runtimeImageCount, "runtime image resource exceeds its compact layout");
+        const auto offset = program.imageMetadataDword + index * metadataWords;
+        const auto kind = words[offset];
+        const auto first = words[offset + 1u];
+        const auto count = words[offset + 2u];
+        Require(count != 0u, "runtime image metadata has no descriptor elements");
+        Require(kind < heaps.size() && heaps[kind] != nullptr, "runtime metadata references an unbound image heap");
+        Require(first < heaps[kind]->count && count <= heaps[kind]->count - first, "runtime metadata exceeds its bound heap");
+    }
+}
+
 }
 
 ShaderResources::ShaderResources(const Context& context, const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes) : ShaderResources(context, std::array<CompiledShader, 2>{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, static_cast<std::uint32_t>(vertex.pushConstants.size())}}}, targets, indexAddress, indexBytes) {}
@@ -102,6 +133,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
             for (const auto& binding : shader.program->bindings) {
                 Require(binding.descriptorSet == 0, "unexpected descriptor set: every shader resource must use descriptor set zero");
                 Require(occupied.insert(binding.binding).second, "duplicate shader binding");
+                ShaderRecompiler::RuntimeAbi::RequireVersion(shader.program->runtimeAbiVersion);
                 const bool addressRole = binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer;
                 const bool bufferRole = addressRole || binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers || binding.role == ShaderRecompiler::DescriptorRole::ShaderData || binding.role == ShaderRecompiler::DescriptorRole::FlattenedSrt || binding.role == ShaderRecompiler::DescriptorRole::Gds;
                 const bool imageRole = binding.role == ShaderRecompiler::DescriptorRole::GuestImages || binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers;
@@ -138,6 +170,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
                 } else {
                     Require(binding.count == 1, "shader data and flattened SRT descriptors must not be arrays");
                     Require(!binding.guestDescriptor.empty(), "empty shader data descriptor");
+                    if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) ValidateRuntimeResources(*shader.program, binding.guestDescriptor);
                     item.allocations.push_back(addDataBuffer(binding.guestDescriptor));
                 }
                 bindings.push_back(std::move(item));
@@ -197,7 +230,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
                     write.pBufferInfo = buffers.data() + bufferOffset;
                     break;
                 case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
-                    for (const auto index : binding.imageAllocations) images.push_back({VK_NULL_HANDLE, storageImages[index]->View(), VK_IMAGE_LAYOUT_GENERAL});
+                    for (const auto index : binding.imageAllocations) images.push_back({VK_NULL_HANDLE, index == NullStorageImage ? VK_NULL_HANDLE : storageImages[index]->View(), VK_IMAGE_LAYOUT_GENERAL});
                     write.pImageInfo = images.data() + imageOffset;
                     break;
                 case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE:
@@ -312,7 +345,14 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(binding.count <= context.limits.maxPerStageDescriptorStorageImages, "shader storage-image descriptors exceed per-stage limits");
         Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, binding.count, flags, nullptr}, {}, {}};
         for (std::uint32_t element = 0; element < binding.count; ++element) {
-            auto resource = DecodeTextureResource(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 8, 8));
+            const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 8, 8);
+            // A null T# (no base address) in a typed heap: with nullDescriptor the element binds no
+            // view, so its loads read zero and its stores are dropped, as on the hardware.
+            if (words[0] == 0u && (words[1] & 0xffu) == 0u && context.nullDescriptors) {
+                item.imageAllocations.push_back(NullStorageImage);
+                continue;
+            }
+            auto resource = DecodeTextureResource(words);
             // A 2D access (MIMG DIM 2D) to a 2D array carries no slice coordinate, so the hardware
             // addresses slice 0 of the view, the BASE_ARRAY layer: bound as a 2D image of that
             // layer (upstream edb13581).
@@ -385,6 +425,13 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
                 resource.lastLevel = 0;
                 resource.baseArray = 0;
                 resource.depthOrLastArray = 0;
+            }
+            // A 1D T# under a 2D image (the recompiler samples it as a 2D image of height 1): the
+            // texture is made 2D, one row high, so a 2D view of it exists.
+            const bool twoDimensionalShape = *binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2D || *binding.imageShape == ShaderRecompiler::DescriptorImageShape::Image2DArray;
+            if (twoDimensionalShape && (resource.dimension == TextureDimension::k1D || resource.dimension == TextureDimension::k1DArray)) {
+                resource.dimension = resource.dimension == TextureDimension::k1D ? TextureDimension::k2D : TextureDimension::k2DArray;
+                resource.height = 1;
             }
             const auto view = SampledViewDimension(*binding.imageShape, resource.dimension);
             Require(view.has_value(), "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (" + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ") cannot be viewed with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));

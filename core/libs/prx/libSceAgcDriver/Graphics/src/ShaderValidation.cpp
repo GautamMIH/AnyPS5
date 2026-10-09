@@ -1,6 +1,7 @@
 #include <unordered_set>
 #include "BdaAbi.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Pipeline.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineSpecialization.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <spirv/unified1/spirv.hpp>
@@ -156,6 +157,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
     using Stage = ShaderRecompiler::ShaderStage;
     Require(compiled.program != nullptr, "missing compiled shader");
     const auto& shader = *compiled.program;
+    // Every uint32 specialization constant the module declares has a value in the invocation.
+    PipelineSpecialization::Validate(shader);
     const auto stage = compiled.stage;
     const bool vertex = stage == Stage::Vertex || stage == Stage::Local;
     const bool fragment = stage == Stage::Fragment;
@@ -224,6 +227,14 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     capability == spv::CapabilityImageBuffer ||
                     capability == spv::CapabilityImageQuery ||
                     capability == spv::CapabilityDerivativeControl ||
+                    capability == spv::CapabilityImageMSArray ||
+                    capability == spv::CapabilityStorageImageMultisample ||
+                    // Runtime buffer descriptors compute 48-bit bases in 64-bit integers (the device
+                    // always enables shaderInt64), with or without the BDA table.
+                    capability == spv::CapabilityInt64 ||
+                    (features.float64 && capability == spv::CapabilityFloat64) ||
+                    (features.imageArrayDynamicIndexing && (capability == spv::CapabilitySampledImageArrayDynamicIndexing || capability == spv::CapabilityStorageImageArrayDynamicIndexing)) ||
+                    (features.descriptorIndexing && (capability == spv::CapabilityShaderNonUniform || capability == spv::CapabilitySampledImageArrayNonUniformIndexing || capability == spv::CapabilityStorageImageArrayNonUniformIndexing)) ||
                     (features.imageGatherExtended && capability == spv::CapabilityImageGatherExtended) ||
                     (features.minLod && capability == spv::CapabilityMinLod) ||
                     (features.storageImageReadWithoutFormat && capability == spv::CapabilityStorageImageReadWithoutFormat) ||
@@ -292,14 +303,13 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     Require(fragment && fragmentShaderBarycentric, "SPV_KHR_fragment_shader_barycentric requires enabled fragmentShaderBarycentric in a fragment shader");
                     break;
                 }
-                Require(extension == "SPV_KHR_float_controls" || (features.imageInt64Atomics && extension == "SPV_EXT_shader_image_int64") || (mesh && extension == "SPV_EXT_mesh_shader") || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (extension == "SPV_KHR_physical_storage_buffer" || extension == "SPV_KHR_8bit_storage")), "unsupported SPIR-V extension");
+                Require(extension == "SPV_KHR_float_controls" || (features.descriptorIndexing && extension == "SPV_EXT_descriptor_indexing") || (features.imageInt64Atomics && extension == "SPV_EXT_shader_image_int64") || (mesh && extension == "SPV_EXT_mesh_shader") || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (extension == "SPV_KHR_physical_storage_buffer" || extension == "SPV_KHR_8bit_storage")), "unsupported SPIR-V extension");
                 break;
             }
             case spv::OpDecorateId:
             case spv::OpDecorationGroup:
             case spv::OpGroupDecorate:
             case spv::OpGroupMemberDecorate:
-            case spv::OpSpecConstant:
             case spv::OpSpecConstantTrue:
             case spv::OpSpecConstantFalse:
             case spv::OpSpecConstantComposite:
@@ -322,6 +332,12 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 for (std::size_t i = 5; i < count; ++i) Require(module.interface.insert(instruction[i]).second, "duplicate SPIR-V interface ID");
                 break;
             case spv::OpExecutionMode:
+                // Float controls per width (32 and, for programs with f64 arithmetic, 64 bits).
+                if (count == 4 && instruction[2] == spv::ExecutionModeSignedZeroInfNanPreserve) {
+                    Require(instruction[3] == 32u || instruction[3] == 64u, "SignedZeroInfNanPreserve requires Float32 or Float64");
+                    executionModeTargets.insert(instruction[1]);
+                    break;
+                }
                 Require(count >= 3 && module.modes.emplace(instruction[2], std::vector<std::uint32_t>(instruction.begin() + 3, instruction.end())).second, "duplicate or malformed execution mode");
                 executionModeTargets.insert(instruction[1]);
                 if (instruction[2] == spv::ExecutionModeOriginUpperLeft) upperLeft = true;
@@ -373,6 +389,9 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             case spv::OpConstant:
                 if (count == 4) module.constants.emplace(instruction[2], instruction[3]);
                 break;
+            // Checked by PipelineSpecialization::Validate: a uint32 with a supplied SpecId value.
+            case spv::OpSpecConstant:
+                break;
             default: break;
         }
         cursor += count;
@@ -380,10 +399,6 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
     Require(entries == 1 && memoryModels == 1, "SPIR-V must contain one entry point and memory model");
     Require(entryPoint != 0 && std::all_of(executionModeTargets.begin(), executionModeTargets.end(), [&](auto target) { return target == entryPoint; }), "execution mode refers to a different entry point");
     Require(!fragment || upperLeft, "fragment coordinates must use an upper-left origin");
-    if (const auto preserve = module.modes.find(spv::ExecutionModeSignedZeroInfNanPreserve); preserve != module.modes.end()) {
-        Require(preserve->second == std::vector<std::uint32_t>{32u}, "SignedZeroInfNanPreserve requires Float32");
-        module.modes.erase(preserve);
-    }
     const auto mode = [&](std::uint32_t name, std::vector<std::uint32_t> operands) {
         const auto it = module.modes.find(name);
         if (it == module.modes.end() || it->second != operands) {
@@ -600,8 +615,8 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
         append(attribute.resource.fields[3]);
     }
     // A compiled variant's id stands for its SPIR-V; results without one key by their code.
-    append(shader.variantId);
-    if (shader.variantId == 0) {
+    append(shader.PipelineVariantId());
+    if (shader.PipelineVariantId() == 0) {
         append(shader.spirv.size());
         const auto code = std::as_bytes(std::span(shader.spirv));
         if (!code.empty()) key.append(reinterpret_cast<const char*>(code.data()), code.size());
@@ -635,12 +650,12 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
     key.reserve(48);
     bool memo = true;
     for (const auto& shader : shaders) {
-        if (shader.program == nullptr || shader.program->variantId == 0) {
+        if (shader.program == nullptr || shader.program->PipelineVariantId() == 0) {
             memo = false;
             break;
         }
         key.push_back(static_cast<std::uint64_t>(shader.stage));
-        key.push_back(shader.program->variantId);
+        key.push_back(shader.program->PipelineVariantId());
     }
     if (!memo) {
         validateShaders(shaders, state, subgroup, fragmentShaderBarycentric, features);

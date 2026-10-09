@@ -9,7 +9,7 @@
 
 namespace Videodec2 {
 
-enum class Codec { Avc, Hevc };
+enum class Codec { Avc, Hevc, Vp9 };
 
 // A decoded picture, already stored as NV12 in the caller's buffer: a luma plane of pitch x
 // alignedHeight bytes followed by interleaved chroma of pitch x alignedHeight / 2 bytes.

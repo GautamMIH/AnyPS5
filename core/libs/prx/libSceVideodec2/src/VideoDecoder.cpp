@@ -46,8 +46,9 @@ std::string errorText(int error) {
 class FfmpegVideoDecoder final : public VideoDecoder {
 public:
     explicit FfmpegVideoDecoder(Codec codec) {
-        const auto* decoder = avcodec_find_decoder(codec == Codec::Avc ? AV_CODEC_ID_H264 : AV_CODEC_ID_HEVC);
-        if (decoder == nullptr) throw std::runtime_error("FFmpeg has no H.264/HEVC decoder");
+        const auto id = codec == Codec::Avc ? AV_CODEC_ID_H264 : codec == Codec::Hevc ? AV_CODEC_ID_HEVC : AV_CODEC_ID_VP9;
+        const auto* decoder = avcodec_find_decoder(id);
+        if (decoder == nullptr) throw std::runtime_error(std::string("FFmpeg has no ") + avcodec_get_name(id) + " decoder");
         context = avcodec_alloc_context3(decoder);
         packet = av_packet_alloc();
         frame = av_frame_alloc();

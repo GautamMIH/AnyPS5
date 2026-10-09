@@ -1,5 +1,4 @@
 #include "SpirvBackend/SpirvAnalysis.hpp"
-#include "RdnaDecoder/RdnaInstruction.hpp"
 #include <algorithm>
 #include <optional>
 #include <stdexcept>
@@ -38,6 +37,7 @@ bool LaneSource(const IrProgram& program, const IrValue& value) {
     case IrOpcode::LaneId:
     case IrOpcode::GetAttribute:
     case IrOpcode::GetInterpolationParameter:
+    case IrOpcode::GetInterpolationParameterF16:
     case IrOpcode::GetTessellationAttribute:
     case IrOpcode::DppMoveU32:
     case IrOpcode::DppUpdateU32:
@@ -332,23 +332,9 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
                     throw std::runtime_error("buffer operation has invalid memory metadata");
                 }
                 const auto& memory = program.Resources().memoryInfo.at(memoryIndex);
-                // Through the BDA table a coherent access is a Volatile load or store (BdaAccessMask).
                 requirements.coherentBuffers = requirements.coherentBuffers || (memory.coherent && !memory.gpuDescriptor);
-                if (memory.gpuDescriptor) {
-                    // The V#'s ADD_TID is known at run time only.
-                    if (program.Resources().stage != IrShaderStage::Compute) {
-                        throw std::runtime_error("GPU-selected buffer descriptors outside compute shaders are not implemented");
-                    }
-                    requirements.subgroupLocalInvocationId = true;
-                } else if (memory.kind == ResourceKind::Buffer) {
-                    if (memory.resource >= program.Info().buffers.size()) {
-                        throw std::runtime_error("buffer operation has invalid resource metadata");
-                    }
-                    // ADD_TID adds the lane index (SubgroupLocalInvocationId) to the record index, in
-                    // any stage; validation checks the device supports it in that stage.
-                    if ((program.Info().buffers.at(memory.resource).packedStride & (1u << 20u)) != 0u) {
-                        requirements.subgroupLocalInvocationId = true;
-                    }
+                if (!memory.planningOnly) {
+                    requirements.subgroupLocalInvocationId = requirements.subgroupLocalInvocationId || program.Resources().stage == IrShaderStage::Compute;
                 }
             }
             const auto sharedAccess = SharedAccessOf(inst->Opcode());
@@ -419,16 +405,6 @@ SpirvRequirements AnalyzeProgramRequirements(const IrProgram& program) {
             case IrOpcode::ImageGatherRaw:
                 requirements.imageGatherExtended = true;
                 break;
-            case IrOpcode::ImageSampleRaw: {
-                const auto index = inst->Flags<MemoryFlags>().index;
-                if (index >= program.Resources().memoryInfo.size()) {
-                    throw std::runtime_error("image sample has invalid memory metadata");
-                }
-                if ((program.Resources().memoryInfo[index].imageSampleFlags & RdnaImageSampleFlagLodClamp) != 0u) {
-                    requirements.minLod = true;
-                }
-                break;
-            }
             case IrOpcode::SetAttribute: {
                 const auto index = inst->Flags<ExportFlags>().index;
                 if (index >= program.Metadata().exportInfo.size()) {

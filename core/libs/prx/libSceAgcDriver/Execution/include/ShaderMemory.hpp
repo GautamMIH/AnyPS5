@@ -9,17 +9,20 @@
 #include <utility>
 #include <vector>
 
+namespace ShaderRecompiler {
+struct SourceHandle;
+}
+
 namespace AgcDriver {
 
 class ShaderMemory {
 public:
     explicit ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial);
     // Walks the request's resources, reading guest memory the snapshot lacks. The result compiles
-    // the request (Recompile(request, capture)) without walking or resolving it again.
-    std::shared_ptr<const ShaderRecompiler::ResourceCapture> Capture(const ShaderRecompiler::RecompileRequest& request);
-    // As Capture, for a request of the same program and context as sameProgram's (see
-    // ShaderRecompiler::CaptureResources): only the resources are walked again.
-    std::shared_ptr<const ShaderRecompiler::ResourceCapture> Capture(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::ResourceCapture& sameProgram);
+    // the request (Recompile(request, capture)) without walking or resolving it again. With `handle`
+    // (the source an earlier capture of the same program and context resolved, see
+    // ShaderRecompiler::CaptureResources) the source lookup is skipped: only the resources are walked.
+    std::shared_ptr<const ShaderRecompiler::ResourceCapture> Capture(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::SourceHandle* handle = nullptr);
     [[nodiscard]] std::vector<ShaderRecompiler::MemoryRegion> Regions() const;
     // The guest dwords the latest Capture read outside the initial regions, by address, with values.
     [[nodiscard]] std::vector<std::pair<std::uint64_t, std::uint32_t>> CapturedWords() const;
@@ -61,13 +64,14 @@ private:
     };
     bool reusable(const Entry& entry, ShaderMemory& memory) const;
     std::unordered_map<std::uint64_t, Entry> entries;
-    // The latest capture of each program and context, whatever its user data (see
-    // ShaderMemory::Capture(request, sameProgram)).
+    // The resolved source of each program and context, whatever its user data (see
+    // ShaderMemory::Capture(request, handle)).
     struct Program {
         // Held so no other code can be registered at the owner's address while the entry lives.
         std::shared_ptr<const void> owner;
         std::vector<std::uint64_t> key;
-        std::shared_ptr<const ShaderRecompiler::ResourceCapture> capture;
+        // Null when the capture had no cache entry (useCache false).
+        std::shared_ptr<const ShaderRecompiler::SourceHandle> handle;
         // PlanUserDataSlots of the capture's plan (masked: it had a plan to read them from).
         std::vector<std::uint32_t> slots;
         bool masked = false;

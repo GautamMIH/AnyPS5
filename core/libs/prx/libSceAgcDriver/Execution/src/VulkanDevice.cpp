@@ -23,6 +23,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/StorageImage.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/PipelineCache.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/PipelineSpecialization.hpp"
 #include "prx/libc/include/General.hpp"
 #include <cctype>
 #include <optional>
@@ -79,6 +80,9 @@ struct ComputePipeline {
 }
 
 struct VulkanDevice::State {
+    // 1 for the process's first device, counting every device created (VulkanDevice::Serial).
+    std::uint64_t serial = 0;
+    bool storageImageMultisample = false;
     void* library = nullptr;
     PFN_vkGetInstanceProcAddr instanceProc = nullptr;
     PFN_vkGetDeviceProcAddr deviceProc = nullptr;
@@ -155,6 +159,13 @@ struct VulkanDevice::State {
     bool clipDistance = false;
     bool cullDistance = false;
     bool viewportIndexLayer = false;
+    // Image arrays indexed at run time (bindless image tables through the shader runtime ABI's
+    // typed heaps), non-uniformly with VK_EXT_descriptor_indexing.
+    bool imageArrayDynamicIndexing = false;
+    bool descriptorIndexing = false;
+    // VK_EXT_robustness2 nullDescriptor: a null guest storage image binds no view.
+    bool nullDescriptors = false;
+    bool float64 = false;
     bool depthClamp = false;
     bool samplerAnisotropy = false;
     bool textureCompressionBC = false;
@@ -305,6 +316,8 @@ struct VulkanDevice::State {
 };
 
 VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_unique<State>()) {
+    static std::atomic<std::uint64_t> createdDevices{0};
+    state->serial = createdDevices.fetch_add(1, std::memory_order_relaxed) + 1;
 #ifdef _WIN32
     state->library = SDL_LoadObject("vulkan-1.dll");
 #else
@@ -700,6 +713,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     // 64-bit float VALU ops (upstream b0afa04c) need Float64 with preserved signed zeros, infinities and NaNs.
     enabled.shaderFloat64 = available.shaderFloat64 && floatControls.shaderSignedZeroInfNanPreserveFloat64;
     if (enabled.shaderFloat64) state->capabilities.push_back(spv::CapabilityFloat64);
+    state->float64 = enabled.shaderFloat64 == VK_TRUE;
     enabled.vertexPipelineStoresAndAtomics = VK_TRUE;
     enabled.fragmentStoresAndAtomics = VK_TRUE;
     enabled.tessellationShader = available.tessellationShader;
@@ -739,8 +753,46 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     enabled.occlusionQueryPrecise = available.occlusionQueryPrecise;
     state->occlusionQueryPrecise = enabled.occlusionQueryPrecise == VK_TRUE;
     state->shaderResourceMinLod = enabled.shaderResourceMinLod == VK_TRUE;
+    // Multisampled storage images (the recompiler's MSAA storage access, upstream 3e47c30e).
+    enabled.shaderStorageImageMultisample = available.shaderStorageImageMultisample;
+    state->storageImageMultisample = enabled.shaderStorageImageMultisample == VK_TRUE;
+    if (state->storageImageMultisample) state->capabilities.push_back(spv::CapabilityStorageImageMultisample);
+    state->capabilities.push_back(spv::CapabilityImageMSArray);
     enabled.shaderStorageImageReadWithoutFormat = available.shaderStorageImageReadWithoutFormat;
     enabled.shaderStorageImageWriteWithoutFormat = available.shaderStorageImageWriteWithoutFormat;
+    // Bindless image tables index an image array with a runtime slot (upstream ab0f9985).
+    enabled.shaderSampledImageArrayDynamicIndexing = available.shaderSampledImageArrayDynamicIndexing;
+    enabled.shaderStorageImageArrayDynamicIndexing = available.shaderStorageImageArrayDynamicIndexing;
+    if (enabled.shaderSampledImageArrayDynamicIndexing) state->capabilities.push_back(spv::CapabilitySampledImageArrayDynamicIndexing);
+    if (enabled.shaderStorageImageArrayDynamicIndexing) state->capabilities.push_back(spv::CapabilityStorageImageArrayDynamicIndexing);
+    state->imageArrayDynamicIndexing = enabled.shaderSampledImageArrayDynamicIndexing == VK_TRUE || enabled.shaderStorageImageArrayDynamicIndexing == VK_TRUE;
+    VkPhysicalDeviceDescriptorIndexingFeaturesEXT descriptorIndexingFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT};
+    if (hasExtension(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &descriptorIndexingFeatures};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        state->descriptorIndexing = descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing == VK_TRUE && descriptorIndexingFeatures.shaderStorageImageArrayNonUniformIndexing == VK_TRUE;
+    }
+    descriptorIndexingFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT};
+    if (state->descriptorIndexing) {
+        descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        descriptorIndexingFeatures.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
+        deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+        state->capabilities.push_back(spv::CapabilityShaderNonUniform);
+        state->capabilities.push_back(spv::CapabilitySampledImageArrayNonUniformIndexing);
+        state->capabilities.push_back(spv::CapabilityStorageImageArrayNonUniformIndexing);
+        state->spirvExtensions.push_back("SPV_EXT_descriptor_indexing");
+    }
+    VkPhysicalDeviceRobustness2FeaturesEXT robustness2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+    if (hasExtension(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &robustness2};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        state->nullDescriptors = robustness2.nullDescriptor == VK_TRUE;
+    }
+    robustness2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+    if (state->nullDescriptors) {
+        robustness2.nullDescriptor = VK_TRUE;
+        deviceExtensions.push_back(VK_EXT_ROBUSTNESS_2_EXTENSION_NAME);
+    }
     state->storageImageReadWithoutFormat = enabled.shaderStorageImageReadWithoutFormat == VK_TRUE;
     state->storageImageWriteWithoutFormat = enabled.shaderStorageImageWriteWithoutFormat == VK_TRUE;
     // Pixel shaders reading SampleId declare SampleRateShading; the validator accepts it only
@@ -796,6 +848,14 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     if (state->imageInt64Atomics) {
         imageAtomicInt64Features.pNext = byteFeatures.pNext;
         byteFeatures.pNext = &imageAtomicInt64Features;
+    }
+    if (state->descriptorIndexing) {
+        descriptorIndexingFeatures.pNext = byteFeatures.pNext;
+        byteFeatures.pNext = &descriptorIndexingFeatures;
+    }
+    if (state->nullDescriptors) {
+        robustness2.pNext = byteFeatures.pNext;
+        byteFeatures.pNext = &robustness2;
     }
     bdaFeatures.pNext = &byteFeatures;
     deviceInfo.pNext = &bdaFeatures;
@@ -1192,6 +1252,10 @@ ShaderRecompiler::SpirvTarget VulkanDevice::ComputeTarget(std::uint32_t) const {
     return Target();
 }
 
+std::uint64_t VulkanDevice::Serial() const {
+    return state->serial;
+}
+
 std::string VulkanDevice::DeviceName() const {
     return state->properties.deviceName;
 }
@@ -1202,6 +1266,10 @@ ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
     target.storageBufferOffsetAlignment = static_cast<std::uint32_t>(limits.minStorageBufferOffsetAlignment);
     target.nonConstantImageOffsets = state->maintenance8;
     target.narrowSubgroupClock = state->narrowSubgroupClock;
+    // Games run with the device's f32 denormal and NaN behaviour (as before the bit-exact
+    // lowering): the emulation cost ~45% of Zorro's draw time. ANYPS5_EXACT_FLOAT=1 restores it.
+    static const bool exactFloat = std::getenv("ANYPS5_EXACT_FLOAT") != nullptr;
+    target.hostFloatSemantics = !exactFloat;
     target.srgbDecodeFormats = state->srgbDecodeFormats;
     if (state->meshShader) {
         const auto& mesh = state->meshLimits;
@@ -1262,6 +1330,10 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.depthClamp = state->depthClamp;
     context.cullDistance = state->cullDistance;
     context.viewportIndexLayer = state->viewportIndexLayer;
+    context.imageArrayDynamicIndexing = state->imageArrayDynamicIndexing;
+    context.descriptorIndexing = state->descriptorIndexing;
+    context.nullDescriptors = state->nullDescriptors;
+    context.float64 = state->float64;
     context.externalMemoryHost = state->externalMemoryHost;
     context.guestGpuMemory = state->guestGpuMemory.get();
     context.imageMemory = state->imageMemory;
@@ -1363,6 +1435,11 @@ void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParamete
 }
 
 void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+    // Every stage was compiled for this driver's shader runtime ABI (descriptor heaps, shader data).
+    for (const auto& shader : shaders) {
+        require(shader.program != nullptr, "missing compiled shader");
+        ShaderRecompiler::RuntimeAbi::RequireVersion(shader.program->runtimeAbiVersion);
+    }
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
         static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
@@ -1373,6 +1450,7 @@ void VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawP
 }
 
 void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t) {
+    ShaderRecompiler::RuntimeAbi::RequireVersion(shader.runtimeAbiVersion);
     std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     PerformanceTimer timing("Vulkan.Dispatch");
     const GuestMemory::MemoryAccessScope memoryScope(this, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
@@ -1399,8 +1477,9 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     // layout and pipeline for every dispatch cost over a millisecond).
     std::string key;
     const auto append = [&](const void* data, std::size_t bytes) { key.append(static_cast<const char*>(data), bytes); };
-    append(&shader.variantId, sizeof(shader.variantId));
-    if (shader.variantId == 0) append(shader.spirv.data(), shader.spirv.size() * sizeof(std::uint32_t));
+    const auto pipelineVariant = shader.PipelineVariantId();
+    append(&pipelineVariant, sizeof(pipelineVariant));
+    if (shader.PipelineVariantId() == 0) append(shader.spirv.data(), shader.spirv.size() * sizeof(std::uint32_t));
     append(&pushStages, sizeof(pushStages));
     const auto& layoutKey = resources->LayoutKey();
     append(layoutKey.data(), layoutKey.size() * sizeof(std::uint32_t));
@@ -1426,6 +1505,8 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
         pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         pipelineInfo.stage.module = created->module;
         pipelineInfo.stage.pName = "main";
+        const Graphics::PipelineSpecialization specialization(shader);
+        pipelineInfo.stage.pSpecializationInfo = specialization.Info();
         VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT requiredSubgroup{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT};
         requiredSubgroup.requiredSubgroupSize = std::min(shader.hostSubgroupSize, state->maxComputeSubgroupSize);
         if (state->computeWave32 && (shader.hostSubgroupSize == 32u || shader.hostSubgroupSize > state->maxComputeSubgroupSize)) pipelineInfo.stage.pNext = &requiredSubgroup;
@@ -1448,7 +1529,7 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     std::uint32_t profile = UINT32_MAX;
     if (state->drawProfiler) {
         char key[96];
-        std::snprintf(key, sizeof(key), "dispatch cs=%016llx", static_cast<unsigned long long>(shader.variantId));
+        std::snprintf(key, sizeof(key), "dispatch cs=%016llx", static_cast<unsigned long long>(shader.PipelineVariantId()));
         profile = state->drawProfiler->Begin(context, commands, key);
     }
     barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);

@@ -17,7 +17,6 @@ namespace {
 using AgcDriver::Graphics::Require;
 using ShaderRecompiler::ShaderStage;
 
-constexpr std::uint32_t ArithmeticCapability = 63;
 constexpr std::uint32_t Sentinel = 0xdeadbeefu;
 constexpr std::uint32_t Width = 192;
 constexpr std::uint32_t Height = 128;
@@ -172,7 +171,7 @@ int main() {
         Pixels = std::span(pixelMemory.As<std::byte>(), Width * Height * 4);
         if (!device) return VulkanTestSkipped;
         const auto target = device->Target();
-        if (std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), ArithmeticCapability) == target.supportedCapabilities.end()) {
+        if (!TargetHasCapability(target, spv::CapabilityGroupNonUniformArithmetic)) {
             std::puts("skipped, the device has no subgroup arithmetic");
             return VulkanTestSkipped;
         }
