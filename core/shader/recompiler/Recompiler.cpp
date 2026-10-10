@@ -246,6 +246,10 @@ struct SourceEntry {
     // The result memo, most recently used first, at most ResultMemoEntries (under mutex).
     std::list<ResultMemoEntry> memo;
     std::unordered_map<std::uint64_t, std::list<ResultMemoEntry>::iterator> memoIndex;
+    // The adaptive bypass of the memo (see materializePreparedMemoized), under mutex.
+    std::uint32_t memoLookups = 0;
+    std::uint32_t memoHits = 0;
+    std::uint32_t memoBypass = 0;
 };
 
 namespace {
@@ -822,9 +826,13 @@ bool ResultMemo() {
 }
 
 constexpr std::size_t ResultMemoEntries = 256;
+// The adaptive memo bypass (runtime-user-data callers): the lookups sampled per decision, and the
+// materializations a source then skips the memo for.
+constexpr std::uint32_t MemoBypassSample = 1024;
+constexpr std::uint32_t MemoBypassDraws = 16384;
 
 struct ResultMemoCounters {
-    std::atomic<std::uint64_t> hits{0}, misses{0}, evictions{0}, populateNanoseconds{0};
+    std::atomic<std::uint64_t> hits{0}, misses{0}, evictions{0}, populateNanoseconds{0}, bypassed{0};
     std::atomic<std::int64_t> lastReport{0};
 };
 
@@ -848,13 +856,20 @@ void reportResultMemo() {
     const auto misses = counters.misses.exchange(0, std::memory_order_relaxed);
     const auto evictions = counters.evictions.exchange(0, std::memory_order_relaxed);
     const auto populate = counters.populateNanoseconds.exchange(0, std::memory_order_relaxed);
-    std::fprintf(stderr, "[recompile] result memo (10 s): %llu hits, %llu misses (%.1f%% hits), Populate %.1f us per miss / %.1f ms in total, %llu evictions\n", static_cast<unsigned long long>(hits), static_cast<unsigned long long>(misses), hits + misses != 0 ? 100.0 * static_cast<double>(hits) / static_cast<double>(hits + misses) : 0.0, misses != 0 ? static_cast<double>(populate) / 1000.0 / static_cast<double>(misses) : 0.0, static_cast<double>(populate) / 1e6, static_cast<unsigned long long>(evictions));
+    const auto bypassed = counters.bypassed.exchange(0, std::memory_order_relaxed);
+    std::fprintf(stderr, "[recompile] result memo (10 s): %llu hits, %llu misses (%.1f%% hits), Populate %.1f us per miss / %.1f ms in total, %llu evictions, %llu bypassed\n", static_cast<unsigned long long>(hits), static_cast<unsigned long long>(misses), hits + misses != 0 ? 100.0 * static_cast<double>(hits) / static_cast<double>(hits + misses) : 0.0, misses != 0 ? static_cast<double>(populate) / 1000.0 / static_cast<double>(misses) : 0.0, static_cast<double>(populate) / 1e6, static_cast<unsigned long long>(evictions), static_cast<unsigned long long>(bypassed));
 }
 
 // Everything materializeResult reads besides the variant: the snapshot (the descriptor words, the
 // flattened SRT, the user data, the uniform fill) and, for the vertex family, the V# table the
 // attributes are resolved from.
-std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapshot& snapshot, bool userData = true) {
+// The hash without the user data (the runtime-user-data key) and with it, in one pass.
+struct SnapshotHashes {
+    std::uint64_t runtime;
+    std::uint64_t full;
+};
+
+SnapshotHashes snapshotHashes(const RecompileRequest& request, const ResourceSnapshot& snapshot) {
     std::uint64_t hash = 0xcbf29ce484222325ull;
     const auto mix = [&](std::uint64_t value) {
         hash ^= value;
@@ -875,8 +890,6 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     mixDescriptors(snapshot.images);
     mixDescriptors(snapshot.samplers);
     mixWords(snapshot.flattenedSrt);
-    if (userData) mixWords(snapshot.userData);
-    else mix(0x52756e74ull);
     mix(static_cast<std::uint64_t>(snapshot.uniformFill.kind));
     mix(snapshot.uniformFill.resource);
     for (const auto stride : snapshot.uniformFill.groupStride) mix(stride);
@@ -898,7 +911,16 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     } else {
         mix(1ull << 32u);
     }
-    return hash;
+    const auto base = hash;
+    mix(0x52756e74ull);
+    const auto runtime = hash;
+    hash = base;
+    mixWords(snapshot.userData);
+    return {runtime, hash};
+}
+
+std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapshot& snapshot) {
+    return snapshotHashes(request, snapshot).full;
 }
 
 // Whether a result reads user data only in its push data (RecompileResult::pushUserData): no
@@ -925,16 +947,34 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
         source.memo.splice(source.memo.begin(), source.memo, found->second);
         return found->second->result;
     };
-    const std::uint64_t runtimeHash = runtimeUserData ? snapshotHash(request, snapshot, false) : 0u;
-    std::uint64_t fullHash = 0;
-    bool fullHashed = false;
+    // Runtime-user-data callers skip the memo of a source whose lookups rarely hit (a per-draw
+    // descriptor such as a constant buffer address in every draw): hashing, inserting and evicting
+    // cost more than the hits save. Re-checked after MemoBypassDraws materializations.
+    {
+        std::unique_lock lock(source.mutex);
+        if (runtimeUserData && source.memoBypass != 0u) {
+            --source.memoBypass;
+            lock.unlock();
+            counters.bypassed.fetch_add(1, std::memory_order_relaxed);
+            auto result = std::make_shared<RecompileResult>(materializeResult(*variant, request, snapshot));
+            result->cacheHit = cacheHit;
+            return result;
+        }
+    }
+    const auto hashes = snapshotHashes(request, snapshot);
+    const std::uint64_t runtimeHash = hashes.runtime;
+    const std::uint64_t fullHash = hashes.full;
     {
         std::lock_guard lock(source.mutex);
         auto hit = runtimeUserData ? lookup(runtimeHash) : nullptr;
-        if (hit == nullptr) {
-            fullHash = snapshotHash(request, snapshot);
-            fullHashed = true;
-            hit = lookup(fullHash);
+        if (hit == nullptr) hit = lookup(fullHash);
+        if (runtimeUserData) {
+            ++source.memoLookups;
+            if (hit != nullptr) ++source.memoHits;
+            if (source.memoLookups >= MemoBypassSample) {
+                if (source.memoHits * 8u < source.memoLookups) source.memoBypass = MemoBypassDraws;
+                source.memoLookups = source.memoHits = 0;
+            }
         }
         if (hit != nullptr) {
             counters.hits.fetch_add(1, std::memory_order_relaxed);
@@ -948,7 +988,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
     result->cacheHit = cacheHit;
     if (profile) counters.populateNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
     counters.misses.fetch_add(1, std::memory_order_relaxed);
-    const auto hash = runtimeUserData && userDataInPushOnly(*result) ? runtimeHash : fullHashed ? fullHash : snapshotHash(request, snapshot);
+    const auto hash = runtimeUserData && userDataInPushOnly(*result) ? runtimeHash : fullHash;
     const auto index = indexOf(hash);
     std::shared_ptr<const RecompileResult> shared = std::move(result);
     {

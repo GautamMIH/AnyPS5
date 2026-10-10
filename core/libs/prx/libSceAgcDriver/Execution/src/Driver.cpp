@@ -433,6 +433,46 @@ private:
     std::shared_ptr<VulkanDevice> device;
     // Used and cleared under gpuMutex (cleared whenever the device, and so the target, changes).
     CaptureMemo captureMemo;
+    // Prepared stages (see PreparedShaders): the vertex header of each registered vertex-family
+    // program (owner held, so its address is not reused), by header and user SGPR base.
+    struct PreparedVertexEntry {
+        std::shared_ptr<const void> owner;
+        std::uint64_t headerAddress = 0;
+        std::uint32_t userSgprBase = 0;
+        Graphics::PreparedVertexHeader header;
+    };
+    std::unordered_map<std::uint64_t, PreparedVertexEntry> preparedVertexHeaders;
+    // The rect-list stages of each linked pair, by what BuildRectListShaders reads (the device's
+    // serial, the fragment parameters, which of them the vertex stage exports, the highest binding).
+    std::map<std::vector<std::uint64_t>, std::pair<std::shared_ptr<const ShaderRecompiler::RecompileResult>, std::shared_ptr<const ShaderRecompiler::RecompileResult>>> preparedRectangles;
+
+    const Graphics::PreparedVertexHeader& preparedVertexHeader(const std::shared_ptr<const void>& owner, std::span<const std::byte> header, std::uint64_t headerAddress, std::uint32_t userSgprBase) {
+        auto hash = (reinterpret_cast<std::uintptr_t>(owner.get()) * 0x9e3779b97f4a7c15ull) ^ headerAddress;
+        hash = (hash * 0x100000001b3ull) ^ userSgprBase;
+        const auto found = preparedVertexHeaders.find(hash);
+        if (found != preparedVertexHeaders.end() && found->second.owner == owner && found->second.headerAddress == headerAddress && found->second.userSgprBase == userSgprBase) return found->second.header;
+        if (preparedVertexHeaders.size() >= 4096) preparedVertexHeaders.clear();
+        auto& entry = preparedVertexHeaders[hash];
+        entry = PreparedVertexEntry{owner, headerAddress, userSgprBase, Graphics::PrepareVertexHeader(header, headerAddress, userSgprBase)};
+        return entry.header;
+    }
+
+    std::pair<std::shared_ptr<const ShaderRecompiler::RecompileResult>, std::shared_ptr<const ShaderRecompiler::RecompileResult>> preparedRectangle(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment) {
+        std::vector<std::uint64_t> key{device->Serial()};
+        for (const auto& input : fragment.fragmentParameters) {
+            const bool exported = std::find(vertex.parameterExports.begin(), vertex.parameterExports.end(), input.sourceLocation) != vertex.parameterExports.end();
+            key.push_back((static_cast<std::uint64_t>(input.location) << 32u) | (static_cast<std::uint64_t>(input.sourceLocation) << 8u) | (input.flat ? 2u : 0u) | (exported ? 1u : 0u));
+        }
+        std::uint64_t faultBinding = 0;
+        for (const auto* shader : {&vertex, &fragment}) {
+            for (const auto& binding : shader->bindings) faultBinding = std::max<std::uint64_t>(faultBinding, static_cast<std::uint64_t>(binding.binding) + 1u);
+        }
+        key.push_back(~faultBinding);
+        if (const auto found = preparedRectangles.find(key); found != preparedRectangles.end()) return found->second;
+        auto rectangle = ShaderRecompiler::BuildRectListShaders(vertex, fragment, device->Target());
+        if (preparedRectangles.size() >= 1024) preparedRectangles.clear();
+        return preparedRectangles[key] = {std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.control)), std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.evaluation))};
+    }
     std::uint64_t accepted = 0;
     std::uint64_t completed = 0;
     std::set<std::uint64_t> finishedOutOfOrder;
@@ -1258,7 +1298,16 @@ private:
         timing.Mark("device_setup");
         const GuestMemory::MemoryAccessScope memoryScope(accessContext(), accessResolver(), pipeline != nullptr);
         const GuestMemory::AccessSite accessSite("draw_capture");
-        ShaderMemory shaderMemory(memory);
+        const bool prepared = PreparedShaders();
+        ShaderMemory shaderMemory = [&] {
+            if (!prepared) return ShaderMemory(memory);
+            std::vector<std::shared_ptr<const void>> owners;
+            owners.reserve(programs.size());
+            for (const auto& program : programs) owners.push_back(program.owner);
+            return ShaderMemory(memory, std::move(owners));
+        }();
+        // The stages' push data where it differs from their results' (runtime user data).
+        std::vector<std::shared_ptr<const std::vector<std::byte>>> pushes;
         // Shared with the recompiler's result memo (immutable): stage pointers stay valid as the list grows.
         std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results;
         std::vector<Graphics::CompiledShader> stages;
@@ -1269,7 +1318,8 @@ private:
         std::uint32_t pushCursorBytes = 0;
         const std::uint32_t pushLimitBytes = graphics.stages.mesh.has_value() ? ShaderRecompiler::MeshDrawPushOffsetBytes : Graphics::PipelinePushConstantBytes;
         const auto vertexStageInfo = [&](const auto& program) {
-            auto info = Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, program.systemSgprs);
+            auto info = prepared ? Graphics::DecodeVertexStageInfo(preparedVertexHeader(program.owner, program.binary.header, program.binary.headerAddress, program.systemSgprs), program.userData)
+                                 : Graphics::DecodeVertexStageInfo(program.binary.header, program.binary.headerAddress, program.userData, program.systemSgprs);
             info.paClVsOutCntl = readRegister(queue.context, 0x207);
             return info;
         };
@@ -1298,11 +1348,14 @@ private:
             // Spliced geometry code belongs to no single registered shader.
             const bool spliced = roles[i] == Role::Main && !splicedGeometry.empty();
             const auto capture = spliced ? shaderMemory.Capture(request) : captureMemo.Capture(program.owner, request, shaderMemory);
+            if (prepared) PreparedTrace::Add(spliced ? PreparedTrace::StageFallbackSpliced : PreparedTrace::StagePrepared);
             shaderTiming.Mark("memory_capture");
             memory = shaderMemory.Regions();
             request.context.memory = memory;
             shaderTiming.Mark("request_memory");
-            results.push_back(ShaderRecompiler::Recompile(request, *capture));
+            bool memoHit = false;
+            results.push_back(ShaderRecompiler::Recompile(request, *capture, &memoHit, prepared));
+            PreparedTrace::Add(memoHit ? PreparedTrace::MemoHit : PreparedTrace::MemoMiss);
             shaderTiming.Mark(results.back()->cacheHit ? "cache_hit" : "compile");
             const auto& result = *results.back();
             // Mesh draws read indices in-shader and take no indexed offsets.
@@ -1317,7 +1370,16 @@ private:
                 if (result.instanceOffsetSgpr >= 0) drawParameters.firstInstance = offsetValue(result.instanceOffsetSgpr);
             }
             require(result.pushConstants.size() <= pushLimitBytes - pushCursorBytes, "stage push constants exceed the pipeline push constant block");
-            stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushCursorBytes});
+            const std::vector<std::byte>* push = nullptr;
+            if (prepared) {
+                std::vector<std::byte> bytes;
+                if (ShaderRecompiler::ApplyRuntimeUserData(result, program.userData, bytes)) {
+                    pushes.push_back(std::make_shared<const std::vector<std::byte>>(std::move(bytes)));
+                    push = pushes.back().get();
+                    PreparedTrace::Add(PreparedTrace::PushOverride);
+                }
+            }
+            stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushCursorBytes, push});
             pushCursorBytes += static_cast<std::uint32_t>(result.pushConstants.size());
         }
         timing.Mark("shaders");
@@ -1325,9 +1387,15 @@ private:
             require(stages.size() == (graphics.hasFragmentShader ? 2u : 1u), "rect-list requires a vertex program and at most one fragment program");
             // Without a pixel shader no parameters are interpolated.
             const ShaderRecompiler::RecompileResult noFragment{};
-            auto rectangle = ShaderRecompiler::BuildRectListShaders(*results[0], graphics.hasFragmentShader ? *results[1] : noFragment, device->Target());
-            results.push_back(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.control)));
-            results.push_back(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.evaluation)));
+            if (prepared) {
+                auto rectangle = preparedRectangle(*results[0], graphics.hasFragmentShader ? *results[1] : noFragment);
+                results.push_back(std::move(rectangle.first));
+                results.push_back(std::move(rectangle.second));
+            } else {
+                auto rectangle = ShaderRecompiler::BuildRectListShaders(*results[0], graphics.hasFragmentShader ? *results[1] : noFragment, device->Target());
+                results.push_back(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.control)));
+                results.push_back(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.evaluation)));
+            }
             const auto control = results.size() - 2;
             stages.insert(stages.begin() + 1, {{Stage::TessellationControl, results[control].get(), 0}, {Stage::TessellationEvaluation, results[control + 1].get(), 0}});
         }
@@ -1342,7 +1410,7 @@ private:
             device->Draw(graphics, drawParameters, stages, snapshots);
             std::fprintf(stderr, "[pm4] draw completed\n");
         } else if (pipeline) {
-            queueDraw(graphics, drawParameters, std::move(results), std::move(stages), std::move(shaderMemory), std::move(memory), std::move(snapshots));
+            queueDraw(graphics, drawParameters, std::move(results), std::move(stages), std::move(shaderMemory), std::move(memory), std::move(snapshots), std::move(pushes));
         } else {
             device->EnqueueDraw(graphics, drawParameters, stages, snapshots);
         }
@@ -1389,7 +1457,7 @@ private:
 
     // Queues a draw's device half (pipelined). The job owns what it reads: the compiled stages (the
     // stage list points into the results) and the captured shader memory (the snapshots view it).
-    void queueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& parameters, std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results, std::vector<Graphics::CompiledShader> stages, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots) {
+    void queueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& parameters, std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results, std::vector<Graphics::CompiledShader> stages, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots, std::vector<std::shared_ptr<const std::vector<std::byte>>> pushes) {
         DeviceThread::Ranges writes;
         for (std::uint32_t slot = 0; slot < graphics.colors.size(); ++slot) {
             if ((graphics.colorTargetMask & (1u << slot)) == 0) continue;
@@ -1428,8 +1496,10 @@ private:
             std::vector<ShaderRecompiler::MemoryRegion> memory;
             std::vector<Graphics::GuestMemorySnapshot> snapshots;
             std::shared_ptr<FrameTiming> timing;
+            // The stages' push data overrides (CompiledShader::pushData points into them).
+            std::vector<std::shared_ptr<const std::vector<std::byte>>> pushes;
         };
-        auto job = std::make_shared<Job>(Job{device, graphics, parameters, std::move(results), std::move(stages), std::move(shaderMemory), std::move(memory), std::move(snapshots), frameTiming});
+        auto job = std::make_shared<Job>(Job{device, graphics, parameters, std::move(results), std::move(stages), std::move(shaderMemory), std::move(memory), std::move(snapshots), frameTiming, std::move(pushes)});
         pipeline->Post([this, job]() mutable {
             {
                 PerformanceContext timingContext(job->timing.get());
@@ -2103,8 +2173,9 @@ extern "C" void AgcDriverAttachWindow_nid_postfix(const AgcDriver::PresentationW
 // Registration-time shader preparation (upstream f524bbed). libSceAgc resolves each static ABI as
 // the game links stages or builds primitive state, inside a preparation scope. This driver prepares
 // a shader's artifact (ShaderRecompiler's source entry and compiled variant, which hold no resource
-// values) at its first draw or dispatch through Recompile(request, capture), and keeps no prepared
-// state per registration: the scope only commits, and resolving an ABI checks the driver's failure
+// values) at its first draw or dispatch through Recompile(request, capture), and keeps the prepared
+// stage state (program source, vertex header, rect-list stages; see PreparedShaders) in the
+// driver, not per registration: the scope only commits, and resolving an ABI checks the driver's failure
 // state (as upstream's entry points do first) so a failed GPU is reported to the linking thread.
 namespace AgcDriver::DriverDetail {
 
