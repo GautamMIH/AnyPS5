@@ -328,12 +328,19 @@ int APS5_VABI sceKernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, int
         return SCE_KERNEL_ERROR_EINVAL;
     }
     const auto waitStart = std::chrono::steady_clock::now();
+    // Debug aid: APS5_TRACE_TIMELINE=1 logs blocking waits (as the driver logs its events).
+    static const bool traceTimeline = std::getenv("APS5_TRACE_TIMELINE") != nullptr;
+    const auto timelineMicros = [](std::chrono::steady_clock::time_point at) { return static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(at.time_since_epoch()).count()); };
     if (timo == nullptr) {
         *out = owner->WaitForEvents(ev, num, 0);
     } else if (*timo == 0) {
         *out = owner->GetTriggeredEvents(ev, num);
     } else {
         *out = owner->WaitForEvents(ev, num, *timo);
+    }
+    if (traceTimeline && (timo == nullptr || *timo != 0) && *out > 0) {
+        std::fprintf(stderr, "[tl] %lld eq_wait_begin eq=%p\n", timelineMicros(waitStart), reinterpret_cast<void*>(eq));
+        std::fprintf(stderr, "[tl] %lld eq_wait_end eq=%p filter=%d ident=0x%llx\n", timelineMicros(std::chrono::steady_clock::now()), reinterpret_cast<void*>(eq), static_cast<int>(ev[0].filter), static_cast<unsigned long long>(ev[0].ident));
     }
     if (timo == nullptr || *timo != 0) {
         KernelTraceWait_nid_postfix("equeue", __builtin_return_address(0), static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - waitStart).count()), *out == 0);

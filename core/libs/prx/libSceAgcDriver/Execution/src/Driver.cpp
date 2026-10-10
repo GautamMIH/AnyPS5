@@ -76,6 +76,29 @@ struct ShaderSnapshot {
     std::vector<std::byte> header;
 };
 
+// Debug aid: APS5_TRACE_TIMELINE=1 logs timestamped submission, decode, release, completion and
+// flip events (microseconds on the steady clock, as libkernel's equeue waits log them) to rebuild
+// a frame's critical path.
+bool TraceTimeline() {
+    static const bool enabled = std::getenv("APS5_TRACE_TIMELINE") != nullptr;
+    return enabled;
+}
+
+long long TimelineNow() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// The calling thread's CPU time in microseconds (timeline events of the worker).
+long long TimelineThreadCpu() {
+#ifndef _WIN32
+    timespec now{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &now);
+    return static_cast<long long>(now.tv_sec) * 1000000 + now.tv_nsec / 1000;
+#else
+    return 0;
+#endif
+}
+
 // An empty shader registry, for submissions accepted without one (boundaries).
 std::shared_ptr<const std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>> noShaders() {
     static const auto empty = std::make_shared<const std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>>();
@@ -241,6 +264,7 @@ public:
             submission.shaders = publishedShaders;
             submission.serial = accepted + 1;
             submission.enqueued = FrameTiming::Clock::now();
+            if (TraceTimeline()) std::fprintf(stderr, "[tl] %lld submit serial=%llu q=%u dwords=%zu\n", TimelineNow(), static_cast<unsigned long long>(accepted + 1), static_cast<unsigned>(queue), submission.commands.size());
             if (TraceRelease()) std::fprintf(stderr, "[agc-release] submit serial=%llu queue=0x%x dwords=%zu\n", static_cast<unsigned long long>(submission.serial), queue, submission.commands.size());
             pending.push_back(std::move(submission));
             ++accepted;
@@ -617,7 +641,7 @@ private:
         noteReadWait(need.kind == DeviceThread::Need::Resolve ? "resolve: gpu mutex" : "after wait: gpu mutex", false, lockStarted);
         const auto deviceStarted = std::chrono::steady_clock::now();
         if (self.device) self.device->ResolveMemory(address, bytes, writable);
-        noteReadWait("resolve: device", false, deviceStarted);
+        noteReadWait((std::string("resolve: device at ") + GuestMemory::AccessSite::Current()).c_str(), false, deviceStarted);
         const auto trackingStarted = std::chrono::steady_clock::now();
         GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
         noteReadWait("resolve: tracking", false, trackingStarted);
@@ -754,6 +778,7 @@ private:
     // Caller holds gpuMutex. The marker orders the completion after all GPU work submitted so far.
     void queueCompletion(Completion completion) {
         completion.queuedAt = std::chrono::steady_clock::now();
+        if (TraceTimeline() && completion.interrupt) std::fprintf(stderr, "[tl] %lld device_queued ctx=0x%x\n", TimelineNow(), *completion.interrupt);
         if (device != nullptr) completion.marker = device->SubmitMarker();
         completions.push_back(std::move(completion));
         completionsPending = true;
@@ -801,6 +826,7 @@ private:
             if (next.flip) done.flips.emplace_back(std::move(next.flip), std::move(next.flipTiming));
             if (next.interrupt) done.interrupts.emplace_back(next.eventQueue, *next.interrupt);
             noteCompletion(next);
+            if (TraceTimeline() && next.interrupt) std::fprintf(stderr, "[tl] %lld gpu_done ctx=0x%x\n", TimelineNow(), *next.interrupt);
             if (next.serial != 0) done.serials.push_back(next.serial);
             if (!next.release.empty()) releasesCompleted.fetch_add(1, std::memory_order_release);
             completions.pop_front();
@@ -838,6 +864,7 @@ private:
         for (const auto& [queue, data] : done.interrupts) {
             if (TraceRelease()) std::fprintf(stderr, "[agc-release] interrupt queue=0x%x context=0x%x\n", static_cast<unsigned>(queue), data);
             AgcDriverTriggerEqEvent_nid_postfix(queue, data);
+            if (TraceTimeline()) std::fprintf(stderr, "[tl] %lld interrupt ctx=0x%x\n", TimelineNow(), data);
         }
         if (done.serials.empty()) return;
         {
@@ -1573,6 +1600,7 @@ private:
         if (!resumed) {
             submission.started = true;
             includeSubmission(submission, true);
+            if (TraceTimeline()) std::fprintf(stderr, "[tl] %lld start serial=%llu cpu=%lld\n", TimelineNow(), static_cast<unsigned long long>(submission.serial), TimelineThreadCpu());
             // Guest CPU writes made before the submission are ordered before its work.
             WriteTracker::NextEpoch();
         }
@@ -1765,6 +1793,7 @@ private:
                     completion.deferredAt = std::chrono::steady_clock::now();
                     if (TraceRelease()) std::fprintf(stderr, "[agc-release] queued serial=%llu queue=0x%x label=0x%llx data=0x%08x%08x select=%u interrupt=%u context=0x%x\n", static_cast<unsigned long long>(submission.serial), static_cast<unsigned>(submission.queue), static_cast<unsigned long long>(packet[3] | (static_cast<std::uint64_t>(packet[4]) << 32u)), packet[6], packet[5], packet[2] >> 29u, (packet[2] >> 24u) & 7u, packet[7]);
                     deferredReleases.emplace_back(++releasesDeferred, completion.release);
+                    if (TraceTimeline() && completion.interrupt) std::fprintf(stderr, "[tl] %lld release serial=%llu ctx=0x%x\n", TimelineNow(), static_cast<unsigned long long>(submission.serial), *completion.interrupt);
                     deferCompletion(std::move(completion));
                     timing.Mark("release_deferred");
                     cursor += count;
@@ -1899,6 +1928,7 @@ private:
             if (header == FlipPacketHeader) {
                 WriteTracker::NextEpoch();
                 frameTiming->SetFlip(submission.serial, cursor, submission.received, FrameTiming::Clock::now());
+                if (TraceTimeline()) std::fprintf(stderr, "[tl] %lld flip serial=%llu\n", TimelineNow(), static_cast<unsigned long long>(submission.serial));
                 {
                     const auto gpuLock = lockDevice();
                     if (device) device->ReportGpuTime(*frameTiming);
@@ -2032,6 +2062,7 @@ private:
                         std::lock_guard lock(mutex);
                         rethrowFailure();
                     }
+                    if (TraceTimeline()) std::fprintf(stderr, "[tl] %lld decoded serial=%llu cpu=%lld\n", TimelineNow(), static_cast<unsigned long long>(active[index].serial), TimelineThreadCpu());
                     active.erase(active.begin() + static_cast<std::ptrdiff_t>(index));
                     progressed = true;
                     changed.notify_all();
