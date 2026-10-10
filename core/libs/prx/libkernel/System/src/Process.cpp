@@ -320,6 +320,10 @@ int APS5_VABI sched_get_priority_min_nid_postfix(int policy) {
 int APS5_VABI getrusage_nid_postfix(int who, GuestResourceUsage* usage) {
     if (usage == nullptr)
         throw std::invalid_argument("getrusage: usage is null");
+    if (who == -1) {
+        *usage = {};
+        return 0;
+    }
     if (who != 0 && who != 1)
         throw std::invalid_argument("getrusage: unsupported who");
 #ifdef _WIN32
