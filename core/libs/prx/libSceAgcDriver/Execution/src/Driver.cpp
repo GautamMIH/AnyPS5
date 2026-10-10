@@ -76,11 +76,19 @@ struct ShaderSnapshot {
     std::vector<std::byte> header;
 };
 
+// An empty shader registry, for submissions accepted without one (boundaries).
+std::shared_ptr<const std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>> noShaders() {
+    static const auto empty = std::make_shared<const std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>>();
+    return empty;
+}
+
 struct Submission {
     std::uint64_t serial;
     std::uint32_t queue;
     std::vector<std::uint32_t> commands;
-    std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>> shaders;
+    // The registered shaders when the submission was accepted (shared: copying and freeing the map
+    // per submission cost the worker ~0.7 ms of a Zorro frame).
+    std::shared_ptr<const std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>> shaders = noShaders();
     std::map<std::size_t, std::shared_ptr<IFlipRequest>> flips;
     std::map<std::size_t, std::shared_ptr<IRenderingWait>> renderingWaits;
     // Indirect register lists (SET_*_REG_INDIRECT) read when their command buffer is submitted
@@ -182,7 +190,9 @@ public:
             require(!stopping, "submission during shutdown");
             require(accepted != std::numeric_limits<std::uint64_t>::max(), "submission serial overflow");
             registerDisplayPackets(submission, 0, submission.commands.size());
-            submission.shaders = shaders;
+            // One shared snapshot of the registry per change, not a copy per submission.
+            if (!publishedShaders) publishedShaders = std::make_shared<const std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>>(shaders);
+            submission.shaders = publishedShaders;
             submission.serial = accepted + 1;
             submission.enqueued = FrameTiming::Clock::now();
             if (TraceRelease()) std::fprintf(stderr, "[agc-release] submit serial=%llu queue=0x%x dwords=%zu\n", static_cast<unsigned long long>(submission.serial), queue, submission.commands.size());
@@ -360,6 +370,7 @@ public:
         rethrowFailure();
         const auto address = snapshot.codeAddress;
         shaders.insert_or_assign(address, std::make_shared<const ShaderSnapshot>(std::move(snapshot)));
+        publishedShaders.reset();
     }
 
 private:
@@ -368,6 +379,8 @@ private:
     std::condition_variable changed;
     std::deque<Submission> pending;
     std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>> shaders;
+    // The registry as submissions share it, rebuilt on the first submission after a change (mutex held).
+    std::shared_ptr<const std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>> publishedShaders;
     std::map<std::uint32_t, QueueState> queues;
     std::map<std::uint32_t, std::shared_ptr<IVideoOutput>> outputs;
     std::recursive_mutex& gpuMutex = GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix();
@@ -910,11 +923,14 @@ private:
 
     void dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission) {
         PerformanceTimer timing("Driver.Dispatch");
-        const auto gpuLock = lockDevice();
+        // Pipelined, the capture runs unlocked (resolveForWorker) and the device half is queued like
+        // a draw's, with no drain (each dispatch drained the device thread).
+        std::unique_lock<std::recursive_mutex> gpuLock(gpuMutex, std::defer_lock);
+        if (!pipeline) gpuLock.lock();
         timing.Mark("gpu_mutex_wait");
         const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
-        auto it = submission.shaders.upper_bound(address);
-        require(it != submission.shaders.begin(), "compute program does not belong to a registered shader");
+        auto it = submission.shaders->upper_bound(address);
+        require(it != submission.shaders->begin(), "compute program does not belong to a registered shader");
         --it;
         const auto& snapshot = *it->second;
         require(address - snapshot.codeAddress < snapshot.code.size() * sizeof(std::uint32_t), "compute program is outside registered shader code");
@@ -939,12 +955,11 @@ private:
         }
         const std::array<ShaderRecompiler::MemoryRegion, 2> memory{{{snapshot.codeAddress, std::as_bytes(std::span(snapshot.code))}, {snapshot.headerAddress, snapshot.header}}};
         if (device == nullptr) {
+            const auto creation = lockDevice();
             device = std::make_shared<VulkanDevice>();
             captureMemo.Clear();
         }
-        const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
-            static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
-        });
+        const GuestMemory::MemoryAccessScope memoryScope(accessContext(), accessResolver(), pipeline != nullptr);
         const GuestMemory::AccessSite accessSite("dispatch_capture");
         const auto codeOffset = static_cast<std::size_t>((address - snapshot.codeAddress) / sizeof(std::uint32_t));
         ShaderRecompiler::RecompileRequest request{
@@ -975,20 +990,63 @@ private:
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
         timing.Mark("snapshots");
-        device->Dispatch(compiled, groups[0], groups[1], groups[2], snapshots);
+        if (pipeline) {
+            queueDispatch(compiledResult, groups, std::move(shaderMemory), captured, std::move(snapshots));
+        } else {
+            recordDispatch(*device, compiled, groups, snapshots);
+        }
         timing.Mark("dispatch_and_resource_release");
-        // A shader that stores to a buffer starting at a registered CMASK without XOR address
-        // math is taken to clear it (shadPS4). The dispatch itself still runs.
-        if (!compiled.usesBitwiseXor) {
-            for (const auto& binding : compiled.bindings) {
-                if (binding.kind != ShaderRecompiler::DescriptorKind::StorageBuffer || binding.readOnly) continue;
-                for (std::uint32_t element = 0; element < binding.count && (element + 1u) * 4u <= binding.guestDescriptor.size(); ++element) {
-                    if (element < binding.bufferWritten.size() && !binding.bufferWritten[element]) continue;
-                    const auto* words = binding.guestDescriptor.data() + element * 4u;
-                    Graphics::NoteMetadataClear(words[0] | (static_cast<std::uint64_t>(words[1] & 0xffffu) << 32u));
-                }
+    }
+
+    // A dispatch's device half: recorded with the device's own resolver (gpuMutex held), then a
+    // shader that stores to a buffer starting at a registered CMASK without XOR address math is taken
+    // to clear it (shadPS4); the dispatch itself still runs.
+    static void recordDispatch(VulkanDevice& target, const ShaderRecompiler::RecompileResult& compiled, const std::array<std::uint32_t, 3>& groups, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+        {
+            const GuestMemory::MemoryAccessScope memoryScope(&target, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
+                static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
+            });
+            const GuestMemory::AccessSite accessSite("dispatch_record");
+            target.Dispatch(compiled, groups[0], groups[1], groups[2], snapshots);
+        }
+        if (compiled.usesBitwiseXor) return;
+        for (const auto& binding : compiled.bindings) {
+            if (binding.kind != ShaderRecompiler::DescriptorKind::StorageBuffer || binding.readOnly) continue;
+            for (std::uint32_t element = 0; element < binding.count && (element + 1u) * 4u <= binding.guestDescriptor.size(); ++element) {
+                if (element < binding.bufferWritten.size() && !binding.bufferWritten[element]) continue;
+                const auto* words = binding.guestDescriptor.data() + element * 4u;
+                Graphics::NoteMetadataClear(words[0] | (static_cast<std::uint64_t>(words[1] & 0xffffu) << 32u));
             }
         }
+    }
+
+    // Queues a dispatch's device half (pipelined), like queueDraw: the job owns the compiled result
+    // and the captured shader memory its snapshots view.
+    void queueDispatch(std::shared_ptr<const ShaderRecompiler::RecompileResult> result, const std::array<std::uint32_t, 3>& groups, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots) {
+        DeviceThread::Ranges writes;
+        bool anyWrite = false;
+        appendShaderWrites(std::span(&result, 1), writes, anyWrite);
+        struct Job {
+            std::shared_ptr<VulkanDevice> device;
+            std::shared_ptr<const ShaderRecompiler::RecompileResult> result;
+            std::array<std::uint32_t, 3> groups;
+            ShaderMemory shaderMemory;
+            std::vector<ShaderRecompiler::MemoryRegion> memory;
+            std::vector<Graphics::GuestMemorySnapshot> snapshots;
+            std::shared_ptr<FrameTiming> timing;
+        };
+        auto job = std::make_shared<Job>(Job{device, std::move(result), groups, std::move(shaderMemory), std::move(memory), std::move(snapshots), frameTiming});
+        pipeline->Post([this, job]() mutable {
+            {
+                PerformanceContext timingContext(job->timing.get());
+                const auto deferred = WriteTracker::DeferredGpuWrites();
+                recordDispatch(*job->device, *job->result, job->groups, job->snapshots);
+                if (WriteTracker::DeferredGpuWrites() != deferred) pipeline->NoteUnknownGpuWrites();
+            }
+            job->device.reset();
+            job->timing.reset();
+            reaper.Retire(std::move(job));
+        }, std::move(writes), anyWrite);
     }
 
     void draw(QueueState& queue, Pm4::DrawParameters drawParameters, const Submission& submission) {
@@ -1032,8 +1090,8 @@ private:
             return (static_cast<std::uint64_t>(readRegister(queue.shader, base)) << 8u) | (static_cast<std::uint64_t>(high) << 40u);
         };
         const auto prepare = [&](std::uint64_t address, std::uint8_t type, ShaderRecompiler::ShaderStage stage, std::uint32_t rsrc2, std::uint32_t userDataBase) {
-            auto it = submission.shaders.upper_bound(address);
-            require(it != submission.shaders.begin(), "graphics program does not belong to a registered shader");
+            auto it = submission.shaders->upper_bound(address);
+            require(it != submission.shaders->begin(), "graphics program does not belong to a registered shader");
             --it;
             const auto& snapshot = *it->second;
             require(address - snapshot.codeAddress < snapshot.code.size() * sizeof(std::uint32_t), "graphics program is outside registered shader code");
@@ -1087,8 +1145,8 @@ private:
             append(0x0c8, 2, Stage::TessellationEvaluation, 0x08b, 0x08c, Role::Domain);
         } else if (graphics.stages.path == Graphics::ShaderPath::Geometry) {
             const auto frontAddress = programAddress(0xc8);
-            auto snapshot = submission.shaders.upper_bound(frontAddress);
-            require(snapshot != submission.shaders.begin(), "geometry front program is not registered");
+            auto snapshot = submission.shaders->upper_bound(frontAddress);
+            require(snapshot != submission.shaders->begin(), "geometry front program is not registered");
             --snapshot;
             const auto type = snapshot->second->type;
             require(type == 2 || type == 4, "invalid geometry front binary type");
@@ -1225,27 +1283,18 @@ private:
         timing.Mark("draw_and_resource_release");
     }
 
-    // Queues a draw's device half (pipelined). The job owns what it reads: the compiled stages (the
-    // stage list points into the results) and the captured shader memory (the snapshots view it).
-    void queueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& parameters, std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results, std::vector<Graphics::CompiledShader> stages, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots) {
-        DeviceThread::Ranges writes;
-        for (std::uint32_t slot = 0; slot < graphics.colors.size(); ++slot) {
-            if ((graphics.colorTargetMask & (1u << slot)) == 0) continue;
-            const auto& color = graphics.colors[slot];
-            writes.emplace_back(color.address, color.address + color.bytes);
-        }
-        if (graphics.hasDepthTarget) {
-            if (graphics.depth.depthBytes != 0) writes.emplace_back(graphics.depth.depthAddress, graphics.depth.depthAddress + graphics.depth.depthBytes);
-            if (graphics.depth.stencilBytes != 0) writes.emplace_back(graphics.depth.stencilAddress, graphics.depth.stencilAddress + graphics.depth.stencilBytes);
-        }
-        // Shader stores (storage buffers and images, address-table stores) may reach anywhere.
-        bool anyWrite = false;
+    // The guest ranges the stages' shader stores may write (writable guest buffers within their
+    // descriptors' ranges, address-table stores within writable registered memory); anyWrite when
+    // they may reach anywhere (storage images, writable texel buffers, unknown elements). Returns
+    // whether a stage makes address-table stores.
+    bool appendShaderWrites(std::span<const std::shared_ptr<const ShaderRecompiler::RecompileResult>> results, DeviceThread::Ranges& writes, bool& anyWrite) {
         bool addressStores = false;
         for (const auto& resultPointer : results) {
             const auto& result = *resultPointer;
             addressStores = addressStores || result.bdaWrites;
             for (const auto& binding : result.bindings) {
                 if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) anyWrite = true;
+                if (binding.kind == ShaderRecompiler::DescriptorKind::StorageTexelBuffer && !binding.readOnly) anyWrite = true;
                 if (binding.kind != ShaderRecompiler::DescriptorKind::StorageBuffer || binding.readOnly) continue;
                 // Only guest buffers are guest memory: the address table and fault buffer are the
                 // driver's, and shader data and flattened SRTs are copies of their words (their
@@ -1266,12 +1315,27 @@ private:
                     if (base != 0 && size != 0) writes.emplace_back(base, base + size);
                 }
             }
-            for (const auto& binding : result.bindings) {
-                if (binding.kind == ShaderRecompiler::DescriptorKind::StorageTexelBuffer && !binding.readOnly) anyWrite = true;
-            }
         }
         // Address-table stores reach writable registered memory only.
         if (addressStores && !appendWritableRegistered(writes)) anyWrite = true;
+        return addressStores;
+    }
+
+    // Queues a draw's device half (pipelined). The job owns what it reads: the compiled stages (the
+    // stage list points into the results) and the captured shader memory (the snapshots view it).
+    void queueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& parameters, std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results, std::vector<Graphics::CompiledShader> stages, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots) {
+        DeviceThread::Ranges writes;
+        for (std::uint32_t slot = 0; slot < graphics.colors.size(); ++slot) {
+            if ((graphics.colorTargetMask & (1u << slot)) == 0) continue;
+            const auto& color = graphics.colors[slot];
+            writes.emplace_back(color.address, color.address + color.bytes);
+        }
+        if (graphics.hasDepthTarget) {
+            if (graphics.depth.depthBytes != 0) writes.emplace_back(graphics.depth.depthAddress, graphics.depth.depthAddress + graphics.depth.depthBytes);
+            if (graphics.depth.stencilBytes != 0) writes.emplace_back(graphics.depth.stencilAddress, graphics.depth.stencilAddress + graphics.depth.stencilBytes);
+        }
+        bool anyWrite = false;
+        const bool addressStores = appendShaderWrites(results, writes, anyWrite);
         // Debug aid: APS5_TRACE_ANYWRITE=1 counts why draws may write anywhere.
         static const bool traceAny = std::getenv("APS5_TRACE_ANYWRITE") != nullptr;
         if (traceAny) {
