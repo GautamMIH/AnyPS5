@@ -516,8 +516,12 @@ private:
         const auto lockStarted = std::chrono::steady_clock::now();
         std::lock_guard gpuLock(self.gpuMutex);
         noteReadWait(need.kind == DeviceThread::Need::Resolve ? "resolve: gpu mutex" : "after wait: gpu mutex", false, lockStarted);
+        const auto deviceStarted = std::chrono::steady_clock::now();
         if (self.device) self.device->ResolveMemory(address, bytes, writable);
+        noteReadWait("resolve: device", false, deviceStarted);
+        const auto trackingStarted = std::chrono::steady_clock::now();
         GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(address, bytes, writable);
+        noteReadWait("resolve: tracking", false, trackingStarted);
     }
 
     // The memory scope for the worker's own guest accesses (shader captures, register packets,
@@ -613,6 +617,17 @@ private:
             return false;
         }
         return Pm4::ValueSatisfiesWait(packet, value);
+    }
+    // predictedWaitSatisfied for the pipelined worker without a drain: the prediction holds only if
+    // no job still queued for the device thread may write the label (a later write would replace
+    // it), and the recorded GPU writer is the predicted one.
+    bool predictedQueuedWaitSatisfied(std::span<const std::uint32_t> packet) {
+        const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93;
+        const auto target = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
+        if (!predicted.contains(target)) return false;
+        const auto need = pipeline->Check(target, wide ? 8 : 4);
+        if (need.kind == DeviceThread::Need::Wait || need.kind == DeviceThread::Need::Drain) return false;
+        return predictedWaitSatisfied(packet);
     }
     // Finished under gpuMutex, not yet published (see publishCompletions).
     Completed unpublished;
@@ -1452,18 +1467,29 @@ private:
                 CheckFailure();
                 timing.Mark("failure_check");
                 if (opcode == 0x3c || opcode == 0x93) {
-                    // Opt-in (ANYPS5_QUEUE_WAIT_REG_MEM=1): a wait on a label a pending release
+                    // A wait on a label a pending release
                     // writes is a GPU barrier (see below), queued in order like one, with no drain.
-                    // Zorro gained ~0.5 ms a frame but Hellboy lost ~1 ms, so waits drain by default.
-                    // ANYPS5_QUEUE_RELEASE_WAITS=1 and ANYPS5_READ_LABEL_WAITS=1 enable each half on its own
-                    // (to find which one cost Hellboy); ANYPS5_QUEUE_WAIT_REG_MEM=1 enables both.
-                    static const bool queueBoth = std::getenv("ANYPS5_QUEUE_WAIT_REG_MEM") != nullptr;
-                    static const bool queueReleases = queueBoth || std::getenv("ANYPS5_QUEUE_RELEASE_WAITS") != nullptr;
-                    static const bool readLabels = queueBoth || std::getenv("ANYPS5_READ_LABEL_WAITS") != nullptr;
+                    // Hellboy lost ~1 ms a frame with label reads until predicted GPU writes were
+                    // queued as barriers too (below): read, those labels waited for the GPU. On by
+                    // default: Zorro's label waits cost ~16 ms a frame drained, ~5.7 ms queued; Hellboy
+                    // 4052-4059 vs 4011-4056 frames. ANYPS5_DRAIN_WAIT_REG_MEM=1 drains as before;
+                    // ANYPS5_DRAIN_RELEASE_WAITS=1 / ANYPS5_DRAIN_LABEL_WAITS=1 turn off one half.
+                    static const bool drainAll = std::getenv("ANYPS5_DRAIN_WAIT_REG_MEM") != nullptr;
+                    static const bool queueReleases = !drainAll && std::getenv("ANYPS5_DRAIN_RELEASE_WAITS") == nullptr;
+                    static const bool readLabels = !drainAll && std::getenv("ANYPS5_DRAIN_LABEL_WAITS") == nullptr;
                     static const bool cpuWaits = std::getenv("ANYPS5_CPU_WAIT_REG_MEM") != nullptr;
                     if (pipeline && device != nullptr && queueReleases && !cpuWaits && pendingReleaseSatisfies(packet)) {
                         pipeline->Post([device = device] { device->AcquireGpuMemory(); }, {}, false);
                         timing.Mark("gpu_wait_queued");
+                        cursor += count;
+                        continue;
+                    }
+                    // A label a WRITE_DATA or small fill recorded on the GPU leaves satisfying the wait
+                    // (predictWrite) is, like a pending release, a GPU barrier: reading it would
+                    // submit the batch and wait for the GPU (~0.3-8 ms a label in Zorro).
+                    if (pipeline && device != nullptr && (queueReleases || readLabels) && !cpuWaits && predictedQueuedWaitSatisfied(packet)) {
+                        pipeline->Post([device = device] { device->AcquireGpuMemory(); }, {}, false);
+                        timing.Mark("predicted_wait_queued");
                         cursor += count;
                         continue;
                     }
