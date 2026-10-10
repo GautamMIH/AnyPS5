@@ -304,8 +304,15 @@ int* errno_slot() {
     return &e;
 }
 
-int fail(int err) {
+extern "C" int* APS5_VABI __error_nid_postfix();
+
+void set_errno(int err) {
     *errno_slot() = err;
+    *__error_nid_postfix() = err;
+}
+
+int fail(int err) {
+    set_errno(err);
     return NET_ERROR_BASE | err;
 }
 
@@ -1087,11 +1094,11 @@ int APS5_VABI sceNetInetPton(int af, const char* src, void* dst) {
 
 const char* APS5_VABI sceNetInetNtop(int af, const void* src, char* dst, uint32_t size) {
     if (src == nullptr || dst == nullptr) {
-        *errno_slot() = NET_EINVAL;
+        set_errno(NET_EINVAL);
         return nullptr;
     }
     if (af != NET_AF_INET && af != NET_AF_INET6) {
-        *errno_slot() = NET_EAFNOSUPPORT;
+        set_errno(NET_EAFNOSUPPORT);
         return nullptr;
     }
     char text[INET6_ADDRSTRLEN];
@@ -1101,12 +1108,12 @@ const char* APS5_VABI sceNetInetNtop(int af, const void* src, char* dst, uint32_
     const auto* result = ::inet_ntop(af == NET_AF_INET ? AF_INET : AF_INET6, src, text, sizeof(text));
 #endif
     if (!result) {
-        *errno_slot() = native_error();
+        set_errno(native_error());
         return nullptr;
     }
     const auto length = std::strlen(text) + 1;
     if (length > size) {
-        *errno_slot() = NET_ENOSPC;
+        set_errno(NET_ENOSPC);
         return nullptr;
     }
     std::memcpy(dst, text, length);
@@ -1159,7 +1166,7 @@ int lookup_ipv4(int rid, const char* hostname, const char* func, std::vector<std
     addrinfo* results = nullptr;
     const int result = ::getaddrinfo(hostname, nullptr, &hints, &results);
     if (result != 0) {
-        *errno_slot() = result == EAI_AGAIN ? NET_ETIMEDOUT : NET_ENOENT;
+        set_errno(result == EAI_AGAIN ? NET_ETIMEDOUT : NET_ENOENT);
         log_soft(func, "host DNS lookup failed");
         set_resolver_error(rid, NET_ERROR_RESOLVER_ENODNS);
         return NET_ERROR_RESOLVER_ENODNS;
@@ -1234,7 +1241,7 @@ int APS5_VABI sceNetResolverStartAton(int rid, const void* addr, char* hostname,
     const int result = ::getnameinfo(reinterpret_cast<const sockaddr*>(&address), sizeof(address), hostname,
         static_cast<NativeLength>(len), nullptr, 0, NI_NAMEREQD);
     if (result != 0) {
-        *errno_slot() = result == EAI_AGAIN ? NET_ETIMEDOUT : NET_ENOENT;
+        set_errno(result == EAI_AGAIN ? NET_ETIMEDOUT : NET_ENOENT);
         log_soft(__func__, "host reverse DNS lookup failed");
         set_resolver_error(rid, NET_ERROR_RESOLVER_ENODNS);
         return NET_ERROR_RESOLVER_ENODNS;

@@ -346,7 +346,9 @@ int main() {
     Require(send_failed);
     Require(sceNetSocketClose(client) == 0);
     Require(sceNetSocketClose(listener) == 0);
+    *__error_nid_postfix() = 0;
     Require(sceNetSocketClose(listener) == static_cast<int>(0x80410109) && *sceNetErrnoLoc() == 9);
+    Require(*__error_nid_postfix() == 9);
 
     const int udp_receiver = sceNetSocket(nullptr, 2, 2, 17);
     const int udp_sender = sceNetSocket(nullptr, 2, 2, 17);
