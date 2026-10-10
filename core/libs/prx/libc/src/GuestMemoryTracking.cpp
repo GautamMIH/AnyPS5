@@ -2,6 +2,7 @@
 #include "prx/libc/include/MemoryTrackingPlatform.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
+#include <atomic>
 #include <exception>
 #include <limits>
 #include <map>
@@ -41,6 +42,17 @@ struct Registry {
     };
     Index noAccess;
     Index readOnly;
+    // The protected ranges as Resolve reads them without the mutex: the mutex is also the driver's
+    // GPU mutex, held by the device thread for every recorded job, so guest threads checking memory
+    // (Submit's register-list reads) waited for draws to record (~7 ms of Zorro's frame). A snapshot
+    // missing a just-protected entry is safe: the access then faults and the handler resolves it.
+    struct Published {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> noAccess;
+        std::uint64_t noAccessLargest = 0;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> readOnly;
+        std::uint64_t readOnlyLargest = 0;
+    };
+    std::atomic<std::shared_ptr<const Published>> published{std::make_shared<const Published>()};
     bool installed = false;
 };
 
@@ -67,6 +79,22 @@ void indexProtection(Registry& registryValue, Entry& entry, Protection from, Pro
         index->entries.emplace(entry.address, &entry);
         index->largest = std::max(index->largest, entry.bytes);
     }
+    // Republished for Resolve's unlocked check (entries are sorted by address in each index).
+    auto snapshot = std::make_shared<Registry::Published>();
+    for (const auto& [address, other] : registryValue.noAccess.entries) snapshot->noAccess.emplace_back(address, address + other->bytes);
+    snapshot->noAccessLargest = registryValue.noAccess.largest;
+    for (const auto& [address, other] : registryValue.readOnly.entries) snapshot->readOnly.emplace_back(address, address + other->bytes);
+    snapshot->readOnlyLargest = registryValue.readOnly.largest;
+    registryValue.published.store(std::move(snapshot), std::memory_order_release);
+}
+
+// Whether a published range overlaps [address, end) (ranges sorted by start, none longer than largest).
+bool overlapsPublished(const std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges, std::uint64_t largest, std::uint64_t address, std::uint64_t end) {
+    auto it = std::lower_bound(ranges.begin(), ranges.end(), std::make_pair(address > largest ? address - largest : 0, std::uint64_t{0}));
+    for (; it != ranges.end() && it->first < end; ++it) {
+        if (it->second > address) return true;
+    }
+    return false;
 }
 
 // Whether an entry of the index overlaps [address, end).
@@ -249,6 +277,11 @@ void GuestMemoryTrackingProtect_nid_postfix(void* handle, Protection protection)
 void GuestMemoryTrackingResolve_nid_postfix(std::uint64_t address, std::size_t bytes, bool writable) {
     if (bytes == 0) return;
     const auto end = checkedEnd(address, bytes);
+    {
+        const auto snapshot = registry().published.load(std::memory_order_acquire);
+        const bool candidate = overlapsPublished(snapshot->noAccess, snapshot->noAccessLargest, address, end) || (writable && overlapsPublished(snapshot->readOnly, snapshot->readOnlyLargest, address, end));
+        if (!candidate) return;
+    }
     std::lock_guard lock(registry().mutex);
     auto& registryValue = registry();
     // Checked thousands of times a frame: find whether a watch needs resolving before copying the
