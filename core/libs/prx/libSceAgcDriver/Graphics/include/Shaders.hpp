@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <span>
+#include <vector>
 
 namespace AgcDriver::Graphics {
 
@@ -15,6 +16,11 @@ struct CompiledShader {
     ShaderRecompiler::ShaderStage stage;
     const ShaderRecompiler::RecompileResult* program;
     std::uint32_t pushConstantOffset;
+    // The invocation's push data when it differs from the program's (runtime user data, see
+    // ShaderRecompiler::ApplyRuntimeUserData): same size, other user-data words.
+    const std::vector<std::byte>* pushData = nullptr;
+
+    [[nodiscard]] const std::vector<std::byte>& PushData() const { return pushData != nullptr ? *pushData : program->pushConstants; }
 };
 
 inline VkShaderStageFlagBits VulkanStage(ShaderRecompiler::ShaderStage stage) {
@@ -60,7 +66,8 @@ inline std::array<std::byte, PipelinePushConstantBytes> AssemblePushConstants(st
     std::array<bool, PipelinePushConstantBytes> occupied{};
     for (const auto& shader : shaders) {
         Require(shader.program != nullptr, "missing compiled shader");
-        const auto& bytes = shader.program->pushConstants;
+        const auto& bytes = shader.PushData();
+        Require(bytes.size() == shader.program->pushConstants.size(), "invocation push data differs in size from the program's");
         if (bytes.empty()) continue;
         Require(bytes.size() % 4 == 0 && shader.pushConstantOffset % 4 == 0, "shader push constant range is not DWORD aligned");
         Require(shader.pushConstantOffset < PipelinePushConstantBytes && bytes.size() <= PipelinePushConstantBytes - shader.pushConstantOffset, "shader push constant range lies outside the pipeline push constant block");

@@ -113,6 +113,52 @@ void NameThread(const char* name) {
 #endif
 }
 
+// Prepared shaders (default; ANYPS5_PREPARED_SHADERS=0 restores the per-draw path): a stage's
+// program source is prepared at its first use per registered shader, code offset and static ABI,
+// the registered code is not copied per draw, and user data is runtime data (results are shared
+// across user data, which the invocation's push data supplies).
+bool PreparedShaders() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("ANYPS5_PREPARED_SHADERS");
+        return value == nullptr || std::strcmp(value, "0") != 0;
+    }();
+    return enabled;
+}
+
+// APS5_TRACE_PREPARED=1: per 10 s, how many stages went through the prepared path and how many fell
+// back to the per-draw one (and why), with the result memo's hits.
+struct PreparedTrace {
+    enum Counter { DispatchPrepared, DispatchFirstUse, DispatchFallback, StagePrepared, StageFirstUse, StageFallbackSpliced, StageFallbackOther, MemoHit, MemoMiss, PushOverride, Count };
+    static bool Enabled() {
+        static const bool enabled = std::getenv("APS5_TRACE_PREPARED") != nullptr;
+        return enabled;
+    }
+    static void Add(Counter counter) {
+        if (!Enabled()) return;
+        auto& self = instance();
+        self.counts[counter].fetch_add(1, std::memory_order_relaxed);
+        const auto now = std::chrono::steady_clock::now().time_since_epoch().count();
+        auto last = self.last.load(std::memory_order_relaxed);
+        if (last == 0) {
+            self.last.compare_exchange_strong(last, now, std::memory_order_relaxed);
+            return;
+        }
+        if (now - last < 10'000'000'000ll || !self.last.compare_exchange_strong(last, now, std::memory_order_relaxed)) return;
+        std::array<unsigned long long, Count> values{};
+        for (std::size_t i = 0; i < values.size(); ++i) values[i] = self.counts[i].exchange(0, std::memory_order_relaxed);
+        std::fprintf(stderr, "[prepared] 10 s: dispatches %llu prepared, %llu first use, %llu fallback; draw stages %llu prepared, %llu first use, %llu fallback (%llu spliced geometry, %llu other); result memo %llu hits, %llu misses; %llu push data overrides\n",
+            values[DispatchPrepared], values[DispatchFirstUse], values[DispatchFallback], values[StagePrepared], values[StageFirstUse], values[StageFallbackSpliced] + values[StageFallbackOther], values[StageFallbackSpliced], values[StageFallbackOther], values[MemoHit], values[MemoMiss], values[PushOverride]);
+    }
+
+private:
+    static PreparedTrace& instance() {
+        static PreparedTrace trace;
+        return trace;
+    }
+    std::array<std::atomic<unsigned long long>, Count> counts{};
+    std::atomic<long long> last{0};
+};
+
 // The float mode a stage's SPI_SHADER_PGM_RSRC1 (or COMPUTE_PGM_RSRC1) sets: FLOAT_MODE, DX10_CLAMP,
 // IEEE_MODE and FP16_OVFL (whose bit differs per stage). None when the register was not written.
 std::optional<ShaderRecompiler::ShaderFloatMode> floatModeOf(const Registers& registers, std::uint32_t rsrc1, std::uint32_t fp16OverflowBit) {
@@ -968,16 +1014,25 @@ private:
             device->Target(),
             {0, 0, 0, 128}
         };
-        ShaderMemory shaderMemory(memory);
+        const bool prepared = PreparedShaders();
+        ShaderMemory shaderMemory = prepared ? ShaderMemory(memory, {it->second}) : ShaderMemory(memory);
         timing.Mark("prepare");
-        const auto capture = shaderMemory.Capture(request);
+        const auto capture = [&] {
+            if (!prepared) return shaderMemory.Capture(request);
+            bool reused = false;
+            auto result = captureMemo.CaptureProgram(it->second, request, shaderMemory, &reused);
+            PreparedTrace::Add(reused ? PreparedTrace::DispatchPrepared : PreparedTrace::DispatchFirstUse);
+            return result;
+        }();
+        if (!prepared) PreparedTrace::Add(PreparedTrace::DispatchFallback);
         timing.Mark("shader_memory_capture");
         const auto captured = shaderMemory.Regions();
         request.context.memory = captured;
         timing.Mark("request_memory");
+        bool memoHit = false;
         const auto compiledResult = [&] {
             try {
-                return ShaderRecompiler::Recompile(request, *capture);
+                return ShaderRecompiler::Recompile(request, *capture, &memoHit, prepared);
             } catch (const std::exception& error) {
                 char context[160]{};
                 std::snprintf(context, sizeof(context), "compute shader 0x%llx (header 0x%llx, PGM_RSRC2 0x%08x, %u user SGPRs): ",
@@ -987,13 +1042,23 @@ private:
         }();
         const auto& compiled = *compiledResult;
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
+        PreparedTrace::Add(memoHit ? PreparedTrace::MemoHit : PreparedTrace::MemoMiss);
+        // Runtime user data: the shared result may carry another dispatch's user-data words.
+        std::shared_ptr<const std::vector<std::byte>> push;
+        if (prepared) {
+            std::vector<std::byte> bytes;
+            if (ShaderRecompiler::ApplyRuntimeUserData(compiled, userData, bytes)) {
+                push = std::make_shared<const std::vector<std::byte>>(std::move(bytes));
+                PreparedTrace::Add(PreparedTrace::PushOverride);
+            }
+        }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : captured) snapshots.push_back({region.guestAddress, region.bytes});
         timing.Mark("snapshots");
         if (pipeline) {
-            queueDispatch(compiledResult, groups, std::move(shaderMemory), captured, std::move(snapshots));
+            queueDispatch(compiledResult, groups, std::move(shaderMemory), captured, std::move(snapshots), std::move(push));
         } else {
-            recordDispatch(*device, compiled, groups, snapshots);
+            recordDispatch(*device, compiled, groups, snapshots, push.get());
         }
         timing.Mark("dispatch_and_resource_release");
     }
@@ -1001,13 +1066,13 @@ private:
     // A dispatch's device half: recorded with the device's own resolver (gpuMutex held), then a
     // shader that stores to a buffer starting at a registered CMASK without XOR address math is taken
     // to clear it (shadPS4); the dispatch itself still runs.
-    static void recordDispatch(VulkanDevice& target, const ShaderRecompiler::RecompileResult& compiled, const std::array<std::uint32_t, 3>& groups, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+    static void recordDispatch(VulkanDevice& target, const ShaderRecompiler::RecompileResult& compiled, const std::array<std::uint32_t, 3>& groups, std::span<const Graphics::GuestMemorySnapshot> snapshots, const std::vector<std::byte>* push) {
         {
             const GuestMemory::MemoryAccessScope memoryScope(&target, [](void* context, std::uint64_t address, std::size_t bytes, bool writable) {
                 static_cast<VulkanDevice*>(context)->ResolveMemory(address, bytes, writable);
             });
             const GuestMemory::AccessSite accessSite("dispatch_record");
-            target.Dispatch(compiled, groups[0], groups[1], groups[2], snapshots);
+            target.Dispatch(compiled, groups[0], groups[1], groups[2], snapshots, 0, push);
         }
         if (compiled.usesBitwiseXor) return;
         for (const auto& binding : compiled.bindings) {
@@ -1022,7 +1087,7 @@ private:
 
     // Queues a dispatch's device half (pipelined), like queueDraw: the job owns the compiled result
     // and the captured shader memory its snapshots view.
-    void queueDispatch(std::shared_ptr<const ShaderRecompiler::RecompileResult> result, const std::array<std::uint32_t, 3>& groups, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots) {
+    void queueDispatch(std::shared_ptr<const ShaderRecompiler::RecompileResult> result, const std::array<std::uint32_t, 3>& groups, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const std::vector<std::byte>> push) {
         DeviceThread::Ranges writes;
         bool anyWrite = false;
         appendShaderWrites(std::span(&result, 1), writes, anyWrite);
@@ -1034,13 +1099,14 @@ private:
             std::vector<ShaderRecompiler::MemoryRegion> memory;
             std::vector<Graphics::GuestMemorySnapshot> snapshots;
             std::shared_ptr<FrameTiming> timing;
+            std::shared_ptr<const std::vector<std::byte>> push;
         };
-        auto job = std::make_shared<Job>(Job{device, std::move(result), groups, std::move(shaderMemory), std::move(memory), std::move(snapshots), frameTiming});
+        auto job = std::make_shared<Job>(Job{device, std::move(result), groups, std::move(shaderMemory), std::move(memory), std::move(snapshots), frameTiming, std::move(push)});
         pipeline->Post([this, job]() mutable {
             {
                 PerformanceContext timingContext(job->timing.get());
                 const auto deferred = WriteTracker::DeferredGpuWrites();
-                recordDispatch(*job->device, *job->result, job->groups, job->snapshots);
+                recordDispatch(*job->device, *job->result, job->groups, job->snapshots, job->push.get());
                 if (WriteTracker::DeferredGpuWrites() != deferred) pipeline->NoteUnknownGpuWrites();
             }
             job->device.reset();

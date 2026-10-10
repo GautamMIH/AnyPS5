@@ -483,6 +483,10 @@ struct ShaderInvocation {
     std::uint64_t specializationId = 0;
     std::vector<DescriptorBinding> bindings;
     std::vector<std::byte> pushConstants;
+    // The user-data word (an index into RecompileContext::userData) each leading push data dword
+    // holds: dword i of pushConstants is userData[pushUserData[i]] of the request that materialized
+    // the result. A caller of Recompile(request, capture, ..., runtimeUserData) writes its own.
+    std::vector<std::uint32_t> pushUserData;
     std::vector<VertexAttribute> vertexAttributes;
 };
 
@@ -507,7 +511,15 @@ struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
 [[nodiscard]] std::vector<std::uint32_t> SpliceGeometryHalves(std::span<const std::uint32_t> front, std::span<const std::uint32_t> back);
 
 struct ResourceCapture;
-[[nodiscard]] std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit = nullptr);
+// runtimeUserData: the caller supplies the user data per invocation, writing
+// userData[pushUserData[i]] into dword i of the push data (ApplyRuntimeUserData). A result that reads
+// user data only as push data is then shared across invocations that differ only in user data, and
+// its pushConstants may hold another invocation's words.
+[[nodiscard]] std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit = nullptr, bool runtimeUserData = false);
+
+// The push data of `result` for `userData` (see Recompile's runtimeUserData): false when the
+// result's own push data already holds it, else true with the bytes to use in `push`.
+[[nodiscard]] bool ApplyRuntimeUserData(const RecompileResult& result, std::span<const std::uint32_t> userData, std::vector<std::byte>& push);
 
 // Debug aid (see DebugProbe in Translation/TranslationContext.hpp): the APS5_PROBE register probe is
 // only applied while a driver has it active, so it can be limited to one dispatch; the recompile

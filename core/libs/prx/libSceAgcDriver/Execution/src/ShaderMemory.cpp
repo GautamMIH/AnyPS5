@@ -19,7 +19,15 @@ namespace AgcDriver {
 ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial) {
     const ShaderRecompiler::RequestMemoryView validated(initial);
     for (const auto& region : initial) {
-        regions.emplace(region.guestAddress, std::vector<std::byte>(region.bytes.begin(), region.bytes.end()));
+        regions.emplace(region.guestAddress, Region(std::vector<std::byte>(region.bytes.begin(), region.bytes.end())));
+        initialRanges.emplace_back(region.guestAddress, region.guestAddress + region.bytes.size());
+    }
+}
+
+ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial, std::vector<std::shared_ptr<const void>> owners) : owners(std::move(owners)) {
+    const ShaderRecompiler::RequestMemoryView validated(initial);
+    for (const auto& region : initial) {
+        regions.emplace(region.guestAddress, Region(region.bytes));
         initialRanges.emplace_back(region.guestAddress, region.guestAddress + region.bytes.size());
     }
 }
@@ -63,7 +71,7 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
     std::vector<std::byte> bytes(static_cast<std::size_t>(end - begin));
     GuestMemory::Read(begin, bytes, 1);
     std::memcpy(value, bytes.data() + (address - begin), sizeof(*value));
-    self.regions.emplace(begin, std::move(bytes));
+    self.regions.emplace(begin, Region(std::move(bytes)));
     return true;
 }
 
@@ -87,7 +95,7 @@ std::vector<ShaderRecompiler::MemoryRegion> ShaderMemory::Regions() const {
     std::vector<ShaderRecompiler::MemoryRegion> result;
     result.reserve(regions.size());
     for (const auto& [address, bytes] : regions) {
-        result.push_back({address, bytes});
+        result.push_back({address, bytes.view});
     }
     return result;
 }
@@ -118,7 +126,7 @@ void ShaderMemory::Insert(std::uint64_t address, std::uint32_t value) {
     }
     std::vector<std::byte> bytes(sizeof(value));
     std::memcpy(bytes.data(), &value, sizeof(value));
-    regions.emplace(address, std::move(bytes));
+    regions.emplace(address, Region(std::move(bytes)));
 }
 
 void ShaderMemory::InsertRun(std::span<const std::pair<std::uint64_t, std::uint32_t>> words) {
@@ -134,11 +142,10 @@ void ShaderMemory::InsertRun(std::span<const std::pair<std::uint64_t, std::uint3
     }
     std::vector<std::byte> bytes(static_cast<std::size_t>(end - begin));
     for (const auto& [address, value] : words) std::memcpy(bytes.data() + (address - begin), &value, sizeof(value));
-    regions.emplace_hint(next, begin, std::move(bytes));
+    regions.emplace_hint(next, begin, Region(std::move(bytes)));
 }
 
-std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request, ShaderMemory& memory) {
-    if (owner == nullptr) return memory.Capture(request);
+std::uint64_t CaptureMemo::programKey(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request) {
     key.clear();
     key.push_back(reinterpret_cast<std::uintptr_t>(owner.get()));
     key.push_back(request.shader.codeAddress);
@@ -147,6 +154,32 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     ShaderRecompiler::RecompileCacheKey::BuildContext(request, key);
     std::uint64_t hash = 0xcbf29ce484222325ull;
     for (const auto word : key) hash = (hash ^ word) * 0x100000001b3ull;
+    return hash;
+}
+
+void CaptureMemo::storeProgram(std::uint64_t hash, const std::shared_ptr<const void>& owner, std::size_t programWords, const ShaderRecompiler::ResourceCapture& capture) {
+    if (programs.size() >= 4096) programs.clear();
+    auto handle = capture.source != nullptr ? std::make_shared<const ShaderRecompiler::SourceHandle>(ShaderRecompiler::SourceHandle{capture.source, nullptr, {}}) : nullptr;
+    programs[hash] = Program{owner, std::vector<std::uint64_t>(key.begin(), key.begin() + static_cast<std::ptrdiff_t>(programWords)), std::move(handle), capture.plan ? ShaderRecompiler::PlanUserDataSlots(*capture.plan) : std::vector<std::uint32_t>{}, capture.plan != nullptr};
+}
+
+std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::CaptureProgram(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request, ShaderMemory& memory, bool* prepared) {
+    if (prepared != nullptr) *prepared = false;
+    if (owner == nullptr) return memory.Capture(request);
+    const auto hash = programKey(owner, request);
+    const auto program = programs.find(hash);
+    if (program != programs.end() && program->second.owner == owner && program->second.key == key && program->second.handle != nullptr) {
+        if (prepared != nullptr) *prepared = true;
+        return memory.Capture(request, program->second.handle.get());
+    }
+    auto capture = memory.Capture(request);
+    storeProgram(hash, owner, key.size(), *capture);
+    return capture;
+}
+
+std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request, ShaderMemory& memory) {
+    if (owner == nullptr) return memory.Capture(request);
+    std::uint64_t hash = programKey(owner, request);
     const auto programHash = hash;
     const auto programWords = key.size();
     PerformanceTimer timing("Driver.CaptureMemo");
@@ -188,15 +221,11 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     auto capture = sameProgram ? memory.Capture(request, program->second.handle.get()) : memory.Capture(request);
     timing.Mark("materialize");
     if (entries.size() >= 16384) entries.clear();
-    if (programs.size() >= 4096) programs.clear();
     auto words = memory.CapturedWords();
     timing.Mark("captured_words");
     entries[hash] = Entry{owner, key, capture, std::move(words), mappingGeneration};
     timing.Mark("store");
-    if (!sameProgram) {
-        auto handle = capture->source != nullptr ? std::make_shared<const ShaderRecompiler::SourceHandle>(ShaderRecompiler::SourceHandle{capture->source, nullptr, {}}) : nullptr;
-        programs[programHash] = Program{owner, std::vector<std::uint64_t>(key.begin(), key.begin() + static_cast<std::ptrdiff_t>(programWords)), std::move(handle), capture->plan ? ShaderRecompiler::PlanUserDataSlots(*capture->plan) : std::vector<std::uint32_t>{}, capture->plan != nullptr};
-    }
+    if (!sameProgram) storeProgram(programHash, owner, programWords, *capture);
     timing.Mark(known ? "changed" : sameProgram ? "walk" : "miss");
     return capture;
 }

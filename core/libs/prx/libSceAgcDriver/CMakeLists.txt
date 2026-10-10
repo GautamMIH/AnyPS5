@@ -523,6 +523,7 @@ foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
 endforeach()
 
 target_link_libraries(agc_driver_interpolation_modes_tests PRIVATE shader_recompiler_agc_driver)
+target_link_libraries(agc_driver_runtime_user_data_tests PRIVATE shader_recompiler_agc_driver)
 
 if(BUILD_TESTING)
     add_test(NAME agc_shader_bindless COMMAND agc_shader_memory_tests --bindless)

@@ -211,7 +211,9 @@ function(add_shader_recompiler target runtimeTarget)
             # This branch's driver: BufferViewMisalignment follows the target's
             # storageBufferOffsetAlignment (keyed); RecompileCacheKey::BuildContext only keys the
             # driver's capture memo; SpliceGeometryHalves rewrites guest code that the request carries;
-            # PlanUserDataSlots only lists a plan's user-data reads (the capture memo's key).
+            # PlanUserDataSlots only lists a plan's user-data reads (the capture memo's key);
+            # ApplyRuntimeUserData only writes a materialized result's user-data words into push data.
+            ApplyRuntimeUserData
             BufferViewMisalignment
             CaptureResources
             PlanUserDataSlots

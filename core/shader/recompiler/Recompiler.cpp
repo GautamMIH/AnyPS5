@@ -733,6 +733,11 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     DescriptorBindingBuilder{}.Populate(bindings, variant.bindings, *bindingPlan, variant.info.userDataBase, snapshot, partialThreads(request), request.target.storageBufferOffsetAlignment);
     result.bindings = std::move(bindings.bindings);
     result.pushConstants = std::move(bindings.pushConstants);
+    if (variant.bindings.layout.UsesPushData()) {
+        const auto& registers = variant.bindings.layout.userDataRegisters;
+        result.pushUserData.reserve(registers.size());
+        for (const auto reg : registers) result.pushUserData.push_back(reg - variant.info.userDataBase);
+    }
     return result;
 }
 
@@ -849,7 +854,7 @@ void reportResultMemo() {
 // Everything materializeResult reads besides the variant: the snapshot (the descriptor words, the
 // flattened SRT, the user data, the uniform fill) and, for the vertex family, the V# table the
 // attributes are resolved from.
-std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapshot& snapshot) {
+std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapshot& snapshot, bool userData = true) {
     std::uint64_t hash = 0xcbf29ce484222325ull;
     const auto mix = [&](std::uint64_t value) {
         hash ^= value;
@@ -870,7 +875,8 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     mixDescriptors(snapshot.images);
     mixDescriptors(snapshot.samplers);
     mixWords(snapshot.flattenedSrt);
-    mixWords(snapshot.userData);
+    if (userData) mixWords(snapshot.userData);
+    else mix(0x52756e74ull);
     mix(static_cast<std::uint64_t>(snapshot.uniformFill.kind));
     mix(snapshot.uniformFill.resource);
     for (const auto stride : snapshot.uniformFill.groupStride) mix(stride);
@@ -895,24 +901,46 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
     return hash;
 }
 
+// Whether a result reads user data only in its push data (RecompileResult::pushUserData): no
+// shader data binding holds a copy of it. Such a result serves any user data once the caller
+// writes the words into its push data.
+bool userDataInPushOnly(const RecompileResult& result) {
+    return std::none_of(result.bindings.begin(), result.bindings.end(), [](const DescriptorBinding& binding) { return binding.role == DescriptorRole::ShaderData; });
+}
+
 // The memo'd result of `source`'s variant for the snapshot (design13 R5): a hit returns the shared
 // object, a miss materializes outside the source mutex and inserts (a concurrent miss's object is
-// as good). `memoHit` reports the hit.
-std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& source, const std::shared_ptr<const CompiledVariant>& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool cacheHit, bool* memoHit) {
+// as good). `memoHit` reports the hit. With runtimeUserData the caller supplies the user data
+// (RecompileResult::pushUserData), so results that read it only as push data are memoized without
+// it: their push data holds the user data of the invocation that materialized them.
+std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& source, const std::shared_ptr<const CompiledVariant>& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool cacheHit, bool* memoHit, bool runtimeUserData = false) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
-    const auto hash = snapshotHash(request, snapshot);
-    std::uint64_t index = 0;
     auto& counters = resultMemoCounters();
+    const auto variantId = variant->artifact.variantId;
+    const auto indexOf = [&](std::uint64_t hash) { return (variantId * 0x9e3779b97f4a7c15ull) ^ hash; };
+    // Under the source mutex: the memo'd result for hash, moved to the front.
+    const auto lookup = [&](std::uint64_t hash) -> std::shared_ptr<const RecompileResult> {
+        const auto found = source.memoIndex.find(indexOf(hash));
+        if (found == source.memoIndex.end() || found->second->variantId != variantId || found->second->hash != hash) return nullptr;
+        source.memo.splice(source.memo.begin(), source.memo, found->second);
+        return found->second->result;
+    };
+    const std::uint64_t runtimeHash = runtimeUserData ? snapshotHash(request, snapshot, false) : 0u;
+    std::uint64_t fullHash = 0;
+    bool fullHashed = false;
     {
         std::lock_guard lock(source.mutex);
-        index = (variant->artifact.variantId * 0x9e3779b97f4a7c15ull) ^ hash;
-        const auto found = source.memoIndex.find(index);
-        if (found != source.memoIndex.end() && found->second->variantId == variant->artifact.variantId && found->second->hash == hash) {
-            source.memo.splice(source.memo.begin(), source.memo, found->second);
+        auto hit = runtimeUserData ? lookup(runtimeHash) : nullptr;
+        if (hit == nullptr) {
+            fullHash = snapshotHash(request, snapshot);
+            fullHashed = true;
+            hit = lookup(fullHash);
+        }
+        if (hit != nullptr) {
             counters.hits.fetch_add(1, std::memory_order_relaxed);
             if (memoHit != nullptr) *memoHit = true;
             reportResultMemo();
-            return found->second->result;
+            return hit;
         }
     }
     const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -920,12 +948,14 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
     result->cacheHit = cacheHit;
     if (profile) counters.populateNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
     counters.misses.fetch_add(1, std::memory_order_relaxed);
+    const auto hash = runtimeUserData && userDataInPushOnly(*result) ? runtimeHash : fullHashed ? fullHash : snapshotHash(request, snapshot);
+    const auto index = indexOf(hash);
     std::shared_ptr<const RecompileResult> shared = std::move(result);
     {
         std::lock_guard lock(source.mutex);
         const auto found = source.memoIndex.find(index);
         if (found != source.memoIndex.end()) {
-            if (found->second->variantId == variant->artifact.variantId && found->second->hash == hash) {
+            if (found->second->variantId == variantId && found->second->hash == hash) {
                 source.memo.splice(source.memo.begin(), source.memo, found->second);
                 shared = found->second->result;
             } else {
@@ -934,7 +964,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
             }
         }
         if (source.memoIndex.find(index) == source.memoIndex.end()) {
-            source.memo.push_front({variant->artifact.variantId, hash, shared});
+            source.memo.push_front({variantId, hash, shared});
             source.memoIndex.emplace(index, source.memo.begin());
             while (source.memo.size() > ResultMemoEntries) {
                 const auto& last = source.memo.back();
@@ -948,26 +978,26 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
     return shared;
 }
 
-std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool* memoHit) {
+std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool* memoHit, bool runtimeUserData) {
     std::shared_ptr<const CompiledVariant> variant;
     bool cacheHit = false;
     {
         std::lock_guard lock(source.mutex);
         variant = findOrCompileVariant(source, request, cacheHit);
     }
-    return materializePreparedMemoized(source, variant, request, snapshot, cacheHit, memoHit);
+    return materializePreparedMemoized(source, variant, request, snapshot, cacheHit, memoHit, runtimeUserData);
 }
 
 // The capture already resolved the source entry (stage input validation included) and materialized
 // the request over exactly the words the driver captured, so neither is repeated here.
-std::shared_ptr<const RecompileResult> RecompileImpl(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit) {
+std::shared_ptr<const RecompileResult> RecompileImpl(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit, bool runtimeUserData) {
     if (!request.useCache || capture.source == nullptr) {
         auto program = PrepareResourceProgram(request);
         const auto variant = compileVariant(request, std::move(program));
         return std::make_shared<const RecompileResult>(materializeResult(variant, request, capture.snapshot));
     }
     if (!ResultMemo()) return std::make_shared<const RecompileResult>(materializeVariant(*capture.source, request, capture.snapshot));
-    return materializeMemoized(*capture.source, request, capture.snapshot, memoHit);
+    return materializeMemoized(*capture.source, request, capture.snapshot, memoHit, runtimeUserData);
 }
 
 template <typename Impl>
@@ -1160,9 +1190,28 @@ RecompileResult Recompile(const RecompileRequest& request) {
     return recompileReporting(request, [&] { return RecompileImpl(request); });
 }
 
-std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit) {
+std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit, bool runtimeUserData) {
     if (memoHit != nullptr) *memoHit = false;
-    return recompileReporting(request, [&] { return RecompileImpl(request, capture, memoHit); });
+    return recompileReporting(request, [&] { return RecompileImpl(request, capture, memoHit, runtimeUserData); });
+}
+
+bool ApplyRuntimeUserData(const RecompileResult& result, std::span<const std::uint32_t> userData, std::vector<std::byte>& push) {
+    const auto& slots = result.pushUserData;
+    if (slots.size() * sizeof(std::uint32_t) > result.pushConstants.size()) throw std::runtime_error("ShaderRecompiler: push user data exceeds the push data");
+    std::size_t first = 0;
+    for (; first < slots.size(); ++first) {
+        if (slots[first] >= userData.size()) throw std::runtime_error("ShaderRecompiler: push user data register is out of range");
+        std::uint32_t current = 0;
+        std::memcpy(&current, result.pushConstants.data() + first * sizeof(std::uint32_t), sizeof(current));
+        if (current != userData[slots[first]]) break;
+    }
+    if (first == slots.size()) return false;
+    push = result.pushConstants;
+    for (std::size_t i = first; i < slots.size(); ++i) {
+        if (slots[i] >= userData.size()) throw std::runtime_error("ShaderRecompiler: push user data register is out of range");
+        std::memcpy(push.data() + i * sizeof(std::uint32_t), &userData[slots[i]], sizeof(std::uint32_t));
+    }
+    return true;
 }
 
 }

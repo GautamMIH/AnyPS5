@@ -18,6 +18,13 @@ namespace AgcDriver {
 class ShaderMemory {
 public:
     explicit ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial);
+    // The initial regions lie in memory `owners` keep alive and unchanged (registered shader code
+    // and headers): they are viewed, not copied.
+    ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial, std::vector<std::shared_ptr<const void>> owners);
+    ShaderMemory(ShaderMemory&&) noexcept = default;
+    ShaderMemory& operator=(ShaderMemory&&) noexcept = default;
+    ShaderMemory(const ShaderMemory&) = delete;
+    ShaderMemory& operator=(const ShaderMemory&) = delete;
     // Walks the request's resources, reading guest memory the snapshot lacks. The result compiles
     // the request (Recompile(request, capture)) without walking or resolving it again. With `handle`
     // (the source an earlier capture of the same program and context resolved, see
@@ -36,7 +43,24 @@ private:
     static bool read(void* context, std::uint64_t address, std::uint32_t* value);
     bool initial(std::uint64_t address) const;
     ShaderRecompiler::SrtRuntime runtime(const ShaderRecompiler::RecompileRequest& request);
-    std::map<std::uint64_t, std::vector<std::byte>> regions;
+    // A region's bytes: its own copy, or a view of memory `owners` hold. Moving a region (or the
+    // map) keeps the owned buffer, so the view stays valid.
+    struct Region {
+        std::vector<std::byte> owned;
+        std::span<const std::byte> view;
+        explicit Region(std::vector<std::byte> bytes) : owned(std::move(bytes)), view(owned) {}
+        explicit Region(std::span<const std::byte> bytes) : view(bytes) {}
+        Region(Region&& other) noexcept : owned(std::move(other.owned)), view(other.view) {}
+        Region& operator=(Region&& other) noexcept {
+            owned = std::move(other.owned);
+            view = other.view;
+            return *this;
+        }
+        [[nodiscard]] std::size_t size() const { return view.size(); }
+        [[nodiscard]] const std::byte* data() const { return view.data(); }
+    };
+    std::map<std::uint64_t, Region> regions;
+    std::vector<std::shared_ptr<const void>> owners;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> initialRanges;
     std::vector<std::uint64_t> accessed;
 };
@@ -52,6 +76,10 @@ private:
 class CaptureMemo {
 public:
     std::shared_ptr<const ShaderRecompiler::ResourceCapture> Capture(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request, ShaderMemory& memory);
+    // A capture of the request through its program's prepared source (resolved at the program's
+    // first use for this owner and context, then reused whatever the user data): the resources are
+    // walked every time, no capture is reused. `prepared` reports whether the source was prepared.
+    std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureProgram(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request, ShaderMemory& memory, bool* prepared = nullptr);
     void Clear();
 
 private:
@@ -63,6 +91,9 @@ private:
         std::uint64_t mappingGeneration = 0;
     };
     bool reusable(const Entry& entry, ShaderMemory& memory) const;
+    // Builds the program key (owner, code, context) into `key`; returns its hash.
+    std::uint64_t programKey(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request);
+    void storeProgram(std::uint64_t hash, const std::shared_ptr<const void>& owner, std::size_t programWords, const ShaderRecompiler::ResourceCapture& capture);
     std::unordered_map<std::uint64_t, Entry> entries;
     // The resolved source of each program and context, whatever its user data (see
     // ShaderMemory::Capture(request, handle)).
