@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Graphics/include/DescriptorCache.hpp"
 #include <algorithm>
+#include <iterator>
 #include <utility>
 
 namespace AgcDriver::Graphics {
@@ -40,26 +41,40 @@ bool DescriptorAllocation::Matches(std::span<const std::uint32_t> candidate) con
     return std::equal(key.begin(), key.end(), candidate.begin(), candidate.end());
 }
 
+std::uint64_t DescriptorCache::hash(std::span<const std::uint32_t> key) {
+    std::uint64_t value = 0xcbf29ce484222325ull;
+    for (const auto word : key) value = (value ^ word) * 0x100000001b3ull;
+    return value;
+}
+
 std::unique_ptr<DescriptorAllocation> DescriptorCache::Take(std::span<const std::uint32_t> key) {
     std::lock_guard lock(mutex);
-    for (auto& allocation : available) {
-        if (allocation && allocation->Matches(key)) return std::move(allocation);
+    const auto found = available.find(hash(key));
+    if (found == available.end()) return nullptr;
+    auto& list = found->second;
+    for (auto it = list.rbegin(); it != list.rend(); ++it) {
+        if (!(*it)->Matches(key)) continue;
+        auto allocation = std::move(*it);
+        list.erase(std::next(it).base());
+        --count;
+        return allocation;
     }
     return nullptr;
 }
 
 void DescriptorCache::Put(std::unique_ptr<DescriptorAllocation> allocation) {
     Require(allocation != nullptr, "cannot cache an empty descriptor allocation");
-    std::lock_guard lock(mutex);
-    for (std::size_t offset = 0; offset < available.size(); ++offset) {
-        const auto index = (cursor + offset) % available.size();
-        if (available[index]) continue;
-        available[index] = std::move(allocation);
-        cursor = (index + 1) % available.size();
-        return;
+    std::unique_ptr<DescriptorAllocation> dropped;
+    {
+        std::lock_guard lock(mutex);
+        // Full: the retired allocation is freed (outside the lock) instead of kept.
+        if (count >= Capacity) {
+            dropped = std::move(allocation);
+        } else {
+            available[hash(allocation->Key())].push_back(std::move(allocation));
+            ++count;
+        }
     }
-    available[cursor] = std::move(allocation);
-    cursor = (cursor + 1) % available.size();
 }
 
 }

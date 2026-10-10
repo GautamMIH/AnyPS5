@@ -141,8 +141,8 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
                     addImageBinding(binding, flags, bindings);
                     continue;
                 }
-                Require(bufferRole, std::string("unsupported descriptor role ") + roleName(binding.role));
-                Require(binding.kind == ShaderRecompiler::DescriptorKind::StorageBuffer, std::string("unsupported descriptor kind ") + kindName(binding.kind) + " for role " + roleName(binding.role) + ": only StorageBuffer is supported");
+                if (!(bufferRole)) Require(false, std::string("unsupported descriptor role ") + roleName(binding.role));
+                if (!(binding.kind == ShaderRecompiler::DescriptorKind::StorageBuffer)) Require(false, std::string("unsupported descriptor kind ") + kindName(binding.kind) + " for role " + roleName(binding.role) + ": only StorageBuffer is supported");
                 Require(!binding.readOnly, "read-only descriptors are unsupported because the recompiler emits no NonWritable decoration");
                 Require(binding.count != 0, "empty descriptor binding");
                 stageDescriptors += binding.count;
@@ -371,7 +371,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         bindings.push_back(std::move(item));
         return;
     }
-    Require(sampledImage || samplerKind, std::string("unsupported descriptor kind ") + kindName(binding.kind) + " for role " + roleName(binding.role));
+    if (!(sampledImage || samplerKind)) Require(false, std::string("unsupported descriptor kind ") + kindName(binding.kind) + " for role " + roleName(binding.role));
     Require((sampledImage && binding.role == ShaderRecompiler::DescriptorRole::GuestImages) || (samplerKind && binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers), "guest image descriptor role disagrees with its kind");
     Require(binding.guestDescriptor.size() % binding.count == 0, "guest image descriptor size is not a multiple of the binding count");
     const auto elementWords = binding.guestDescriptor.size() / binding.count;
@@ -434,7 +434,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
                 resource.height = 1;
             }
             const auto view = SampledViewDimension(*binding.imageShape, resource.dimension);
-            Require(view.has_value(), "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (" + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ") cannot be viewed with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
+            if (!(view.has_value())) Require(false, "guest texture dimension " + std::to_string(static_cast<int>(resource.dimension)) + " (" + std::to_string(resource.width) + "x" + std::to_string(resource.height) + ") cannot be viewed with the shader's declared image shape " + std::to_string(static_cast<int>(*binding.imageShape)));
             resource.viewDimension = *view;
             // A converted format's shader applies DST_SEL itself (upstream baa202d2): its view keeps
             // the packed dword in X.
