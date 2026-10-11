@@ -75,6 +75,16 @@ if(BUILD_TESTING)
     # GuestTimeConversion.cpp is not built: upstream's version expects a 56-byte guest struct tm
     # (tm_gmtoff, tm_zone), while ours reads and writes only the nine int fields (f00c57c5f: Zorro
     # crashed on a garbage guest tm_zone).
+    add_test_executable(guest_array_callbacks_tests ${LIBS_INCLUDE_DIR}/tests/GuestArrayCallbacks.cpp)
+    target_include_directories(guest_array_callbacks_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_array_callbacks_tests PRIVATE libc)
+    configure_windows_unwind(guest_array_callbacks_tests)
+    add_test(NAME guest_array_callbacks COMMAND guest_array_callbacks_tests)
+    set_tests_properties(guest_array_callbacks PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        set_tests_properties(guest_array_callbacks PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test_executable(precise_wait_tests ${LIBS_INCLUDE_DIR}/tests/PreciseWait.cpp)
     target_include_directories(precise_wait_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(precise_wait_tests PRIVATE libc)
