@@ -135,9 +135,12 @@ std::string parseJsonString(const std::string& text, std::size_t& position) {
     return result;
 }
 
-JsonValue parseJsonValue(const std::string& text, std::size_t& position);
+constexpr std::size_t MaxNestingDepth = 512;
 
-JsonValue parseJsonObject(const std::string& text, std::size_t& position) {
+JsonValue parseJsonValue(const std::string& text, std::size_t& position, std::size_t depth);
+
+JsonValue parseJsonObject(const std::string& text, std::size_t& position, std::size_t depth) {
+    if (depth >= MaxNestingDepth) throw std::runtime_error("param.json is nested too deeply");
     expectChar(text, position, '{');
     JsonValue value;
     value.type = JsonType::Object;
@@ -148,7 +151,7 @@ JsonValue parseJsonObject(const std::string& text, std::size_t& position) {
         std::string key = parseJsonString(text, position);
         skipWhitespace(text, position);
         expectChar(text, position, ':');
-        JsonValue member = parseJsonValue(text, position);
+        JsonValue member = parseJsonValue(text, position, depth + 1);
         value.objectValue.emplace_back(std::move(key), std::move(member));
         skipWhitespace(text, position);
         const char next = peekChar(text, position);
@@ -159,14 +162,15 @@ JsonValue parseJsonObject(const std::string& text, std::size_t& position) {
     return value;
 }
 
-JsonValue parseJsonArray(const std::string& text, std::size_t& position) {
+JsonValue parseJsonArray(const std::string& text, std::size_t& position, std::size_t depth) {
+    if (depth >= MaxNestingDepth) throw std::runtime_error("param.json is nested too deeply");
     expectChar(text, position, '[');
     JsonValue value;
     value.type = JsonType::Array;
     skipWhitespace(text, position);
     if (peekChar(text, position) == ']') { ++position; return value; }
     while (true) {
-        JsonValue element = parseJsonValue(text, position);
+        JsonValue element = parseJsonValue(text, position, depth + 1);
         value.arrayValue.push_back(std::move(element));
         skipWhitespace(text, position);
         const char next = peekChar(text, position);
@@ -205,11 +209,11 @@ JsonValue parseJsonNumber(const std::string& text, std::size_t& position) {
     return value;
 }
 
-JsonValue parseJsonValue(const std::string& text, std::size_t& position) {
+JsonValue parseJsonValue(const std::string& text, std::size_t& position, std::size_t depth) {
     skipWhitespace(text, position);
     const char c = peekChar(text, position);
-    if (c == '{') return parseJsonObject(text, position);
-    if (c == '[') return parseJsonArray(text, position);
+    if (c == '{') return parseJsonObject(text, position, depth);
+    if (c == '[') return parseJsonArray(text, position, depth);
     if (c == '"') { JsonValue value; value.type = JsonType::String; value.stringValue = parseJsonString(text, position); return value; }
     if (c == 't') { expectLiteral(text, position, "true"); JsonValue value; value.type = JsonType::Boolean; value.boolValue = true; return value; }
     if (c == 'f') { expectLiteral(text, position, "false"); JsonValue value; value.type = JsonType::Boolean; value.boolValue = false; return value; }
@@ -220,7 +224,7 @@ JsonValue parseJsonValue(const std::string& text, std::size_t& position) {
 
 JsonValue parseJsonDocument(const std::string& text) {
     std::size_t position = 0;
-    JsonValue root = parseJsonValue(text, position);
+    JsonValue root = parseJsonValue(text, position, 0);
     skipWhitespace(text, position);
     if (position != text.size()) throw std::runtime_error("unexpected trailing data in param.json");
     return root;

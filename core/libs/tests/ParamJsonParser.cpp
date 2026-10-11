@@ -49,6 +49,23 @@ static void CheckUserDefinedParams(const std::filesystem::path& path) {
     }
 }
 
+static void CheckNesting(const std::filesystem::path& path) {
+    const std::string prefix = R"({"titleId":"PPSA00000","localizedParameters":{"en-US":{"titleName":"Example"}},"extra":)";
+    const auto nested = [&](std::size_t arrays) {
+        return prefix + std::string(arrays, '[') + std::string(arrays, ']') + "}";
+    };
+    Require(ParseText(path, nested(511)).title == "Example", "Nesting within the limit rejected");
+    for (const std::size_t arrays : {std::size_t{512}, std::size_t{513}, std::size_t{100000}}) {
+        bool rejected = false;
+        try {
+            ParseText(path, nested(arrays));
+        } catch (const std::runtime_error& error) {
+            rejected = std::string(error.what()).find("nested too deeply") != std::string::npos;
+        }
+        Require(rejected, "Excessive nesting not rejected: " + std::to_string(arrays));
+    }
+}
+
 static void CheckLanguages(const std::filesystem::path& path) {
     const auto nested = ParseText(path, "{\r\n  \"localizedParameters\": {\r\n    \"defaultLanguage\": \"en-GB\",\r\n"
                                         "    \"en-GB\": { \"titleName\": \"British\" }\r\n  },\r\n  \"titleId\": \"PPSA00001\"\r\n}\r\n");
@@ -116,6 +133,7 @@ int main() {
         }
         CheckLanguages(path);
         CheckUserDefinedParams(path);
+        CheckNesting(path);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         result = 1;
