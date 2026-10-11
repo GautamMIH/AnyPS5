@@ -1,6 +1,7 @@
 #include "Optimization/SrtWalker.hpp"
 #include "Optimization/SrtWalker/SrtDescriptorEvaluation.hpp"
 #include "Optimization/SrtWalker/SrtEvaluator.hpp"
+#include "Optimization/SrtWalker/SrtCompiled.hpp"
 #include "Optimization/SrtWalker/SrtPlanBuilder.hpp"
 #include "Optimization/SrtWalker/SrtRuntimeValidator.hpp"
 
@@ -27,11 +28,19 @@ void SrtWalker::EvaluateUniformValues(const IrResourcePlan& program, std::span<I
     }
     auto clean = runtime;
     clean.readMemory = runtime.readSpecializationMemory != nullptr ? runtime.readSpecializationMemory : +[](void*, std::uint64_t, std::uint32_t*) { return false; };
-    Detail::Evaluator evaluator(program, clean);
-    for (std::size_t i = 0; i < values.size(); ++i) {
-        if (!evaluator.Evaluate(values[i], results[i])) {
-            throw std::runtime_error("SrtWalker::EvaluateUniformValues failed to evaluate a uniform value");
+    const auto evaluate = [&](auto& evaluator) {
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (!evaluator.Evaluate(values[i], results[i])) {
+                throw std::runtime_error("SrtWalker::EvaluateUniformValues failed to evaluate a uniform value");
+            }
         }
+    };
+    if (Detail::UseCompiledSrt(program)) {
+        Detail::CompiledEvaluator evaluator(program, clean);
+        evaluate(evaluator);
+    } else {
+        Detail::Evaluator evaluator(program, clean);
+        evaluate(evaluator);
     }
 }
 

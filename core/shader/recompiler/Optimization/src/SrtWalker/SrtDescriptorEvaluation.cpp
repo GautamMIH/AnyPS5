@@ -1,7 +1,9 @@
 #include "Optimization/SrtWalker/SrtDescriptorEvaluation.hpp"
 #include "Optimization/SrtWalker/SrtEvaluator.hpp"
+#include "Optimization/SrtWalker/SrtCompiled.hpp"
 #include "prx/libc/include/HostThreadLocal.hpp"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
@@ -45,7 +47,10 @@ const DescriptorSource* Source(const IrResourcePlan& program, std::uint32_t sour
 
 }
 
-bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const std::uint32_t> sources, const SrtRuntime& runtime, std::vector<DescriptorValue>& results, std::vector<std::uint32_t>& flat, bool evaluateFlat, std::span<const std::uint8_t> cleanFlatSlots, std::vector<std::uint8_t>& activeSources, std::vector<SrtReadPoison>* poison, std::uint32_t* nullRootReads) {
+namespace {
+
+template<typename TEvaluator>
+bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::uint32_t> sources, const SrtRuntime& runtime, std::vector<DescriptorValue>& results, std::vector<std::uint32_t>& flat, bool evaluateFlat, std::span<const std::uint8_t> cleanFlatSlots, std::vector<std::uint8_t>& activeSources, std::vector<SrtReadPoison>* poison, std::uint32_t* nullRootReads) {
     failureReason().clear();
     static const bool debug = std::getenv("APS5_SRT_DEBUG") != nullptr;
     if (debug) {
@@ -59,8 +64,8 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
     }
     SrtRuntime cleanRuntime = runtime;
     cleanRuntime.readMemory = runtime.readSpecializationMemory;
-    Evaluator cleanEvaluator(program, cleanRuntime);
-    Evaluator evaluator(program, runtime, cleanFlatSlots, &cleanEvaluator);
+    TEvaluator cleanEvaluator(program, cleanRuntime);
+    TEvaluator evaluator(program, runtime, cleanFlatSlots, &cleanEvaluator);
     std::vector<std::uint8_t> active;
     if (evaluateFlat) {
         active.assign(program.descriptorSources.size(), 1u);
@@ -186,6 +191,43 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
         *nullRootReads = nullRoots;
     }
     return true;
+}
+
+}
+
+bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const std::uint32_t> sources, const SrtRuntime& runtime, std::vector<DescriptorValue>& results, std::vector<std::uint32_t>& flat, bool evaluateFlat, std::span<const std::uint8_t> cleanFlatSlots, std::vector<std::uint8_t>& activeSources, std::vector<SrtReadPoison>* poison, std::uint32_t* nullRootReads) {
+    if (!UseCompiledSrt(program)) return evaluateRuntimeSources<Evaluator>(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
+    const bool evaluated = evaluateRuntimeSources<CompiledEvaluator>(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
+    // Debug aid: ANYPS5_SRT_VERIFY=1 evaluates every walk again with Evaluator (without the read trace)
+    // and reports where the results differ.
+    static const bool verify = std::getenv("ANYPS5_SRT_VERIFY") != nullptr;
+    if (verify) {
+        const auto reason = failureReason();
+        SrtRuntime untraced = runtime;
+        untraced.readTrace = nullptr;
+        std::vector<DescriptorValue> otherResults;
+        std::vector<std::uint32_t> otherFlat;
+        std::vector<std::uint8_t> otherActive;
+        std::vector<SrtReadPoison> otherPoison;
+        std::uint32_t otherNullRoots = 0;
+        const bool other = evaluateRuntimeSources<Evaluator>(program, sources, untraced, otherResults, otherFlat, evaluateFlat, cleanFlatSlots, otherActive, poison != nullptr ? &otherPoison : nullptr, nullRootReads != nullptr ? &otherNullRoots : nullptr);
+        const char* differs = nullptr;
+        if (other != evaluated) differs = "success";
+        else if (evaluated && otherResults != results) differs = "descriptor words";
+        else if (evaluated && evaluateFlat && otherFlat != flat) differs = "flat SRT";
+        else if (evaluated && otherActive != activeSources) differs = "active sources";
+        else if (evaluated && poison != nullptr && otherPoison != *poison) differs = "poison";
+        else if (evaluated && nullRootReads != nullptr && otherNullRoots != *nullRootReads) differs = "null-root reads";
+        static std::atomic<std::uint64_t> walks{0}, mismatches{0};
+        const auto count = walks.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (differs != nullptr) {
+            const auto bad = mismatches.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (bad <= 20) std::fprintf(stderr, "[srt-verify] MISMATCH (%s) shader 0x%llx: compiled %d, interpreter %d\n", differs, static_cast<unsigned long long>(program.shaderHash), evaluated ? 1 : 0, other ? 1 : 0);
+        }
+        if (count % 20000 == 0) std::fprintf(stderr, "[srt-verify] %llu walks, %llu mismatches\n", static_cast<unsigned long long>(count), static_cast<unsigned long long>(mismatches.load()));
+        failureReason() = reason;
+    }
+    return evaluated;
 }
 
 const std::string& RuntimeSourceFailureReason() {

@@ -50,6 +50,10 @@ struct UniformFillPlan {
     std::array<IrValue*, 4> values{};
 };
 
+namespace Detail {
+struct CompiledSrt;
+}
+
 inline constexpr std::uint32_t NativePushSlotSize = sizeof(PushData);
 inline constexpr std::uint32_t NativePushConstantSize = 2u * NativePushSlotSize;
 
@@ -80,6 +84,9 @@ struct IrResourcePlan {
     bool resourceTrackingComplete = false;
     ShaderInfo info;
     UniformFillPlan uniformFill;
+    // An extracted plan's values lowered for the SRT walks (Detail::CompileSrt), set once its values
+    // are final (ResourceMaterializer::ExtractPlan).
+    std::shared_ptr<const Detail::CompiledSrt> compiledSrt;
 };
 
 }
