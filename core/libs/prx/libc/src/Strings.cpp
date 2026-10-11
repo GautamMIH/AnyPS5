@@ -147,24 +147,21 @@ long long APS5_VABI atoll_nid_postfix(const char* str) {
 extern "C" {
 
 int APS5_VABI strcasecmp_nid_postfix(const char* s1, const char* s2) {
-    while (*s1 && *s2) {
-        unsigned char a = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(*s1)));
-        unsigned char b = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(*s2)));
-        if (a != b) return a - b;
-        ++s1; ++s2;
+    for (;; ++s1, ++s2) {
+        const int a = std::tolower(static_cast<unsigned char>(*s1));
+        const int b = std::tolower(static_cast<unsigned char>(*s2));
+        if (a != b || *s1 == 0) return a - b;
     }
-    return static_cast<unsigned char>(*s1) - static_cast<unsigned char>(*s2);
 }
 
 int APS5_VABI strncasecmp_nid_postfix(const char* s1, const char* s2, size_t n) {
-    while (n && *s1 && *s2) {
-        unsigned char a = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(*s1)));
-        unsigned char b = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(*s2)));
+    for (; n != 0; ++s1, ++s2, --n) {
+        const int a = std::tolower(static_cast<unsigned char>(*s1));
+        const int b = std::tolower(static_cast<unsigned char>(*s2));
         if (a != b) return a - b;
-        ++s1; ++s2; --n;
+        if (*s1 == 0) break;
     }
-    if (!n) return 0;
-    return static_cast<unsigned char>(*s1) - static_cast<unsigned char>(*s2);
+    return 0;
 }
 
 int APS5_VABI strcoll_nid_postfix(const char* s1, const char* s2) {
