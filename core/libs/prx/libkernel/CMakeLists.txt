@@ -37,6 +37,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Once.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Tsd.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Sem.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Pthread/Posix/Spinlock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Socket/src/Socket.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Socket/src/Udp.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Socket/src/AddressConversion.cpp
@@ -285,6 +286,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_thread_self PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_thread_self PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_pthread_spin_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadSpin.cpp)
+    target_include_directories(guest_pthread_spin_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_pthread_spin_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_pthread_spin_tests)
+    add_test(NAME guest_pthread_spin COMMAND guest_pthread_spin_tests)
+    set_tests_properties(guest_pthread_spin PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_pthread_spin PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_pthread_getname_tests ${LIBS_INCLUDE_DIR}/tests/GuestPthreadGetname.cpp)
