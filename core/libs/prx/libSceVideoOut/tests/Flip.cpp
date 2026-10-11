@@ -648,6 +648,19 @@ void testFlipAfterGpuWork() {
     LibcRunShutdown_nid_postfix();
 }
 
+void testUnopenedEventRegistration() {
+    KernelEqueue eq = 0;
+    check(sceKernelCreateEqueue(&eq, "unopened") == 0, "the event queue was not created");
+    check(sceVideoOutAddFlipEvent(eq, 0, nullptr) == VIDEO_OUT_ERROR_INVALID_HANDLE, "flip event on an unopened port was accepted");
+    check(sceVideoOutAddVblankEvent(eq, 1, nullptr) == VIDEO_OUT_ERROR_INVALID_HANDLE, "vblank event on an unopened port was accepted");
+    const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
+    check(sceVideoOutAddFlipEvent(eq, handle, nullptr) == 0, "flip event on an open port was refused");
+    sceVideoOutClose(handle);
+    check(sceVideoOutAddFlipEvent(eq, handle, nullptr) == VIDEO_OUT_ERROR_INVALID_HANDLE, "flip event on a closed port was accepted");
+    check(sceKernelDeleteEqueue(eq) == 0, "the event queue was not deleted");
+    LibcRunShutdown_nid_postfix();
+}
+
 void testOneDevice() {
     const int handle = sceVideoOutOpen(255, 0, 0, nullptr);
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
@@ -693,6 +706,7 @@ int main(int argc, char** argv) {
         else if (argc == 2 && std::string(argv[1]) == "aftergpu") testFlipAfterGpuWork();
         else if (argc == 2 && std::string(argv[1]) == "unavailable") testUnavailable();
         else if (argc == 2 && std::string(argv[1]) == "onedevice") testOneDevice();
+        else if (argc == 2 && std::string(argv[1]) == "unopened") testUnopenedEventRegistration();
         else if (argc == 2 && std::string(argv[1]) == "overlay") testOverlay();
         else if (argc == 2 && std::string(argv[1]) == "deferred") testDeferredBuffer();
         else if (argc == 2 && std::string(argv[1]) == "unregistered") testUnregisteredBuffer();

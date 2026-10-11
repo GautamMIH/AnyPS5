@@ -18,6 +18,7 @@ static std::vector<EventRegistration>* getEventList(VideoOutConfig& cfg, int16_t
 }
 
 static int registerVideoOutEvent(int handle, KernelEqueue eq, int16_t eventKind, void* udata) {
+    if (!VideoOutDriver::Get().HasConfig(handle)) return VIDEO_OUT_ERROR_INVALID_HANDLE;
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");
