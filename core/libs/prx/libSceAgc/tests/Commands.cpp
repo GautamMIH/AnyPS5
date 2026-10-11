@@ -32,6 +32,8 @@ extern "C" std::uint32_t* APS5_VABI sceAgcDcbDispatchIndirect(CommandBuffer* buf
 extern "C" std::uint32_t* APS5_VABI sceAgcAcbDispatchIndirect(CommandBuffer* buf, const volatile void* indirectArgs, std::uint32_t modifier);
 extern "C" std::uint32_t* APS5_VABI sceAgcDcbPushMarker(CommandBuffer* buf, const char* str, std::uint32_t color);
 extern "C" std::uint32_t* APS5_VABI sceAgcDcbPopMarker(CommandBuffer* buf);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetWorkloadComplete(CommandBuffer* buf, std::uint32_t stream_id, std::uint32_t workload_id);
+extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetWorkloadsActive(CommandBuffer* buf, std::uint32_t stream_id, const std::uint32_t* workload_ids, std::uint32_t workload_count);
 extern "C" std::uint32_t* APS5_VABI sceAgcDcbSetMarker(CommandBuffer* buf, const char* str, std::uint32_t color);
 extern "C" std::uint32_t* APS5_VABI sceAgcAcbPushMarker(CommandBuffer* buf, const char* str, std::uint32_t color);
 extern "C" std::uint32_t* APS5_VABI sceAgcAcbPopMarker(CommandBuffer* buf);
@@ -203,6 +205,18 @@ void testMarkers() {
     expectFailure([] { sceAgcAcbPushMarker(nullptr, "frame", 0); });
     expectFailure([] { sceAgcAcbPopMarker(nullptr); });
     expectFailure([] { sceAgcAcbSetMarker(nullptr, "frame", 0); });
+}
+
+void testWorkloads() {
+    Storage dcb;
+    const std::uint32_t ids[2] = {3, 4};
+    const auto* active = sceAgcDcbSetWorkloadsActive(&dcb.buffer, 1, ids, 2);
+    check(active == dcb.words.data() && active[0] == Agc::Command::Header(0x10, 2, 0) && active[1] == 0, "workloads active packet is not a plain NOP");
+    const auto* complete = sceAgcDcbSetWorkloadComplete(&dcb.buffer, 1, 3);
+    check(complete == dcb.words.data() + 2 && complete[0] == Agc::Command::Header(0x10, 2, 0) && complete[1] == 0, "workload complete packet is not a plain NOP");
+    check(dcb.buffer.cursor_up == dcb.words.data() + 4, "incorrect workload cursor advance");
+    expectFailure([] { sceAgcDcbSetWorkloadsActive(nullptr, 1, nullptr, 0); });
+    expectFailure([] { sceAgcDcbSetWorkloadComplete(nullptr, 1, 3); });
 }
 
 void testIndexBuffer() {
@@ -451,6 +465,7 @@ int main(int argc, char** argv) {
         testClearState();
         testIndexedIndirectDraws();
         testMarkers();
+        testWorkloads();
         testIndexBuffer();
         testContextState();
         testFlip();
