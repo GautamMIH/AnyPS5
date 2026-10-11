@@ -547,9 +547,11 @@ int APS5_VABI getsockopt_nid_postfix(int descriptor, int level, int option,
     return 0;
 }
 int APS5_VABI socket_nid_postfix(int family, int type, int protocol) {
+    const bool nonblocking = (type & GuestNonBlocking) != 0;
+    const int plainType = type & ~(GuestCloseOnExec | GuestNonBlocking);
     if (family != 2 && family != 28) return Fail(47);
-    const int nativeType = type == 1 ? SOCK_STREAM : type == 2 ? SOCK_DGRAM : -1;
-    const int expectedProtocol = type == 1 ? 6 : 17;
+    const int nativeType = plainType == 1 ? SOCK_STREAM : plainType == 2 ? SOCK_DGRAM : -1;
+    const int expectedProtocol = plainType == 1 ? 6 : 17;
     if (nativeType == -1 || (protocol != 0 && protocol != expectedProtocol)) return Fail(43);
 #ifdef _WIN32
     static const int startup = [] { WSADATA data{}; return WSAStartup(MAKEWORD(2, 2), &data); }();
@@ -557,10 +559,11 @@ int APS5_VABI socket_nid_postfix(int family, int type, int protocol) {
 #endif
     const auto native = ::socket(family == 2 ? AF_INET : AF_INET6, nativeType, protocol);
     if (native == Invalid) return Fail(NativeError());
-    Socket guard(native, family, type);
+    Socket guard(native, family, plainType);
     try {
-        auto socket = std::make_shared<Socket>(native, family, type);
+        auto socket = std::make_shared<Socket>(native, family, plainType);
         guard.value = Invalid;
+        if (nonblocking && SetNonBlocking(*socket)) return -1;
         std::lock_guard lock(socketsMutex);
         if (nextDescriptor == INT_MAX) return Fail(24);
         const int descriptor = nextDescriptor++;
