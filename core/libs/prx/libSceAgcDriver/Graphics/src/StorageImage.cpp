@@ -26,6 +26,16 @@ bool checkTiling() {
     return enabled;
 }
 
+// The download tiles the texels straight into guest memory: the tiling pass writes each texel's
+// bytes and nothing else (whole dwords, or atomic byte masks below four bytes), so the padding
+// between them stays as it was. The masked merge it replaces (tile the texels and an all-ones
+// image, then merge the masked bytes) cost ~1 ms of GPU a frame in Zorro, in the frame's tail.
+// ANYPS5_STORAGE_MERGE=1 merges as before.
+bool mergeDownload() {
+    static const bool merge = std::getenv("ANYPS5_STORAGE_MERGE") != nullptr;
+    return merge;
+}
+
 // Opt-in (ANYPS5_STORAGE_IMAGE_POOL=1): released storage images (image, memory, view) are kept for
 // the next one of the same shape. Creating and freeing them per dispatch cost driver ioctls (about
 // 1 ms of a heavy Zorro frame over both driver threads). Images are released after their work
@@ -105,9 +115,11 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
     if (!guest) WriteTracker::NoteDeferredGpuWrite();
     if (guest) {
         const auto deviceUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        tiledStaging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        tiledMask = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        ones = std::make_unique<Buffer>(context, static_cast<std::size_t>(mip.linearSize * layers), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (mergeDownload()) {
+            tiledStaging = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            tiledMask = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            ones = std::make_unique<Buffer>(context, static_cast<std::size_t>(mip.linearSize * layers), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        }
         const VkMemoryPropertyFlags linearMemory = checkTiling() ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(mip.linearSize * layers), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, linearMemory);
         if (checkTiling()) {
@@ -302,6 +314,21 @@ void StorageImage::recordGpuDownload(VkCommandBuffer commands) {
     barrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &reuse, 0, nullptr, 1, &toTransfer);
     const auto copies = imageCopies();
     context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging->Handle(), static_cast<std::uint32_t>(copies.size()), copies.data());
+    if (!mergeDownload()) {
+        VkMemoryBarrier copied{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        copied.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        copied.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &copied, 0, nullptr, 0, nullptr);
+        for (std::uint32_t layer = 0; layer < layers; ++layer) {
+            const auto tiledOffset = layer * sliceBytes + mip.tiledOffset;
+            context.detiler->Dispatch(commands, resource.tileMode, elementBytes, staging->Handle(), layer * mip.linearSize, guest->buffer, guest->offset + tiledOffset, mip, layer + resource.baseArray, true, tilingPool, volume ? VolumeSliceXor(resource.tileMode, elementBytes, layer + resource.baseArray) : 0u);
+        }
+        VkMemoryBarrier tiled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        tiled.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        tiled.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &tiled, 0, nullptr, 0, nullptr);
+        return;
+    }
     fill(commands, ones->Handle(), 0, VK_WHOLE_SIZE, 0xffffffffu);
     for (std::uint32_t layer = 0; layer < layers; ++layer) fill(commands, tiledMask->Handle(), layer * sliceBytes + mip.tiledOffset, mip.tiledSize, 0u);
     VkMemoryBarrier linear{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
