@@ -178,6 +178,35 @@ static bool CheckBinaryModes() {
     return correct;
 }
 
+static int DuplicateDescriptor(std::FILE* stream) {
+#ifdef _WIN32
+    return _dup(_fileno(stream));
+#else
+    return ::dup(::fileno(stream));
+#endif
+}
+
+static void CheckDescriptorModes(std::FILE* original) {
+    for (const char* mode : {"rt", "r+t", "re", "rbe", "rw", "r+x"}) {
+        const int descriptor = DuplicateDescriptor(original);
+        Require(descriptor >= 0);
+        auto* wrapped = fdopen_nid_postfix(descriptor, mode);
+        Require(wrapped != nullptr && fseek_nid_postfix(wrapped, 0, SEEK_SET) == 0);
+        char contents[32]{};
+        Require(fgets_nid_postfix(contents, sizeof(contents), wrapped) == contents && std::strcmp(contents, "retained") == 0);
+        Require(fclose_nid_postfix(wrapped) == 0);
+    }
+    const int descriptor = DuplicateDescriptor(original);
+    Require(descriptor >= 0);
+    *__error_nid_postfix() = 0;
+    Require(fdopen_nid_postfix(descriptor, "rx") == nullptr && *__error_nid_postfix() == 22);
+#ifdef _WIN32
+    Require(_close(descriptor) == 0);
+#else
+    Require(::close(descriptor) == 0);
+#endif
+}
+
 int main() {
     Require(_Getmbcurmax_nid_postfix() == 1 && _Getmbcurmax_nid_postfix() == ___mb_cur_max_nid_postfix());
     Require(fdopen_nid_postfix(-1, "rb") == nullptr && *__error_nid_postfix() == 9);
@@ -205,6 +234,7 @@ int main() {
 #else
     Require(::close(descriptor) == -1);
 #endif
+    CheckDescriptorModes(original);
     Require(std::fclose(original) == 0);
     char stringOutput[256];
     std::memset(stringOutput, '!', sizeof(stringOutput));
