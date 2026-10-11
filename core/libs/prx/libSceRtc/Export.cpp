@@ -233,6 +233,8 @@ bool parseZoneName(const char* cursor, std::int64_t& offsetMinutes) {
         const char* name;
         std::int64_t minutes;
     } zones[] = {
+        {"WETDST", 60}, {"METDST", 120}, {"EETDST", 180}, {"SWT", 60}, {"MEZ", 60}, {"AESST", 660}, {"ACSST", 630},
+        {"CAST", 570}, {"CADT", 630}, {"SAST", 570}, {"SADT", 630}, {"WST", 480}, {"WDT", 540},
         {"GMT", 0}, {"WET", 0}, {"BST", 60}, {"WAT", -60}, {"AST", -240}, {"ADT", -180}, {"EST", -300}, {"EDT", -240},
         {"CST", -360}, {"CDT", -300}, {"MST", -420}, {"MDT", -360}, {"PST", -480}, {"PDT", -420}, {"YST", -540}, {"YDT", -480},
         {"HDT", -540}, {"CAT", -600}, {"AHST", -600}, {"NST", -150}, {"NDT", -90}, {"IDLW", -720}, {"CET", 60}, {"MET", 60},
