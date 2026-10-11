@@ -1,5 +1,6 @@
 #include "prx/libc/include/GuestLocale.hpp"
 #include <array>
+#include <cerrno>
 #include <cstring>
 #include <cwchar>
 #include <climits>
@@ -131,6 +132,12 @@ static void CheckCharacterConversions() {
     RequireException([&] { _Mbtowcx_nid_postfix(&wide, "]", 1, nullptr); });
     RequireException([&] { _Wctombx_nid_postfix(nullptr, ']', &state); });
     RequireException([&] { _Wctombx_nid_postfix(&byte, ']', nullptr); });
+    // Characters the C locale cannot convert fail like wcrtomb/mbrtowc, with the guest EILSEQ (86).
+    errno = 0;
+    Require(_Wctombx_nid_postfix(&byte, 0x80, &state) == -1 && errno == 86);
+    errno = 0;
+    std::mbstate_t invalidState{};
+    Require(_Mbtowcx_nid_postfix(&wide, "\x80", 1, &invalidState) == -1 && errno == 86);
 }
 
 static void CheckStreamDestruction() {

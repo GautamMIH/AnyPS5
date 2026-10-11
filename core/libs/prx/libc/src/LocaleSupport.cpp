@@ -1,3 +1,4 @@
+#include <cerrno>
 #include <climits>
 #include <cstddef>
 #include <cstdio>
@@ -274,8 +275,12 @@ int APS5_VABI _Mbtowcx_nid_postfix(std::uint16_t* dst, const char* src, std::siz
     if (dst == nullptr || src == nullptr || st == nullptr || count == 0) throw std::invalid_argument("_Mbtowcx: invalid conversion arguments");
     wchar_t converted{};
     const auto result = std::mbrtowc(&converted, src, count, st);
-    if (result == static_cast<std::size_t>(-1)) throw std::runtime_error("_Mbtowcx: invalid multibyte character");
-    if (result == static_cast<std::size_t>(-2)) throw std::runtime_error("_Mbtowcx: incomplete multibyte character");
+    // Like mbrtowc: -1 with EILSEQ (guest value 86) for an invalid sequence, -2 for an incomplete one.
+    if (result == static_cast<std::size_t>(-1)) {
+        errno = 86;
+        return -1;
+    }
+    if (result == static_cast<std::size_t>(-2)) return -2;
     if (result > static_cast<std::size_t>(std::numeric_limits<int>::max()) || static_cast<std::uint32_t>(converted) > 0xffff) throw std::runtime_error("_Mbtowcx: conversion exceeds guest character limits");
     *dst = static_cast<std::uint16_t>(converted);
     return static_cast<int>(result);
@@ -284,7 +289,12 @@ int APS5_VABI _Mbtowcx_nid_postfix(std::uint16_t* dst, const char* src, std::siz
 int APS5_VABI _Wctombx_nid_postfix(char* dst, std::uint16_t src, mbstate_t* st) {
     if (dst == nullptr || st == nullptr) throw std::invalid_argument("_Wctombx: invalid conversion arguments");
     const auto result = std::wcrtomb(dst, static_cast<wchar_t>(src), st);
-    if (result == static_cast<std::size_t>(-1)) throw std::runtime_error("_Wctombx: invalid wide character");
+    // Like wcrtomb: -1 with EILSEQ (guest value 86) for a character the locale cannot represent. Dreaming
+    // Sarah's runtime probes 0x80 while it starts and expects this failure.
+    if (result == static_cast<std::size_t>(-1)) {
+        errno = 86;
+        return -1;
+    }
     if (result > static_cast<std::size_t>(std::numeric_limits<int>::max())) throw std::runtime_error("_Wctombx: conversion size exceeds guest limits");
     return static_cast<int>(result);
 }
