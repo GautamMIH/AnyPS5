@@ -49,7 +49,7 @@ int EnvironmentError(int error) { errno = error; return -1; }
 
 extern "C" {
 char* APS5_VABI getenv_nid_postfix(const char* name) {
-    if (!ValidEnvironmentName(name)) return nullptr;
+    if (!ValidEnvironmentName(name)) { errno = 22; return nullptr; }
     try {
         std::lock_guard lock(environmentMutex);
         for (auto& entry : Environment())
