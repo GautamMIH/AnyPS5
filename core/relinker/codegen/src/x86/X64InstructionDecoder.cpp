@@ -240,7 +240,7 @@ std::size_t X64InstructionDecoder::Decode(const std::uint8_t* data, std::size_t 
             hasModRm = true;
         } else if (opcode >= TwoByteJccRel32Min && opcode <= TwoByteJccRel32Max) {
             immediateSize = ImmSize32;
-        } else if (opcode == TwoByteMovImm8ModRm) {
+        } else if (opcode == TwoByteMovImm8ModRm || opcode == TwoByte3DNow) {
             hasModRm = true;
             immediateSize = ImmSize8;
         } else if (opcode >= TwoByteShiftImm8Min && opcode <= TwoByteShiftImm8Max) {
