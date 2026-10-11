@@ -74,87 +74,88 @@ void buildGraph(
         VirtualAddress va = worklist.front();
         worklist.pop();
 
-        if (va < textVaddr || va >= textVaddr + static_cast<VirtualAddress>(text.size()))
-            throw RelinkerException("CFG: jump target outside text segment", va);
+        while (va >= textVaddr && va - textVaddr < text.size() && !reachable.contains(va)) {
+            std::size_t bufOff = static_cast<std::size_t>(va - textVaddr);
+            std::size_t available = text.size() - bufOff;
+            if (available == 0) throw RelinkerException("CFG: zero available bytes at target", va);
 
-        std::size_t bufOff = static_cast<std::size_t>(va - textVaddr);
-        std::size_t available = text.size() - bufOff;
-        if (available == 0) throw RelinkerException("CFG: zero available bytes at target", va);
-
-        Codegen::DecodedInstructionInfo info;
-        if (speculative) {
-            try {
+            Codegen::DecodedInstructionInfo info;
+            if (speculative) {
+                try {
+                    info = decoder.DecodeInstruction(text.data() + bufOff, available);
+                } catch (const Codegen::CodegenException&) {
+                    break;
+                }
+            } else {
                 info = decoder.DecodeInstruction(text.data() + bufOff, available);
-            } catch (const Codegen::CodegenException&) {
-                continue;
             }
-        } else {
-            info = decoder.DecodeInstruction(text.data() + bufOff, available);
-        }
-        reachable.insert(va);
+            reachable.insert(va);
+            visited.erase(va);
 
-        VirtualAddress nextVaddr = va + static_cast<VirtualAddress>(info.Length);
+            VirtualAddress nextVaddr = va + static_cast<VirtualAddress>(info.Length);
 
-        if (followCodeAddresses && info.HasRipRelativeDisp && text[bufOff + info.OpcodeOffset] == 0x8d && (info.RexPrefix & 8)) {
-            std::int32_t displacement = 0;
-            std::memcpy(&displacement, text.data() + bufOff + info.RipRelativeDispOffset, 4);
-            enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + displacement));
-        }
+            if (followCodeAddresses && info.HasRipRelativeDisp && text[bufOff + info.OpcodeOffset] == 0x8d && (info.RexPrefix & 8)) {
+                std::int32_t displacement = 0;
+                std::memcpy(&displacement, text.data() + bufOff + info.RipRelativeDispOffset, 4);
+                enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + displacement));
+            }
 
-        if (data != nullptr && info.HasRipRelativeDisp && !info.IsTwoByteOpcode && info.Opcode == 0x8D) {
-            std::int32_t displacement = 0;
-            std::memcpy(&displacement, text.data() + bufOff + info.RipRelativeDispOffset, 4);
-            const auto base = static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + displacement);
-            takeAddress(base);
-            for (VirtualAddress target : ReadRelativeTableTargets(*data, base, textVaddr, text.size())) takeAddress(target);
-        }
+            if (data != nullptr && info.HasRipRelativeDisp && !info.IsTwoByteOpcode && info.Opcode == 0x8D) {
+                std::int32_t displacement = 0;
+                std::memcpy(&displacement, text.data() + bufOff + info.RipRelativeDispOffset, 4);
+                const auto base = static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + displacement);
+                takeAddress(base);
+                for (VirtualAddress target : ReadRelativeTableTargets(*data, base, textVaddr, text.size())) takeAddress(target);
+            }
 
-        switch (info.FlowKind) {
-            using enum Codegen::ControlFlowKind;
-            case Sequential:
-                enqueue(nextVaddr);
-                break;
-            case ConditionalBranch:
-                enqueue(nextVaddr);
-                if (info.HasBranchTarget)
-                    enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + info.BranchDisp));
-                break;
-            case UnconditionalJump:
-                if (info.HasRipRelativeDisp) {
-                    std::int32_t disp = 0;
-                    std::memcpy(&disp, text.data() + bufOff + info.RipRelativeDispOffset, 4);
-                    VirtualAddress slotVaddr = static_cast<VirtualAddress>(
-                        static_cast<std::int64_t>(nextVaddr) + disp
-                    );
-                    auto resolved = relativeRelocations.TargetOfSlot(slotVaddr);
-                    if (resolved.has_value())
-                        enqueue(*resolved);
-                } else if (info.HasBranchTarget) {
-                    enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + info.BranchDisp));
-                }
-                break;
-            case Call:
-                if (info.HasRipRelativeDisp) {
-                    std::int32_t disp = 0;
-                    std::memcpy(&disp, text.data() + bufOff + info.RipRelativeDispOffset, 4);
-                    VirtualAddress slotVaddr = static_cast<VirtualAddress>(
-                        static_cast<std::int64_t>(nextVaddr) + disp
-                    );
-                    auto resolved = relativeRelocations.TargetOfSlot(slotVaddr);
-                    if (resolved.has_value())
-                        enqueue(*resolved);
-                } else if (info.HasBranchTarget) {
-                    enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + info.BranchDisp));
-                }
-                enqueue(nextVaddr);
-                break;
-            case IndirectCall:
-                enqueue(nextVaddr);
-                break;
-            case Return:
-            case IndirectJump:
-            case Trap:
-                break;
+            bool fallThrough = true;
+            switch (info.FlowKind) {
+                using enum Codegen::ControlFlowKind;
+                case Sequential:
+                    break;
+                case ConditionalBranch:
+                    if (info.HasBranchTarget)
+                        enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + info.BranchDisp));
+                    break;
+                case UnconditionalJump:
+                    fallThrough = false;
+                    if (info.HasRipRelativeDisp) {
+                        std::int32_t disp = 0;
+                        std::memcpy(&disp, text.data() + bufOff + info.RipRelativeDispOffset, 4);
+                        VirtualAddress slotVaddr = static_cast<VirtualAddress>(
+                            static_cast<std::int64_t>(nextVaddr) + disp
+                        );
+                        auto resolved = relativeRelocations.TargetOfSlot(slotVaddr);
+                        if (resolved.has_value())
+                            enqueue(*resolved);
+                    } else if (info.HasBranchTarget) {
+                        enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + info.BranchDisp));
+                    }
+                    break;
+                case Call:
+                    if (info.HasRipRelativeDisp) {
+                        std::int32_t disp = 0;
+                        std::memcpy(&disp, text.data() + bufOff + info.RipRelativeDispOffset, 4);
+                        VirtualAddress slotVaddr = static_cast<VirtualAddress>(
+                            static_cast<std::int64_t>(nextVaddr) + disp
+                        );
+                        auto resolved = relativeRelocations.TargetOfSlot(slotVaddr);
+                        if (resolved.has_value())
+                            enqueue(*resolved);
+                    } else if (info.HasBranchTarget) {
+                        enqueue(static_cast<VirtualAddress>(static_cast<std::int64_t>(nextVaddr) + info.BranchDisp));
+                    }
+                    break;
+                case IndirectCall:
+                    break;
+                case Return:
+                case IndirectJump:
+                case Trap:
+                    fallThrough = false;
+                    break;
+            }
+            if (!fallThrough) break;
+            va = nextVaddr;
         }
     }
 }
