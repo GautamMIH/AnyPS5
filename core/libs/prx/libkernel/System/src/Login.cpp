@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <lmcons.h>
 #else
+#include <pwd.h>
 #include <unistd.h>
 #endif
 
@@ -26,22 +27,18 @@ int ReadLogin(char* output, int size) {
     std::memcpy(output, utf8.data(), static_cast<std::size_t>(length));
     return 0;
 #else
-    const int error = ::getlogin_r(output, static_cast<std::size_t>(size));
-    switch (error) {
-        case 0: return 0;
-        case ENOENT: return 2;
-        case EINTR: return 4;
-        case EIO: return 5;
-        case ENXIO: return 6;
-        case ENOMEM: return 12;
-        case EACCES: return 13;
-        case ENFILE: return 23;
-        case EMFILE: return 24;
-        case ENOTTY: return 25;
-        case ERANGE: return 34;
-        case ENOSYS: return 78;
-        default: throw std::system_error(error, std::generic_category(), "getlogin_r: unsupported host error");
-    }
+    std::array<char, 16384> storage{};
+    passwd entry{};
+    passwd* account = nullptr;
+    const int error = ::getpwuid_r(::geteuid(), &entry, storage.data(), storage.size(), &account);
+    if (error != 0)
+        throw std::system_error(error, std::generic_category(), "getlogin_r: getpwuid_r");
+    if (account == nullptr || account->pw_name == nullptr || account->pw_name[0] == '\0')
+        throw std::runtime_error("getlogin_r: host effective user has no account name");
+    const std::size_t length = std::strlen(account->pw_name) + 1;
+    if (length > static_cast<std::size_t>(size)) return 34;
+    std::memcpy(output, account->pw_name, length);
+    return 0;
 #endif
 }
 }

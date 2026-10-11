@@ -12,6 +12,7 @@
 #include <windows.h>
 #include <lmcons.h>
 #else
+#include <pwd.h>
 #include <unistd.h>
 #endif
 
@@ -26,31 +27,19 @@ static void Check(bool condition, int line) {
 }
 #define Require(value) Check((value), __LINE__)
 
-static int HostLogin(std::array<char, 4096>& output) {
+static std::string HostLogin() {
 #ifdef _WIN32
     wchar_t name[UNLEN + 1];
     DWORD count = UNLEN + 1;
     Require(GetUserNameW(name, &count) != 0);
+    std::array<char, UNLEN * 4 + 1> output{};
     Require(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name, -1,
         output.data(), static_cast<int>(output.size()), nullptr, nullptr) > 0);
-    return 0;
+    return output.data();
 #else
-    const int error = ::getlogin_r(output.data(), output.size());
-    switch (error) {
-        case 0: return 0;
-        case ENOENT: return 2;
-        case EINTR: return 4;
-        case EIO: return 5;
-        case ENXIO: return 6;
-        case ENOMEM: return 12;
-        case EACCES: return 13;
-        case ENFILE: return 23;
-        case EMFILE: return 24;
-        case ENOTTY: return 25;
-        case ERANGE: return 34;
-        case ENOSYS: return 78;
-        default: std::abort();
-    }
+    const passwd* account = ::getpwuid(::geteuid());
+    Require(account != nullptr && account->pw_name != nullptr && account->pw_name[0] != '\0');
+    return account->pw_name;
 #endif
 }
 
@@ -78,17 +67,11 @@ int main() {
     }
     Require(getlogin_r_nid_postfix(nullptr, 1) == 14);
     Require(*__error_nid_postfix() == 12345);
-    std::array<char, 4096> host{};
-    const int status = HostLogin(host);
+    const std::string expected = HostLogin();
     *__error_nid_postfix() = 12345;
-    Require(getlogin_r_nid_postfix(output.data(), static_cast<int>(output.size())) == status);
+    Require(getlogin_r_nid_postfix(output.data(), static_cast<int>(output.size())) == 0);
     Require(*__error_nid_postfix() == 12345);
-    if (status != 0) {
-        std::fprintf(stderr, "Host has no login name: guest error %d\n", status);
-        return 0;
-    }
-    Require(std::strcmp(output.data(), host.data()) == 0);
-    const std::string expected(host.data());
+    Require(std::strcmp(output.data(), expected.c_str()) == 0);
     RequireLogin(expected);
     std::array<std::thread, 4> readers;
     for (auto& reader : readers) reader = std::thread([&] {

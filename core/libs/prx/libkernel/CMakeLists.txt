@@ -626,6 +626,14 @@ if(BUILD_TESTING)
     configure_windows_unwind(guest_getlogin_tests)
     add_test(NAME guest_getlogin COMMAND guest_getlogin_tests)
     set_tests_properties(guest_getlogin PROPERTIES TIMEOUT 20)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        add_test_executable(guest_getlogin_no_session_tests
+            ${LIBS_INCLUDE_DIR}/tests/GuestGetloginNoSession.cpp
+            System/src/Login.cpp)
+        target_include_directories(guest_getlogin_no_session_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        add_test(NAME guest_getlogin_no_session COMMAND guest_getlogin_no_session_tests)
+        set_tests_properties(guest_getlogin_no_session PROPERTIES TIMEOUT 20)
+    endif()
     if(WIN32)
         target_link_libraries(guest_getlogin_tests PRIVATE advapi32)
         set_tests_properties(guest_getlogin PROPERTIES ENVIRONMENT_MODIFICATION
