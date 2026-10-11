@@ -152,6 +152,8 @@ public:
     // Resolve and the page watches act on nothing else (clean surfaces match guest memory and their
     // pages are readable).
     void DirtyRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const;
+    // Whether any resident surface (colour, or a depth or stencil plane) overlaps the range.
+    bool Overlaps(std::uint64_t address, std::size_t bytes) const;
     void Flush();
 
 private:

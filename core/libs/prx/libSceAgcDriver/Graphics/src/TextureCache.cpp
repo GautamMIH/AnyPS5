@@ -208,6 +208,7 @@ void TextureCache::NoteDrawWrites(std::uint64_t begin, std::uint64_t end) {
         if (entry.bytes == 0 || !(entry.address < end && begin < entry.address + entry.bytes)) continue;
         entry.gpuSequence = 0;
         entry.unchangedAt = {};
+        entry.validated = false;
     }
 }
 
@@ -277,12 +278,49 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
             erase(it);
             timing.Mark("stale_erase");
         } else {
+            // Fast path: no write the tracker counts has happened anywhere since the entry's last full
+            // validation in this epoch, the mappings are the same, and no resident surface overlaps
+            // the range (the range check would resolve nothing and validation would hold again).
+            // ANYPS5_NO_TEXTURE_FAST_PATH=1 validates every lookup; ANYPS5_VERIFY_TEXTURE_FAST=1
+            // validates anyway and reports a lookup the fast path would have answered wrongly.
+            static const bool noFastPath = std::getenv("ANYPS5_NO_TEXTURE_FAST_PATH") != nullptr;
+            static const bool verifyFastPath = std::getenv("ANYPS5_VERIFY_TEXTURE_FAST") != nullptr;
+            const auto writeCounters = [] {
+                return std::array<std::uint64_t, 6>{WriteTracker::Epoch(), WriteTracker::GpuWriteSequence(), WriteTracker::DriverWriteSequence(), WriteTracker::AliasWriteGeneration(), WriteTracker::DeferredGpuWrites(), GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix()};
+            };
+            const auto counters = writeCounters();
+            const bool fast = !noFastPath && it->validated && it->validatedAt == counters && !(context.renderCache && context.renderCache->Overlaps(resource.baseAddress, static_cast<std::size_t>(it->bytes)));
+            if (fast && !verifyFastPath) {
+                timing.Mark("fast_path");
+                auto result = it->texture;
+                entries.splice(entries.end(), entries, it);
+                return result;
+            }
+            it->validated = false;
             // Resident render targets over the range reach guest memory first (written through the
             // alias, which the write tracker records).
             const GuestMemory::AccessSite site("cpu_wait_texture");
             GuestMemory::CheckRange(reinterpret_cast<const void*>(resource.baseAddress), static_cast<std::size_t>(it->bytes), 1);
             timing.Mark("range_check");
-            if (unchanged(*it)) {
+            const bool held = unchanged(*it);
+            if (fast) {
+                const auto after = writeCounters();
+                static std::uint64_t checked = 0;
+                // Wrong: validation failed (the fast path would have returned a stale texture). Moved:
+                // the range check wrote something (per counter), which the fast path leaves for later.
+                static std::uint64_t wrong = 0;
+                static std::array<std::uint64_t, 6> moved{};
+                ++checked;
+                if (!held) {
+                    ++wrong;
+                    if (wrong <= 20) std::fprintf(stderr, "[verify-texture-fast] WRONG at 0x%llx+0x%llx\n", static_cast<unsigned long long>(resource.baseAddress), static_cast<unsigned long long>(it->bytes));
+                }
+                for (std::size_t index = 0; index < moved.size(); ++index) moved[index] += after[index] != counters[index] ? 1u : 0u;
+                if (checked % 200000 == 0) std::fprintf(stderr, "[verify-texture-fast] %llu fast lookups checked, %llu wrong; counters moved: epoch %llu gpu %llu driver %llu alias %llu deferred %llu mapping %llu\n", static_cast<unsigned long long>(checked), static_cast<unsigned long long>(wrong), static_cast<unsigned long long>(moved[0]), static_cast<unsigned long long>(moved[1]), static_cast<unsigned long long>(moved[2]), static_cast<unsigned long long>(moved[3]), static_cast<unsigned long long>(moved[4]), static_cast<unsigned long long>(moved[5]));
+            }
+            if (held) {
+                it->validated = true;
+                it->validatedAt = counters;
                 timing.Mark("validate_tracked");
                 // Debug aid: APS5_VERIFY_TEXTURE_TRACKING=1 keeps every snapshot and compares it with
                 // guest memory whenever write tracking vouches for the entry (a mismatch is a missed write).

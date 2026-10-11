@@ -71,6 +71,11 @@ private:
         std::shared_ptr<TextureWatch> watch;
         std::uint32_t cleanScans = 0;
         bool watchRefused = false;
+        // The write counters (epoch, GPU, driver, alias, deferred GPU, mapping) before the last full
+        // validation that held: while none has moved and no resident surface overlaps the range, a
+        // lookup returns the texture without range check or validation (see Get).
+        std::array<std::uint64_t, 6> validatedAt{};
+        bool validated = false;
     };
     using Entries = std::list<Entry>;
     static void armWatch(Entry& entry);

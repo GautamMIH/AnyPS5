@@ -238,6 +238,17 @@ void RenderCache::DirtyRanges(std::vector<std::pair<std::uint64_t, std::uint64_t
     }
 }
 
+bool RenderCache::Overlaps(std::uint64_t address, std::size_t bytes) const {
+    const auto end = entries.lower_bound(address + bytes);
+    for (auto it = address > largestColor ? entries.lower_bound(address - largestColor) : entries.begin(); it != end; ++it) {
+        if (address < it->first + it->second->Description().bytes && it->first < address + bytes) return true;
+    }
+    for (const auto& entry : depthEntries) {
+        if (entry->Overlaps(address, bytes)) return true;
+    }
+    return false;
+}
+
 void RenderCache::Resolve(std::uint64_t address, std::size_t bytes, bool writable, bool gpuConsumer) {
     std::vector<std::shared_ptr<ResidentColor>> affected;
     // Entries beginning before the end of the range and at most largestColor bytes before it.
