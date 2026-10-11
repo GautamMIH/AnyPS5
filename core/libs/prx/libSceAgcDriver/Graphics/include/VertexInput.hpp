@@ -185,23 +185,38 @@ inline std::size_t VertexBufferValidBytes(const ShaderRecompiler::VertexAttribut
 
 // The highest index of an indexed draw, without primitive restart markers when they restart
 // (upstream c0a88ce3); none when every index is a restart marker (upstream 98b4bdf8).
+// One index width; branch-free so the compiler vectorizes it (a scan per indexed draw, ~2000 indices
+// in Zorro, cost the device thread ~1.4 ms a frame as a scalar loop). A restart marker counts as 0
+// and is noted apart, so a draw of markers alone has no highest index.
+template<typename TIndex>
+std::optional<std::uint32_t> HighestDrawIndexOf(std::span<const std::byte> indices, bool skipRestart) {
+    constexpr TIndex restart = static_cast<TIndex>(~TIndex{0});
+    const auto count = indices.size() / sizeof(TIndex);
+    if (count == 0) return std::nullopt;
+    TIndex highest = 0;
+    if (!skipRestart) {
+        for (std::size_t index = 0; index < count; ++index) {
+            TIndex value;
+            std::memcpy(&value, indices.data() + index * sizeof(TIndex), sizeof(TIndex));
+            highest = std::max(highest, value);
+        }
+        return highest;
+    }
+    TIndex vertex = 0;
+    for (std::size_t index = 0; index < count; ++index) {
+        TIndex value;
+        std::memcpy(&value, indices.data() + index * sizeof(TIndex), sizeof(TIndex));
+        const TIndex marker = value == restart ? restart : TIndex{0};
+        highest = std::max(highest, static_cast<TIndex>(value & ~marker));
+        vertex |= static_cast<TIndex>(~marker);
+    }
+    if (vertex == 0) return std::nullopt;
+    return highest;
+}
+
 inline std::optional<std::uint32_t> HighestDrawIndex(std::span<const std::byte> indices, std::uint32_t indexSize, bool skipRestart) {
     Require(indexSize == 2 || indexSize == 4, "unsupported index size");
-    const auto restartIndex = indexSize == 2 ? 0xffffu : 0xffffffffu;
-    std::optional<std::uint32_t> highest;
-    for (std::size_t offset = 0; offset + indexSize <= indices.size(); offset += indexSize) {
-        std::uint32_t index = 0;
-        if (indexSize == 2) {
-            std::uint16_t value = 0;
-            std::memcpy(&value, indices.data() + offset, sizeof(value));
-            index = value;
-        } else {
-            std::memcpy(&index, indices.data() + offset, sizeof(index));
-        }
-        if (skipRestart && index == restartIndex) continue;
-        highest = std::max(highest.value_or(0u), index);
-    }
-    return highest;
+    return indexSize == 2 ? HighestDrawIndexOf<std::uint16_t>(indices, skipRestart) : HighestDrawIndexOf<std::uint32_t>(indices, skipRestart);
 }
 
 }
