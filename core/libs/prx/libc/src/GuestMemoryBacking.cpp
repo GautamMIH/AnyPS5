@@ -12,6 +12,7 @@
 #include <limits>
 #include <shared_mutex>
 #include <map>
+#include <unordered_map>
 #include <memory>
 #include <set>
 #include <stdexcept>
@@ -113,8 +114,12 @@ int hostProtection(int protection) {
     return (hostReadable(protection) ? 1 : 0) | (hostWritable(protection) ? 2 : 0) | ((protection & kProtCpuExec) != 0 ? 5 : 0);
 }
 
+// Moves with every change to the area map (segmentPieces is rebuilt from it).
+std::uint64_t areaChanges = 0;
+
 // Splits the area containing address so an area begins there.
 void split(std::uint64_t address) {
+    ++areaChanges;
     auto& map = areas();
     auto it = map.upper_bound(address);
     if (it == map.begin()) return;
@@ -154,6 +159,7 @@ bool wholeReserved(std::uint64_t first, std::uint64_t last) {
 // Removes the areas in [first, last): committed views return to the claimed, inaccessible state
 // (the range stays claimed for the caller) and the GPU registry forgets them.
 void carve(std::uint64_t first, std::uint64_t last) {
+    ++areaChanges;
     split(first);
     split(last);
     for (const auto begin : overlapping(first, last)) {
@@ -217,6 +223,30 @@ Status unmapRange(std::uint64_t address, std::size_t bytes, bool heap) {
     carve(address, last);
     for (const auto& [begin, end] : pieces) Platform::ReleaseRange(begin, static_cast<std::size_t>(end - begin));
     return Status::Ok;
+}
+
+// A committed area's bytes of its segment: [first, last) shown at guest address `begin`.
+struct SegmentPiece {
+    std::uint64_t first;
+    std::uint64_t last;
+    std::uint64_t begin;
+};
+
+// The committed areas of each segment, sorted by segment offset; rebuilt when the area map changes
+// (tracking mutex held). GuestVirtualSingleView scanned the whole map per piece.
+const std::unordered_map<const SegmentHolder*, std::vector<SegmentPiece>>& segmentPieces() {
+    static auto* pieces = new std::unordered_map<const SegmentHolder*, std::vector<SegmentPiece>>;
+    static std::uint64_t built = std::numeric_limits<std::uint64_t>::max();
+    if (built != areaChanges) {
+        pieces->clear();
+        for (const auto& [begin, record] : areas()) {
+            if (!committed(record.kind) || record.segment == nullptr) continue;
+            (*pieces)[record.segment.get()].push_back({record.offset, record.offset + (record.end - begin), begin});
+        }
+        for (auto& [segment, list] : *pieces) std::sort(list.begin(), list.end(), [](const SegmentPiece& left, const SegmentPiece& right) { return left.first < right.first; });
+        built = areaChanges;
+    }
+    return *pieces;
 }
 
 // A direct view: physical bytes [first, last) shown at guest address `address`.
@@ -344,9 +374,11 @@ Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_
             record.segment = std::make_shared<SegmentHolder>(bytes);
         }
         if (committed(kind)) Platform::MapView(target, bytes, record.segment->segment, record.offset, hostProtection(protection));
+        ++areaChanges;
         areas().emplace(target, record);
         registerCommitted(target, target + bytes, record);
     } catch (...) {
+        ++areaChanges;
         areas().erase(target);
         Platform::ReleaseRange(target, bytes);
         throw;
@@ -521,6 +553,7 @@ bool GuestVirtualSingleView_nid_postfix(std::uint64_t address, std::uint64_t byt
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     const AreaWrite areaWrite;
     auto& map = areas();
+    const auto& pieces = segmentPieces();
     const auto last = address + bytes;
     auto it = map.upper_bound(address);
     if (it == map.begin()) return false;
@@ -531,11 +564,12 @@ bool GuestVirtualSingleView_nid_postfix(std::uint64_t address, std::uint64_t byt
         const auto& record = it->second;
         const auto first = record.offset + (cursor - it->first);
         const auto end = record.offset + (std::min(last, record.end) - it->first);
-        for (const auto& [otherBegin, other] : map) {
-            if (other.segment != record.segment || otherBegin == it->first || !committed(other.kind)) continue;
-            const auto otherFirst = other.offset;
-            const auto otherEnd = other.offset + (other.end - otherBegin);
-            if (otherFirst < end && first < otherEnd) return false;
+        // Another committed area showing any of these segment bytes is a second view.
+        if (const auto found = pieces.find(record.segment.get()); found != pieces.end()) {
+            for (const auto& piece : found->second) {
+                if (piece.first >= end) break;
+                if (piece.begin != it->first && first < piece.last) return false;
+            }
         }
         cursor = std::min(last, record.end);
     }
