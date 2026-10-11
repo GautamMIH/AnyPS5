@@ -256,13 +256,15 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
         const auto size = get(sizeTag, sceSizeTag);
         if (size % 24 != 0) fail("Invalid relocation table size");
         const auto offset = table(addressTag, sceAddressTag, size);
-        output.assign(bytes.begin() + offset, bytes.begin() + offset + size);
+        if (plt && size != 0 && get(20, 0x6100002b) != 7) fail("Unsupported PLT relocation format");
+        output.reserve(size);
         for (std::uint64_t index = 0; index < size; index += 24) {
-            const auto info = Io::ReadU64(output, index + 8);
+            const auto info = Io::ReadU64(bytes, offset + index + 8);
             const auto relocation = static_cast<std::uint32_t>(info);
+            if (relocation == 0) continue;
             if ((info >> 32) >= image.Symbols.size() || (plt && relocation != 7) || (relocation != 1 && relocation != 6 && relocation != 7 && relocation != 8 && relocation != 16 && relocation != 17 && relocation != 18)) fail("Unsupported relocation or symbol index");
-            const auto target = Io::ReadU64(output, index);
-            const auto addend = Io::ReadU64(output, index + 16);
+            const auto target = Io::ReadU64(bytes, offset + index);
+            const auto addend = Io::ReadU64(bytes, offset + index + 16);
             mapped(target, 8, 2);
             const auto next = relocationTargets.lower_bound(target);
             if ((next != relocationTargets.end() && next->first < target + 8) || (next != relocationTargets.begin() && std::prev(next)->second > target)) fail("Overlapping guest relocations");
@@ -277,6 +279,7 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
                 const auto& symbol = image.Symbols[info >> 32];
                 if (((info >> 32) == 0 && tls == nullptr) || ((info >> 32) != 0 && (symbol.Info & 15) != 6) || (relocation == 16 && addend != 0)) fail("Invalid guest TLS relocation");
             }
+            output.insert(output.end(), bytes.begin() + offset + index, bytes.begin() + offset + index + 24);
         }
     };
     if (tags.contains(7) || tags.contains(0x6100002f)) {
@@ -284,7 +287,6 @@ GuestImage GuestImageReader::Read(const std::filesystem::path& path, std::vector
     }
     copyRelocations(7, 0x6100002f, 8, 0x61000031, image.Dynamic.RelaData, false);
     copyRelocations(23, 0x61000029, 2, 0x6100002d, image.Dynamic.RelaPltData, true);
-    if (!image.Dynamic.RelaPltData.empty() && get(20, 0x6100002b) != 7) fail("Unsupported PLT relocation format");
     if (tags.contains(3) || tags.contains(0x61000027)) image.Got = get(3, 0x61000027);
     if (tags.contains(12)) image.Init = tags.at(12);
     if (tags.contains(13)) image.Fini = tags.at(13);
