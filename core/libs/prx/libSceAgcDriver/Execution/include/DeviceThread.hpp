@@ -207,6 +207,15 @@ public:
         return {Need::None};
     }
 
+    // Whether a dirty resident surface the device published covers part of the range (a read of it
+    // needs the device's resolve).
+    bool ResidentOverlaps(std::uint64_t address, std::size_t bytes) {
+        std::lock_guard lock(mutex);
+        for (const auto& [first, last] : resident)
+            if (first < address + bytes && address < last) return true;
+        return false;
+    }
+
     // Work that reports its GPU writes only once they landed (address-table stores) was recorded
     // (called by the job, under the tracking mutex): every range may concern the device until the GPU
     // is next idle (VulkanDevice::WaitIdle holds the mutex too, so a later idle point follows it).

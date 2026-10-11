@@ -1777,11 +1777,44 @@ private:
                     // A label already in memory is read like any worker read (waiting only for a
                     // queued job that writes it); a wait it does not satisfy yet drains below.
                     if (pipeline && device != nullptr && readLabels && !cpuWaits) {
+                        // A label that only queued draws or dispatches may write (their shader write
+                        // ranges cover it: address-table stores count all writable registered memory)
+                        // is read as it is now. The console's WAIT_REG_MEM polls memory without waiting
+                        // for earlier shaders to finish; releases, WRITE_DATA and DMA writes, the writes
+                        // a wait is ordered after, are handled above or recorded when met. In Zorro the
+                        // waits never changed the label (~3 ms a frame). A wait not yet satisfied drains
+                        // below. ANYPS5_LABEL_WAIT_QUEUED=1 waits for those jobs; ANYPS5_VERIFY_LABEL_READS=1
+                        // reads both ways and reports a difference.
+                        static const bool waitQueued = std::getenv("ANYPS5_LABEL_WAIT_QUEUED") != nullptr;
+                        static const bool verifyLabels = std::getenv("ANYPS5_VERIFY_LABEL_READS") != nullptr;
+                        const auto target = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
+                        const auto labelBytes = ((packet[0] >> 8u) & 0xffu) == 0x93 ? 8u : 4u;
                         bool satisfied = false;
-                        {
+                        bool readNow = false;
+                        if (!waitQueued && pipeline->Check(target, labelBytes).kind == DeviceThread::Need::Wait && !pipeline->ResidentOverlaps(target, labelBytes)) {
+                            // Nothing to resolve: no dirty resident surface covers the label, and the
+                            // scope's tracking is handled (a page watch on a label is a write watch).
+                            const GuestMemory::MemoryAccessScope memoryScope(nullptr, [](void*, std::uint64_t, std::size_t, bool) {}, true);
+                            const GuestMemory::AccessSite accessSite("wait_reg_mem_now");
+                            satisfied = Pm4::WaitSatisfied(packet);
+                            readNow = true;
+                        }
+                        if (!readNow || verifyLabels) {
                             const GuestMemory::MemoryAccessScope memoryScope(accessContext(), accessResolver(), true);
                             const GuestMemory::AccessSite accessSite("wait_reg_mem");
-                            satisfied = Pm4::WaitSatisfied(packet);
+                            const bool waited = Pm4::WaitSatisfied(packet);
+                            if (readNow) {
+                                static std::uint64_t reads = 0;
+                                static std::uint64_t differ = 0;
+                                ++reads;
+                                if (waited != satisfied) {
+                                    ++differ;
+                                    if (differ <= 20) std::fprintf(stderr, "[verify-label] 0x%llx: read now %d, after the queued writers %d\n", static_cast<unsigned long long>(target), satisfied ? 1 : 0, waited ? 1 : 0);
+                                }
+                                if (reads % 5000 == 0) std::fprintf(stderr, "[verify-label] %llu reads, %llu differ\n", static_cast<unsigned long long>(reads), static_cast<unsigned long long>(differ));
+                            } else {
+                                satisfied = waited;
+                            }
                         }
                         if (satisfied) {
                             timing.Mark("memory_wait");
