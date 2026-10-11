@@ -22,7 +22,9 @@
 #else
 #include <dlfcn.h>
 #include <link.h>
+#include <mutex>
 #include <unistd.h>
+#include <unordered_map>
 #endif
 
 extern "C" std::int32_t ModuleIdForImage_nid_no_patch(const void* native);
@@ -81,6 +83,24 @@ bool Contains(const dl_phdr_info& image, std::uintptr_t begin, std::uint64_t siz
     return false;
 }
 
+struct FrameTableCache {
+    std::mutex mutex;
+    unsigned long long unloads = 0;
+    std::unordered_map<std::uintptr_t, EhFrame::Tables> tables;
+};
+
+EhFrame::Tables FrameTables(const dl_phdr_info& image, std::uintptr_t header) {
+    static auto& cache = *new FrameTableCache();
+    std::lock_guard lock(cache.mutex);
+    if (cache.unloads != image.dlpi_subs) {
+        cache.tables.clear();
+        cache.unloads = image.dlpi_subs;
+    }
+    if (const auto found = cache.tables.find(header); found != cache.tables.end()) return found->second;
+    const auto contains = [&](std::uintptr_t begin, std::uint64_t size) { return Contains(image, begin, size); };
+    return cache.tables.emplace(header, EhFrame::ReadTables(contains, header, Caller)).first->second;
+}
+
 std::string ImageName(const dl_phdr_info& image) {
     std::string path = image.dlpi_name ? image.dlpi_name : "";
     if (path.empty()) {
@@ -111,8 +131,7 @@ void Fill(const dl_phdr_info& image, TInfo& info) {
                 info.tls_size = ToU32(header.p_memsz, "TLS size");
                 info.tls_align = ToU32(header.p_align, "TLS alignment");
             } else if (header.p_type == PT_GNU_EH_FRAME) {
-                const auto contains = [&](std::uintptr_t begin, std::uint64_t size) { return Contains(image, begin, size); };
-                const auto tables = EhFrame::ReadTables(contains, address, Caller);
+                const auto tables = FrameTables(image, address);
                 info.eh_frame_hdr_addr = address;
                 info.eh_frame_hdr_size = ToU32(header.p_memsz, "eh_frame_hdr size");
                 info.eh_frame_addr = tables.frames;
