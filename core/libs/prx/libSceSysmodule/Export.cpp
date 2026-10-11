@@ -9,7 +9,7 @@
 #include <windows.h>
 #include <psapi.h>
 #else
-#include <fstream>
+#include "prx/libc/include/specifics/linux/HostMapping.hpp"
 #endif
 
 #include "SceTypes.hpp"
@@ -47,46 +47,19 @@ bool fillModuleInfoForUnwind(std::uint64_t addr, ModuleInfoForUnwind* info) {
     info->name[sizeof(info->name) - 1] = '\0';
     return true;
 #else
-    std::ifstream maps("/proc/self/maps");
-    if (!maps) {
-        throw std::runtime_error("sceSysmoduleGetModuleInfoForUnwind: failed to open /proc/self/maps");
+    const auto mapping = HostMapping::Find(addr, "sceSysmoduleGetModuleInfoForUnwind");
+    if (!mapping) {
+        return false;
     }
-    std::string line;
-    while (std::getline(maps, line)) {
-        std::uint64_t start = 0;
-        std::uint64_t end = 0;
-        char perms[8] = {};
-        std::uint64_t offset = 0;
-        unsigned int devMajor = 0;
-        unsigned int devMinor = 0;
-        std::uint64_t inode = 0;
-        char path[4096] = {};
-        int parsed = std::sscanf(
-            line.c_str(),
-            "%llx-%llx %7s %llx %x:%x %llu %4095s",
-            (unsigned long long*)&start,
-            (unsigned long long*)&end,
-            perms,
-            (unsigned long long*)&offset,
-            &devMajor,
-            &devMinor,
-            (unsigned long long*)&inode,
-            path
-        );
-        if (parsed < 7 || addr < start || addr >= end) {
-            continue;
-        }
-        info->st_size = sizeof(ModuleInfoForUnwind);
-        std::strncpy(info->name, parsed >= 8 ? path : "", sizeof(info->name) - 1);
-        info->name[sizeof(info->name) - 1] = '\0';
-        info->eh_frame_hdr_addr = 0;
-        info->eh_frame_addr = 0;
-        info->eh_frame_size = 0;
-        info->seg0_addr = start;
-        info->seg0_size = end - start;
-        return true;
-    }
-    return false;
+    info->st_size = sizeof(ModuleInfoForUnwind);
+    std::strncpy(info->name, mapping->path.c_str(), sizeof(info->name) - 1);
+    info->name[sizeof(info->name) - 1] = '\0';
+    info->eh_frame_hdr_addr = 0;
+    info->eh_frame_addr = 0;
+    info->eh_frame_size = 0;
+    info->seg0_addr = mapping->start;
+    info->seg0_size = mapping->end - mapping->start;
+    return true;
 #endif
 }
 
