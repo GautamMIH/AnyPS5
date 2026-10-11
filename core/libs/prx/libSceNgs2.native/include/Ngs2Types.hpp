@@ -36,6 +36,7 @@ static constexpr std::uint32_t SCE_NGS2_VOICE_STATE_FLAG_INUSE = 1;
 static constexpr std::uint32_t SCE_NGS2_VOICE_STATE_FLAG_PLAYING = 2;
 static constexpr std::uint32_t SCE_NGS2_VOICE_STATE_FLAG_PAUSED = 4;
 static constexpr std::uint32_t SCE_NGS2_VOICE_STATE_FLAG_STOPPED = 8;
+static constexpr std::uint32_t SCE_NGS2_VOICE_STATE_FLAG_EMPTY = 0x20;
 
 static constexpr std::uint32_t SCE_NGS2_VOICE_PARAM_MATRIX_LEVELS = 0x0001;
 static constexpr std::uint32_t SCE_NGS2_VOICE_PARAM_PORT_VOLUME = 0x0002;
