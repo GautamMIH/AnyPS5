@@ -529,6 +529,37 @@ bool GuestVirtualAccessible_nid_postfix(std::uint64_t address, std::uint64_t byt
 
 bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t bytes, Translation* translation) {
     if (translation == nullptr || bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
+    const auto last = address + bytes;
+    // Runs of adjacent views of consecutive segment bytes this thread translated recently, valid
+    // while the mapping generation stands (every change of the area map moves it before editing):
+    // the driver translates every bound guest range, and the tracking mutex it took per call is
+    // shared with the command thread. ANYPS5_NO_TRANSLATE_CACHE=1 takes the mutex every time.
+    struct Run {
+        std::uint64_t begin = 0;
+        std::uint64_t end = 0;
+        std::uint64_t offset = 0;
+        std::uint64_t segment = 0;
+        void* alias = nullptr;
+        std::uint64_t segmentBytes = 0;
+    };
+    static const bool uncached = std::getenv("ANYPS5_NO_TRANSLATE_CACHE") != nullptr;
+    thread_local std::array<Run, 16> runs{};
+    thread_local std::uint64_t runsGeneration = std::numeric_limits<std::uint64_t>::max();
+    thread_local std::size_t nextRun = 0;
+    const auto generation = mappingGeneration.load(std::memory_order_acquire);
+    if (!uncached) {
+        if (generation == runsGeneration) {
+            for (const auto& run : runs) {
+                if (run.begin <= address && address < run.end) {
+                    *translation = {run.segment, run.alias, run.segmentBytes, run.offset + (address - run.begin), std::min(last, run.end) - address};
+                    return true;
+                }
+            }
+        } else {
+            runs = {};
+            runsGeneration = generation;
+        }
+    }
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     const AreaWrite areaWrite;
     auto& map = areas();
@@ -538,13 +569,16 @@ bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t byte
     if (it->second.end <= address || !committed(it->second.kind)) return false;
     const auto& first = it->second;
     const auto offset = first.offset + (address - it->first);
-    const auto last = address + bytes;
-    auto covered = std::min(last, first.end);
-    // Adjacent views of the next segment bytes extend the translation.
-    for (auto next = std::next(it); covered < last && next != map.end() && next->first == covered && committed(next->second.kind) && next->second.segment == first.segment && next->second.offset == offset + (covered - address); ++next) {
-        covered = std::min(last, next->second.end);
+    // Adjacent views of the next segment bytes extend the translation; the run is followed to its end.
+    auto runEnd = first.end;
+    for (auto next = std::next(it); next != map.end() && next->first == runEnd && committed(next->second.kind) && next->second.segment == first.segment && next->second.offset == first.offset + (runEnd - it->first); ++next) {
+        runEnd = next->second.end;
     }
-    *translation = {first.segment->id, first.segment->segment.alias, first.segment->segment.bytes, offset, covered - address};
+    *translation = {first.segment->id, first.segment->segment.alias, first.segment->segment.bytes, offset, std::min(last, runEnd) - address};
+    if (!uncached && generation == mappingGeneration.load(std::memory_order_acquire)) {
+        runs[nextRun] = {it->first, runEnd, first.offset, first.segment->id, first.segment->segment.alias, first.segment->segment.bytes};
+        nextRun = (nextRun + 1) % runs.size();
+    }
     return true;
 }
 
