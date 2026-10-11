@@ -699,7 +699,7 @@ int APS5_VABI sceKernelConvertLocaltimeToUtc(int64_t local_time, int64_t reserve
     return 0;
 }
 
-int APS5_VABI sceKernelConvertUtcToLocaltime(int64_t utc_time, int64_t* local_time, KernelTimesec* st, uint64_t* dst_sec) {
+int APS5_VABI sceKernelConvertUtcToLocaltime(int64_t utc_time, int64_t* local_time, KernelTimesec* st, int32_t* dst_sec) {
     if (local_time != nullptr) *local_time = utc_time;
     if (st != nullptr) *st = {utc_time, 0u, 0u};
     if (dst_sec != nullptr) *dst_sec = 0;
