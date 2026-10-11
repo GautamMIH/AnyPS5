@@ -1,6 +1,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstdlib>
 #include <cstring>
+#include <string>
 extern "C" {
 char* APS5_VABI getenv_nid_postfix(const char*);
 int APS5_VABI setenv_nid_postfix(const char*, const char*, int);
@@ -50,4 +51,11 @@ int main() {
     Require(getenv_nid_postfix(key) == nullptr);
     Require(unsetenv_nid_postfix(key) == 0);
     Require(unsetenv_nid_postfix("anyps5_guest_env_test_4c27") == 0);
+    Require(setenv_nid_postfix("Q7A", "a", 1) == 0);
+    Require(setenv_nid_postfix("Q7B", "b", 1) == 0);
+    const char* kept = getenv_nid_postfix("Q7B");
+    Require(unsetenv_nid_postfix("Q7A") == 0);
+    for (int index = 0; index < 64; ++index)
+        Require(setenv_nid_postfix(("ANYPS5_GUEST_ENV_GROW_4C27_" + std::to_string(index)).c_str(), "x", 1) == 0);
+    Require(getenv_nid_postfix("Q7B") == kept && std::strcmp(kept, "b") == 0);
 }
