@@ -32,7 +32,8 @@ int APS5_VABI pthread_cond_timedwait_nid_postfix(PthreadCond* cond, PthreadMutex
 }
 
 int APS5_VABI pthread_cond_reltimedwait_np_nid_postfix(PthreadCond* cond, PthreadMutex* mutex, KernelUseconds usec) {
-    return toPosix(scePthreadCondTimedwait(cond, mutex, usec));
+    APS5_STALL_WATCH("cond-timed", reinterpret_cast<const void*>(cond));
+    return PthreadSync::CondWait(cond, mutex, PthreadSync::DeadlineAfterMicroseconds(usec));
 }
 
 int APS5_VABI pthread_cond_wait_nid_postfix(PthreadCond* cond, PthreadMutex* mutex) {
