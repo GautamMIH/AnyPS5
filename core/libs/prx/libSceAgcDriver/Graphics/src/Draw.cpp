@@ -207,6 +207,12 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     const bool depthReadOnly = state.hasDepthTarget && !state.depthState.depthWrite && !state.depthState.clearDepth && !depthFastClear;
     if (context.textureCache) context.textureCache->SetRenderedDepth(state.hasDepthTarget && state.depth.depthBytes != 0 ? state.depth.depthAddress : 0, depthReadOnly);
     const auto renderedCopiesBefore = context.textureCache ? context.textureCache->RenderedDepthCopies() : 0;
+    if (context.textureCache) {
+        std::array<std::uint64_t, MaxColorTargets> rendered{};
+        std::size_t count = 0;
+        for (const auto& color : colorTargets) rendered[count++] = color.address;
+        context.textureCache->SetRenderedColors(std::span(rendered).first(count));
+    }
     auto resources = std::make_shared<ShaderResources>(context, shaders, colorTargets, draw.indexAddress, static_cast<std::size_t>(indexBytes), snapshots);
     // Debug aid: APS5_TRACE_DEPTH_FEEDBACK=1 logs the state of draws that sample their own depth target.
     static const bool traceFeedback = std::getenv("APS5_TRACE_DEPTH_FEEDBACK") != nullptr;
@@ -214,7 +220,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         const auto& depthState = state.depthState;
         std::fprintf(stderr, "[depth-feedback] depth 0x%llx test=%d write=%d compare=%d stencil=%d stencilWrite=%x/%x clearDepth=%d clearStencil=%d colors=%x\n", static_cast<unsigned long long>(state.depth.depthAddress), depthState.depthTest, depthState.depthWrite, static_cast<int>(depthState.depthCompare), depthState.stencilTest, depthState.front.writeMask, depthState.back.writeMask, depthState.clearDepth, depthState.clearStencil, state.colorTargetMask);
     }
-    if (context.textureCache) context.textureCache->SetRenderedDepth(0);
+    if (context.textureCache) {
+        context.textureCache->SetRenderedDepth(0);
+        context.textureCache->SetRenderedColors({});
+    }
     timing.Mark("shader_resources");
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         if ((state.colorTargetMask & (1u << slot)) == 0) continue;

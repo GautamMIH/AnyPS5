@@ -28,6 +28,9 @@ public:
         renderedDepth = address;
         renderedDepthReadOnly = readOnly;
     }
+    // The colour targets the work being set up renders to: a texture over one of them is a copy
+    // (sampling an attachment of the same pass is not allowed), any other resident target a view.
+    void SetRenderedColors(std::span<const std::uint64_t> addresses) { renderedColors.assign(addresses.begin(), addresses.end()); }
     // Copies made of the depth plane being rendered (the work samples its own depth target).
     std::uint64_t RenderedDepthCopies() const { return renderedDepthCopies; }
     // The work being set up writes [begin, end) on the GPU (storage images). It may have validated a
@@ -93,6 +96,7 @@ private:
     std::vector<std::shared_ptr<Texture>> uploading;
     std::uint64_t retainedBytes = 0;
     std::uint64_t renderedDepth = 0;
+    std::vector<std::uint64_t> renderedColors;
     std::uint64_t renderedDepthCopies = 0;
     bool renderedDepthReadOnly = false;
     static constexpr std::uint64_t budget = 1024ull * 1024 * 1024;

@@ -255,13 +255,18 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
     static const bool noFeedback = std::getenv("ANYPS5_NO_DEPTH_FEEDBACK") != nullptr;
     const bool feedbackDepth = viewable && rendered && renderedDepthReadOnly && !noFeedback;
     if (feedbackDepth) key[8] |= 1u << 17u;
+    // A resident colour target in the texture's own format is sampled through a view of its image,
+    // unless this work renders to it: the copy cost a GPU-wide barrier pair and its own submission
+    // (~1.3 ms of GPU a frame in Zorro, ~21 copies). ANYPS5_COPY_COLOR=1 copies every one.
+    static const bool copyColor = std::getenv("ANYPS5_COPY_COLOR") != nullptr;
+    const bool directColor = source && !copyColor && source->Sampleable() && SampledTextureFormat(context.srgbDecodeFormats, resource.format) == source->Description().format && std::find(renderedColors.begin(), renderedColors.end(), resource.baseAddress) == renderedColors.end();
     // Why a lookup misses, for the frame profile: the entry's memory changed, or no entry exists.
     const char* missReason = "miss_absent";
     if (const auto found = index.find(key); found != index.end()) {
         const auto it = found->second;
         missReason = "miss_changed";
         if (source || depthSource || it->generation != 0) {
-            const bool sameSource = ((source && it->source.lock() == source) || (depthSource && it->depthSource.lock() == depthSource)) && (!depthSource || (it->texture->Direct() == (directDepth || feedbackDepth) && it->texture->DepthFeedback() == feedbackDepth));
+            const bool sameSource = ((source && it->source.lock() == source) || (depthSource && it->depthSource.lock() == depthSource)) && (!depthSource || (it->texture->Direct() == (directDepth || feedbackDepth) && it->texture->DepthFeedback() == feedbackDepth)) && (!source || it->texture->Direct() == directColor);
             if (sameSource) {
                 // Render targets change every frame: the copy is refreshed in place instead of
                 // recreated (allocating, destroying and a new command batch cost ~2 ms each time).
@@ -387,8 +392,8 @@ create:
         return texture;
     }
     if (source) {
-        auto texture = std::make_shared<Texture>(context, source, resource, components);
-        timing.Mark("render_texture");
+        auto texture = directColor ? std::make_shared<Texture>(context, source, components, Texture::DirectView{}) : std::make_shared<Texture>(context, source, resource, components);
+        timing.Mark(directColor ? "render_view" : "render_texture");
         Entry entry{key, {}, texture, source, source->Generation()};
         entries.push_back(std::move(entry));
         index[key] = std::prev(entries.end());

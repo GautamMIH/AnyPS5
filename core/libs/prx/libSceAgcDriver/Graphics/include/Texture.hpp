@@ -31,6 +31,8 @@ public:
     // Views the resident depth image itself (the texture format samples depth values as they are).
     struct DirectView {};
     Texture(const Context& context, const std::shared_ptr<ResidentDepth>& depthSource, VkComponentMapping components, DirectView);
+    // Views the resident colour image itself (the texture's format is the target's).
+    Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, VkComponentMapping components, DirectView);
     // Views the depth image the same work renders to without writing depth: sampled inside the
     // render pass in its read-only depth layout (the pass makes the transitions).
     struct FeedbackView {};

@@ -111,7 +111,9 @@ RenderTarget::RenderTarget(const Context& context, const ColorTarget& target, bo
     context.formatProperties(context.physical, target.format, &properties);
     const VkFormatFeatureFlags required = VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | (blending ? VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT : 0u);
     Require((properties.optimalTilingFeatures & required) == required, "render-target format does not support required operations");
-    create(target.format, target.extent, target.bytes, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, target.Layered() ? target.layers : 1u);
+    // Sampled directly by textures over the target (no copy) where the format allows it.
+    sampled = (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) != 0;
+    create(target.format, target.extent, target.bytes, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | (sampled ? VK_IMAGE_USAGE_SAMPLED_BIT : 0u), VK_IMAGE_ASPECT_COLOR_BIT, target.Layered() ? target.layers : 1u);
 }
 
 RenderTarget::RenderTarget(const Context& context, const DepthTarget& target) : context(context) {

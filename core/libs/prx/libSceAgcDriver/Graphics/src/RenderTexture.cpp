@@ -104,6 +104,18 @@ Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& d
     noteView(viewInfo);
 }
 
+Texture::Texture(const Context& context, const std::shared_ptr<ResidentColor>& source, VkComponentMapping components, DirectView) : context(context), source(source), direct(true) {
+    Require(source != nullptr && source->Sampleable(), "resident colour target cannot be sampled directly");
+    VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    viewInfo.image = source->Target().Image();
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format = source->Description().format;
+    viewInfo.components = components;
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView direct colour");
+    noteView(viewInfo);
+}
+
 Texture::Texture(const Context& context, const std::shared_ptr<ResidentDepth>& depthSource, VkComponentMapping components, FeedbackView) : Texture(context, depthSource, components, DirectView{}) {
     feedback = true;
 }
@@ -113,7 +125,9 @@ VkImageLayout Texture::SampledLayout() const {
 }
 
 void Texture::PrepareSampling(VkCommandBuffer commands) {
-    if (direct && !feedback) depthSource->PrepareSampling(commands);
+    if (!direct || feedback) return;
+    if (depthSource) depthSource->PrepareSampling(commands);
+    else if (source) source->PrepareSampling(commands);
 }
 
 void Texture::Refresh() {

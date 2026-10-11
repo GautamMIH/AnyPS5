@@ -37,6 +37,13 @@ public:
     // The draw queue was waited for: a queued GPU write-back reached guest memory, which the CPU may read.
     void GpuWriteCompleted();
     void Transition(VkCommandBuffer commands, VkImageLayout layout);
+    // Direct sampling: whether shaders can sample the image (a single-layer target whose format
+    // allows it), and the transition into the layout sampled views use (before the sampling work's
+    // render pass; Begin returns the image to an attachment).
+    bool Sampleable() { return !layered && Target().Sampled(); }
+    void PrepareSampling(VkCommandBuffer commands) {
+        if (layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) Transition(commands, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
     RenderTarget& Target() { return layered ? layered->Target() : transfer.Target(color, false); }
     const ColorTarget& Description() const { return color; }
     bool Valid() const { return valid; }
