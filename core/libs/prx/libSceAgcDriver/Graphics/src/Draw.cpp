@@ -146,8 +146,26 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         // are left out of the vertex range; a draw of markers alone draws nothing.
         const bool listTopology = state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY || state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
         const bool skipRestart = state.primitiveRestart && (!listTopology || context.primitiveListRestart) && !state.stages.mesh;
-        const auto highestIndex = HighestDrawIndex(source.first(static_cast<std::size_t>(indexBytes)), draw.indexSize, skipRestart);
+        auto highestIndex = HighestDrawIndex(source.first(static_cast<std::size_t>(indexBytes)), draw.indexSize, skipRestart);
         if (!highestIndex) return;
+        // Fetches past a descriptor's records read zeros, so an index far past every per-vertex
+        // record count (Goat Simulator 3 draws lists of 0xffffffff with restart off) is moved to the
+        // first such zero vertex in a private copy; zero-padded vertex copies would otherwise be sized
+        // to the original index (160 GiB). Only the vertex index the shader sees changes.
+        constexpr std::uint32_t ZeroFetchSlack = 0x10000u;
+        if (const auto zeroFrom = state.stages.mesh ? std::nullopt : ZeroFetchVertex(shaders.front().program->vertexAttributes)) {
+            const auto limit = *zeroFrom > draw.firstVertex ? *zeroFrom - draw.firstVertex : 0u;
+            if (*highestIndex >= limit && *highestIndex - limit >= ZeroFetchSlack) {
+                if (!indices) {
+                    indices = std::make_unique<Buffer>(context, static_cast<std::size_t>(indexBytes), VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+                    std::memcpy(indices->Bytes().data(), source.data(), static_cast<std::size_t>(indexBytes));
+                    indexHandle = indices->Handle();
+                    indexOffset = 0;
+                }
+                highestIndex = ClampDrawIndices(indices->Bytes().first(static_cast<std::size_t>(indexBytes)), draw.indexSize, skipRestart, limit);
+                if (!highestIndex) return;
+            }
+        }
         maxIndex = *highestIndex;
         Require(maxIndex <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
         const auto highest = static_cast<std::int64_t>(maxIndex) + static_cast<std::int32_t>(draw.firstVertex);
