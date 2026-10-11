@@ -868,6 +868,15 @@ void testAsyncMemoryFailure() {
     expectFailure([] { LibcRunShutdown_nid_postfix(); }, "guest");
 }
 
+void testRefusedWorkerPriority() {
+    alignas(8) static std::uint32_t result = 0;
+    auto words = writeWord(result, 91);
+    submitWords(words);
+    expectFailure([] { AgcDriverWaitIdle_nid_postfix(); }, "refused");
+    check(result == 0, "a queue worker whose priority was refused executed its submission");
+    expectFailure([] { LibcRunShutdown_nid_postfix(); }, "refused");
+}
+
 }
 
 int main(int argc, char** argv) {
@@ -875,6 +884,11 @@ int main(int argc, char** argv) {
         if (argc == 2 && std::string(argv[1]) == "failure") {
             testAsyncMemoryFailure();
             std::puts("PM4 asynchronous memory failure propagated to idle, suspend, submit and shutdown");
+            return 0;
+        }
+        if (argc == 2 && std::string(argv[1]) == "priority-refused") {
+            testRefusedWorkerPriority();
+            std::puts("PM4 refused queue worker priority propagated to idle and shutdown");
             return 0;
         }
         testCatalog();

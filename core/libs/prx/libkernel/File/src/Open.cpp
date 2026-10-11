@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstdio>
 #include <filesystem>
+#include <cstdarg>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -98,7 +99,17 @@ static int NativeClose(int fd) {
     _set_thread_local_invalid_parameter_handler(previous);
     return result;
 }
-static int NativeUnlink(const std::filesystem::path& p) { return ::_wunlink(p.wstring().c_str()); }
+static int NativeUnlink(const std::filesystem::path& p) {
+    const auto path = p.wstring();
+    struct _stat64 status{};
+    const bool unlocked = ::_wstat64(path.c_str(), &status) == 0 && (status.st_mode & _S_IFMT) == _S_IFREG &&
+        !(status.st_mode & _S_IWRITE) && ::_wchmod(path.c_str(), _S_IREAD | _S_IWRITE) == 0;
+    if (::_wunlink(path.c_str()) == 0) return 0;
+    const int error = errno;
+    if (unlocked) ::_wchmod(path.c_str(), _S_IREAD);
+    errno = error;
+    return -1;
+}
 static int NativeMkdir(const std::filesystem::path& p, int) { return ::_wmkdir(p.wstring().c_str()); }
 static int NativeRmdir(const std::filesystem::path& p) { return ::_wrmdir(p.wstring().c_str()); }
 static int NativeRename(const std::filesystem::path& from, const std::filesystem::path& to) { return ::_wrename(from.wstring().c_str(), to.wstring().c_str()); }
@@ -273,6 +284,18 @@ int openFile(const char* path, int flags, int mode) {
         return result;
     }
     const auto host = ResolvePath_nid_no_patch(path);
+#ifdef _WIN32
+    // O_DIRECTORY on a file is ENOTDIR (Windows opens the file; upstream ee0b249e4).
+    if ((flags & (SCE_KERNEL_O_DIRECTORY | SCE_KERNEL_O_CREAT)) == SCE_KERNEL_O_DIRECTORY) {
+        std::error_code error;
+        const auto status = std::filesystem::status(host, error);
+        if (std::filesystem::exists(status) && !std::filesystem::is_directory(status)) {
+            errno = ENOTDIR;
+            trace("open", path, host, -1);
+            return -1;
+        }
+    }
+#endif
     int result = NativeOpen(host, nativeFlags, mode);
 #ifdef _WIN32
     // Windows cannot open a directory as a file; a descriptor stands in for it (getdents, fstat),
@@ -329,7 +352,14 @@ int statPath(const char* path, FileStat* sb) {
         errno = ENOENT;
         return -1;
     }
-    const auto host = ResolvePath_nid_no_patch(path);
+    // A path the host cannot convert names no file (upstream 7fe298bfa).
+    std::filesystem::path host;
+    try {
+        host = ResolvePath_nid_no_patch(path);
+    } catch (const std::filesystem::filesystem_error&) {
+        errno = ENOENT;
+        return -1;
+    }
     const std::string_view guestPath(path);
     std::error_code status;
     if (guestPath.back() == '/' && std::filesystem::exists(host, status) && !std::filesystem::is_directory(host, status)) {
@@ -400,6 +430,9 @@ int renamePath(const char* from, const char* to) {
     }
     return NativeRename(ResolvePath_nid_no_patch(from), ResolvePath_nid_no_patch(to));
 }
+extern "C" int* APS5_VABI __error_nid_postfix();
+extern "C" int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...);
+static constexpr int GuestSetFlags = 4;
 
 }
 
@@ -460,7 +493,11 @@ int APS5_VABI sceKernelUnlink(const char* path) {
 
 int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
     if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    return sceResult(recordIfDone(NativeMkdir(ResolvePath_nid_no_patch(path), mode), ResolvePath_nid_no_patch(path)));
+    if (*path == '\0') return FileErrors::SceBsd(kErrorNoEntry);
+    // "dir/" records the directory itself (upstream 3779ffa37).
+    auto host = ResolvePath_nid_no_patch(path);
+    while (!host.has_filename() && host.has_relative_path()) host = host.parent_path();
+    return sceResult(recordIfDone(NativeMkdir(host, mode), host));
 }
 
 int APS5_VABI sceKernelRmdir(const char* path) {
@@ -608,9 +645,29 @@ int APS5_VABI futimes_nid_postfix(int d, const KernelTimeval* times) {
 #endif
 }
 
-int APS5_VABI sceKernelFcntl() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceKernelFcntl(int d, int command, ...) {
+    if (d < GuestSockets::FirstDescriptor) {
+        if (!DescriptorIsOpen_nid_no_patch(d)) return SCE_KERNEL_ERROR_EBADF;
+        throw std::runtime_error(std::string(__func__) + ": file descriptors are not implemented, fd=" + std::to_string(d));
+    }
+    int result;
+    if (command == GuestSetFlags) {
+#ifdef _WIN32
+        __builtin_sysv_va_list arguments;
+        __builtin_sysv_va_start(arguments, command);
+        const int flags = __builtin_va_arg(arguments, int);
+        __builtin_sysv_va_end(arguments);
+#else
+        std::va_list arguments;
+        va_start(arguments, command);
+        const int flags = va_arg(arguments, int);
+        va_end(arguments);
+#endif
+        result = fcntl_nid_postfix(d, command, flags);
+    } else {
+        result = fcntl_nid_postfix(d, command);
+    }
+    return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
 }
 
 }

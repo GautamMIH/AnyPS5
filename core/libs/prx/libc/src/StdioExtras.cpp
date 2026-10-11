@@ -96,6 +96,14 @@ void APS5_VABI _Unlockfilelock_nid_postfix(FileStream* stream) {
     funlockfile(native(stream));
 }
 
+void APS5_VABI flockfile_nid_postfix(FileStream* stream) {
+    _Lockfilelock_nid_postfix(stream);
+}
+
+void APS5_VABI funlockfile_nid_postfix(FileStream* stream) {
+    _Unlockfilelock_nid_postfix(stream);
+}
+
 FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode);
 
 int APS5_VABI fopen_s_nid_postfix(FileStream** stream, const char* path, const char* mode) {

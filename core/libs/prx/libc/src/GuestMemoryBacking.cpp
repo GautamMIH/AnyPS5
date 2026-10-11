@@ -140,6 +140,17 @@ bool anyOverlap(std::uint64_t first, std::uint64_t last) {
     return !overlapping(first, last).empty();
 }
 
+// Whether reserved areas cover all of [first, last).
+bool wholeReserved(std::uint64_t first, std::uint64_t last) {
+    auto cursor = first;
+    for (const auto begin : overlapping(first, last)) {
+        const auto& record = areas().at(begin);
+        if (begin > cursor || record.kind != Kind::Reserved) return false;
+        cursor = record.end;
+    }
+    return cursor >= last;
+}
+
 // Removes the areas in [first, last): committed views return to the claimed, inaccessible state
 // (the range stays claimed for the caller) and the GPU registry forgets them.
 void carve(std::uint64_t first, std::uint64_t last) {
@@ -299,7 +310,11 @@ Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_
     std::lock_guard lock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
     const AreaWrite areaWrite;
     auto target = reinterpret_cast<std::uint64_t>(*address);
-    const bool fixed = (flags & kMapFixed) != 0;
+    bool fixed = (flags & kMapFixed) != 0;
+    // A map without MAP_FIXED whose hint lies wholly inside reserved areas is placed at the hint, as a
+    // fixed map into the reservation would be (upstream 3444ebf5c; PPSA01474 reserves 64 GiB and maps
+    // into it by hint).
+    if (!fixed && kind != Kind::Reserved && target != 0 && target % alignment == 0 && bytes <= std::numeric_limits<std::uint64_t>::max() - target && wholeReserved(target, target + bytes)) fixed = true;
     if (fixed) {
         if (target == 0 || target % alignment != 0 || bytes > std::numeric_limits<std::uint64_t>::max() - target) return Status::Invalid;
         const auto last = target + bytes;

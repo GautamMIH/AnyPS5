@@ -407,8 +407,26 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(context.detiler != nullptr, "device texture detiler is unavailable");
         Require(context.textureCache != nullptr, "device texture cache is unavailable");
         Require(binding.count <= context.limits.maxPerStageDescriptorSampledImages, "shader sampled-image descriptors exceed per-stage limits");
+        // An element repeating the one just before it (the same eight words, depth-compare and
+        // unnormalized flags) binds the same texture: nothing runs between the two lookups, so the
+        // second would find what the first left (upstream 63fb5779). ANYPS5_NO_REPEATED_TEXTURE=1
+        // looks every element up.
+        static const bool lookUpRepeats = std::getenv("ANYPS5_NO_REPEATED_TEXTURE") != nullptr;
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
+            if (!lookUpRepeats && element != 0 && !pairedSamplers.empty() && pairedSamplers.back().texture + 1 == textures.size()) {
+                const auto previous = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element - 1) * elementWords, elementWords);
+                const auto flag = [](const std::vector<bool>& flags, std::uint32_t index) { return index < flags.size() && flags[index]; };
+                if (std::equal(words.begin(), words.end(), previous.begin()) && flag(binding.imageDepthCompare, element) == flag(binding.imageDepthCompare, element - 1) && flag(binding.imageUnnormalized, element) == flag(binding.imageUnnormalized, element - 1)) {
+                    auto paired = pairedSamplers.back();
+                    paired.texture = textures.size();
+                    paired.mask = element < binding.imageSamplers.size() ? binding.imageSamplers[element] : 0u;
+                    pairedSamplers.push_back(paired);
+                    textures.push_back(textures.back());
+                    item.imageAllocations.push_back(textures.size() - 1);
+                    continue;
+                }
+            }
             // A null base address (BASE_ADDRESS, the low 40 bits of the first two dwords): a 1x1, one
             // level, one layer texture over zeroed guest memory, keyed by the patched descriptor.
             std::array<std::uint32_t, 8> nullWords{};
@@ -463,7 +481,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             // the packed dword in X.
             const VkComponentMapping components = IsConvertedTextureFormat(resource.format)
                 ? VkComponentMapping{VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A}
-                : VkComponentMapping{ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
+                : VkComponentMapping{TextureComponentChannel(resource.format, ComponentSwizzleFor(resource.dstSelX)), TextureComponentChannel(resource.format, ComponentSwizzleFor(resource.dstSelY)), TextureComponentChannel(resource.format, ComponentSwizzleFor(resource.dstSelZ)), TextureComponentChannel(resource.format, ComponentSwizzleFor(resource.dstSelW))};
             const bool depthCompare = element < binding.imageDepthCompare.size() && binding.imageDepthCompare[element];
             auto texture = context.textureCache->Get(words, resource, components, depthCompare);
             // A texture sampled with unnormalized coordinates (upstream 76ddd9b6): the host sampler

@@ -94,6 +94,8 @@ struct Context {
     bool samplerFilterMinmax = false;
     // VK_EXT_conservative_rasterization overestimating by at most 1/256 pixel (upstream 29c22442).
     bool conservativeRasterization = false;
+    // VK_EXT_subgroup_size_control can require 32-lane mesh subgroups (upstream a3437abd).
+    bool meshWave32 = false;
     // VK_EXT_non_seamless_cube_map: samplers with DISABLE_CUBE_WRAP (upstream bf184200).
     bool nonSeamlessCubeMap = false;
     // VK_EXT_provoking_vertex with provokingVertexLast, and whether the mode may differ between

@@ -7,6 +7,7 @@ namespace GuestHeap {
 
 extern "C" {
 
+std::size_t GuestHeapUsableSize_nid_postfix(const void* pointer);
 void* GuestHeapAllocate_nid_postfix(std::size_t bytes);
 void GuestHeapFree_nid_postfix(void* pointer);
 void* GuestHeapReallocate_nid_postfix(void* pointer, std::size_t bytes);

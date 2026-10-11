@@ -28,6 +28,7 @@ enum class MutexType : std::uint32_t {
 struct PthreadMutexattrPrivate {
     MutexType type;
     int protocol = 0;
+    int ceiling = 0;
 };
 
 struct PthreadMutexPrivate {
@@ -62,6 +63,8 @@ struct PthreadRwlockPrivate {
     }
     std::shared_timed_mutex lock;
     std::atomic<std::thread::id> writer;
+    // Read locks held, so a held rwlock is not destroyed (upstream 718eb9cc3).
+    std::atomic<int> readers{0};
 };
 
 inline constexpr KernelCpumask kDefaultThreadAffinity = 0x3fff;

@@ -180,6 +180,7 @@ struct VulkanDevice::State {
     // VK_EXT_subgroup_size_control with compute 32-wide subgroups, and the widest subgroup a compute
     // pipeline can require (upstream bd0df80a, f91e3291).
     bool computeWave32 = false;
+    bool meshWave32 = false;
     std::uint32_t maxComputeSubgroupSize = 0;
     bool depthRangeUnrestricted = false;
     bool externalMemoryHost = false;
@@ -769,11 +770,14 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->InstanceFunction<PFN_vkGetPhysicalDeviceProperties2>("vkGetPhysicalDeviceProperties2")(selected, &sizeProperties);
         state->computeWave32 = subgroupSizeFeatures.subgroupSizeControl == VK_TRUE && subgroupSize.minSubgroupSize <= 32u && subgroupSize.maxSubgroupSize >= 32u &&
             (subgroupSize.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+        // Wave32 mesh programs ballot over 32-lane host subgroups (upstream a3437abd).
+        state->meshWave32 = state->meshShader && subgroupSizeFeatures.subgroupSizeControl == VK_TRUE && subgroupSize.minSubgroupSize <= 32u && subgroupSize.maxSubgroupSize >= 32u &&
+            (subgroupSize.requiredSubgroupSizeStages & VK_SHADER_STAGE_MESH_BIT_EXT) != 0;
         state->maxComputeSubgroupSize = subgroupSize.maxSubgroupSize;
     }
     subgroupSizeFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT};
     subgroupSizeFeatures.subgroupSizeControl = VK_TRUE;
-    if (state->computeWave32) deviceExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
+    if (state->computeWave32 || state->meshWave32) deviceExtensions.push_back(VK_EXT_SUBGROUP_SIZE_CONTROL_EXTENSION_NAME);
     state->depthRangeUnrestricted = hasExtension(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     if (state->depthRangeUnrestricted) deviceExtensions.push_back(VK_EXT_DEPTH_RANGE_UNRESTRICTED_EXTENSION_NAME);
     VkPhysicalDeviceDepthClipControlFeaturesEXT depthClipFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT};
@@ -987,7 +991,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         interlockFeatures.pNext = byteFeatures.pNext;
         byteFeatures.pNext = &interlockFeatures;
     }
-    if (state->computeWave32) {
+    if (state->computeWave32 || state->meshWave32) {
         subgroupSizeFeatures.pNext = byteFeatures.pNext;
         byteFeatures.pNext = &subgroupSizeFeatures;
     }
@@ -1497,6 +1501,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.srgbDecodeFormats = state->srgbDecodeFormats;
     context.samplerFilterMinmax = state->samplerFilterMinmax;
     context.conservativeRasterization = state->conservativeRasterization;
+    context.meshWave32 = state->meshWave32;
     context.nonSeamlessCubeMap = state->nonSeamlessCubeMap;
     context.provokingVertexLast = state->provokingVertexLast;
     context.provokingVertexModePerPipeline = state->provokingVertexModePerPipeline;
@@ -1648,7 +1653,10 @@ void VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std
     const auto context = graphicsContext();
     const auto* limit = state->properties.limits.maxComputeWorkGroupCount;
     if (x > limit[0] || y > limit[1] || z > limit[2]) {
-        throw std::runtime_error("Vulkan dispatch: workgroup count exceeds device limits");
+        // Names the counts and limits (upstream 7a3c38c0).
+        char text[160];
+        std::snprintf(text, sizeof(text), "Vulkan dispatch: workgroup count %ux%ux%u exceeds device limits %ux%ux%u", x, y, z, limit[0], limit[1], limit[2]);
+        throw std::runtime_error(text);
     }
     auto resources = std::make_shared<Graphics::ShaderResources>(context, shaders[0], snapshots);
     timing.Mark("shader_resources");

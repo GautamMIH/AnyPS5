@@ -102,8 +102,12 @@ void APS5_VABI _Thrd_yield_nid_postfix() {
     std::this_thread::yield();
 }
 
-void APS5_VABI _Thrd_sleep_nid_postfix(const Xtime* time) {
+// The console's libc.prx _Thrd_sleep takes a second xtime* (remaining) and returns int (upstream
+// fddcb00a4).
+int APS5_VABI _Thrd_sleep_nid_postfix(const Xtime* time, Xtime*) {
+    if (time == nullptr) APS5_INVALID_ARG_EX;
     std::this_thread::sleep_until(*deadlineOf(time));
+    return 0;
 }
 
 std::uint64_t APS5_VABI _Thrd_id_nid_postfix() {

@@ -441,15 +441,15 @@ GuestWchar* APS5_VABI wmemmove_nid_postfix(GuestWchar* destination, const GuestW
 }
 
 long APS5_VABI wcstol_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
-    return parseNumber<long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtBinaryPrefix_nid_no_patch(narrow, narrowEnd, base) ? 0L : std::strtol(narrow, narrowEnd, base); });
+    return parseNumber<long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtPrefixLetter_nid_no_patch(narrow, narrowEnd, base) ? 0L : std::strtol(narrow, narrowEnd, base); });
 }
 
 long long APS5_VABI wcstoll_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
-    return parseNumber<long long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtBinaryPrefix_nid_no_patch(narrow, narrowEnd, base) ? 0LL : std::strtoll(narrow, narrowEnd, base); });
+    return parseNumber<long long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtPrefixLetter_nid_no_patch(narrow, narrowEnd, base) ? 0LL : std::strtoll(narrow, narrowEnd, base); });
 }
 
 unsigned long long APS5_VABI wcstoull_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
-    return parseNumber<unsigned long long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtBinaryPrefix_nid_no_patch(narrow, narrowEnd, base) ? 0ULL : std::strtoull(narrow, narrowEnd, base); });
+    return parseNumber<unsigned long long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtPrefixLetter_nid_no_patch(narrow, narrowEnd, base) ? 0ULL : std::strtoull(narrow, narrowEnd, base); });
 }
 
 double APS5_VABI wcstod_nid_postfix(const GuestWchar* text, GuestWchar** end) {
@@ -463,7 +463,12 @@ long double APS5_VABI wcstold_nid_postfix(const GuestWchar* text, GuestWchar** e
 }
 
 unsigned long long APS5_VABI wcstoul_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
-    return parseNumber<unsigned long long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtBinaryPrefix_nid_no_patch(narrow, narrowEnd, base) ? 0ULL : std::strtoull(narrow, narrowEnd, base); });
+    return parseNumber<unsigned long long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtPrefixLetter_nid_no_patch(narrow, narrowEnd, base) ? 0ULL : std::strtoull(narrow, narrowEnd, base); });
+}
+
+std::uint64_t APS5_VABI _WStoul_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
+    if (base < 0 || base == 1 || base > 36) throw std::invalid_argument("_WStoul: unsupported base " + std::to_string(base));
+    return wcstoul_nid_postfix(text, end, base);
 }
 
 // The guest's wide characters are UTF-16 units (char16_t), not the host's 32-bit wchar_t, so these
@@ -575,28 +580,6 @@ int APS5_VABI swprintf_nid_postfix(GuestWchar* destination, std::size_t count, c
     const int result = formatWide(destination, count, format, arguments);
     va_end(arguments);
     return result;
-}
-
-int APS5_VABI _Iswctype_nid_postfix(std::uint32_t character, short description) {
-    const bool upper = character >= 'A' && character <= 'Z';
-    const bool lower = character >= 'a' && character <= 'z';
-    const bool digit = character >= '0' && character <= '9';
-    const bool graph = character >= 0x21 && character <= 0x7e;
-    switch (description) {
-    case 1: return upper || lower || digit;
-    case 2: return upper || lower;
-    case 3: return character <= 0x1f || character == 0x7f;
-    case 4: return digit;
-    case 5: return graph;
-    case 6: return lower;
-    case 7: return character >= 0x20 && character <= 0x7e;
-    case 8: return graph && !upper && !lower && !digit;
-    case 9: return character == 0x20 || (character >= 0x09 && character <= 0x0d);
-    case 10: return upper;
-    case 11: return digit || (character >= 'a' && character <= 'f') || (character >= 'A' && character <= 'F');
-    case 12: return character == 0x20 || character == 0x09;
-    default: return 0;
-    }
 }
 
 // wctype and iswctype use the rune locale's masks (RuneLocale.cpp).

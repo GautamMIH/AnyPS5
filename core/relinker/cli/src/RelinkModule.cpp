@@ -1,6 +1,7 @@
 #include <Cli.hpp>
 #include <domain/Types.hpp>
 #include <io/FileWriter.hpp>
+#include <io/NativePath.hpp>
 #include <io/ByteWriter.hpp>
 #include <elfpatcher/linux/LinuxElfPatcher.hpp>
 #include <elfpatcher/general/SegmentFilter.hpp>
@@ -101,15 +102,15 @@ PreparedModule PrepareModule(const std::vector<std::uint8_t>& inputBytes, const 
 ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOutputPath, const Args& args) {
     Io::FileWriter fileWriter;
     auto& result = module.Result;
-    const std::filesystem::path outFsPath(absOutputPath);
+    const std::filesystem::path outFsPath = Io::NativePath(absOutputPath);
     if (args.writeRegistry) {
-        const std::string registryPath = (outFsPath.parent_path() / (outFsPath.stem().string() + ".registry.json")).string();
+        const std::string registryPath = Io::Utf8Path(outFsPath.parent_path() / Io::NativePath(Io::Utf8Path(outFsPath.stem()) + ".registry.json"));
         fileWriter.Write(registryPath, std::make_shared<Relinker::CallRegistryWriter>()->WriteCallRegistry(result.RegistryEntries));
     }
 
     const bool isLibrary = result.LinkInfo.Kind == Domain::ModuleKind::Library;
     if (isLibrary)
-        result.LinkInfo.SoName = outFsPath.filename().string();
+        result.LinkInfo.SoName = Io::Utf8Path(outFsPath.filename());
     const std::string runPath = isLibrary && !args.runPathSpecified ? std::string(kLibraryRunPath) : args.runPath;
 
     auto byteWriter = std::make_shared<Io::ByteWriter>();
@@ -118,7 +119,7 @@ ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOut
         patcher = std::make_shared<Elfpatcher::MacOs::MacOsMachOPatcher>();
     } else if (args.toWindows) {
         // The game's icon (sce_sys/icon0.png beside the input) becomes the executable's icon (upstream).
-        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui, std::filesystem::path(args.inputPath).parent_path() / "sce_sys" / "icon0.png");
+        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui, Io::NativePath(args.inputPath).parent_path() / "sce_sys" / "icon0.png");
     } else {
         patcher = std::make_shared<Elfpatcher::Linux::LinuxElfPatcher>(
             std::make_shared<Elfpatcher::EntryStubBuilder>(),

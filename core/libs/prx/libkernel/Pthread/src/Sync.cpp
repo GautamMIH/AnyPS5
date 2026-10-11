@@ -10,6 +10,13 @@ namespace PthreadSync {
 namespace {
 
 constexpr std::uintptr_t kAdaptiveMutexInitializer = 1;
+// A destroyed mutex holds this marker (FreeBSD's THR_MUTEX_DESTROYED), so a later use reports EINVAL
+// instead of initializing it again (upstream 709c12e13).
+constexpr std::uintptr_t kDestroyedMutex = 2;
+
+bool isDestroyedMutex(PthreadMutexPrivate* value) {
+    return reinterpret_cast<std::uintptr_t>(value) == kDestroyedMutex;
+}
 
 std::mutex& staticInitializationMutex() {
     static std::mutex instance;
@@ -26,6 +33,8 @@ PthreadMutexPrivate* resolveMutex(PthreadMutex* mutex) {
         throw std::runtime_error("pthread mutex: null pointer");
     std::atomic_ref<PthreadMutexPrivate*> slot(*mutex);
     PthreadMutexPrivate* current = slot.load(std::memory_order_acquire);
+    if (isDestroyedMutex(current))
+        return nullptr;
     if (!isStaticMutexInitializer(current))
         return current;
     const std::lock_guard lock(staticInitializationMutex());
@@ -101,17 +110,21 @@ int MutexCreate(PthreadMutex* mutex, const MutexType type) {
 int MutexDestroy(PthreadMutex* mutex) {
     if (mutex == nullptr)
         throw std::runtime_error("pthread mutex: null pointer");
+    if (isDestroyedMutex(*mutex))
+        return kErrorInvalid;
     // A locked mutex cannot be destroyed (upstream d77bc7c36).
     if (!isStaticMutexInitializer(*mutex) && (*mutex)->_owner.load(std::memory_order_acquire) != std::thread::id{})
         return kErrorBusy;
     if (!isStaticMutexInitializer(*mutex))
         delete *mutex;
-    *mutex = nullptr;
+    *mutex = reinterpret_cast<PthreadMutex>(kDestroyedMutex);
     return 0;
 }
 
 int MutexLock(PthreadMutex* mutex, const Deadline& deadline) {
     auto* m = resolveMutex(mutex);
+    if (m == nullptr)
+        return kErrorInvalid;
     const auto self = std::this_thread::get_id();
     if (m->_type == MutexType::Recursive) {
         if (deadline) {
@@ -138,6 +151,8 @@ int MutexLock(PthreadMutex* mutex, const Deadline& deadline) {
 
 int MutexTryLock(PthreadMutex* mutex) {
     auto* m = resolveMutex(mutex);
+    if (m == nullptr)
+        return kErrorInvalid;
     const auto self = std::this_thread::get_id();
     if (m->_type == MutexType::Recursive) {
         if (!m->_rmtx.try_lock())
@@ -154,6 +169,8 @@ int MutexTryLock(PthreadMutex* mutex) {
 
 int MutexUnlock(PthreadMutex* mutex) {
     auto* m = resolveMutex(mutex);
+    if (m == nullptr)
+        return kErrorInvalid;
     if (m->_owner.load(std::memory_order_acquire) != std::this_thread::get_id())
         return kErrorPermission;
     if (m->_type == MutexType::Recursive) {
@@ -205,6 +222,8 @@ bool cancellableWait(std::condition_variable_any& condition, TLock& lock, const 
 int CondWait(PthreadCond* cond, PthreadMutex* mutex, const Deadline& deadline) {
     auto* c = resolveCond(cond);
     auto* m = resolveMutex(mutex);
+    if (m == nullptr)
+        return kErrorInvalid;
     const auto self = std::this_thread::get_id();
     if (m->_owner.load(std::memory_order_acquire) != self)
         return kErrorPermission;
@@ -263,6 +282,9 @@ int RwlockCreate(PthreadRwlock* rwlock) {
 int RwlockDestroy(PthreadRwlock* rwlock) {
     if (rwlock == nullptr)
         throw std::runtime_error("pthread rwlock: null pointer");
+    // A locked rwlock cannot be destroyed (EBUSY, upstream 718eb9cc3).
+    if (auto* current = *rwlock; current != nullptr && (current->writer.load(std::memory_order_acquire) != std::thread::id{} || current->readers.load(std::memory_order_acquire) != 0))
+        return kErrorBusy;
     delete *rwlock;
     *rwlock = nullptr;
     return 0;
@@ -289,6 +311,7 @@ int RwlockLock(PthreadRwlock* rwlock, const bool exclusive, const Deadline& dead
     } else {
         r->lock.lock_shared();
     }
+    r->readers.fetch_add(1, std::memory_order_release);
     return 0;
 }
 
@@ -303,7 +326,10 @@ int RwlockTryLock(PthreadRwlock* rwlock, const bool exclusive) {
         r->writer.store(self, std::memory_order_release);
         return 0;
     }
-    return r->lock.try_lock_shared() ? 0 : kErrorBusy;
+    if (!r->lock.try_lock_shared())
+        return kErrorBusy;
+    r->readers.fetch_add(1, std::memory_order_release);
+    return 0;
 }
 
 int RwlockUnlock(PthreadRwlock* rwlock) {
@@ -313,6 +339,7 @@ int RwlockUnlock(PthreadRwlock* rwlock) {
         r->lock.unlock();
         return 0;
     }
+    r->readers.fetch_sub(1, std::memory_order_release);
     r->lock.unlock_shared();
     return 0;
 }

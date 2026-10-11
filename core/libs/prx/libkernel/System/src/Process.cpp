@@ -243,6 +243,13 @@ int APS5_VABI waitpid_nid_postfix(int pid, int* status, int options) {
     return -1;
 }
 
+int APS5_VABI execvp_nid_postfix(const char* file, char* const* arguments) {
+    (void)file;
+    (void)arguments;
+    NotImplemented_nid_no_patch("execvp: executable replacement");
+    return -1;
+}
+
 int APS5_VABI sceKernelGetCurrentCpu(void) {
 #ifdef _WIN32
     PROCESSOR_NUMBER processor{};
@@ -294,6 +301,10 @@ int APS5_VABI sceKernelUuidCreate(uint32_t* uuid) {
 
 void APS5_VABI sceKernelSync(void) {
     SyncWrittenPaths_nid_no_patch();
+}
+
+void APS5_VABI sync_nid_postfix(void) {
+    sceKernelSync();
 }
 
 int APS5_VABI sched_get_priority_max_nid_postfix(int policy) {

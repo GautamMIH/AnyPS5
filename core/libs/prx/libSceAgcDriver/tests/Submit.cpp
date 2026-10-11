@@ -305,6 +305,7 @@ void testMultiAcbs() {
 
 }
 
+
 void testShaderHeaderAlignment() {
     alignas(256) static const std::array<std::uint32_t, 64> code{0xbf810000};
     alignas(8) static std::array<std::byte, 2 * sizeof(Shader)> storage{};

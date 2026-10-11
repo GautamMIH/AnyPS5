@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstddef>
+#include <cerrno>
 #include <ctime>
 #include <cstring>
 
@@ -55,6 +56,14 @@ extern "C" {
 
 std::tm* APS5_VABI localtime_s_nid_postfix(const int64_t* timer, std::tm* result);
 std::tm* APS5_VABI gmtime_s_nid_postfix(const int64_t* timer, std::tm* result);
+
+void APS5_VABI tzset_nid_postfix(void) {
+#ifdef _WIN32
+    _tzset();
+#else
+    ::tzset();
+#endif
+}
 
 int64_t APS5_VABI libc_time_nid_postfix(int64_t* timer) {
     std::time_t t = std::time(nullptr);
@@ -147,6 +156,14 @@ size_t APS5_VABI libc_strftime_nid_postfix(char* str, size_t count, const char* 
 char* APS5_VABI asctime_nid_postfix(const std::tm* timeptr) {
     const std::tm host = toHost(timeptr);
     return std::asctime(&host);
+}
+
+char* APS5_VABI ctime_nid_postfix(const int64_t* timer) {
+    if (const std::tm* local = localtime_nid_postfix(timer)) return asctime_nid_postfix(local);
+    static char unknown[26];
+    std::memcpy(unknown, "??? ??? ?? ??:??:?? ????\n", sizeof(unknown));
+    errno = EINVAL;
+    return unknown;
 }
 
 size_t APS5_VABI strftime_nid_postfix(char* str, size_t count, const char* format, const std::tm* timeptr) {

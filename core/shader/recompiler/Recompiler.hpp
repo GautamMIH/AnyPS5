@@ -300,6 +300,9 @@ inline constexpr std::uint32_t MeshArgumentAddressDword = 4;
 inline constexpr std::uint32_t MeshArgumentIndexCountDword = 3;
 inline constexpr std::uint32_t MeshArgumentFirstIndexDword = 4;
 inline constexpr std::uint32_t MeshArgumentBytes = 20;
+inline constexpr std::uint32_t MeshIndexRestartTable = 0x100;
+inline constexpr std::uint32_t MeshRestartLengthDword = MeshArgumentBytes / 4;
+inline constexpr std::uint32_t MeshRestartTableDword = MeshRestartLengthDword + 1;
 inline constexpr std::uint32_t MeshIndexBufferUserWord = 4;
 inline constexpr std::uint32_t WorkgroupMemoryDescriptorSet = 1;
 
@@ -385,6 +388,7 @@ struct DescriptorBinding {
     std::vector<bool> samplerUnnormalized;
     std::vector<bool> imageUnnormalized;
     std::vector<std::uint32_t> imageSamplers;
+    std::vector<bool> bufferRead;
 };
 
 struct VertexAttribute {

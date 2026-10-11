@@ -5,8 +5,18 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "../include/PthreadSync.hpp"
+#include <stdexcept>
+
+namespace {
+
+constexpr int kPrioProtect = 2;
+constexpr int kSchedRr = 3;
+
+}
 
 extern "C" {
+
+int APS5_VABI sched_get_priority_max_nid_postfix(int policy);
 
 int APS5_VABI pthread_mutex_destroy_nid_postfix(PthreadMutex* mutex) {
     return PthreadSync::MutexDestroy(mutex);
@@ -51,8 +61,24 @@ int APS5_VABI pthread_mutexattr_init_nid_postfix(PthreadMutexattr* attr) {
 }
 
 int APS5_VABI pthread_mutexattr_setprotocol_nid_postfix(PthreadMutexattr* attr, int protocol) {
-    if (!attr || !*attr || protocol < 0 || protocol > 2) return PthreadSync::kErrorInvalid;
+    if (!attr || !*attr || protocol < 0 || protocol > kPrioProtect) return PthreadSync::kErrorInvalid;
     (*attr)->protocol = protocol;
+    (*attr)->ceiling = sched_get_priority_max_nid_postfix(kSchedRr);
+    return 0;
+}
+
+int APS5_VABI pthread_mutexattr_setprioceiling_nid_postfix(PthreadMutexattr* attr, int prioceiling) {
+    if (!attr || !*attr) throw std::runtime_error("pthread_mutexattr_setprioceiling: null attr");
+    if ((*attr)->protocol != kPrioProtect) return PthreadSync::kErrorInvalid;
+    (*attr)->ceiling = prioceiling;
+    return 0;
+}
+
+int APS5_VABI pthread_mutexattr_getprioceiling_nid_postfix(const PthreadMutexattr* attr, int* prioceiling) {
+    if (!attr || !*attr) throw std::runtime_error("pthread_mutexattr_getprioceiling: null attr");
+    if (!prioceiling) throw std::runtime_error("pthread_mutexattr_getprioceiling: null prioceiling");
+    if ((*attr)->protocol != kPrioProtect) return PthreadSync::kErrorInvalid;
+    *prioceiling = (*attr)->ceiling;
     return 0;
 }
 

@@ -4,6 +4,10 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/Ampr/include/AmprPackets.hpp"
+#include <array>
+#include <atomic>
+#include <cstring>
+#include <thread>
 
 namespace {
 
@@ -30,6 +34,12 @@ void commit(AmprCommandBuffer* cb, std::uint32_t size, std::uint32_t flags) {
     cb->flags |= flags;
 }
 
+}
+
+static std::atomic_flag sharedPtrSpinLock;
+
+extern "C" {
+int APS5_VABI wcsrtombs_s_nid_postfix(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t** source, std::size_t limit, void* state);
 }
 
 extern "C" {
@@ -456,9 +466,8 @@ int APS5_VABI _ZNSt7num_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE2idE_n
 }
 
 
-int APS5_VABI _Unlock_shared_ptr_spin_lock_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _Unlock_shared_ptr_spin_lock_nid_postfix(void) {
+    sharedPtrSpinLock.clear(std::memory_order_release);
 }
 
 int APS5_VABI _Cnd_init_with_name_nid_postfix(void) {
@@ -496,15 +505,14 @@ int APS5_VABI _ZNSt8time_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE7_Get
     return 0;
 }
 
-int APS5_VABI _Lock_shared_ptr_spin_lock_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _Lock_shared_ptr_spin_lock_nid_postfix(void) {
+    while (sharedPtrSpinLock.test_and_set(std::memory_order_acquire)) std::this_thread::yield();
 }
 
 
-int APS5_VABI wcstombs_s_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI wcstombs_s_nid_postfix(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t* source, std::size_t limit) {
+    std::array<std::uint64_t, 16> state{};
+    return wcsrtombs_s_nid_postfix(result, destination, capacity, &source, limit, state.data());
 }
 
 int APS5_VABI __cxa_call_unexpected_nid_postfix(void) {

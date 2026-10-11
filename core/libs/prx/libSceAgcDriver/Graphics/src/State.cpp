@@ -125,7 +125,7 @@ DecodedColorFormat decodeColorFormat(std::uint32_t info) {
     // 8_8_8_8 and 16_16_16_16 also take the reversed orders SWAP_STD_REV (A, B, G, R in attachment
     // components 0-3) and SWAP_ALT_REV (A, R, G, B) (upstream 5b10200b, 9ebc907b).
     const bool reversible = format == 10 || format == 12;
-    if (!single && (swap > 1 ? !reversible : swap == 1 && format != 9 && format != 10)) return fail();
+    if (!single && (swap > 1 ? !reversible : swap == 1 && format != 3 && format != 9 && format != 10)) return fail();
     const bool alternate = swap == 1;
     const auto reversed = static_cast<std::uint8_t>(swap == 2 ? 0x1bu : swap == 3 ? 0x93u : 0xe4u);
     const auto one = [&](VkFormat vkFormat, std::uint32_t bytes) { return DecodedColorFormat{vkFormat, bytes, static_cast<std::uint8_t>((0xe4u & ~3u) | swap)}; };
@@ -139,10 +139,14 @@ DecodedColorFormat decodeColorFormat(std::uint32_t info) {
             if (number == snorm) return one(VK_FORMAT_R16_SNORM, 2);
             if (number == floating) return one(VK_FORMAT_R16_SFLOAT, 2);
             break;
-        case 3:
-            if (number == unorm) return {VK_FORMAT_R8G8_UNORM, 2};
-            if (number == snorm) return {VK_FORMAT_R8G8_SNORM, 2};
+        // SWAP_ALT on COLOR_8_8 stores the x and w exports (Mesa si_translate_colorswap "X__Y";
+        // upstream 048c9ff0).
+        case 3: {
+            const auto mapping = static_cast<std::uint8_t>(alternate ? 0xecu : 0xe4u);
+            if (number == unorm) return {VK_FORMAT_R8G8_UNORM, 2, mapping};
+            if (number == snorm) return {VK_FORMAT_R8G8_SNORM, 2, mapping};
             break;
+        }
         case 4: if (number == floating) return one(VK_FORMAT_R32_SFLOAT, 4); break;
         case 5:
             if (number == floating) return {VK_FORMAT_R16G16_SFLOAT, 4};
@@ -837,6 +841,7 @@ State DecodeState(const QueueState& queue) {
         }
         state.blendEnable = (blend >> 30u) & 1u;
         if (state.blendEnable && (mapping == 0x1bu || mapping == 0x93u)) throw std::runtime_error("AGC graphics: blending into a color target with a reversed component order is not implemented");
+        if (state.blendEnable && mapping == 0xecu) throw std::runtime_error("AGC graphics: blending into an 8_8 color target with the alternate component order is not implemented");
         if (state.blendEnable) {
             Require((read(cx, 0x31c + 0xfu * slot) & 0x10000u) == 0, "blend bypass conflicts with enabled blending");
             state.srcColorBlendFactor = blendFactor(blend & 0x1fu);

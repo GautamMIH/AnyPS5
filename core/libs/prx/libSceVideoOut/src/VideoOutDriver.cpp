@@ -259,6 +259,8 @@ VideoOutDriver::VideoOutDriver() {
         AgcDriverWaitIdle_nid_postfix();
         std::promise<void> started;
         auto attached = started.get_future();
+        // Upstream raises the presenter's priority here (APS5_THREAD_PRIORITY, a9c132a6); this
+        // driver does not take ThreadPriority.
         presentThread = std::jthread([this, &started](std::stop_token token) { presentLoop(token, started); });
         attached.get();
         vblankThread = std::jthread([this](std::stop_token token) { vblankLoop(token); });

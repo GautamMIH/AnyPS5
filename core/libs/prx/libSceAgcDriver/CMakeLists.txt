@@ -230,6 +230,35 @@ if(ANYPS5_ENABLE_SPIRV_TOOLS)
     configure_windows_unwind(agc_spirv_optimizer_tests)
 endif()
 
+# Upstream 961b25fe merge: recompiler-only tests (LDS atomic lock, vertex-program barriers, scalar
+# aperture sources, the structurizer without the dominance-intersection reuse).
+add_test_executable(agc_spirv_lds_atomic_lock_tests EXCLUDE_FROM_ALL tests/SpirvLdsAtomicLock.cpp)
+target_link_libraries(agc_spirv_lds_atomic_lock_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_spirv_lds_atomic_lock_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_spirv_lds_atomic_lock_tests)
+add_test_executable(agc_vertex_barrier_tests EXCLUDE_FROM_ALL tests/VertexBarrier.cpp)
+target_link_libraries(agc_vertex_barrier_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_vertex_barrier_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_vertex_barrier_tests)
+if(BUILD_TESTING)
+    foreach(agcTest IN ITEMS agc_spirv_lds_atomic_lock agc_vertex_barrier)
+        set_target_properties(${agcTest}_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+        add_test(NAME ${agcTest} COMMAND ${agcTest}_tests)
+        set_tests_properties(${agcTest} PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1")
+        if(WIN32)
+            set_tests_properties(${agcTest} PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
+    add_test(NAME agc_structurizer_intersection_off COMMAND agc_structurizer_tests)
+    set_tests_properties(agc_structurizer_intersection_off PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_PERF_DOM_INTERSECTION=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+    add_test_executable(aperture_sources_tests ${LIBS_INCLUDE_DIR}/tests/ApertureSources.cpp)
+    target_link_libraries(aperture_sources_tests PRIVATE shader_recompiler_agc_driver libc)
+    configure_windows_unwind(aperture_sources_tests)
+    add_test(NAME aperture_sources COMMAND aperture_sources_tests)
+endif()
+# Not taken with upstream's driver: ThreadPriority (APS5_THREAD_PRIORITY for upstream's queue
+# workers; this driver places its worker and device thread with ThreadPlacement).
+
 add_test_executable(agc_dpp_write_tests EXCLUDE_FROM_ALL tests/DppWrite.cpp)
 target_link_libraries(agc_dpp_write_tests PRIVATE shader_recompiler_agc_driver libc)
 set_target_properties(agc_dpp_write_tests PROPERTIES CXX_EXTENSIONS OFF)
@@ -481,9 +510,9 @@ file(GLOB agcExecutionTestSources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/
 # these need a guest-memory harness first: image tests fail with "guest memory backing range ... is
 # unmapped", store/atomic tests with a BDA permission fault (reason 2). VulkanTestDevice.hpp has a
 # guest-memory block (GuestTestMemory) for images, as ImageAtomics64 and the image format tests use.
-# Upstream's ConstantStore (narrow constant stores), BdaSpanReads and MaskedGlobalStore (new in the
-# 5edae353 merge) write to the host heap the same way.
-list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ImageAtomics|ImageAtomicsBitwise|ImageAtomicsFloat|ImageCacheBits|ImageTexelStatus|PixelHelperLanes|FlatStore|FlatCacheBits|GlobalAtomicCsub|GlobalAtomics|GlobalAtomics64|GlobalAtomicsFloat|GlobalAtomicsLanes|GlobalStoreAddtid|GlobalVccBase|ConstantStore|BdaSpanReads|MaskedGlobalStore)\\.cpp$")
+# Upstream's ConstantStore (narrow constant stores), BdaSpanReads, MaskedGlobalStore (new in the
+# 5edae353 merge) and FlatApertures (961b25fe) write to the host heap the same way.
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ImageAtomics|ImageAtomicsBitwise|ImageAtomicsFloat|ImageCacheBits|ImageTexelStatus|PixelHelperLanes|FlatStore|FlatCacheBits|GlobalAtomicCsub|GlobalAtomics|GlobalAtomics64|GlobalAtomicsFloat|GlobalAtomicsLanes|GlobalStoreAddtid|GlobalVccBase|ConstantStore|BdaSpanReads|MaskedGlobalStore|FlatApertures)\\.cpp$")
 # Others drive upstream's driver internals (single color/blend state, DescribeSurface, StorageTexture,
 # texture cache flushes) and need porting to this driver's State and caches.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(EmulatedColorCompare|ImageStorePacked|PixelLds|PixelLdsLaneSlots|PixelValidMask|ViewPastLastMip)\\.cpp$")
@@ -512,6 +541,9 @@ list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(PreparedShaders|PreparedGra
 # zero-stride and null vertex fetches, compute LDS beyond the device limit); the tests need porting
 # to this driver's interfaces first.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(DepthBiasPerFace|DrawOffsetIndices|DualSourceBlend|DwordPatternFill|FillCoverKeys|GatedDispatchCapture|GuardedNullPointer|ImagePipeBankXor|ImagePlaneAddressOnLine|ImageStoreLineThroughPlane|ImageVolumeAddressOnPlane|LdsBeyondDeviceLimit|PackedUnormColorTarget|PatternBufferFill|PendingExactSurface|PixelBarycentricEmulation|PixelFixedPointPosition|PixelUint16Export|ProvokingVertex|Uint8x4ColorTarget|UnimportedLabelOrder|ZeroStrideVertexFetch)\\.cpp$")
+# Likewise from the 961b25fe merge: upstream Recorder, DrawCache, CopyBuffer/FillBuffer, GpuMutex,
+# registration preparation and AgcDriverShutdown internals.
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(CopiedWriterCopy|DrawCacheReuse|HostImportAtMap|IndirectArgumentsWrittenAhead|PooledBufferRange|RecordedKeptBytes|RegistrationPrepareShutdown)\\.cpp$")
 set(agcExecutionTests)
 foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
     get_filename_component(agcExecutionTestName ${agcExecutionTestSource} NAME_WE)
