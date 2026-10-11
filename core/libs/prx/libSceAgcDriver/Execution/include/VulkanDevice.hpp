@@ -59,6 +59,13 @@ public:
     // VK_EXT_sampler_filter_minmax: min and max sampler reduction modes (S# FILTER_MODE 1 and 2).
     bool SamplerFilterMinmax() const;
     bool ConservativeRasterization() const;
+    // The shader stages with subgroup operations (VkPhysicalDeviceSubgroupProperties::supportedStages).
+    VkShaderStageFlags SubgroupStages() const;
+    // Presentations queued since start (upstream's PresentCounts; only `presents` is kept here).
+    struct PresentStatistics {
+        std::uint64_t presents;
+    };
+    static PresentStatistics PresentCounts();
     void PresentClear(std::uint32_t width, std::uint32_t height, bool opaque);
     void PresentPixels(std::uint32_t width, std::uint32_t height, std::span<const std::byte> pixels);
     void PresentDisplayBuffer(const DisplayBuffer& buffer);

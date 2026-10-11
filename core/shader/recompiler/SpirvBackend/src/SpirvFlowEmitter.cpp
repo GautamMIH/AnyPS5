@@ -85,7 +85,8 @@ void EmitReturnTerminator(SpirvValueEmitContext& ctx) {
         const auto pc = state.module.AllocateId();
         state.module.AddFunction(spv::OpLoad, TypeU32(state), pc, state.loopGuardPc);
         EmitIfCondition(state, Binary(state, spv::OpINotEqual, TypeBool(state), pc, ConstantU32(state, 0u)), [&] {
-            RecordBdaFault(state, BdaConstant(state, state.program.Resources().shaderHash), ConstantU32(state, state.loopGuardLimit), EmitBinaryU32(state, spv::OpISub, pc, ConstantU32(state, 1u)), BdaAbi::FaultReason::LoopLimit);
+            const auto hash = state.program.Resources().shaderHash;
+            RecordBdaFaultWords(state, ConstantU32(state, static_cast<std::uint32_t>(hash)), ConstantU32(state, static_cast<std::uint32_t>(hash >> 32u)), ConstantU32(state, state.loopGuardLimit), EmitBinaryU32(state, spv::OpISub, pc, ConstantU32(state, 1u)), BdaAbi::FaultReason::LoopLimit);
         });
     }
     if (OrderedPixelShader(state)) {
@@ -507,6 +508,9 @@ void EmitDirectInstruction(SpirvValueEmitContext& ctx, const IrValue& inst) {
         case IrOpcode::StoreAddressU8: return Invoke(EmitStoreAddressU8, ctx, inst);
         case IrOpcode::StoreAddressU16: return Invoke(EmitStoreAddressU16, ctx, inst);
         case IrOpcode::StoreAddressU32: return Invoke(EmitStoreAddressU32, ctx, inst);
+        case IrOpcode::StoreAddressU32x2: return Invoke(EmitStoreAddressU32x2, ctx, inst);
+        case IrOpcode::StoreAddressU32x3: return Invoke(EmitStoreAddressU32x3, ctx, inst);
+        case IrOpcode::StoreAddressU32x4: return Invoke(EmitStoreAddressU32x4, ctx, inst);
         case IrOpcode::AddressAtomicSwap32: return Invoke(EmitAddressAtomic, ctx, inst);
         case IrOpcode::AddressAtomicCmpSwap32: return Invoke(EmitAddressAtomic, ctx, inst);
         case IrOpcode::AddressAtomicIAdd32: return Invoke(EmitAddressAtomic, ctx, inst);
@@ -729,7 +733,7 @@ void EmitStructuredBlock(SpirvValueEmitContext& ctx, StructuredFunctionState& fu
             } else if (access != SharedAccess::None) {
                 const bool writes = access != SharedAccess::Read;
                 if (ldsWritten || (writes && ldsRead)) {
-                    state.module.AddFunction(spv::OpControlBarrier, ConstantU32(state, state.waveLdsScope), ConstantU32(state, spv::ScopeWorkgroup), ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask | spv::MemorySemanticsWorkgroupMemoryMask));
+                    state.module.AddFunction(spv::OpControlBarrier, ConstantU32(state, state.waveLdsScope), ConstantU32(state, spv::ScopeWorkgroup), ConstantU32(state, spv::MemorySemanticsAcquireReleaseMask | LdsMemorySemantics(state)));
                     ldsWritten = false;
                     ldsRead = false;
                 }
@@ -814,11 +818,13 @@ void EmitControlFlow(SpirvValueEmitContext& context, StructuredFunctionState& fu
         // continue target), so a BDA fault in the continue target's instructions does not stop the
         // invocation; the fault is recorded all the same.
         const bool stops = state.bdaStopsInvocations;
-        state.bdaStopsInvocations = stops && !IsContinueTarget(program, info->id);
+        state.continueTarget = IsContinueTarget(program, info->id);
+        state.bdaStopsInvocations = stops && !state.continueTarget;
         EmitStructuredBlock(context, functionState, block);
         functionState.blockExitLabels.emplace(block, state.currentLabel);
         EmitStructuredTerminator(context, program, *info);
         state.bdaStopsInvocations = stops;
+        state.continueTarget = false;
     }
     PatchStructuredPhis(context, functionState);
 }
@@ -829,7 +835,7 @@ void EmitVoid(SpirvValueEmitContext&) {
 void EmitBarrier(SpirvEmitterState& state) {
     const bool tessellation = state.program.Resources().stage == IrShaderStage::TessellationControl;
     const auto memoryScope = tessellation ? spv::ScopeInvocation : spv::ScopeWorkgroup;
-    const auto semantics = tessellation ? spv::MemorySemanticsMaskNone : spv::MemorySemanticsAcquireReleaseMask | spv::MemorySemanticsWorkgroupMemoryMask;
+    const std::uint32_t semantics = tessellation ? static_cast<std::uint32_t>(spv::MemorySemanticsMaskNone) : spv::MemorySemanticsAcquireReleaseMask | LdsMemorySemantics(state);
     state.module.AddFunction(spv::OpControlBarrier, ConstantU32(state, spv::ScopeWorkgroup), ConstantU32(state, memoryScope), ConstantU32(state, semantics));
 }
 

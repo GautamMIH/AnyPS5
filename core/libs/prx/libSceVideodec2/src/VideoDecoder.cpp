@@ -24,6 +24,7 @@ std::uint64_t Nv12Bytes(std::uint32_t width, std::uint32_t height) {
 
 #include <algorithm>
 #include <cstring>
+#include <new>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -77,12 +78,18 @@ public:
         packet->pts = static_cast<std::int64_t>(pts);
         packet->dts = static_cast<std::int64_t>(dts);
         packet->opaque = reinterpret_cast<void*>(static_cast<std::uintptr_t>(attachedData));
+        // The access unit's own decode timestamp travels with its picture (FFmpeg's pkt_dts is the
+        // timestamp of the packet that released the picture, later under reordering).
+        packet->opaque_ref = av_buffer_alloc(sizeof(dts));
+        if (packet->opaque_ref == nullptr) throw std::bad_alloc();
+        std::memcpy(packet->opaque_ref->data, &dts, sizeof(dts));
         auto error = avcodec_send_packet(context, packet);
         if (error == AVERROR_EOF) {
             // A new stream after a flush.
             avcodec_flush_buffers(context);
             error = avcodec_send_packet(context, packet);
         }
+        av_buffer_unref(&packet->opaque_ref);
         packet->data = nullptr;
         packet->size = 0;
         if (error < 0) throw std::runtime_error("video decode failed: " + errorText(error));
@@ -120,6 +127,11 @@ private:
         const auto width = static_cast<std::uint32_t>(nv12->width);
         const auto height = static_cast<std::uint32_t>(nv12->height);
         Picture picture{width, height, Nv12Pitch(width), alignUp(height, 16), static_cast<std::uint64_t>(frame->pts), static_cast<std::uint64_t>(frame->pkt_dts), static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(frame->opaque))};
+        picture.keyFrame = (frame->flags & AV_FRAME_FLAG_KEY) != 0;
+        if (frame->opaque_ref != nullptr && frame->opaque_ref->size >= sizeof(picture.dts))
+            std::memcpy(&picture.dts, frame->opaque_ref->data, sizeof(picture.dts));
+        picture.profile = context->profile;
+        picture.level = context->level;
         if (Nv12Bytes(width, height) > output.size()) {
             av_frame_unref(frame);
             throw std::length_error("decoded picture exceeds the frame buffer");

@@ -6,11 +6,13 @@
 #include <relinker/parsing/SelfUnwrapper.hpp>
 #include <relinker/analysis/SyscallScanner.hpp>
 #include <relinker/guest/GuestImage.hpp>
+#include <relinker/output/CallRegistryWriter.hpp>
 #include <codegen/IAmd64OnlyConverter.hpp>
 #include <map>
 #include <codegen/CodegenException.hpp>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -23,17 +25,24 @@ int main(const int argc, char* argv[]) {
         return 1;
     }
 
+    if (args.showHelp) {
+        std::cout << Cli::Usage() << '\n';
+        return 0;
+    }
+
     try {
         if (args.gameMode)
             return Cli::RelinkGame(args, argc > 0 ? argv[0] : "");
 
         auto extension = std::filesystem::path(args.outputPath).extension().string();
         for (auto& character : extension) if (character >= 'A' && character <= 'Z') character = static_cast<char>(character + ('a' - 'A'));
-        if (!args.toWindows && extension == ".exe") std::cerr << "WARNING: Output filename ends with .exe, but --windows was not specified. The output will be a Linux ELF executable.\n";
+        if (!args.toWindows && !args.toMacos && extension == ".exe") std::cerr << "WARNING: Output filename ends with .exe, but --windows was not specified. The output will be a Linux ELF executable.\n";
         Io::FileReader fileReader;
         Io::FileWriter fileWriter;
 
         auto inputBytes = fileReader.Read(args.inputPath);
+        if (std::filesystem::exists(args.outputPath) && std::filesystem::equivalent(args.inputPath, args.outputPath))
+            throw Domain::RelinkerException("Executable output would overwrite the input executable");
         const std::string absPath = std::filesystem::absolute(args.outputPath).string();
 
         std::vector<Codegen::TrampolineSite> trampolines;
@@ -60,12 +69,21 @@ int main(const int argc, char* argv[]) {
         // A single executable: modules shipped beside it (sce_module/) are relinked as guest
         // modules it loads first. --game mode relinks a whole dump, modules included.
         auto module = Cli::PrepareModule(inputBytes, args);
-        std::cout << "sce_module/sce_modules/prx processing: " << (args.skipSceModule ? "disabled (--skip-sce-module)" : "enabled") << '\n';
+        std::cout << Relinker::GuestModulePattern << " processing: " << (args.skipSceModule ? "disabled (--skip-sce-module)" : "enabled") << '\n';
         for (const auto& name : args.excludedSceModules) std::cout << "Guest module excluded: " << name << '\n';
         std::vector<Relinker::GuestArtifact> guestArtifacts;
         if (!args.skipSceModule) {
             const auto syscallScanner = args.skipSyscallCheck ? Relinker::MakeNullSyscallScanner() : Relinker::MakeSyscallScanner();
-            guestArtifacts = Relinker::GuestModuleBuilder().Build(args.inputPath, absPath, module.Result.DynamicSection, args.toWindows, args.toIntel, *syscallScanner, args.lazyBinding, args.runPath, args.excludedSceModules);
+            guestArtifacts = Relinker::GuestModuleBuilder().Build(args.inputPath, absPath, module.Result.DynamicSection, args.toWindows, args.toMacos, args.toIntel, *syscallScanner, args.lazyBinding, args.runPath, args.excludedSceModules, args.sceModulePath);
+        }
+        if (args.writeRegistry) {
+            // Each converted guest module gets its imports registry beside the executable's (upstream bd750b59).
+            const std::filesystem::path outFsPath(absPath);
+            const auto registryWriter = std::make_shared<Relinker::CallRegistryWriter>();
+            for (const auto& artifact : guestArtifacts) {
+                const auto modulePath = outFsPath.parent_path() / (outFsPath.stem().string() + "." + artifact.Path.filename().string() + ".registry.json");
+                fileWriter.Write(modulePath.string(), registryWriter->WriteModuleImports(artifact.Imports));
+            }
         }
         module.Trampolines = std::move(trampolines);
         Cli::EmitModule(module, absPath, args);

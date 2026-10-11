@@ -13,6 +13,7 @@
 
 #include "SDL.h"
 #include "SceTypes.hpp"
+#include "prx/libc/include/PreciseWait.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 
 static constexpr int PORT_TYPE_MAIN = 0;
@@ -203,10 +204,7 @@ static void queueAudio(Port& port, const void* data) {
                 SDL_ClearQueuedAudio(port.device);
                 break;
             }
-            struct timespec req{};
-            req.tv_sec = 0;
-            req.tv_nsec = static_cast<long>(DRAIN_SLEEP_US * 1000ULL);
-            nanosleep(&req, nullptr);
+            PreciseSleepUs(DRAIN_SLEEP_US);
         }
         return;
     }
@@ -256,10 +254,7 @@ static void queueAudio(Port& port, const void* data) {
             SDL_ClearQueuedAudio(port.device);
             break;
         }
-        struct timespec req{};
-        req.tv_sec = 0;
-        req.tv_nsec = static_cast<long>(DRAIN_SLEEP_US * 1000ULL);
-        nanosleep(&req, nullptr);
+        PreciseSleepUs(DRAIN_SLEEP_US);
     }
 
     if (SDL_QueueAudio(port.device, queueData, queueSize) < 0) {
@@ -269,10 +264,7 @@ static void queueAudio(Port& port, const void* data) {
 }
 
 static void sleepUs(std::uint64_t us) {
-    struct timespec req{};
-    req.tv_sec = static_cast<time_t>(us / 1000000ULL);
-    req.tv_nsec = static_cast<long>((us % 1000000ULL) * 1000ULL);
-    nanosleep(&req, nullptr);
+    PreciseSleepUs(us);
 }
 
 static void paceVirtualPort(Port& port, bool hasData) {

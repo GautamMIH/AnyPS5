@@ -4,9 +4,11 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
+#include "Decoder/Png.hpp"
 #include "SDL_vulkan.h"
 #include <cstdlib>
 #include <cstdio>
+#include <span>
 #include <stdexcept>
 #include <string>
 
@@ -20,6 +22,17 @@ namespace {
 
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("DisplayWindow: ") + reason);
+}
+
+void applyAppIcon(SDL_Window* window) {
+    if (!HasAppIcon_nid_postfix()) return;
+    const auto data = GetAppIconData_nid_postfix();
+    auto image = Decoder::Png::Decode(std::span<const std::uint8_t>(data.bytes, static_cast<std::size_t>(data.size)));
+    require(image.has_value(), "failed to decode icon0.png");
+    SDL_Surface* icon = SDL_CreateRGBSurfaceWithFormatFrom(image->pixels.data(), static_cast<int>(image->width), static_cast<int>(image->height), 32, static_cast<int>(image->width * 4), SDL_PIXELFORMAT_RGBA32);
+    require(icon != nullptr, SDL_GetError());
+    SDL_SetWindowIcon(window, icon);
+    SDL_FreeSurface(icon);
 }
 
 #ifdef _WIN32
@@ -61,6 +74,7 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     require(window != nullptr, SDL_GetError());
     if (background) std::fprintf(stderr, "[AnyPS5] ANYPS5_BACKGROUND_WINDOW: the game window is hidden\n");
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
+    applyAppIcon(window);
     installSubclass();
 }
 

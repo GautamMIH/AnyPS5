@@ -8,6 +8,8 @@ namespace File {
 
 int FillFileStat(const std::filesystem::path& nativePath, FileStat* sb);
 int FillFileStatFromDescriptor(int descriptor, FileStat* sb);
+// lstat: false with errno set when the path cannot be read.
+bool FillLinkStat(const std::filesystem::path& nativePath, FileStat* sb);
 
 }
 

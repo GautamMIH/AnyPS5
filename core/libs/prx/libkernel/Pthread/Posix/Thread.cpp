@@ -3,6 +3,14 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
+#include "SceTypes.hpp"
+#include "../include/ThreadLifecycle.hpp"
+#include "../include/Cancel.hpp"
+#include "prx/libc/include/General.hpp"
+#include "../include/Pthread.hpp"
+#include "Common.hpp"
+#include "prx/libkernel/KernelErrors.hpp"
 #include <chrono>
 #include <mutex>
 #include <thread>
@@ -48,7 +56,10 @@ int APS5_VABI scePthreadDetach(Pthread thread);
 void APS5_VABI scePthreadExit(void* retval);
 Pthread APS5_VABI scePthreadSelf();
 int APS5_VABI scePthreadRename(Pthread thread, const char* name);
+int APS5_VABI scePthreadGetname(Pthread thread, char* name);
+int APS5_VABI scePthreadCancel(Pthread thread);
 int APS5_VABI scePthreadSetcancelstate(int state, int* old_state);
+int APS5_VABI scePthreadSetcanceltype(int type, int* old_type);
 void APS5_VABI scePthreadTestcancel();
 int APS5_VABI scePthreadSetprio(Pthread thread, int prio);
 int APS5_VABI scePthreadGetprio(Pthread thread, int* prio);
@@ -91,7 +102,14 @@ int APS5_VABI pthread_join_nid_postfix(Pthread thread, void** value) {
 }
 
 int APS5_VABI pthread_rename_np_nid_postfix(Pthread thread, const char* name) {
+    if (thread && name && std::strlen(name) >= 32) return posixFromSce(SCE_KERNEL_ERROR_ENAMETOOLONG);
     return posixFromSce(scePthreadRename(thread, name));
+}
+
+int APS5_VABI pthread_getname_np_nid_postfix(Pthread thread, char* name) {
+    if (!thread) return PosixThread::GUEST_ESRCH;
+    if (!name) return PosixThread::GUEST_EFAULT;
+    return PosixThread::ToErrno(scePthreadGetname(thread, name));
 }
 
 Pthread APS5_VABI pthread_self_nid_postfix(void) {
@@ -136,17 +154,34 @@ void APS5_VABI pthread_yield_nid_postfix(void) {
     std::this_thread::yield();
 }
 
+int APS5_VABI pthread_getcpuclockid_nid_postfix(Pthread thread, int* clockId) {
+    constexpr int guestFault = 14;
+    if (!thread) return PosixThread::GUEST_EINVAL;
+    if (!clockId) return guestFault;
+    *clockId = GuestThreadCpuClockId(thread);
+    return 0;
+}
+
 int APS5_VABI sched_yield_nid_postfix(void) {
     std::this_thread::yield();
     return 0;
 }
 
+int APS5_VABI pthread_cancel_nid_postfix(Pthread thread) {
+    return posixFromSce(scePthreadCancel(thread));
+}
+
+int APS5_VABI pthread_setcanceltype_nid_postfix(int type, int* old_type) {
+    return posixFromSce(scePthreadSetcanceltype(type, old_type));
+}
 void APS5_VABI pthread_testcancel_nid_postfix(void) {
     scePthreadTestcancel();
 }
 
 unsigned int APS5_VABI sleep_nid_postfix(unsigned int seconds) {
+    ThreadCancel::Check();
     std::this_thread::sleep_for(std::chrono::seconds(seconds));
+    ThreadCancel::Check();
     return 0;
 }
 

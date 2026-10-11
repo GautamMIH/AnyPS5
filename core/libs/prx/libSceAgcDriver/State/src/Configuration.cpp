@@ -14,8 +14,9 @@ namespace {
 // shader translator, which lowers tessellation without a guest-visible ring.
 struct RingConfiguration {
     std::mutex mutex;
-    const volatile void* tessellationFactorBase = nullptr;
-    std::uint32_t tessellationFactorSize = 0;
+    // The console's default ring until a title sets its own (upstream b38c8d6a).
+    std::uintptr_t tessellationFactorBase = 0xff0000000;
+    std::uint32_t tessellationFactorSize = 0x20000;
     std::array<std::uint64_t, 3> hullShaderOffchip{};
 };
 
@@ -36,12 +37,22 @@ int APS5_VABI sceAgcDriverSetHsOffchipParam(uint64_t value0, uint64_t value1, ui
 }
 
 int APS5_VABI sceAgcDriverSetTFRing(const volatile void* base, uint32_t size) {
-    if ((base == nullptr) != (size == 0)) throw std::runtime_error("sceAgcDriverSetTFRing: base and size must both be set or both be empty");
-    if ((reinterpret_cast<std::uintptr_t>(base) & 0xffu) != 0) throw std::runtime_error("sceAgcDriverSetTFRing: misaligned ring base");
+    if (base == nullptr || size == 0) throw std::invalid_argument("sceAgcDriverSetTFRing: empty ring");
+    if ((reinterpret_cast<std::uintptr_t>(base) & 0xffu) != 0) throw std::invalid_argument("sceAgcDriverSetTFRing: misaligned ring base");
     auto& state = configuration();
     std::lock_guard lock(state.mutex);
-    state.tessellationFactorBase = base;
+    state.tessellationFactorBase = reinterpret_cast<std::uintptr_t>(base);
     state.tessellationFactorSize = size;
+    return 0;
+}
+
+// Upstream d8ecb8e4.
+int APS5_VABI sceAgcDriverGetTFRing(uintptr_t* base, uint32_t* size) {
+    if (base == nullptr || size == nullptr) throw std::invalid_argument("sceAgcDriverGetTFRing: null output");
+    auto& state = configuration();
+    std::lock_guard lock(state.mutex);
+    *base = state.tessellationFactorBase;
+    *size = state.tessellationFactorSize;
     return 0;
 }
 

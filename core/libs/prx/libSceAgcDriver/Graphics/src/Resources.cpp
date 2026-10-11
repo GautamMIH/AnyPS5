@@ -23,6 +23,8 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
         mapping = allocation->mapping;
         deviceAddress = allocation->address;
         allocationBytes = allocation->allocationBytes;
+        offset = allocation->offset;
+        slab = allocation->slab;
         reusable = true;
         return;
     }
@@ -44,6 +46,18 @@ Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usag
         // an order of magnitude slower, so a cached type is preferred.
         const auto preferred = (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 ? VK_MEMORY_PROPERTY_HOST_CACHED_BIT : 0u;
         allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, properties, preferred);
+        if (const auto capacity = (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0 ? BufferPool::SlabCapacity(requirements.size, requirements.alignment, context.limits.nonCoherentAtomSize) : 0u; capacity != 0) {
+            const auto slot = cache->TakeSlot(context, allocation.memoryTypeIndex, capacity, addressable);
+            memory = slot.memory;
+            offset = slot.offset;
+            slab = true;
+            allocationBytes = capacity;
+            Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, offset), "vkBindBufferMemory slab");
+            initializeAddress(usage);
+            mapping = slot.mapping;
+            reusable = true;
+            return;
+        }
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory buffer");
         Check(context.Function<PFN_vkBindBufferMemory>("vkBindBufferMemory")(context.device, buffer, memory, 0), "vkBindBufferMemory");
         initializeAddress(usage);
@@ -61,7 +75,12 @@ Buffer::~Buffer() {
 
 void Buffer::release() noexcept {
     if (reusable && buffer && memory && cache) {
-        cache->Put({buffer, memory, mapping, deviceAddress, allocationBytes, size, usage, properties});
+        cache->Put({buffer, memory, mapping, deviceAddress, allocationBytes, size, usage, properties, offset, slab});
+        return;
+    }
+    if (slab) {
+        if (buffer) context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, buffer, nullptr);
+        if (cache) cache->PutSlot(memory, offset);
         return;
     }
     if (mapping) context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")(context.device, memory);
@@ -82,7 +101,8 @@ void Buffer::Invalidate() {
     Require(mapping != nullptr, "cannot invalidate an unmapped GPU buffer");
     VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};
     range.memory = memory;
-    range.size = VK_WHOLE_SIZE;
+    range.offset = offset;
+    range.size = slab ? allocationBytes : VK_WHOLE_SIZE;
     Check(context.Function<PFN_vkInvalidateMappedMemoryRanges>("vkInvalidateMappedMemoryRanges")(context.device, 1, &range), "vkInvalidateMappedMemoryRanges");
 }
 

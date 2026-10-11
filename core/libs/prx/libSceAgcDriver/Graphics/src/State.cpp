@@ -55,10 +55,37 @@ VkBlendFactor blendFactor(std::uint32_t value) {
         case 10: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
         case 13: return VK_BLEND_FACTOR_CONSTANT_COLOR;
         case 14: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+        // BLEND_SRC1_COLOR .. BLEND_INV_SRC1_ALPHA: the pixel stage's MRT1 export (upstream b8cc4adb).
+        case 15: return VK_BLEND_FACTOR_SRC1_COLOR;
+        case 16: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR;
+        case 17: return VK_BLEND_FACTOR_SRC1_ALPHA;
+        case 18: return VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
         case 19: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
         case 20: return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
         default: throw std::runtime_error("AGC graphics: unsupported blend factor " + std::to_string(value));
     }
+}
+
+// CB_COLOR_ATTRIB FORCE_DST_ALPHA_1: blending reads destination alpha as 1 (upstream 1e20b4ec).
+VkBlendFactor colorFactorWithOpaqueDestination(VkBlendFactor factor) {
+    switch (factor) {
+        case VK_BLEND_FACTOR_DST_ALPHA: return VK_BLEND_FACTOR_ONE;
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA: return VK_BLEND_FACTOR_ZERO;
+        case VK_BLEND_FACTOR_SRC_ALPHA_SATURATE: return VK_BLEND_FACTOR_ZERO;
+        default: return factor;
+    }
+}
+
+VkBlendFactor alphaFactorWithOpaqueDestination(VkBlendFactor factor) {
+    switch (factor) {
+        case VK_BLEND_FACTOR_DST_ALPHA: case VK_BLEND_FACTOR_DST_COLOR: return VK_BLEND_FACTOR_ONE;
+        case VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA: case VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR: return VK_BLEND_FACTOR_ZERO;
+        default: return factor;
+    }
+}
+
+bool secondSource(VkBlendFactor factor) {
+    return factor == VK_BLEND_FACTOR_SRC1_COLOR || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_COLOR || factor == VK_BLEND_FACTOR_SRC1_ALPHA || factor == VK_BLEND_FACTOR_ONE_MINUS_SRC1_ALPHA;
 }
 
 VkBlendOp blendOp(std::uint32_t value) {
@@ -218,23 +245,28 @@ VkStencilOpState stencilState(std::uint32_t compare, std::uint32_t operations, s
 // PA_SU_POLY_OFFSET_* (scale x16; offset x4 for Z16 with 16 negative DB bits, x1 for Z32F with 23).
 void decodeDepthBias(const Registers& cx, State& result) {
     const auto raster = read(cx, 0x205);
-    const bool front = (raster & 0x800u) != 0 && (raster & 1u) == 0;
-    const bool back = (raster & 0x1000u) != 0 && (raster & 2u) == 0;
-    Require((raster & 0x2000u) == 0, "depth bias for point and line polygons is unsupported");
+    // Faces the draw rasterizes, and the faces whose offset is enabled.
+    const bool frontVisible = (raster & 1u) == 0;
+    const bool backVisible = (raster & 2u) == 0;
+    const bool frontBias = (raster & 0x800u) != 0;
+    const bool backBias = (raster & 0x1000u) != 0;
+    // POLY_OFFSET_PARA_ENABLE offsets points and lines; RADV sets it with the face enables whatever
+    // the topology, and on triangles it changes nothing (upstream af9e60b6).
+    const bool pointsOrLines = result.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || result.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    Require((raster & 0x2000u) == 0 || ((raster & 0x1800u) != 0 && !pointsOrLines), "depth bias for point and line polygons is unsupported");
     auto& state = result.depthState;
-    if (!front && !back) return;
+    if (!(frontVisible && frontBias) && !(backVisible && backBias)) return;
     if (!result.hasDepthTarget || result.depth.depthElementBytes == 0) return;
     const auto frontScale = readFloat(cx, 0x2e0);
     const auto frontOffset = readFloat(cx, 0x2e1);
     const auto backScale = readFloat(cx, 0x2e2);
     const auto backOffset = readFloat(cx, 0x2e3);
-    if (front && back && (frontScale != backScale || frontOffset != backOffset)) {
-        std::ostringstream message;
-        message << "AGC graphics: different front (" << frontScale << ", " << frontOffset << ") and back (" << backScale << ", " << backOffset << ") depth bias is unsupported";
-        throw std::runtime_error(message.str());
-    }
-    const auto scale = front ? frontScale : backScale;
-    const auto offset = front ? frontOffset : backOffset;
+    // Both faces drawn with different offsets (one of them possibly disabled, which is 0): the draw
+    // is split per face (upstream e0084a56; Graphics::Draw).
+    const bool perFace = frontVisible && backVisible && (frontBias != backBias || frontScale != backScale || frontOffset != backOffset);
+    const bool useFront = frontVisible && frontBias;
+    const auto scale = perFace && !frontBias ? 0.0f : useFront ? frontScale : backScale;
+    const auto offset = perFace && !frontBias ? 0.0f : useFront ? frontOffset : backOffset;
     const auto format = read(cx, 0x2de);
     const bool z16 = result.depth.depthElementBytes == 2;
     // NEG_NUM_DB_BITS is a signed byte: -16 for Z16, -23 plus POLY_OFFSET_DB_IS_FLOAT_FMT for Z32F.
@@ -248,6 +280,10 @@ void decodeDepthBias(const Registers& cx, State& result) {
     state.depthBiasSlope = scale / 16.0f;
     state.depthBiasConstant = z16 ? offset / 4.0f : offset;
     state.depthBiasClamp = readFloat(cx, 0x2df);
+    if (!perFace) return;
+    state.depthBiasPerFace = true;
+    state.backDepthBiasSlope = backBias ? backScale / 16.0f : 0.0f;
+    state.backDepthBiasConstant = backBias ? (z16 ? backOffset / 4.0f : backOffset) : 0.0f;
 }
 
 void decodeDepth(const Registers& cx, State& result) {
@@ -345,10 +381,13 @@ void requireConservativeTriangles(bool triangles, const char* primitive, const c
 VkConservativeRasterizationModeEXT decodeConservativeRasterization(const QueueState& queue) {
     const auto& cx = queue.context;
     const auto control = read(cx, 0x313);
-    if (control == 0x6000u) return VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
+    // Off: over- and underestimation disabled, with at most the inner-to-normal overrides,
+    // NULL_SQUAD_AA_MASK_ENABLE (RADV) and the uncertainty-region mode and edge rules (upstream
+    // 88cc2ea4, ab09a0a9).
+    if ((control & ~0x001f6000u) == 0) return VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT;
     if (control != 0x6001u) {
         std::ostringstream message;
-        message << "AGC graphics: PA_SC_CONSERVATIVE_RASTERIZATION_CNTL=0x" << std::hex << control << ": only 0x6000 (off) and 0x6001 (overestimation) are supported";
+        message << "AGC graphics: PA_SC_CONSERVATIVE_RASTERIZATION_CNTL=0x" << std::hex << control << ": only off (over- and underestimation disabled) and 0x6001 (overestimation) are supported";
         throw std::runtime_error(message.str());
     }
     const auto stages = read(cx, 0x2d5);
@@ -387,11 +426,24 @@ bool pixelStageInert(const Registers& cx) {
 
 }
 
+bool ResummarizeOnly(const QueueState& queue) {
+    // RESUMMARIZE_ENABLE recomputes the HTILE summary from the depth values; HTILE is not modelled,
+    // so with depth and stencil tests off and no colour writes the draw changes nothing.
+    const auto& cx = queue.context;
+    const auto control = cx.find(0x000);
+    const auto depthControl = cx.find(0x200);
+    if (control == cx.end() || (control->second & ~0x2063u) != 0x10u) return false;
+    if (depthControl == cx.end() || (depthControl->second & 3u) != 0) return false;
+    if (cx.find(0x8e) == cx.end() || cx.find(0x8f) == cx.end()) return false;
+    return ColorWriteMask(cx) == 0;
+}
+
 std::string DepthMaintenanceRejection(const QueueState& queue) {
     // DB_RENDER_CONTROL depth copy, resummarize or decompress passes are rejected before any shader
     // is compiled, whether or not depth is active (upstream f2fe3f71).
     const auto control = queue.context.find(0x000);
     if (control == queue.context.end() || (control->second & ~0x2063u) == 0) return {};
+    if (ResummarizeOnly(queue)) return {};
     std::ostringstream message;
     message << "AGC graphics: DB_RENDER_CONTROL depth copy, resummarize or decompress is unsupported (context register 0x0 = 0x" << std::hex << control->second << ")";
     return message.str();
@@ -470,6 +522,7 @@ State DecodeState(const QueueState& queue) {
     if (auto reason = DepthMaintenanceRejection(queue); !reason.empty()) throw std::runtime_error(reason);
     const auto& cx = queue.context;
     State result{};
+    result.resummarizeOnly = ResummarizeOnly(queue);
     result.conservativeRasterization = decodeConservativeRasterization(queue);
     result.stages = DecodeShaderStages(queue);
     const auto primitive = read(queue.userConfig, 0x242, "user-config");
@@ -540,10 +593,15 @@ State DecodeState(const QueueState& queue) {
     result.negativeOneToOne = (read(cx, 0x204) & 0x80000u) == 0;
     const auto raster = read(cx, 0x205);
     // POLY_OFFSET_FRONT/BACK_ENABLE (bits 11-12) request depth bias; see decodeDepthBias.
-    const auto rasterMode = raster & ~0x1807u;
+    // PROVOKING_VTX_LAST (bit 19) picks the provoking vertex (upstream 3a8cf3a3); POLY_OFFSET_PARA_ENABLE
+    // (bit 13) with a face offset changes nothing on triangles (upstream af9e60b6, decodeDepthBias).
+    const bool pointsOrLines = result.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || result.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+    const auto lineOffset = (raster & 0x1800u) != 0 && !pointsOrLines ? 0x2000u : 0u;
+    const auto rasterMode = raster & ~0x1807u & ~lineOffset & ~(1u << 19u);
+    result.provokingVertexLast = (raster & (1u << 19u)) != 0;
     if (!(rasterMode == 0 || rasterMode == 0x240u)) {
         std::ostringstream message;
-        message << "AGC graphics: PA_SU_SC_MODE_CNTL=0x" << std::hex << raster << ": polygon mode, provoking vertex or nonstandard rasterization is unsupported";
+        message << "AGC graphics: PA_SU_SC_MODE_CNTL=0x" << std::hex << raster << ": polygon mode or nonstandard rasterization is unsupported";
         throw std::runtime_error(message.str());
     }
     result.cullMode = ((raster & 1u) != 0 ? VK_CULL_MODE_FRONT_BIT : 0u) | ((raster & 2u) != 0 ? VK_CULL_MODE_BACK_BIT : 0u);
@@ -648,12 +706,13 @@ State DecodeState(const QueueState& queue) {
         const auto viewMip = (view >> 26u) & 0xfu;
         const auto sliceStart = view & 0x7ffu;
         auto sliceMax = (view >> 13u) & 0x7ffu;
-        zero(cx, 0x31d + cb, ~0u, "color samples, fragments or destination alpha override");
+        zero(cx, 0x31d + cb, ~0x20000u, "color samples or fragments");
         const auto attrib2 = read(cx, 0x3b0 + slot);
         const auto maxMip = attrib2 >> 28u;
         Require(viewMip <= maxMip, "color view mip exceeds the surface");
         const auto attrib3 = read(cx, 0x3b8 + slot);
         color.tileMode = DecodeColorTileMode(attrib3);
+        Require(((attrib3 >> 24u) & 3u) != 0u || (attrib2 & 0x3fffu) == 0u, "1D color targets taller than one row are unsupported");
         // A volume in a standard swizzle uses thick blocks that interleave its slices (addrlib
         // IsThick; textures: IsThickVolume), which the slice-per-layer targets below do not model.
         Require(((attrib3 >> 24u) & 3u) != 2u || (color.tileMode != ColorTileMode::Standard4KB && color.tileMode != ColorTileMode::Standard64KB), "3D SW_4KB_S and SW_64KB_S color targets (thick blocks) are not modelled");
@@ -739,13 +798,17 @@ State DecodeState(const QueueState& queue) {
     const auto zo = readFloat(cx, 0x114);
     const auto minDepth = result.negativeOneToOne ? zo - zs : zo;
     const auto maxDepth = zo + zs;
-    if (!(xs > 0 && ys != 0 && std::isfinite(minDepth) && std::isfinite(maxDepth))) {
+    // A zero X or Y scale maps every vertex onto a line: triangle and rect-list draws through it cover
+    // no pixel (titles skip work that way). They get a valid 1x1 viewport and an empty scissor.
+    const bool areaFree = result.stages.path == ShaderPath::Vertex && (result.rectList || result.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || result.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN || result.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP);
+    const bool collapsed = (xs == 0 || ys == 0) && xs >= 0 && areaFree && std::isfinite(xo) && std::isfinite(yo) && std::isfinite(minDepth) && std::isfinite(maxDepth);
+    if (!collapsed && !(xs > 0 && ys != 0 && std::isfinite(minDepth) && std::isfinite(maxDepth))) {
         std::ostringstream message;
         message << "AGC graphics: unsupported viewport transform: scale=(" << xs << ", " << ys << ", " << zs << "), offset=(" << xo << ", " << yo << ", " << zo << "), depth=(" << minDepth << ", " << maxDepth << "), negativeOneToOne=" << result.negativeOneToOne;
         throw std::runtime_error(message.str());
     }
     Require(readFloat(cx, 0xb4) <= readFloat(cx, 0xb5), "inverted viewport depth clamp bounds");
-    result.viewport = {xo - xs, yo - ys, 2 * xs, 2 * ys, minDepth, maxDepth};
+    result.viewport = collapsed ? VkViewport{xo, yo, 1, 1, minDepth, maxDepth} : VkViewport{xo - xs, yo - ys, 2 * xs, 2 * ys, minDepth, maxDepth};
     const auto& depthState = result.depthState;
     if (!result.hasDepthTarget || (!depthState.depthTest && !depthState.depthWrite && !depthState.depthBounds)) {
         // Window depth reaches no attachment and clipping happens in clip space, so the range
@@ -758,6 +821,7 @@ State DecodeState(const QueueState& queue) {
     intersect(result.scissor, cx, 0x81, false);
     intersect(result.scissor, cx, 0x90, false);
     if ((read(cx, 0x292) & 2u) != 0) intersect(result.scissor, cx, 0x94, false);
+    if (collapsed) result.scissor.extent = {0, 0};
     for (std::uint32_t slot = 0; slot < MaxColorTargets; ++slot) {
         if ((result.colorTargetMask & (1u << slot)) == 0) continue;
         const auto blend = read(cx, 0x1e0 + slot);
@@ -787,8 +851,26 @@ State DecodeState(const QueueState& queue) {
                 state.dstColorBlendFactor = state.dstAlphaBlendFactor;
                 state.colorBlendOp = state.alphaBlendOp;
             }
+            if ((read(cx, 0x31d + 0xfu * slot) & 0x20000u) != 0) {
+                state.srcColorBlendFactor = colorFactorWithOpaqueDestination(state.srcColorBlendFactor);
+                state.dstColorBlendFactor = colorFactorWithOpaqueDestination(state.dstColorBlendFactor);
+                state.srcAlphaBlendFactor = alphaFactorWithOpaqueDestination(state.srcAlphaBlendFactor);
+                state.dstAlphaBlendFactor = alphaFactorWithOpaqueDestination(state.dstAlphaBlendFactor);
+            }
             for (std::uint32_t i = 0; i < 4; ++i) result.blendConstants[i] = readFloat(cx, 0x105 + i);
+            if (secondSource(state.srcColorBlendFactor) || secondSource(state.dstColorBlendFactor) || secondSource(state.srcAlphaBlendFactor) || secondSource(state.dstAlphaBlendFactor)) {
+                const auto addition = [](VkBlendOp op) { return op == VK_BLEND_OP_ADD || op == VK_BLEND_OP_SUBTRACT || op == VK_BLEND_OP_REVERSE_SUBTRACT; };
+                Require(addition(state.colorBlendOp) && addition(state.alphaBlendOp), "dual-source blending with a MIN or MAX operation is unsupported");
+                result.dualSourceBlend = true;
+            }
         }
+    }
+    if (result.dualSourceBlend) {
+        // Target 0 blends with the MRT1 export as its second source (upstream b8cc4adb): the pixel
+        // stage exports to slots 0 and 1 only, colour reaches slot 0 alone, and MRT1 matches MRT0.
+        Require(result.colorTargetMask == 1u && result.hasFragmentShader && (shaderMask & ~0xffu) == 0 && (shaderMask & 0xfu) != 0 && ((shaderMask >> 4u) & 0xfu) == (shaderMask & 0xfu), "dual-source blending needs pixel exports to MRT slots 0 and 1 with one shader mask and color writes to slot 0 alone");
+        Require(result.colors[0].componentMapping == 0xe4u, "dual-source blending into a component-swapped color target is unsupported");
+        Require(((exportFormat >> 4u) & 0xfu) == (exportFormat & 0xfu), "dual-source blending needs the MRT1 export in the MRT0 export format");
     }
     {
         bool moved = false;

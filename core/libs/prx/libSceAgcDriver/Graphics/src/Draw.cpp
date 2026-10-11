@@ -43,6 +43,24 @@ std::array<std::uint32_t, 4> MeshIndexBufferDescriptor(const Pm4::DrawParameters
 }
 
 void Draw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, std::span<const GuestMemorySnapshot> snapshots) {
+    // A resummarize pass with no depth or color work draws nothing (upstream 24876afc).
+    if (state.resummarizeOnly) return;
+    // Front and back faces offset differently (upstream e0084a56): the draw runs once per face, each
+    // culling the other face, with that face's bias. DB_RENDER_CONTROL clears replace depth wherever
+    // a draw rasterizes, so a clear draw keeps one pass (they never carry a per-face bias).
+    if (state.hasDepthTarget && state.depthState.depthBiasPerFace && !state.depthState.clearDepth && !state.depthState.clearStencil && !state.eliminateFastClear) {
+        auto front = state;
+        front.depthState.depthBiasPerFace = false;
+        front.depthState.depthBias = true;
+        front.cullMode |= VK_CULL_MODE_BACK_BIT;
+        auto back = front;
+        back.cullMode = state.cullMode | VK_CULL_MODE_FRONT_BIT;
+        back.depthState.depthBiasConstant = state.depthState.backDepthBiasConstant;
+        back.depthState.depthBiasSlope = state.depthState.backDepthBiasSlope;
+        if (front.cullMode != VK_CULL_MODE_FRONT_AND_BACK) Draw(context, front, draw, shaders, snapshots);
+        if (back.cullMode != VK_CULL_MODE_FRONT_AND_BACK) Draw(context, back, draw, shaders, snapshots);
+        return;
+    }
     PerformanceTimer timing("Graphics.Draw");
     ApplyFastClears(state);
     const bool depthFastClear = TakeDepthFastClear(state);
@@ -126,19 +144,13 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             indexHandle = indices->Handle();
             source = indices->Bytes();
         }
-        if (draw.indexSize == 2) {
-            for (std::size_t offset = 0; offset < indexBytes; offset += 2) {
-                std::uint16_t value = 0;
-                std::memcpy(&value, source.data() + offset, sizeof(value));
-                maxIndex = std::max<std::uint32_t>(maxIndex, value);
-            }
-        } else {
-            for (std::size_t offset = 0; offset < indexBytes; offset += 4) {
-                std::uint32_t value = 0;
-                std::memcpy(&value, source.data() + offset, sizeof(value));
-                maxIndex = std::max(maxIndex, value);
-            }
-        }
+        // Restart markers are no vertices: with restart on (and honoured for the topology) they
+        // are left out of the vertex range; a draw of markers alone draws nothing.
+        const bool listTopology = state.topology == VK_PRIMITIVE_TOPOLOGY_POINT_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || state.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST_WITH_ADJACENCY || state.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST_WITH_ADJACENCY || state.topology == VK_PRIMITIVE_TOPOLOGY_PATCH_LIST;
+        const bool skipRestart = state.primitiveRestart && (!listTopology || context.primitiveListRestart) && !state.stages.mesh;
+        const auto highestIndex = HighestDrawIndex(source.first(static_cast<std::size_t>(indexBytes)), draw.indexSize, skipRestart);
+        if (!highestIndex) return;
+        maxIndex = *highestIndex;
         Require(maxIndex <= context.limits.maxDrawIndexedIndexValue, "index exceeds the device's indexed draw limit");
         const auto highest = static_cast<std::int64_t>(maxIndex) + static_cast<std::int32_t>(draw.firstVertex);
         Require(highest >= 0 && highest <= std::numeric_limits<std::uint32_t>::max(), "base vertex moves indices out of range");
@@ -153,12 +165,21 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     for (std::size_t index = 0; index < attributes.size(); ++index) {
         const auto& attribute = attributes[index];
         const auto bytes = VertexBufferReadSize(attribute, maxIndex, draw.instanceCount, draw.firstInstance);
+        if (ZeroVertexFetch(attribute)) {
+            // A null or out-of-range descriptor: a zero stride over zeros.
+            auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
+            std::memset(buffer->Bytes().data(), 0, bytes);
+            vertexHandles.push_back(buffer->Handle());
+            vertexBuffers.push_back(std::move(buffer));
+            continue;
+        }
+        const auto valid = VertexBufferValidBytes(attribute, bytes);
         const auto& fields = attribute.resource.fields;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
-        Require(!aliasesTargets(address, bytes), "vertex buffer aliases a render target");
+        Require(!aliasesTargets(address, valid), "vertex buffer aliases a render target");
         // The GPU fetches vertices from guest memory itself when it is imported: earlier draws' writes
-        // then need a barrier, and nothing is copied.
-        if (context.guestGpuMemory != nullptr) {
+        // then need a barrier, and nothing is copied. Fetches past the records read zeros from a copy.
+        if (context.guestGpuMemory != nullptr && valid == bytes) {
             {
                 const GuestMemory::GpuAccessScope gpuAccess;
                 GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
@@ -171,9 +192,12 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             }
         }
         const GuestMemory::AccessSite site("cpu_wait_vertex");
-        GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
         auto buffer = std::make_unique<Buffer>(context, bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT);
-        GuestMemory::Read(address, buffer->Bytes(), 1);
+        if (valid != 0) {
+            GuestMemory::CheckRange(reinterpret_cast<const void*>(address), valid, 1);
+            GuestMemory::Read(address, buffer->Bytes().first(valid), 1);
+        }
+        if (valid < bytes) std::memset(buffer->Bytes().data() + valid, 0, bytes - valid);
         vertexHandles.push_back(buffer->Handle());
         vertexBuffers.push_back(std::move(buffer));
     }
@@ -212,7 +236,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     // ANYPS5_NO_PASS_MERGE=1 begins a pass per draw. (The GPU draw profiler resets queries, which a
     // pass forbids: it disables merging.)
     static const bool noMerge = std::getenv("ANYPS5_NO_PASS_MERGE") != nullptr;
-    bool mergeable = !noMerge && !context.drawProfiler && !resources->RecordsOutsidePass();
+    // Without per-pipeline provoking vertex modes, a pass holds one mode: last-vertex draws take a
+    // pass of their own.
+    bool mergeable = !noMerge && !context.drawProfiler && !resources->RecordsOutsidePass() && (!state.provokingVertexLast || context.provokingVertexModePerPipeline);
     for (const auto& color : storage->colors) mergeable = mergeable && (!color || !color->BeginRecords());
     mergeable = mergeable && (!storage->depth || !storage->depth->BeginRecords());
     const auto continued = mergeable ? context.drawQueue->ContinuePass(pipeline.PassKey()) : VkCommandBuffer{VK_NULL_HANDLE};

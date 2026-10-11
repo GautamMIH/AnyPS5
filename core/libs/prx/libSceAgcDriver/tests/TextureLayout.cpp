@@ -197,11 +197,26 @@ void standardColorTargets() {
 
 }
 
+void thickDisplayVolumes() {
+    // 3D SW_64KB_D_X is thick, addressed by the D3 XOR equation (upstream e5da5fd2; addrlib values).
+    struct Expected { std::uint32_t x, y, z; std::uint64_t offset; };
+    constexpr Expected expected[] = {{0, 0, 0, 0x0}, {63, 63, 15, 0x3f0fc}, {47, 4, 9, 0x13134}, {54, 3, 3, 0x19af8}, {23, 39, 12, 0x2ba5c}, {57, 14, 7, 0x1c6e4}};
+    for (const auto& [x, y, z, offset] : expected) {
+        const auto actual = ThickVolumeOffset(TextureTileMode::kD64KBX, 4, 64, 64, x, y, z);
+        Require(actual == offset, "SW_64KB_D_X 32 bpp element (" + std::to_string(x) + ", " + std::to_string(y) + ", " + std::to_string(z) + ") at 0x" + std::to_string(actual) + " instead of 0x" + std::to_string(offset));
+    }
+    GuestTextureResource volume{};
+    volume.dimension = TextureDimension::k3D;
+    volume.tileMode = TextureTileMode::kD64KBX;
+    Require(IsThickVolume(volume), "a 3D SW_64KB_D_X texture is a thick volume");
+}
+
 int main() {
     try {
         viewsPastLastMip();
         equationSwizzles();
         standardColorTargets();
+        thickDisplayVolumes();
         std::puts("AGC driver texture layout tests passed");
         return 0;
     } catch (const std::exception& error) {

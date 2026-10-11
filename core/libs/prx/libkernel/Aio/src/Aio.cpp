@@ -211,13 +211,12 @@ int APS5_VABI sceKernelAioPollRequest(int32_t id, int32_t* state) {
     return stateOf(id, state);
 }
 
+// As upstream: every id is checked before any state is written, and an empty batch succeeds.
 int APS5_VABI sceKernelAioPollRequests(const int32_t* ids, int32_t count, int32_t* states) {
-    if (!ids || !states) return SCE_KERNEL_ERROR_EFAULT;
-    if (count <= 0) return SCE_KERNEL_ERROR_EINVAL;
-    for (int32_t index = 0; index < count; ++index) {
-        const int result = stateOf(ids[index], &states[index]);
-        if (result != 0) return result;
-    }
+    if (const int error = validateIds(ids, count, states, "sceKernelAioPollRequests", false)) return error;
+    const std::lock_guard lock(requestMutex);
+    for (int32_t index = 0; index < count; ++index)
+        states[index] = requests[ids[index]];
     return 0;
 }
 

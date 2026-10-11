@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdio>
+#include <cstdint>
 #include <iterator>
 #include <cstdlib>
 #include <stdexcept>
@@ -93,10 +94,12 @@ unsigned int APS5_VABI _Atomic_load_4_nid_postfix(volatile unsigned int* target,
 }
 
 std::intmax_t APS5_VABI strtoimax_nid_postfix(const char* str, char** endptr, int base) {
+    if (StopAtBinaryPrefix_nid_no_patch(str, endptr, base)) return 0;
     return std::strtoimax(str, endptr, base);
 }
 
 std::uintmax_t APS5_VABI strtoumax_nid_postfix(const char* str, char** endptr, int base) {
+    if (StopAtBinaryPrefix_nid_no_patch(str, endptr, base)) return 0;
     return std::strtoumax(str, endptr, base);
 }
 
@@ -111,8 +114,9 @@ unsigned int APS5_VABI _ZSt14_Random_devicev_nid_postfix() {
     throw std::runtime_error("_Throw_C_error: C11 thread error " + std::to_string(code));
 }
 
-unsigned long APS5_VABI _Stoul_nid_postfix(const char* str, char** endptr, int base) {
-    return std::strtoul(str, endptr, base);
+std::uint64_t APS5_VABI _Stoul_nid_postfix(const char* str, char** endptr, int base) {
+    if (StopAtBinaryPrefix_nid_no_patch(str, endptr, base)) return 0;
+    return std::strtoull(str, endptr, base);
 }
 
 void APS5_VABI _Locksyslock_nid_postfix() {

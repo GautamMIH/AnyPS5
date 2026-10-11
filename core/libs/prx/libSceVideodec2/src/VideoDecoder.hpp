@@ -21,6 +21,10 @@ struct Picture {
     std::uint64_t pts;
     std::uint64_t dts;
     std::uint64_t attachedData;
+    // The stream's key-frame flag, profile and level (picture information).
+    bool keyFrame = false;
+    int profile = 0;
+    int level = 0;
 };
 
 // Bytes of the NV12 layout for a picture: height aligned to 16 (shadPS4) and the pitch to 256 bytes,

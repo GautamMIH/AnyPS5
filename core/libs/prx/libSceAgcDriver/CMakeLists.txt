@@ -481,8 +481,9 @@ file(GLOB agcExecutionTestSources CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/
 # these need a guest-memory harness first: image tests fail with "guest memory backing range ... is
 # unmapped", store/atomic tests with a BDA permission fault (reason 2). VulkanTestDevice.hpp has a
 # guest-memory block (GuestTestMemory) for images, as ImageAtomics64 and the image format tests use.
-# Upstream's ConstantStore (narrow constant stores) writes to the host heap the same way.
-list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ImageAtomics|ImageAtomicsBitwise|ImageAtomicsFloat|ImageCacheBits|ImageTexelStatus|PixelHelperLanes|FlatStore|FlatCacheBits|GlobalAtomicCsub|GlobalAtomics|GlobalAtomics64|GlobalAtomicsFloat|GlobalAtomicsLanes|GlobalStoreAddtid|GlobalVccBase|ConstantStore)\\.cpp$")
+# Upstream's ConstantStore (narrow constant stores), BdaSpanReads and MaskedGlobalStore (new in the
+# 5edae353 merge) write to the host heap the same way.
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ImageAtomics|ImageAtomicsBitwise|ImageAtomicsFloat|ImageCacheBits|ImageTexelStatus|PixelHelperLanes|FlatStore|FlatCacheBits|GlobalAtomicCsub|GlobalAtomics|GlobalAtomics64|GlobalAtomicsFloat|GlobalAtomicsLanes|GlobalStoreAddtid|GlobalVccBase|ConstantStore|BdaSpanReads|MaskedGlobalStore)\\.cpp$")
 # Others drive upstream's driver internals (single color/blend state, DescribeSurface, StorageTexture,
 # texture cache flushes) and need porting to this driver's State and caches.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(EmulatedColorCompare|ImageStorePacked|PixelLds|PixelLdsLaneSlots|PixelValidMask|ViewPastLastMip)\\.cpp$")
@@ -504,6 +505,13 @@ list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(HostImportTeardown|Oversize
 # SampledCacheBudget and StorageCacheBudget test upstream's VK_EXT_memory_budget texture cache
 # budgets (TextureCacheUsage, SampledTextureBudget), not this driver's TextureCache.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(PreparedShaders|PreparedGraphics|PreparedExports|PreparedPublication|SampledCacheBudget|StorageCacheBudget)\\.cpp$")
+# New upstream execution tests (merge of 5edae353) written against upstream's driver: they build
+# upstream's single color/blend State or call its VulkanDevice, Execution/Driver, DccMetadata,
+# TextureSwizzleEquations, StorageTexture, DescribeSurface or GuestArena interfaces. The fixes they
+# cover that apply here were ported (per-face depth bias, provoking vertex, dual-source blending,
+# zero-stride and null vertex fetches, compute LDS beyond the device limit); the tests need porting
+# to this driver's interfaces first.
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(DepthBiasPerFace|DrawOffsetIndices|DualSourceBlend|DwordPatternFill|FillCoverKeys|GatedDispatchCapture|GuardedNullPointer|ImagePipeBankXor|ImagePlaneAddressOnLine|ImageStoreLineThroughPlane|ImageVolumeAddressOnPlane|LdsBeyondDeviceLimit|PackedUnormColorTarget|PatternBufferFill|PendingExactSurface|PixelBarycentricEmulation|PixelFixedPointPosition|PixelUint16Export|ProvokingVertex|Uint8x4ColorTarget|UnimportedLabelOrder|ZeroStrideVertexFetch)\\.cpp$")
 set(agcExecutionTests)
 foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
     get_filename_component(agcExecutionTestName ${agcExecutionTestSource} NAME_WE)
@@ -525,6 +533,37 @@ endforeach()
 target_link_libraries(agc_driver_interpolation_modes_tests PRIVATE shader_recompiler_agc_driver)
 target_link_libraries(agc_driver_runtime_user_data_tests PRIVATE shader_recompiler_agc_driver)
 
+
+# Upstream's standalone decode and recompiler tests (no device, or skipping without one).
+add_test_executable(agc_tessellation_factor_ring_tests EXCLUDE_FROM_ALL
+        tests/TessellationFactorRing.cpp
+        State/src/Configuration.cpp
+)
+target_include_directories(agc_tessellation_factor_ring_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(agc_tessellation_factor_ring_tests PRIVATE libc)
+set_target_properties(agc_tessellation_factor_ring_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_tessellation_factor_ring_tests)
+add_test_executable(agc_fragment_barycentric_tests EXCLUDE_FROM_ALL tests/FragmentBarycentric.cpp)
+target_include_directories(agc_fragment_barycentric_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include)
+set_target_properties(agc_fragment_barycentric_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_fragment_barycentric_tests)
+set(agcRecompilerUnitTests)
+foreach(agcUnitTest IN ITEMS Float16Conversion:agc_float16_conversion ConstantBitTest:agc_constant_bit_test ScalarSelectMask:agc_scalar_select_mask DenormalFlushElimination:agc_denormal_flush_elimination Vop2EncodingDecode:agc_vop2_encoding_decode FormattedBufferOnce:agc_formatted_buffer_once ShaderModeRegisters:agc_shader_mode_register EmbeddedVertexFetch:agc_embedded_vertex_fetch MubufLdsDecode:agc_mubuf_lds_decode PositionInvariance:agc_position_invariance)
+    string(REPLACE ":" ";" agcUnitTestParts ${agcUnitTest})
+    list(GET agcUnitTestParts 0 agcUnitTestSource)
+    list(GET agcUnitTestParts 1 agcUnitTestName)
+    add_test_executable(${agcUnitTestName}_tests EXCLUDE_FROM_ALL tests/${agcUnitTestSource}.cpp)
+    target_include_directories(${agcUnitTestName}_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(${agcUnitTestName}_tests PRIVATE shader_recompiler_agc_driver libc)
+    set_target_properties(${agcUnitTestName}_tests PROPERTIES CXX_EXTENSIONS OFF)
+    configure_windows_unwind(${agcUnitTestName}_tests)
+    list(APPEND agcRecompilerUnitTests ${agcUnitTestName}_tests)
+endforeach()
+# Not taken with upstream's driver: PassHazards (its Recorder's render-pass hazard tracker; this
+# driver orders passes in DrawQueue by barrier epochs), BufferPool (its size-class pool; ours keys
+# exact sizes and keeps the slab sub-allocation), DepthSurfaceReuse, SharedWrites and CmaskFastClear
+# (its DepthSurface, write tracker and per-tile CMASK clears), with their sources.
+
 if(BUILD_TESTING)
     add_test(NAME agc_shader_bindless COMMAND agc_shader_memory_tests --bindless)
     set_tests_properties(agc_shader_bindless PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1" WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
@@ -536,7 +575,7 @@ if(BUILD_TESTING)
     # this branch covers state decoding in agc_driver_state_decode_tests),
     # agc_driver_bda_device_tests (BdaDevice.cpp includes upstream's Recorder) and
     # agc_driver_mesh_tests (Mesh.cpp drives upstream's Execution/Driver draw decoding, not kept here).
-    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_spirv_module_tests agc_dpp_write_tests agc_masked_select_tests agc_vop1_control_decode_tests agc_shader_disk_cache_tests agc_shader_device_profile_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_color_exports_tests agc_driver_texture_layout_tests agc_driver_resource_decode_tests agc_driver_state_decode_tests agc_driver_color_transfer_device_tests ${agcExecutionTests})
+    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_spirv_module_tests agc_dpp_write_tests agc_masked_select_tests agc_vop1_control_decode_tests agc_shader_disk_cache_tests agc_shader_device_profile_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_color_exports_tests agc_driver_texture_layout_tests agc_driver_resource_decode_tests agc_driver_state_decode_tests agc_driver_color_transfer_device_tests agc_tessellation_factor_ring_tests agc_fragment_barycentric_tests ${agcRecompilerUnitTests} ${agcExecutionTests})
         if(agcTest STREQUAL "agc_driver_constant_store_tests")
             continue()
         endif()
@@ -769,7 +808,7 @@ include(PostCompile.cmake)
                 endif()
             endif()
         endforeach()
-        foreach(recompilerTest IN ITEMS Wave32WideSubgroup:wave32_wide_subgroup VectorFusedMultiplyAdd:vector_fused_multiply_add ScalarSwappc:scalar_swappc ScalarScratchLoad:scalar_scratch_load ScalarCall:scalar_call PixelAncillary:pixel_ancillary ImageBy:image_by ImagePckN:image_pck_n ImageMsaaLoad:image_msaa_load)
+        foreach(recompilerTest IN ITEMS VectorConstantFactorTininess:vector_constant_factor_tininess BitfieldMask:bitfield_mask Wave32WideSubgroup:wave32_wide_subgroup VectorFusedMultiplyAdd:vector_fused_multiply_add ScalarSwappc:scalar_swappc ScalarScratchLoad:scalar_scratch_load ScalarCall:scalar_call PixelAncillary:pixel_ancillary ImageBy:image_by ImagePckN:image_pck_n ImageMsaaLoad:image_msaa_load)
             string(REPLACE ":" ";" recompilerTestParts ${recompilerTest})
             list(GET recompilerTestParts 0 recompilerTestSource)
             list(GET recompilerTestParts 1 recompilerTestName)

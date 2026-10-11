@@ -118,6 +118,8 @@ struct Submission {
     // (upstream de651c62): titles reuse the list memory once the submit returns.
     std::map<std::size_t, std::vector<std::uint32_t>> registerLists;
     bool suspend = false;
+    // Flips of a queue 0 submission the worker has not reached yet (counted in Driver::flipsAhead).
+    std::uint32_t heldFlips = 0;
     std::size_t cursor = 0;
     bool started = false;
     FrameTiming::Clock::time_point received;
@@ -253,12 +255,17 @@ public:
         validate(submission.commands, queue);
         readRegisterLists(submission, 0, submission.commands.size());
         submission.validated = FrameTiming::Clock::now();
+        holdFlipBehindWorker(submission);
         {
             std::lock_guard lock(mutex);
             rethrowFailure();
             require(!stopping, "submission during shutdown");
             require(accepted != std::numeric_limits<std::uint64_t>::max(), "submission serial overflow");
             registerDisplayPackets(submission, 0, submission.commands.size());
+            if (queue == 0) {
+                submission.heldFlips = static_cast<std::uint32_t>(submission.flips.size());
+                flipsAhead += submission.heldFlips;
+            }
             // One shared snapshot of the registry per change, not a copy per submission.
             if (!publishedShaders) publishedShaders = std::make_shared<const std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>>>(shaders);
             submission.shaders = publishedShaders;
@@ -268,6 +275,34 @@ public:
             if (TraceRelease()) std::fprintf(stderr, "[agc-release] submit serial=%llu queue=0x%x dwords=%zu\n", static_cast<unsigned long long>(submission.serial), queue, submission.commands.size());
             pending.push_back(std::move(submission));
             ++accepted;
+        }
+        changed.notify_all();
+    }
+
+    // A title pacing itself on pending flips assumes the command processor consumed a submitted
+    // frame at once: with three flips pending it may rewrite the oldest frame's slot of a per-frame
+    // ring while the worker still decodes that frame. A queue 0 submission carrying a flip therefore
+    // waits until the worker has reached the flips of all earlier ones, or until queue 0 is blocked
+    // on a memory wait (which the title may be the one to satisfy). Upstream 8cd0904f, 5d888abd.
+    // ANYPS5_NO_FLIP_HOLD=1 submits at once.
+    void holdFlipBehindWorker(const Submission& submission) {
+        static const bool disabled = std::getenv("ANYPS5_NO_FLIP_HOLD") != nullptr;
+        if (disabled || submission.queue != 0 || std::this_thread::get_id() == worker.get_id()) return;
+        bool flips = false;
+        for (std::size_t cursor = 0; cursor < submission.commands.size() && !flips; cursor += Pm4::PacketWords(submission.commands[cursor])) flips = submission.commands[cursor] == FlipPacketHeader;
+        if (!flips) return;
+        std::unique_lock lock(mutex);
+        changed.wait(lock, [&] { return failure != nullptr || stopping || flipsAhead == 0 || queue0Blocked; });
+    }
+
+    // The worker reached one of the submission's held flips (or finished it with some left).
+    void releaseHeldFlips(Submission& submission, std::uint32_t count) {
+        count = std::min(count, submission.heldFlips);
+        if (count == 0) return;
+        submission.heldFlips -= count;
+        {
+            std::lock_guard lock(mutex);
+            flipsAhead -= count;
         }
         changed.notify_all();
     }
@@ -447,6 +482,9 @@ private:
     std::mutex mutex;
     std::mutex shutdownMutex;
     std::condition_variable changed;
+    // Held flips (see holdFlipBehindWorker) and whether queue 0 is blocked on a memory wait; under mutex.
+    std::uint32_t flipsAhead = 0;
+    bool queue0Blocked = false;
     std::deque<Submission> pending;
     std::map<std::uint64_t, std::shared_ptr<const ShaderSnapshot>> shaders;
     // The registry as submissions share it, rebuilt on the first submission after a change (mutex held).
@@ -925,7 +963,7 @@ private:
                 require(request != nullptr, "video output returned a null flip reservation");
                 submission.flips.emplace(cursor, std::move(request));
             }
-            cursor += static_cast<std::size_t>((words[0] >> 16u) & 0x3fffu) + 2;
+            cursor += Pm4::PacketWords(words[0]);
         }
     }
 
@@ -980,7 +1018,7 @@ private:
         const std::span<const std::uint32_t> commands(submission.commands);
         for (auto cursor = begin; cursor < end && cursor < commands.size();) {
             const auto header = commands[cursor];
-            const auto count = static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2;
+            const auto count = Pm4::PacketWords(header);
             if (Pm4::IndirectRegisterOpcode((header >> 8u) & 0xffu) && count == 5) {
                 try {
                     submission.registerLists.insert_or_assign(cursor, Pm4::ReadIndirectRegisters(commands.subspan(cursor, count)));
@@ -995,8 +1033,12 @@ private:
     static void validate(std::span<const std::uint32_t> commands, std::uint32_t queue) {
         for (std::size_t cursor = 0; cursor < commands.size();) {
             const auto header = commands[cursor];
+            if (Pm4::FillerPacket(header)) {
+                ++cursor;
+                continue;
+            }
             require((header & 0xc0000000u) == 0xc0000000u, "unsupported PM4 packet type");
-            const auto count = static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2;
+            const auto count = Pm4::PacketWords(header);
             require(count <= commands.size() - cursor, "truncated PM4 packet");
             try {
                 Pm4::Validate(commands.subspan(cursor, count), queue);
@@ -1008,7 +1050,7 @@ private:
                     std::size_t inner = cursor + count;
                     while (inner < end) {
                         require(commands[inner] != FlipPacketHeader, "a flip inside a conditional execution range is not implemented");
-                        inner += static_cast<std::size_t>((commands[inner] >> 16u) & 0x3fffu) + 2;
+                        inner += Pm4::PacketWords(commands[inner]);
                     }
                     require(inner == end, "conditional execution range ends inside a packet");
                 }
@@ -1304,6 +1346,7 @@ private:
             std::array<std::uint8_t, 8> mappings{};
             for (std::uint32_t slot = 0; slot < mappings.size(); ++slot) mappings[slot] = (graphics.colorTargetMask & (1u << slot)) != 0 ? graphics.colors[slot].componentMapping : 0xe4u;
             pixel = Graphics::DecodePixelStageInfo(queue.context, mappings);
+            pixel->dualSourceBlend = graphics.dualSourceBlend;
         }
         std::vector<ShaderRecompiler::MemoryRegion> memory;
         std::vector<ShaderRecompiler::LinkedProgram> linked;
@@ -1393,7 +1436,13 @@ private:
                     require(index < program.userData.size(), "draw offset SGPR exceeds user data");
                     return program.userData[index];
                 };
-                if (drawParameters.firstVertex == 0 && result.vertexOffsetSgpr >= 0) drawParameters.firstVertex = offsetValue(result.vertexOffsetSgpr);
+                // The recompiled entry subtracts the folded SGPR's word from the vertex index, so the
+                // draw always adds it (upstream fcc5105a).
+                if (result.vertexOffsetSgpr >= 0) {
+                    const auto offset = offsetValue(result.vertexOffsetSgpr);
+                    require(offset <= std::numeric_limits<std::uint32_t>::max() - drawParameters.firstVertex, "draw vertex offset overflow");
+                    drawParameters.firstVertex += offset;
+                }
                 if (result.instanceOffsetSgpr >= 0) drawParameters.firstInstance = offsetValue(result.instanceOffsetSgpr);
             }
             require(result.pushConstants.size() <= pushLimitBytes - pushCursorBytes, "stage push constants exceed the pipeline push constant block");
@@ -1623,7 +1672,11 @@ private:
         for (auto& cursor = submission.cursor; cursor < submission.commands.size();) {
             if (frameTiming == nullptr) includeSubmission(submission, false);
             const auto header = submission.commands[cursor];
-            const auto count = static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2;
+            if (Pm4::FillerPacket(header)) {
+                ++cursor;
+                continue;
+            }
+            const auto count = Pm4::PacketWords(header);
             const auto packet = std::span(submission.commands).subspan(cursor, count);
             const auto opcode = (header >> 8u) & 0xffu;
             if ((header & 1u) != 0 && queue.predicateSkip) {
@@ -1799,6 +1852,15 @@ private:
                     cursor += count;
                     continue;
                 }
+                // Pipeline statistics, SQ and VGT_FLUSH events (RADV's preamble; Pm4::Validate) order
+                // nothing the driver tracks.
+                if (opcode == 0x46) {
+                    const auto eventType = packet[1] & 0x3fu;
+                    if (eventType == 0x19u || eventType == 0x1au || eventType == 0x26u || eventType == 0x24u) {
+                        cursor += count;
+                        continue;
+                    }
+                }
                 if (pipeline && device != nullptr && ((opcode == 0x46 && (packet[1] & 0x3fu) != 0x39u) || opcode == 0x58)) {
                     // A GPU barrier is device work like a draw: queued in order, no drain.
                     pipeline->Post([device = device] { device->AcquireGpuMemory(); }, {}, false);
@@ -1926,6 +1988,7 @@ private:
             }
             publishCompletions();
             if (header == FlipPacketHeader) {
+                releaseHeldFlips(submission, 1);
                 WriteTracker::NextEpoch();
                 frameTiming->SetFlip(submission.serial, cursor, submission.received, FrameTiming::Clock::now());
                 if (TraceTimeline()) std::fprintf(stderr, "[tl] %lld flip serial=%llu\n", TimelineNow(), static_cast<unsigned long long>(submission.serial));
@@ -2031,6 +2094,7 @@ private:
                     }
                 }
                 bool progressed = false;
+                bool queue0Waits = false;
                 for (std::size_t index = 0; index < active.size();) {
                     if (!runnable(index)) {
                         ++index;
@@ -2042,9 +2106,11 @@ private:
                     publishCompletions();
                     if (!finished) {
                         if (active[index].cursor != startCursor || !wasStarted) progressed = true;
+                        else if (active[index].queue == 0) queue0Waits = true;
                         ++index;
                         continue;
                     }
+                    releaseHeldFlips(active[index], active[index].heldFlips);
                     {
                         PerformanceContext timingContext(frameTiming.get());
                         PerformanceTimer timing("Driver.SubmissionCompletion");
@@ -2066,6 +2132,13 @@ private:
                     active.erase(active.begin() + static_cast<std::ptrdiff_t>(index));
                     progressed = true;
                     changed.notify_all();
+                }
+                {
+                    std::lock_guard lock(mutex);
+                    if (queue0Blocked != queue0Waits) {
+                        queue0Blocked = queue0Waits;
+                        if (queue0Waits) changed.notify_all();
+                    }
                 }
                 if (progressed) {
                     lastProgress = std::chrono::steady_clock::now();

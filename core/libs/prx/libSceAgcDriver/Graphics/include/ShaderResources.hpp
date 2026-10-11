@@ -81,7 +81,24 @@ private:
     std::vector<std::shared_ptr<Sampler>> samplers;
     // While a shader's bindings are added: its sampled textures (index into textures) and the masks
     // of the sampler elements paired with each (DescriptorBinding::imageSamplers).
-    std::vector<std::pair<std::size_t, std::uint32_t>> pairedSamplers;
+    // A sampled texture of the shader being bound with the sampler elements paired with it (mask), and
+    // what the pairing checks need: one level, cube, BC swizzle, guest format.
+    struct PairedTexture {
+        std::size_t texture;
+        std::uint32_t mask;
+        bool singleLevel;
+        bool cube;
+        std::uint32_t bcSwizzle;
+        std::uint32_t format;
+    };
+    std::vector<PairedTexture> pairedSamplers;
+    // Each bound sampler's S# words and decode inputs (index as samplers), for ANISO_OVERRIDE variants.
+    struct SamplerInput {
+        std::array<std::uint32_t, 4> words;
+        bool compareEnable;
+        bool unnormalized;
+    };
+    std::vector<SamplerInput> samplerInputs;
     std::vector<std::unique_ptr<StorageImage>> storageImages;
 };
 

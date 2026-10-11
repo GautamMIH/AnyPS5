@@ -35,6 +35,22 @@ void toGuest(const std::tm& host, std::tm* guest) {
 
 }
 
+#ifdef __linux__
+#include <cstdlib>
+
+namespace {
+
+// Without TZ, glibc's localtime, mktime and tzset re-check /etc/localtime on every call; titles that
+// call them every frame spent most of their time there (upstream 11b32af52). The zone is read once.
+const bool timeZoneFixed = [] {
+    if (std::getenv("TZ") == nullptr) ::setenv("TZ", ":/etc/localtime", 0);
+    ::tzset();
+    return true;
+}();
+
+}
+#endif
+
 extern "C" {
 
 std::tm* APS5_VABI localtime_s_nid_postfix(const int64_t* timer, std::tm* result);

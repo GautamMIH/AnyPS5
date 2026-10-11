@@ -11,12 +11,17 @@
 namespace GuestHeap {
 namespace {
 
+// Clang's PS4/PS5 targets set the default new and malloc alignment to 32 bytes, so guest code may
+// store to a fresh malloc or operator new result with 32-byte-aligned AVX instructions (upstream
+// a43f1411c).
+constexpr std::size_t MinimumAlignment = 32;
+
 void* allocate(GuestAllocations::Mutation& mutation, std::size_t alignment, std::size_t bytes) {
     if (alignment == 0 || (alignment & (alignment - 1)) != 0) throw std::invalid_argument("invalid guest heap alignment");
-    alignment = std::max(alignment, alignof(void*));
+    alignment = std::max(alignment, MinimumAlignment);
     void* pointer = GuestHeapStorage::Allocate(alignment, bytes);
     try {
-        mutation.Add(pointer, bytes, true, true);
+        mutation.Add(pointer, bytes, true, true, true);
     } catch (...) {
         GuestHeapStorage::Free(pointer);
         throw;

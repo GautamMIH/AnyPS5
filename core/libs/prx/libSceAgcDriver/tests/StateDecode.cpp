@@ -42,6 +42,7 @@ alignas(256) std::array<std::byte, 4096> colorMemory{};
 // A linear 64x4 R8G8B8A8_UNORM target in slot 0 written by a bound pixel shader.
 AgcDriver::QueueState makeState() {
     AgcDriver::QueueState queue;
+    queue.context[0x105] = queue.context[0x106] = queue.context[0x107] = queue.context[0x108] = 0;
     queue.userConfig[0x242] = 4;
     const std::initializer_list<std::pair<std::uint32_t, std::uint32_t>> values = {
         {0x2d5, 0x2000},
@@ -132,6 +133,11 @@ void conservativeTests() {
     queue.userConfig[0x242] = 4;
     queue.context[0x313] = 0x6002u;
     Reject([&] { DecodeState(queue); }, "PA_SC_CONSERVATIVE_RASTERIZATION_CNTL");
+    // RADV's disabled state and the uncertainty-region bits are off too (upstream 88cc2ea4, ab09a0a9).
+    for (const std::uint32_t off : {0x100000u, 0x1f6000u}) {
+        queue.context[0x313] = off;
+        Require(DecodeState(queue).conservativeRasterization == VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT, "a disabled conservative state with RADV or uncertainty-region bits must decode as off");
+    }
 }
 
 void depthMaintenanceTests() {
@@ -140,6 +146,57 @@ void depthMaintenanceTests() {
     queue.context[0x000] = 0x80u;
     Require(!DepthMaintenanceRejection(queue).empty(), "a depth copy pass must be rejected");
     Reject([&] { DecodeState(queue); }, "DB_RENDER_CONTROL");
+    // A resummarize pass without depth, stencil or colour work changes nothing (upstream 24876afc).
+    queue.context[0x000] = 0x10u;
+    queue.context[0x8e] = 0;
+    Require(DepthMaintenanceRejection(queue).empty() && DecodeState(queue).resummarizeOnly, "a resummarize pass with no work must be skipped, not rejected");
+    queue.context[0x8e] = 0xf;
+    Require(!DepthMaintenanceRejection(queue).empty(), "a resummarize pass writing colour must be rejected");
+}
+
+void blendTests() {
+    auto queue = makeState();
+    // FORCE_DST_ALPHA_1: destination alpha reads as 1 (upstream 1e20b4ec). Blend SRC_ALPHA, INV_DST_ALPHA.
+    queue.context[0x31d] = 0x20000u;
+    queue.context[0x1e0] = 0x40000000u | (7u << 8u) | 4u;
+    auto state = DecodeState(queue);
+    Require(state.blends[0].dstColorBlendFactor == VK_BLEND_FACTOR_ZERO && state.blends[0].srcColorBlendFactor == VK_BLEND_FACTOR_SRC_ALPHA, "FORCE_DST_ALPHA_1 must turn ONE_MINUS_DST_ALPHA into ZERO");
+    queue.context[0x31d] = 0x10000u;
+    Reject([&] { DecodeState(queue); }, "color samples or fragments");
+    // Dual-source blending through MRT1 (upstream b8cc4adb): SRC1_COLOR and INV_SRC1_COLOR.
+    queue = makeState();
+    queue.context[0x1e0] = 0x40000000u | (16u << 8u) | 15u;
+    queue.context[0x8f] = 0xffu;
+    queue.context[0x1c5] = 0x99u;
+    state = DecodeState(queue);
+    Require(state.dualSourceBlend && state.blends[0].srcColorBlendFactor == VK_BLEND_FACTOR_SRC1_COLOR, "SRC1 factors must decode as dual-source blending");
+    queue.context[0x1c5] = 0x49u;
+    Reject([&] { DecodeState(queue); }, "MRT1 export in the MRT0 export format");
+    queue.context[0x1c5] = 0x99u;
+    queue.context[0x8f] = 0xfu;
+    Reject([&] { DecodeState(queue); }, "dual-source blending needs pixel exports");
+}
+
+void rasterTests() {
+    // PROVOKING_VTX_LAST (bit 19; upstream 3a8cf3a3).
+    auto queue = makeState();
+    queue.context[0x205] = 0x240u | (1u << 19u);
+    Require(DecodeState(queue).provokingVertexLast, "PROVOKING_VTX_LAST must select the last vertex");
+    // A zero-scale viewport rasterizes nothing (upstream 0fc522d9).
+    queue = makeState();
+    queue.context[0x10f] = 0;
+    auto state = DecodeState(queue);
+    Require(state.scissor.extent.width == 0 && state.scissor.extent.height == 0 && state.viewport.width == 1.0f, "a zero-scale viewport must get an empty scissor");
+    queue.userConfig[0x242] = 2;
+    Reject([&] { DecodeState(queue); }, "unsupported viewport transform");
+    // A 1D target one row high is a one-row 2D target (upstream 7638ade7).
+    queue = makeState();
+    queue.context[0x3b8] = 0x8000000u;
+    queue.context[0x3b0] = 63u << 14u;
+    Require(DecodeState(queue).colors[0].extent.height == 1u, "a one-row 1D color target must decode");
+    queue.context[0x3b0] = (63u << 14u) | 3u;
+    Reject([&] { DecodeState(queue); }, "1D color targets taller than one row");
+    Reject([] { DecodeColorTileMode(0x8000000u | (9u << 14u)); }, "1D color targets with a standard swizzle mode");
 }
 
 void inertPixelStageTests() {
@@ -180,6 +237,8 @@ int main() {
         tuningFieldTests();
         conservativeTests();
         depthMaintenanceTests();
+        blendTests();
+        rasterTests();
         inertPixelStageTests();
         standard64KBTests();
     } catch (const std::exception& error) {

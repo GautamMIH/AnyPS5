@@ -36,6 +36,8 @@ private:
     void* mapping = nullptr;
     std::size_t size;
     VkDeviceSize allocationBytes = 0;
+    VkDeviceSize offset = 0;
+    bool slab = false;
     VkBufferUsageFlags usage;
     VkMemoryPropertyFlags properties;
     bool reusable = false;

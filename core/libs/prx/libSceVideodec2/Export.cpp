@@ -343,6 +343,11 @@ void publish(const Decoder& decoder, const Videodec2::Picture& picture, FrameBuf
         avc.pts_data = picture.pts;
         avc.dts_data = picture.dts;
         avc.attached_data = picture.attachedData;
+        // As upstream's Videodec2 reports them (libSceVdecsw reads them): IDR from the key-frame
+        // flag, profile_idc without FFmpeg's constraint bits, level_idc.
+        avc.idr_pictureflag = picture.keyFrame ? 1 : 0;
+        avc.profile_idc = static_cast<std::uint8_t>(picture.profile > 0 ? picture.profile & 0xff : 0);
+        avc.level_idc = static_cast<std::uint8_t>(picture.level > 0 ? picture.level : 0);
         avc.frame_cropping_flag = cropRight != 0 || cropBottom != 0;
         avc.frame_crop_right_offset = cropRight;
         avc.frame_crop_bottom_offset = cropBottom;

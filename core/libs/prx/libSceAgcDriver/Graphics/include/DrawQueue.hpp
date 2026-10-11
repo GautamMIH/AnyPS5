@@ -26,6 +26,9 @@ public:
     void WaitGpu();
     void Collect();
     void RecordMemoryBarrier(const Context& context);
+    // A full memory barrier (all writes before it visible to everything after it) was recorded after
+    // every entry queued so far (VulkanDevice::Dispatch's trailing barrier).
+    void NoteFullBarrier() { barrierSerial = nextEntrySerial - 1; }
     // Render-pass merging: the last draw leaves its pass open (KeepPassOpen); a following draw with
     // the same pass key that records nothing outside a pass continues it (ContinuePass returns the
     // batch's commands, or null). Every other recording (Begin), Flush and the end of the batch
@@ -111,6 +114,11 @@ private:
     WriteIndex writes;
     // A GPU access overlaps writes of queued draws: the next recording starts with a memory barrier.
     bool barrierRequested = false;
+    // Entries up to this serial are ordered before everything recorded since by a full barrier: a GPU
+    // access overlapping only their writes needs no new barrier and leaves the open render pass
+    // going (the idea of upstream's PassHazards, 0211ee7c/ecc14b0f: hazards count only against the
+    // work since the last barrier). ANYPS5_BARRIER_PER_OVERLAP=1 requests one for every overlap.
+    std::uint64_t barrierSerial = 0;
 };
 
 }

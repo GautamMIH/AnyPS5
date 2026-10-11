@@ -23,6 +23,7 @@ struct Decoration {
     std::optional<std::uint32_t> set;
     std::optional<std::uint32_t> binding;
     std::optional<std::uint32_t> stride;
+    std::optional<std::uint32_t> index;
     bool block = false;
     bool patch = false;
     bool perPrimitive = false;
@@ -44,6 +45,8 @@ struct Module {
     std::set<std::uint32_t> interface;
     std::map<std::uint32_t, std::string> inputs;
     std::map<std::uint32_t, std::string> outputs;
+    // The dual-source blend second color (location 0 index 1), by signature.
+    std::optional<std::string> secondSource;
     bool position = false;
     bool primitiveIndices = false;
     bool fragmentBarycentric = false;
@@ -241,7 +244,9 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     (features.storageImageWriteWithoutFormat && capability == spv::CapabilityStorageImageWriteWithoutFormat) ||
                     (features.clipDistance && capability == spv::CapabilityClipDistance) ||
                     (features.cullDistance && capability == spv::CapabilityCullDistance) ||
-                    (features.imageInt64Atomics && (capability == spv::CapabilityInt64Atomics || capability == spv::CapabilityInt64ImageEXT));
+                    ((features.imageInt64Atomics || features.bufferInt64Atomics) && capability == spv::CapabilityInt64Atomics) ||
+                    (features.imageInt64Atomics && capability == spv::CapabilityInt64ImageEXT) ||
+                    (features.float16Rte && (capability == spv::CapabilityFloat16 || capability == spv::CapabilityRoundingModeRTE || capability == spv::CapabilityDenormPreserve));
 
                 const bool isBdaCapability =
                     shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version &&
@@ -333,8 +338,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 break;
             case spv::OpExecutionMode:
                 // Float controls per width (32 and, for programs with f64 arithmetic, 64 bits).
-                if (count == 4 && instruction[2] == spv::ExecutionModeSignedZeroInfNanPreserve) {
-                    Require(instruction[3] == 32u || instruction[3] == 64u, "SignedZeroInfNanPreserve requires Float32 or Float64");
+                if (count == 4 && (instruction[2] == spv::ExecutionModeSignedZeroInfNanPreserve || instruction[2] == spv::ExecutionModeRoundingModeRTE || instruction[2] == spv::ExecutionModeDenormPreserve)) {
+                    Require(instruction[3] == 16u || instruction[3] == 32u || instruction[3] == 64u, "float controls execution modes require Float16, Float32 or Float64");
                     executionModeTargets.insert(instruction[1]);
                     break;
                 }
@@ -348,13 +353,13 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 Require(count >= 3, "malformed SPIR-V decoration");
                 auto& decoration = module.decorations[instruction[1]];
                 const auto kind = static_cast<spv::Decoration>(instruction[2]);
-                if (kind == spv::DecorationLocation || kind == spv::DecorationBuiltIn || kind == spv::DecorationDescriptorSet || kind == spv::DecorationBinding || kind == spv::DecorationArrayStride) {
+                if (kind == spv::DecorationLocation || kind == spv::DecorationBuiltIn || kind == spv::DecorationDescriptorSet || kind == spv::DecorationBinding || kind == spv::DecorationArrayStride || kind == spv::DecorationIndex) {
                     Require(count == 4, "malformed SPIR-V literal decoration");
-                    auto* field = kind == spv::DecorationLocation ? &decoration.location : kind == spv::DecorationBuiltIn ? &decoration.builtin : kind == spv::DecorationDescriptorSet ? &decoration.set : kind == spv::DecorationBinding ? &decoration.binding : &decoration.stride;
+                    auto* field = kind == spv::DecorationLocation ? &decoration.location : kind == spv::DecorationBuiltIn ? &decoration.builtin : kind == spv::DecorationDescriptorSet ? &decoration.set : kind == spv::DecorationBinding ? &decoration.binding : kind == spv::DecorationIndex ? &decoration.index : &decoration.stride;
                     Require(!field->has_value(), "duplicate SPIR-V decoration");
                     *field = instruction[3];
                 }
-                Require(kind != spv::DecorationComponent && kind != spv::DecorationIndex && kind != spv::DecorationStream && kind != spv::DecorationXfbBuffer && kind != spv::DecorationXfbStride, "unsupported shader interface packing or transform feedback");
+                Require(kind != spv::DecorationComponent && kind != spv::DecorationStream && kind != spv::DecorationXfbBuffer && kind != spv::DecorationXfbStride, "unsupported shader interface packing or transform feedback");
                 if (kind == spv::DecorationPatch) decoration.patch = true;
                 if (kind == spv::DecorationPerPrimitiveEXT) decoration.perPrimitive = true;
                 if (kind == spv::DecorationPerVertexKHR) {
@@ -468,9 +473,13 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             typeId = outer[2];
         }
         const auto& type = module.Type(typeId);
+        Require(!decoration.index || (fragment && variable.storage == spv::StorageClassOutput && state.dualSourceBlend && decoration.location == 0u && *decoration.index == 1u), "only the second dual-source blend color may use the Index decoration, at location 0 index 1");
         if (variable.storage == spv::StorageClassInput || variable.storage == spv::StorageClassOutput) {
             Require(module.interface.contains(id), "SPIR-V input or output is absent from the entry point interface");
-            if (decoration.location) {
+            if (decoration.index) {
+                Require(!module.secondSource, "duplicate second dual-source blend color");
+                module.secondSource = module.Signature(typeId);
+            } else if (decoration.location) {
                 Require(!vertexArray || (outer[0] & 0xffffu) == spv::OpTypeArray, "per-vertex interface lacks a control-point or mesh-output dimension");
                 Require(!decoration.perPrimitive, "per-primitive user outputs are unsupported");
                 Require(!decoration.builtin, "shader input cannot have both location and built-in decorations");
@@ -561,6 +570,7 @@ namespace {
 struct ValidatedInterface {
     std::map<std::uint32_t, std::string> inputs;
     std::map<std::uint32_t, std::string> outputs;
+    std::optional<std::string> secondSource;
 };
 
 std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& compiled, const State& state, const VkPhysicalDeviceSubgroupProperties& subgroup, bool fragmentShaderBarycentric, const ShaderDeviceFeatures& features) {
@@ -596,6 +606,9 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
     append(features.cullDistance);
     append(features.geometryShader);
     append(features.sampleRateShading);
+    append(features.bufferInt64Atomics);
+    append(features.float16Rte);
+    append(state.dualSourceBlend);
     append(shader.bdaAbiVersion);
     append(shader.pushConstants.empty());
     append(shader.bindings.size());
@@ -629,7 +642,7 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
         return found->second;
     }
     auto module = Inspect(compiled, state, subgroup, fragmentShaderBarycentric, features);
-    auto result = std::make_shared<const ValidatedInterface>(ValidatedInterface{std::move(module.inputs), std::move(module.outputs)});
+    auto result = std::make_shared<const ValidatedInterface>(ValidatedInterface{std::move(module.inputs), std::move(module.outputs), std::move(module.secondSource)});
     if (cache.size() >= 128) cache.clear();
     cache.emplace(std::move(key), result);
     timing.Mark("inspect");
@@ -674,7 +687,7 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
     }
     key.push_back(subgroup.subgroupSize | (static_cast<std::uint64_t>(subgroup.supportedStages) << 32u));
     key.push_back(subgroup.supportedOperations | (static_cast<std::uint64_t>(subgroup.quadOperationsInAllStages) << 32u));
-    key.push_back(static_cast<std::uint64_t>(fragmentShaderBarycentric) | (static_cast<std::uint64_t>(features.imageGatherExtended) << 1u) | (static_cast<std::uint64_t>(features.storageImageReadWithoutFormat) << 2u) | (static_cast<std::uint64_t>(features.storageImageWriteWithoutFormat) << 3u) | (static_cast<std::uint64_t>(features.geometryShader) << 4u) | (static_cast<std::uint64_t>(features.minLod) << 5u) | (static_cast<std::uint64_t>(features.clipDistance) << 6u) | (static_cast<std::uint64_t>(features.cullDistance) << 7u) | (static_cast<std::uint64_t>(features.sampleRateShading) << 8u));
+    key.push_back(static_cast<std::uint64_t>(fragmentShaderBarycentric) | (static_cast<std::uint64_t>(features.imageGatherExtended) << 1u) | (static_cast<std::uint64_t>(features.storageImageReadWithoutFormat) << 2u) | (static_cast<std::uint64_t>(features.storageImageWriteWithoutFormat) << 3u) | (static_cast<std::uint64_t>(features.geometryShader) << 4u) | (static_cast<std::uint64_t>(features.minLod) << 5u) | (static_cast<std::uint64_t>(features.clipDistance) << 6u) | (static_cast<std::uint64_t>(features.cullDistance) << 7u) | (static_cast<std::uint64_t>(features.sampleRateShading) << 8u) | (static_cast<std::uint64_t>(features.bufferInt64Atomics) << 9u) | (static_cast<std::uint64_t>(features.float16Rte) << 11u) | (static_cast<std::uint64_t>(state.dualSourceBlend) << 10u));
     struct KeyHash {
         std::size_t operator()(const std::vector<std::uint64_t>& value) const {
             std::uint64_t hash = 0xcbf29ce484222325ull;
@@ -734,6 +747,7 @@ void validateShaders(std::span<const CompiledShader> shaders, const State& state
             const auto output = previous->outputs.find(slot);
             Require(output != previous->outputs.end() && output->second == "vertex:f32x4", "fragment shader must export a float4 color for color target " + std::to_string(slot));
         }
+        Require(!state.dualSourceBlend || previous->secondSource == "f32x4", "dual-source blending needs a float4 second color at location 0 index 1");
     }
 }
 

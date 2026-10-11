@@ -96,6 +96,9 @@ struct GuestTextureResource {
     std::uint8_t dstSelY;
     std::uint8_t dstSelZ;
     std::uint8_t dstSelW;
+    // T# BC_SWIZZLE: how the border colour's channels are ordered (0 XYZW; only an opaque black
+    // border tells the orders apart, Sampler::ReadsOpaqueBlackBorder).
+    std::uint32_t bcSwizzle = 0;
 };
 
 GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words);

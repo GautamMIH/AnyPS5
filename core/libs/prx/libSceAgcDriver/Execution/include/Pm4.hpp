@@ -51,6 +51,10 @@ struct IndirectDraw {
 };
 
 std::string Name(std::uint32_t header);
+// A PM4 type-2 packet is a one-dword filler (command-buffer padding), as is the one-dword NOP pad
+// 0xffff1000 (upstream 0e42a60d); type 3 and type 0 carry a dword count in bits 29:16.
+inline bool FillerPacket(std::uint32_t header) { return (header >> 30u) == 2u || header == 0xffff1000u; }
+inline std::size_t PacketWords(std::uint32_t header) { return FillerPacket(header) ? 1u : static_cast<std::size_t>((header >> 16u) & 0x3fffu) + 2u; }
 std::string_view UnsupportedReason(std::uint32_t header);
 void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue);
 void Execute(std::span<const std::uint32_t> packet, QueueState& queue);

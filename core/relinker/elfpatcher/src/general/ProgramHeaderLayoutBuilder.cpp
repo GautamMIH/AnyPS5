@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iostream>
 #include <string>
+#include <vector>
 
 namespace Elfpatcher {
 
@@ -135,31 +136,33 @@ std::uint16_t ProgramHeaderLayoutBuilder::WriteLayout(
     std::vector<std::uint8_t>& buf,
     const ProgramHeaderLayoutRequest& request
 ) const {
-    std::uint16_t keptCount = 0;
-    std::uint16_t frameCount = 0;
+    std::vector<Domain::ProgramHeader> kept;
+    std::size_t frameCount = 0;
     for (const auto& ph : request.OriginalHeaders) {
         if (_segmentFilter->ShouldSkip(ph))
             continue;
-        keptCount++;
+        kept.push_back(ph);
         if (ph.Type == PT_GNU_EH_FRAME)
             frameCount++;
     }
 
-    const bool keepFrames = keptCount + kSyntheticProgramHeaderCount < request.PhNum;
+    // A library module (no PT_INTERP) needs one synthetic header less.
+    const bool hasInterp = request.InterpSize != 0;
+    const std::size_t syntheticCount = hasInterp ? kSyntheticProgramHeaderCount : kSyntheticProgramHeaderCount - 1u;
+    const bool keepFrames = kept.size() + syntheticCount <= request.PhNum;
     if (!keepFrames && frameCount > 0) {
-        keptCount -= frameCount;
+        std::erase_if(kept, [](const Domain::ProgramHeader& ph) { return ph.Type == PT_GNU_EH_FRAME; });
         std::cerr << "WARNING: No free program header slot for PT_GNU_EH_FRAME; C++ exceptions thrown in the executable cannot be caught.\n";
     }
+    _sortLoadHeaders(kept);
 
-    const bool hasInterp = request.InterpSize != 0;
-    const std::uint16_t syntheticCount = hasInterp ? kSyntheticProgramHeaderCount : static_cast<std::uint16_t>(kSyntheticProgramHeaderCount - 1);
-    const std::uint16_t requiredPh = keptCount + syntheticCount;
+    const std::size_t requiredPh = kept.size() + syntheticCount;
     if (requiredPh > request.PhNum || (request.RequireNonExecutableStack && requiredPh + 1 > request.PhNum))
         throw Domain::RelinkerException(
             "Not enough program header slots: need " + std::to_string(requiredPh + (request.RequireNonExecutableStack ? 1 : 0)) +
             ", available " + std::to_string(request.PhNum));
     const bool hasGnuStack = requiredPh + 1 <= request.PhNum;
-    const std::uint16_t neededPh = hasGnuStack ? static_cast<std::uint16_t>(requiredPh + 1) : requiredPh;
+    const std::size_t neededPh = hasGnuStack ? requiredPh + 1 : requiredPh;
 
     const std::uint64_t headerBlockSize = request.PhOff + static_cast<std::uint64_t>(neededPh) * request.PhEntSize;
     std::uint64_t headerBlockAlign = kDefaultLoadAlignment;
@@ -182,52 +185,49 @@ std::uint16_t ProgramHeaderLayoutBuilder::WriteLayout(
     const std::uint64_t dynamicSegmentVaddr = request.ExtraBlockVaddr + (request.DynamicSegmentOffset - request.ExtraBlockOffset);
     const std::uint64_t interpVaddr = hasInterp ? request.ExtraBlockVaddr + (request.InterpOffset - request.ExtraBlockOffset) : 0;
 
-    std::vector<Domain::ProgramHeader> headers;
-    headers.push_back(_makePhdrHeader(request.PhOff, headerBlockVaddr + request.PhOff, static_cast<std::uint64_t>(neededPh) * request.PhEntSize));
-    headers.push_back(_makeHeaderBlockLoad(headerBlockVaddr, headerBlockSize, headerBlockAlign));
-
-    for (const auto& ph : request.OriginalHeaders) {
-        if (_segmentFilter->ShouldSkip(ph) || (!keepFrames && ph.Type == PT_GNU_EH_FRAME))
-            continue;
-        Domain::ProgramHeader kept = ph;
-        if (kept.Type == PT_LOAD)
-            kept.Flags = _fixLoadFlags(ph.Flags);
-        headers.push_back(kept);
-    }
-
-    headers.push_back(_makeLoadHeader(request.ExtraBlockOffset, request.ExtraBlockVaddr, request.ExtraBlockSize));
-    headers.push_back(_makeDynamicHeader(request.DynamicSegmentOffset, dynamicSegmentVaddr, request.DynamicSegmentSize));
+    // PT_PHDR and PT_INTERP precede every PT_LOAD, and the PT_LOADs are in ascending address order
+    // (Linux before 5.18 sizes the mapping from the first and last PT_LOAD in table order).
+    std::vector<Domain::ProgramHeader> layout;
+    layout.push_back(_makePhdrHeader(request.PhOff, headerBlockVaddr + request.PhOff, static_cast<std::uint64_t>(neededPh) * request.PhEntSize));
     if (hasInterp)
-        headers.push_back(_makeInterpHeader(request.InterpOffset, interpVaddr, request.InterpSize));
+        layout.push_back(_makeInterpHeader(request.InterpOffset, interpVaddr, request.InterpSize));
+    for (auto ph : kept) {
+        if (ph.Type == PT_LOAD)
+            ph.Flags = _fixLoadFlags(ph.Flags);
+        layout.push_back(ph);
+    }
+    layout.push_back(_makeLoadHeader(request.ExtraBlockOffset, request.ExtraBlockVaddr, request.ExtraBlockSize));
+    layout.push_back(_makeHeaderBlockLoad(headerBlockVaddr, headerBlockSize, headerBlockAlign));
+    layout.push_back(_makeDynamicHeader(request.DynamicSegmentOffset, dynamicSegmentVaddr, request.DynamicSegmentSize));
     if (hasGnuStack) {
         Domain::ProgramHeader stack{};
         stack.Type = PT_GNU_STACK;
         stack.Flags = PF_R | PF_W;
         stack.Alignment = kGnuStackAlignment;
-        headers.push_back(stack);
+        layout.push_back(stack);
     }
+    _sortLoadHeaders(layout);
 
-    std::vector<std::size_t> loadSlots;
+    for (std::size_t index = 0; index < layout.size(); ++index)
+        _writeProgramHeader(buf, static_cast<std::size_t>(request.PhOff) + index * request.PhEntSize, layout[index]);
+
+    return static_cast<std::uint16_t>(layout.size());
+}
+
+void ProgramHeaderLayoutBuilder::_sortLoadHeaders(std::vector<Domain::ProgramHeader>& headers) const {
     std::vector<Domain::ProgramHeader> loads;
-    for (std::size_t index = 0; index < headers.size(); ++index) {
-        if (headers[index].Type != PT_LOAD)
-            continue;
-        loadSlots.push_back(index);
-        loads.push_back(headers[index]);
+    for (const auto& ph : headers) {
+        if (ph.Type == PT_LOAD)
+            loads.push_back(ph);
     }
     std::stable_sort(loads.begin(), loads.end(), [](const Domain::ProgramHeader& left, const Domain::ProgramHeader& right) {
         return left.MappedAddress < right.MappedAddress;
     });
-    for (std::size_t index = 0; index < loadSlots.size(); ++index)
-        headers[loadSlots[index]] = loads[index];
-
-    std::uint16_t writtenPh = 0;
-    for (const auto& ph : headers) {
-        _writeProgramHeader(buf, static_cast<std::size_t>(request.PhOff) + static_cast<std::size_t>(writtenPh) * request.PhEntSize, ph);
-        writtenPh++;
+    std::size_t next = 0;
+    for (auto& ph : headers) {
+        if (ph.Type == PT_LOAD)
+            ph = loads[next++];
     }
-
-    return writtenPh;
 }
 
 }

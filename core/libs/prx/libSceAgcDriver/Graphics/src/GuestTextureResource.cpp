@@ -114,7 +114,9 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     static_cast<void>(dccAlphaPos);
     static_cast<void>(dccColorTransf);
     static_cast<void>(metaAddr);
-    Require(bcSwizzle == 0, "guest texture descriptor uses a BC swizzle which is not implemented");
+    // The BC swizzle only reorders the border colour; transparent black and opaque white read the
+    // same in every order, opaque black is checked against the paired samplers (upstream 85016605).
+    Require(bcSwizzle <= 5u, "guest texture descriptor uses an invalid BC swizzle " + std::to_string(bcSwizzle));
 
     Require(baseLevel <= lastLevel, "guest texture descriptor has a base mip level past its last mip level");
 
@@ -138,7 +140,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
             // modelled.
             Require(baseArray == 0, "guest 3D texture descriptor has a nonzero base slice");
             Require(tileMode != TextureTileMode::kStandard256B && tileMode != TextureTileMode::kD256B, "3D textures in 256-byte tiling are invalid");
-            Require(tileMode == TextureTileMode::kLinear || tileMode == TextureTileMode::kStandard4KB || tileMode == TextureTileMode::kStandard64KB || tileMode == TextureTileMode::kS64KBX || tileMode == TextureTileMode::Depth64KB || tileMode == TextureTileMode::RenderTarget64KB || tileMode == TextureTileMode::kD64KBX, "3D textures are implemented linear, in SW_4KB_S, SW_64KB_S or SW_64KB_S_X (thick) and in SW_64KB_Z_X, SW_64KB_D_X or SW_64KB_R_X (thin) only");
+            Require(tileMode == TextureTileMode::kLinear || tileMode == TextureTileMode::kStandard4KB || tileMode == TextureTileMode::kStandard64KB || tileMode == TextureTileMode::kS64KBX || tileMode == TextureTileMode::Depth64KB || tileMode == TextureTileMode::RenderTarget64KB || tileMode == TextureTileMode::kD64KBX, "3D textures are implemented linear, in SW_4KB_S, SW_64KB_S, SW_64KB_S_X or SW_64KB_D_X (thick) and in SW_64KB_Z_X or SW_64KB_R_X (thin) only");
             Require(maxMip == 0, "mipmapped 3D textures are not implemented");
             break;
         case TextureDimension::k1DArray:
@@ -198,6 +200,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     result.dstSelZ = static_cast<std::uint8_t>(dstSelZ);
     result.dstSelW = static_cast<std::uint8_t>(dstSelW);
     result.minLod = minLod;
+    result.bcSwizzle = bcSwizzle;
     return result;
 }
 

@@ -59,11 +59,14 @@ ColorTileMode DecodeColorTileMode(std::uint32_t attrib3) {
     // MIP0_DEPTH (bits 0-12) counts array or volume slices (see DecodeState); RESOURCE_TYPE
     // (bits 24-25) is 2D or 3D, whose render-target slices are laid out alike.
     const auto resourceType = (attrib3 >> 24u) & 3u;
-    require((attrib3 & 0x80002000u) == 0 && (resourceType == 1 || resourceType == 2) && ((attrib3 >> 27u) & 7u) == 1, "AGC graphics: unsupported color dimension, resource level or metadata mode");
+    // RESOURCE_TYPE 0 is a 1D surface: one row high it is laid out like a one-row 2D target (addrlib
+    // allows it the linear and render modes; upstream 7638ade7).
+    require((attrib3 & 0x80002000u) == 0 && ((resourceType == 0 && (attrib3 & 0x1fffu) == 0) || resourceType == 1 || resourceType == 2) && ((attrib3 >> 27u) & 7u) == 1, "AGC graphics: unsupported color dimension, resource level or metadata mode");
     const auto mode = (attrib3 >> 14u) & 0x1fu;
     const auto fmaskMode = (attrib3 >> 19u) & 0x1fu;
     require(fmaskMode == 0 || fmaskMode == 0x18, "AGC graphics: unsupported color FMASK swizzle mode");
     require(mode == 0 || mode == 5 || mode == 9 || mode == 0x1b, "AGC graphics: unsupported color tile mode");
+    require(resourceType != 0 || mode == 0 || mode == 0x1b, "AGC graphics: 1D color targets with a standard swizzle mode are invalid");
     return static_cast<ColorTileMode>(mode);
 }
 

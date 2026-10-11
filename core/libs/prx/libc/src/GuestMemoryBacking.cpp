@@ -181,7 +181,9 @@ bool claimGaps(std::uint64_t first, std::uint64_t last) {
 
 void registerCommitted(std::uint64_t begin, std::uint64_t end, const Record& record) {
     if (!committed(record.kind) || record.kind == Kind::Heap) return;
-    GuestAllocations::GuestAllocationsAdd_nid_postfix(nullptr, reinterpret_cast<void*>(begin), static_cast<std::size_t>(end - begin), hostReadable(record.protection), hostWritable(record.protection));
+    // The registry records GPU access (SCE protection 0x10/0x20), as the console's GPU page tables do.
+    const bool gpu = (record.protection & (kProtGpuRead | kProtGpuWrite)) != 0;
+    GuestAllocations::GuestAllocationsAdd_nid_postfix(nullptr, reinterpret_cast<void*>(begin), static_cast<std::size_t>(end - begin), hostReadable(record.protection), hostWritable(record.protection), gpu);
 }
 
 bool validRange(std::uint64_t address, std::size_t bytes) {

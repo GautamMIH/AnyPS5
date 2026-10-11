@@ -50,6 +50,8 @@ std::size_t APS5_VABI wcrtomb_nid_postfix(char* destination, std::uint16_t value
     return 1;
 }
 
+// wcsrtombs is in WideStrings.cpp (UTF-8, like mbstowcs and wcstombs there).
+
 int APS5_VABI wcsrtombs_s_nid_postfix(
     std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t** source, std::size_t limit,
     void* state

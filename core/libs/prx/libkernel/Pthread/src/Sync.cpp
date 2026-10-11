@@ -1,4 +1,5 @@
 #include "../include/PthreadSync.hpp"
+#include "../include/Cancel.hpp"
 #include <atomic>
 #include <mutex>
 #include <new>
@@ -100,6 +101,9 @@ int MutexCreate(PthreadMutex* mutex, const MutexType type) {
 int MutexDestroy(PthreadMutex* mutex) {
     if (mutex == nullptr)
         throw std::runtime_error("pthread mutex: null pointer");
+    // A locked mutex cannot be destroyed (upstream d77bc7c36).
+    if (!isStaticMutexInitializer(*mutex) && (*mutex)->_owner.load(std::memory_order_acquire) != std::thread::id{})
+        return kErrorBusy;
     if (!isStaticMutexInitializer(*mutex))
         delete *mutex;
     *mutex = nullptr;
@@ -182,12 +186,31 @@ int CondDestroy(PthreadCond* cond) {
     return 0;
 }
 
+// Waits once, registered with the thread's cancel state so scePthreadCancel can wake it; the
+// registration ends before the mutex is taken back. Returns false on a timeout.
+template <class TLock>
+bool cancellableWait(std::condition_variable_any& condition, TLock& lock, const Deadline& deadline) {
+    ThreadCancel::BeginWait(&condition);
+    if (ThreadCancel::Requested()) {
+        ThreadCancel::EndWait();
+        return true;
+    }
+    ThreadCancel::WaitLock<TLock> waitLock{lock};
+    if (deadline)
+        return condition.wait_until(waitLock, *deadline) != std::cv_status::timeout;
+    condition.wait(waitLock);
+    return true;
+}
+
 int CondWait(PthreadCond* cond, PthreadMutex* mutex, const Deadline& deadline) {
     auto* c = resolveCond(cond);
     auto* m = resolveMutex(mutex);
     const auto self = std::this_thread::get_id();
     if (m->_owner.load(std::memory_order_acquire) != self)
         return kErrorPermission;
+    // A cond wait is a cancellation point: a pending cancel is acted on before the wait and after
+    // it (with the mutex held again); a blocked waiter is woken by the cancel (upstream 3acca27f).
+    ThreadCancel::Check();
 
     bool timedOut = false;
     if (m->_type == MutexType::Recursive) {
@@ -197,10 +220,7 @@ int CondWait(PthreadCond* cond, PthreadMutex* mutex, const Deadline& deadline) {
         m->_count = 0;
         m->_owner.store(std::thread::id{}, std::memory_order_relaxed);
         std::unique_lock lock(m->_rmtx, std::adopt_lock);
-        if (deadline)
-            timedOut = c->_cv.wait_until(lock, *deadline) == std::cv_status::timeout;
-        else
-            c->_cv.wait(lock);
+        timedOut = !cancellableWait(c->_cv, lock, deadline);
         lock.release();
         for (int index = 1; index < depth; ++index)
             m->_rmtx.lock();
@@ -208,13 +228,11 @@ int CondWait(PthreadCond* cond, PthreadMutex* mutex, const Deadline& deadline) {
     } else {
         m->_owner.store(std::thread::id{}, std::memory_order_relaxed);
         std::unique_lock lock(m->_mtx, std::adopt_lock);
-        if (deadline)
-            timedOut = c->_cv.wait_until(lock, *deadline) == std::cv_status::timeout;
-        else
-            c->_cv.wait(lock);
+        timedOut = !cancellableWait(c->_cv, lock, deadline);
         lock.release();
     }
     m->_owner.store(self, std::memory_order_relaxed);
+    ThreadCancel::Check();
     return timedOut ? kErrorTimedOut : 0;
 }
 

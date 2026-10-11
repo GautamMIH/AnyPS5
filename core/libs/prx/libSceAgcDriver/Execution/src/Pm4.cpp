@@ -108,6 +108,8 @@ void copyData(std::span<const std::uint32_t> packet) {
 
 // DMA_DATA selector 1: the 64 KiB global data share, shared by every queue.
 constexpr std::uint32_t DmaSelectGds = 1;
+// DMA_DATA destination 2: nowhere, a prefetch of the source into the GPU caches (upstream 2c7d9b9c).
+constexpr std::uint32_t DmaSelectNowhere = 2;
 
 bool gdsRange(std::uint64_t offset, std::size_t bytes) {
     return offset <= GdsBytes && bytes <= GdsBytes - offset;
@@ -117,7 +119,7 @@ bool gdsRange(std::uint64_t offset, std::size_t bytes) {
 // as it reaches any guest range and shaders binding the GDS see the same bytes.
 void dmaData(std::span<const std::uint32_t> packet) {
     const std::size_t bytes = packet[6] & 0x3ffffffu;
-    if (bytes == 0) return;
+    if (bytes == 0 || dmaDestination(packet) == DmaSelectNowhere) return;
     const bool fromGds = dmaSource(packet) == DmaSelectGds;
     const bool toGds = dmaDestination(packet) == DmaSelectGds;
     const bool immediate = dmaSource(packet) == 2;
@@ -186,7 +188,7 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         case 0x11: case 0x12: case 0x13: case 0x15: case 0x16: case 0x26:
         case 0x27: case 0x2a: case 0x2d: case 0x2f: case 0x35: case 0x37: case 0x40: case 0x42: case 0x45: case 0x46: case 0x50:
         case 0x58: case 0x63: case 0x64: case 0x69: case 0x76: case 0x79: case 0x7a:
-        case 0x81: case 0x83: case 0x9f: return {};
+        case 0x81: case 0x83: case 0x9f: case 0x28: return {};
         case 0x24: case 0x25: case 0x2c: case 0x38: return {};
         case 0x3a: case 0x8d:
             return "graphics draw, shader stages and guest render-target materialization are not implemented";
@@ -204,7 +206,7 @@ std::string_view UnsupportedReason(std::uint32_t header) {
         case 0x43: case 0x47: case 0x48:
             return "guest cache actions, GPU events and interrupt delivery are not implemented";
         case 0x8e: return "GPU LOD statistics are not implemented; synthetic results are forbidden";
-        case 0x28: case 0x41: case 0x68: case 0x78:
+        case 0x41: case 0x68: case 0x78:
             return "opcode is named but has no handler in the reference dispatch table";
         default: return "opcode is not known in the reference";
     }
@@ -215,6 +217,10 @@ constexpr std::uint32_t ConditionCachePolicy = 3u << 25u;
 constexpr std::uint32_t ConditionalWordsMask = 0x3fffu;
 
 void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
+    if (!packet.empty() && FillerPacket(packet[0])) {
+        require(packet.size() == 1, "invalid filler size");
+        return;
+    }
     require(packet.size() >= 2, "truncated PM4 header or payload");
     const auto header = packet[0];
     require((header & 0xc0000000u) == 0xc0000000u, "unsupported PM4 packet type");
@@ -249,7 +255,11 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         return;
     }
     // Bit 0 is PREDICATE: the executor skips such packets while SET_PREDICATION's predicate is set.
-    if ((header & 0xfeu) != 0 && !(opcode == 0x11 && (header & 0xfeu) == 2))
+    // Bit 1 selects the compute shader type and bit 2 (register writes) resets the filter CAM;
+    // neither changes what the packet writes (upstream).
+    const bool registerWrite = opcode == 0x69 || opcode == 0x76 || opcode == 0x79 || opcode == 0x7a;
+    const auto allowedFlags = opcode == 0x11 || opcode == 0x15 || opcode == 0x16 ? 2u : registerWrite ? 6u : opcode == 0x3c || opcode == 0x93 ? 2u : 0u;
+    if ((header & 0xfeu & ~allowedFlags) != 0)
         throw std::runtime_error("PM4 header flags are not implemented for " + Name(header) + " (header 0x" + [&] { char text[12]{}; std::snprintf(text, sizeof(text), "%08x", header); return std::string(text); }() + ")");
     switch (opcode) {
         case 0x11:
@@ -302,12 +312,20 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         // Initiator bits accepted besides COMPUTE_SHADER_EN | ORDER_MODE: CS_W32_EN (0x8000) and
         // TUNNEL_ENABLE (0x2000, a wave launch priority hint with no effect on results); direct
         // dispatches also USE_THREAD_DIMENSIONS (0x20: the packet counts threads, Driver::dispatch).
-        case 0x15: size(5); require((packet[4] & ~0xa020u) == 0x41u, "dispatch modifiers are not implemented"); break;
+        // FORCE_START_AT_000 (0x4) only resets the start position, which dispatches here never carry
+        // (upstream 75638194: RADV's dispatch form).
+        case 0x15: size(5); require((packet[4] & ~0xa024u) == 0x41u, "dispatch modifiers are not implemented"); break;
         case 0x16:
             require(packet.size() == 3 || packet.size() == 4, "invalid indirect dispatch size");
-            require((packet.back() & ~0xa000u) == 0x41u, "indirect dispatch modifiers are not implemented");
+            require((packet.back() & ~0xa004u) == 0x41u, "indirect dispatch modifiers are not implemented");
             break;
         case 0x42: size(2); require(packet[1] == 0, "unsupported PFP_SYNC_ME payload"); break;
+        // CONTEXT_CONTROL with register loading and shadowing off (RADV's graphics preamble).
+        case 0x28:
+            graphics();
+            size(3);
+            require((packet[1] & 0x7fffffffu) == 0 && (packet[2] & 0x7fffffffu) == 0, "CONTEXT_CONTROL register loading and shadowing are not implemented");
+            break;
         case 0x22:
             size(5);
             require((packet[1] & 3u) == 0, "COND_EXEC reserved address bits are not implemented");
@@ -394,6 +412,16 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
                     size(2);
                     require(eventIndex == 0 || eventIndex == 7, "invalid cache-flush event index");
                     break;
+                // Pipeline statistics start/stop and SQ events, VGT_FLUSH (RADV's preamble): no effect here.
+                case 0x19: case 0x1a: case 0x26:
+                    size(2);
+                    require(eventIndex == 0, "invalid pipeline statistics or SQ event index");
+                    break;
+                case 0x24:
+                    graphics();
+                    size(2);
+                    require(eventIndex == 0, "invalid VGT_FLUSH event index");
+                    break;
                 case 0x39:
                     // PIXEL_PIPE_STAT_DUMP: the occlusion counters (see Driver::dumpSampleCounters).
                     graphics();
@@ -410,11 +438,11 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             const auto controlMask = packet.size() == 8 ? 0x86287fc3u : 0xfeecfffbu;
             require((packet[1] & ~controlMask) == 0, "unsupported ACQUIRE_MEM control flags");
             require(queue == 0 || (packet[1] & 0x06287fc3u) == 0, "graphics cache operation in compute queue");
-            require(packet[3] == 0 && packet[5] == 0, "ACQUIRE_MEM ranges above 40 bits are not implemented");
+            require(packet[3] <= 0xffu && packet[5] <= 0xffu, "invalid ACQUIRE_MEM range high bits");
             require(packet[6] <= 0xffffu, "invalid ACQUIRE_MEM poll interval");
-            const auto base = static_cast<std::uint64_t>(packet[4]) << 8u;
-            const auto bytes = static_cast<std::uint64_t>(packet[2]) << 8u;
-            require(bytes <= (1ull << 40u) - base, "ACQUIRE_MEM range exceeds 40-bit address space");
+            const auto base = ((static_cast<std::uint64_t>(packet[5]) << 32u) | packet[4]) << 8u;
+            const auto bytes = ((static_cast<std::uint64_t>(packet[3]) << 32u) | packet[2]) << 8u;
+            require(bytes <= (1ull << 48u) - base, "ACQUIRE_MEM range exceeds 48-bit address space");
             if (packet.size() == 8) {
                 require((packet[7] & ~0x3ffffu) == 0, "unsupported ACQUIRE_MEM GCR flags");
                 require((packet[7] & 0x2000u) == 0, "ACQUIRE_MEM cache discard is not implemented");
@@ -424,7 +452,9 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         case 0x63: case 0x64: case 0x9f:
             if (opcode != 0x63) graphics();
             size(5);
-            require((packet[1] & 3u) == 0 && packet[3] == 0x80000000u && packet[4] <= 0x3fffu, "unsupported indirect-register address or control fields");
+            // packet[3] 0x80000000: the list holds (offset, value) pairs; otherwise it holds packet[4]
+            // values for consecutive registers from offset packet[3] (upstream 0e5bd5e5).
+            require((packet[1] & 3u) == 0 && packet[4] <= 0x3fffu && (packet[3] == 0x80000000u || ((packet[3] & ~0xffffu) == 0 && packet[4] <= 0x10000u - packet[3])), "unsupported indirect-register address or control fields");
             break;
         case 0x69: case 0x76: case 0x79: case 0x7a: {
             require(packet.size() >= 3, "register packet has no values");
@@ -436,7 +466,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
                 std::snprintf(message, sizeof(message), "graphics packet in compute queue (register 0x%x)", registerOffset(packet[1]));
                 require(false, message);
             }
-            if (opcode == 0x7a) require((packet[1] & 0xf0000000u) == 0 || (packet.size() == 3 && packet[1] == 0x20000243u), "indexed register bank selection is not implemented");
+            if (opcode == 0x7a) require((packet[1] & 0xf0000000u) == 0 || (packet.size() == 3 && (packet[1] == 0x20000243u || packet[1] == 0x10000242u)), "indexed register bank selection is not implemented");
             const auto offset = registerOffset(packet[1]);
             require(packet.size() - 2 <= 0x10000u - offset, "register range overflow");
             break;
@@ -459,7 +489,7 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
                 throw std::runtime_error(text);
             }
             const auto destination = (packet[1] >> 8u) & 0xfu;
-            require(destination == 1 || destination == 2 || (queue != 0 && destination == 5), "WRITE_DATA register or GDS destination is not implemented");
+            require(destination == 1 || destination == 2 || destination == 5, "WRITE_DATA register or GDS destination is not implemented");
             require((packet[2] & 3u) == 0, "misaligned WRITE_DATA destination");
             break;
         }
@@ -478,7 +508,8 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
             // Source/destination cache policy (bits 13-14, 25-26) and volatile hints (15, 27) do not
             // change results because copies go through coherent host memory.
             require((packet[1] & ~0xee30e001u) == 0, "DMA_DATA reserved control fields are not implemented");
-            require(memorySelector(dmaDestination(packet)) || dmaDestination(packet) == DmaSelectGds, "DMA_DATA register or prefetch destination is not implemented");
+            require(memorySelector(dmaDestination(packet)) || dmaDestination(packet) == DmaSelectGds || dmaDestination(packet) == DmaSelectNowhere, "DMA_DATA register destination is not implemented");
+            require(dmaDestination(packet) != DmaSelectNowhere || memorySelector(dmaSource(packet)), "DMA_DATA prefetch of a register, GDS or immediate source is not implemented");
             require(memorySelector(dmaSource(packet)) || dmaSource(packet) == 2 || dmaSource(packet) == DmaSelectGds, "DMA_DATA register source is not implemented");
             require(dmaSource(packet) != DmaSelectGds || (packet[3] == 0 && gdsRange(packet[2], packet[6] & 0x3ffffffu)), "DMA_DATA GDS source range exceeds the GDS");
             require(dmaDestination(packet) != DmaSelectGds || (packet[5] == 0 && gdsRange(packet[4], packet[6] & 0x3ffffffu)), "DMA_DATA GDS destination range exceeds the GDS");
@@ -718,6 +749,18 @@ std::vector<IndirectDraw> ResolveIndirectDraws(std::span<const std::uint32_t> pa
 
 std::vector<std::uint32_t> ReadIndirectRegisters(std::span<const std::uint32_t> packet) {
     require(packet.size() == 5 && IndirectRegisterOpcode((packet[0] >> 8u) & 0xffu), "expected indirect register packet");
+    if (packet[3] != 0x80000000u) {
+        // Consecutive registers from offset packet[3]: the list holds values only.
+        std::vector<std::uint32_t> values(packet[4]);
+        if (!values.empty()) GuestMemory::Read(address(packet[1], packet[2]), std::as_writable_bytes(std::span(values)), 4);
+        std::vector<std::uint32_t> pairs;
+        pairs.reserve(values.size() * 2);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            pairs.push_back(packet[3] + static_cast<std::uint32_t>(i));
+            pairs.push_back(values[i]);
+        }
+        return pairs;
+    }
     std::vector<std::uint32_t> pairs(static_cast<std::size_t>(packet[4]) * 2);
     if (!pairs.empty()) GuestMemory::Read(address(packet[1], packet[2]), std::as_writable_bytes(std::span(pairs)), 4);
     return pairs;
@@ -740,8 +783,8 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
                 case 0x09: queue = QueueState{}; return;
                 case 0x0b: queue.markers.emplace_back(reinterpret_cast<const char*>(packet.data() + 1)); return;
                 case 0x0c:
-                    require(!queue.markers.empty(), "marker stack underflow");
-                    queue.markers.pop_back();
+                    // A pop without a pushed marker is ignored (upstream 628c6561).
+                    if (!queue.markers.empty()) queue.markers.pop_back();
                     return;
                 case 0x1a:
                     switch (packet[1]) {
@@ -765,6 +808,8 @@ void Execute(std::span<const std::uint32_t> packet, QueueState& queue) {
             return;
         case 0x12:
             queue.ClearContext(); return;
+        // CONTEXT_CONTROL without register loading or shadowing (Validate) changes nothing.
+        case 0x28: return;
         case 0x20: {
             // Predicate semantics follow KytyPS5: condition 0 skips when the value is non-zero,
             // condition 1 when it is zero.

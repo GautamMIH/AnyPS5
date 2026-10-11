@@ -14,6 +14,8 @@ std::uint32_t BytesPerElement(std::uint32_t guestFormat);
 // A guest format without a Vulkan equivalent, read and written through another format's view with
 // the shader converting each texel (10_11_11 UNORM and UINT through R32_UINT).
 bool IsConvertedTextureFormat(std::uint32_t guestFormat);
+// The guest sRGB formats (sampled with sRGB decoding by their view).
+bool IsSrgbTextureFormat(std::uint32_t guestFormat);
 // The 8 and 8_8 sRGB formats (ShaderRecompiler::SrgbDecodeBit) the device cannot sample but can
 // sample as UNORM: the shader decodes them (SpirvTarget::srgbDecodeFormats). APS5_SRGB_SHADER_DECODE=1
 // decodes them in the shader on every device.

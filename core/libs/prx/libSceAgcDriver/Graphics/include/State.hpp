@@ -88,6 +88,13 @@ struct DepthState {
     float depthBiasConstant;
     float depthBiasSlope;
     float depthBiasClamp;
+    // PA_SU_SC_MODE_CNTL offsets front and back faces differently (POLY_OFFSET_FRONT/BACK_ENABLE
+    // with different PA_SU_POLY_OFFSET_FRONT/BACK values, upstream e0084a56): the draw is split per
+    // face, front faces with depthBiasConstant/Slope, back faces with these. A face whose offset is
+    // disabled gets 0.
+    bool depthBiasPerFace = false;
+    float backDepthBiasConstant = 0.0f;
+    float backDepthBiasSlope = 0.0f;
     float depthClearValue;
     std::uint32_t stencilClearValue;
 };
@@ -130,12 +137,21 @@ struct State {
     VkFrontFace frontFace;
     std::array<VkPipelineColorBlendAttachmentState, MaxColorTargets> blends{};
     std::array<float, 4> blendConstants;
+    // PA_SU_SC_MODE_CNTL PROVOKING_VTX_LAST (upstream 3a8cf3a3).
+    bool provokingVertexLast = false;
+    // Target 0 blends with the pixel stage's second (MRT1) export as source 1 (upstream b8cc4adb).
+    bool dualSourceBlend = false;
+    // A DB_RENDER_CONTROL resummarize draw with no depth, stencil or colour work (upstream 24876afc):
+    // HTILE is not modelled, so the draw changes nothing and is skipped.
+    bool resummarizeOnly = false;
 };
 
 ShaderStages DecodeShaderStages(const QueueState& queue);
 State DecodeState(const QueueState& queue);
 // The DB_RENDER_CONTROL depth maintenance passes DecodeState rejects; empty when there are none.
 std::string DepthMaintenanceRejection(const QueueState& queue);
+// A resummarize pass that changes no modelled state (see State::resummarizeOnly).
+bool ResummarizeOnly(const QueueState& queue);
 // CB_TARGET_MASK & CB_SHADER_MASK without the slots whose colour format is INVALID.
 std::uint32_t ColorWriteMask(const Registers& context);
 

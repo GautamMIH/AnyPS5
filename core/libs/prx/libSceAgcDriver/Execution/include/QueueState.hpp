@@ -160,6 +160,8 @@ inline Registers buildInitialContextRegisters() {
         {0x318, 0}, {0x31b, 0}, {0x31c, 0}, {0x31d, 0},
         {0x390, 0}, {0x3b0, 0}, {0x3b8, 0}
     };
+    // SPI_PS_INPUT_CNTL_0-31 start at their clear-state value (upstream e70e81dc).
+    for (std::uint32_t i = 0; i < 32; ++i) result.emplace(0x191 + i, 0);
     for (std::uint32_t i = 0; i < 8; ++i) result.emplace(0x1e0 + i, 0x20010001);
     for (std::uint32_t i = 0; i < 8; ++i) {
         // CB_COLOR<i> BASE, VIEW, INFO, ATTRIB, CMASK and CLEAR_WORD0/1, then the per-target arrays

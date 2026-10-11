@@ -157,6 +157,17 @@ void testRegisterBank() {
     check(bank.empty() && bank.begin() == bank.end(), "cleared bank is not empty");
 }
 
+// The one-dword NOP pad (upstream 0e42a60d).
+void testNopPad() {
+    check(AgcDriver::Pm4::PacketWords(0xffff1000u) == 1, "the one-dword NOP is not one dword");
+    for (const auto queue : {0u, 0x20u}) AgcDriver::Pm4::Validate(std::vector<std::uint32_t>{0xffff1000u}, queue);
+    expectFailure([] { AgcDriver::Pm4::Validate(std::vector<std::uint32_t>{0xffff1000u, 0}, 0); }, "filler size");
+    for (const auto header : {0xffff1001u, 0xffff1002u}) check(AgcDriver::Pm4::PacketWords(header) == 0x4001, "a NOP with count 0x3fff and header flags is not sized by its count");
+    std::vector<std::uint32_t> largest(0x4000, 0);
+    largest[0] = 0xfffe1000u;
+    check(AgcDriver::Pm4::PacketWords(largest[0]) == largest.size(), "the largest counted NOP is not sized by its count");
+}
+
 void testRegisters() {
     testRegisterBank();
     testConditionalValidation();
@@ -178,10 +189,16 @@ void testRegisters() {
         pairs[4] = 0xffffffffu;
         expectFailure([&] { execute(state, packet); }, "sentinel");
         check(!registers.contains(0x16), "invalid indirect packet partially changed state");
+        // Consecutive registers from an offset (upstream 0e5bd5e5).
+        std::array<std::uint32_t, 2> values{0x11223344, 0x55667788};
+        execute(state, makePacket(opcode, {low(values.data()), high(values.data()), 0x0a, 2}));
+        check(registers.at(0x0a) == 0x11223344 && registers.at(0x0b) == 0x55667788, "consecutive indirect registers lost");
+        expectFailure([&] { execute(state, makePacket(opcode, {low(values.data()), high(values.data()), 0xffff, 2})); }, "indirect-register");
+        expectFailure([&] { execute(state, makePacket(opcode, {low(values.data()), high(values.data()), 0x4000000a, 2})); }, "indirect-register");
         packet[1] = 0x1000;
         packet[2] = 0;
         expectFailure([&] { execute(state, packet); }, "guest");
-        packet[3] = 0;
+        packet[3] = 0x10000;
         expectFailure([&] { AgcDriver::Pm4::Validate(packet, 0); }, "control");
     }
     execute(state, makePacket(0x69, {0x11, 50, 51}));
@@ -190,7 +207,17 @@ void testRegisters() {
     check(state.userConfig.at(0x10) == 60, "uconfig index zero failed");
     execute(state, makePacket(0x7a, {0x20000243, 0x441}));
     check(state.indexType == 1 && state.userConfig.at(0x243) == 0x441, "indexed VGT_INDEX_TYPE write lost state");
+    execute(state, makePacket(0x7a, {0x10000242, 0x11}));
+    check(state.userConfig.at(0x242) == 0x11, "indexed VGT_PRIMITIVE_TYPE write lost state");
     expectFailure([&] { execute(state, makePacket(0x7a, {0x10000010, 1})); }, "bank selection");
+    expectFailure([&] { execute(state, makePacket(0x7a, {0x10000243, 1})); }, "bank selection");
+    expectFailure([&] { execute(state, makePacket(0x7a, {0x20000242, 1})); }, "bank selection");
+    execute(state, makePacket(0x28, {0x80000000, 0x80000000}));
+    execute(state, makePacket(0x28, {0, 0}));
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x28, {0x80000001, 0x80000000}), 0); }, "shadowing");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x28, {0x80000000, 0x80000002}), 0); }, "shadowing");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x28, {0x80000000, 0x80000000}), 0x20); }, "compute queue");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x28, {0x80000000}), 0); }, "packet size");
     expectFailure([&] { execute(state, makePacket(0x69, {0xffff, 1, 2})); }, "overflow");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x9f, {0, 0, 0x80000000, 0}), 0x20); }, "compute");
 }
@@ -216,6 +243,10 @@ void testContextAndBases() {
     AgcDriver::Pm4::Validate(packet, 0x20);
     check(AgcDriver::Pm4::ResolveDispatch(packet, state)[3] == 9, "absolute indirect dispatch arguments changed");
     AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x2041}), 0);
+    AgcDriver::Pm4::Validate(makePacket(0x15, {0x280, 1, 1, 0x2045}, 2), 0);
+    AgcDriver::Pm4::Validate(makePacket(0x16, {0, 0x2045}, 2), 0);
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x41}, 4), 0); }, "header flags");
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x49}), 0); }, "dispatch modifiers");
     AgcDriver::Pm4::Validate(makePacket(0x16, {0, 0xa041}), 0);
     AgcDriver::Pm4::Validate(makePacket(0x15, {100, 1, 1, 0x8061}), 0);
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x16, {0, 0x0061}), 0); }, "indirect dispatch modifiers");
@@ -228,7 +259,8 @@ void testContextAndBases() {
     execute(state, makePacket(0x10, {0x00636261}, 0x2c));
     check(state.markers.back() == "abc", "marker text lost");
     execute(state, makePacket(0x10, {0}, 0x30));
-    expectFailure([&] { execute(state, makePacket(0x10, {0}, 0x30)); }, "underflow");
+    execute(state, makePacket(0x10, {0}, 0x30));
+    check(state.markers.empty(), "an unbalanced marker pop changed the marker stack");
     execute(state, makePacket(0x10, {0}, 0x24));
     check(state.shader.empty() && state.context == AgcDriver::InitialContextRegisters() && state.dispatchIndirectBase == 0 && state.indexBase == 0 && !state.savedContext, "dispatch reset retained state");
 }
@@ -370,6 +402,8 @@ void testMemory() {
     check(data[0] == 11 && data[1] == 12, "WRITE_DATA increment failed");
     execute(state, makePacket(0x37, {0x10100, low(data.data()), high(data.data()), 21, 22}));
     check(data[0] == 22 && data[1] == 12, "WRITE_DATA fixed destination failed");
+    execute(state, makePacket(0x37, {0x40100500, low(data.data()), high(data.data()), 81, 82}));
+    check(data[0] == 81 && data[1] == 82, "WRITE_DATA to memory from the graphics queue failed");
     execute(state, makePacket(0x81, {4, 31, 32}));
     execute(state, makePacket(0x83, {4, 2, low(data.data()), high(data.data())}));
     check(data[0] == 31 && data[1] == 32, "constant RAM round trip failed");
@@ -434,7 +468,13 @@ void testCopies() {
     check(source == destination, "DMA_DATA GDS round trip failed");
     expectFailure([&] { execute(state, makePacket(0x50, {0x60100000, low(source.data()), high(source.data()), 0xfffc, 0, 8})); }, "exceeds the GDS");
     expectFailure([&] { execute(state, makePacket(0x50, {0x20000000, 0, 1, low(destination.data()), high(destination.data()), 4})); }, "exceeds the GDS");
-    expectFailure([&] { execute(state, makePacket(0x50, {0x60200000, low(source.data()), high(source.data()), 0, 0, 4})); }, "destination is not implemented");
+    // DMA_DATA to nowhere prefetches the source (upstream 2c7d9b9c).
+    destination = {};
+    execute(state, makePacket(0x50, {0x60200000, low(source.data()), high(source.data()), low(source.data()), high(source.data()), 0x80000010}));
+    check(destination[0] == 0, "a DMA_DATA prefetch wrote memory");
+    check(!AgcDriver::Pm4::DecodeDmaCopy(makePacket(0x50, {0x60200000, low(source.data()), high(source.data()), low(source.data()), high(source.data()), 0x80000010})).has_value(), "a DMA_DATA prefetch decoded as a copy");
+    expectFailure([&] { execute(state, makePacket(0x50, {0x40200000, 1, 0, 0, 0, 4})); }, "prefetch of a register");
+    expectFailure([&] { execute(state, makePacket(0x50, {0x60200000, low(source.data()), high(source.data()), 0, 0, 4 | (1u << 27u)})); }, "register destination");
     expectFailure([&] { execute(state, makePacket(0x37, {0x100, 0x1000, 0, 1})); }, "guest");
 #ifdef _WIN32
     auto* memory = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -521,6 +561,15 @@ void testEventWrite() {
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x139, 0x1000}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x13a, 0, 0}), 0); }, "event type 58");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x0d}), 0); }, "event type 13");
+    for (const auto eventType : {0x19u, 0x1au, 0x26u}) {
+        AgcDriver::Pm4::Validate(makePacket(0x46, {eventType}), 0);
+        AgcDriver::Pm4::Validate(makePacket(0x46, {eventType}), 0x20);
+        expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x100u | eventType}), 0); }, "pipeline statistics or SQ event index");
+    }
+    AgcDriver::Pm4::Validate(makePacket(0x46, {0x24}), 0);
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x24}), 0x20); }, "compute queue");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x424}), 0); }, "VGT_FLUSH event index");
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x46, {0x1e, 0x1000, 0}), 0); }, "event type 30");
 }
 
 void testAcquireMem() {
@@ -553,12 +602,14 @@ void testAcquireMem() {
     invalidWord(0, captured[0] | 4u, "header flags");
     invalidWord(1, 4, "control flags");
     invalidWord(1, 0x00800000, "control flags");
-    invalidWord(3, 1, "above 40 bits");
-    invalidWord(5, 1, "above 40 bits");
+    invalidWord(3, 0x100, "range high bits");
+    invalidWord(5, 0x100, "range high bits");
     invalidWord(6, 0x10000, "poll interval");
     invalidWord(7, 0x40000, "GCR flags");
     invalidWord(7, 0x2000, "cache discard");
-    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 2, 0, 0xffffffff, 0, 0, 0}), 0); }, "range exceeds");
+    AgcDriver::Pm4::Validate(makePacket(0x58, {0, 0xffffffff, 0xff, 0, 0, 10, 0xc3b1}), 0);
+    AgcDriver::Pm4::Validate(makePacket(0x58, {0, 2, 0, 0xffffffff, 0, 0, 0}), 0);
+    expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 2, 0, 0xffffffff, 0xff, 0, 0}), 0); }, "range exceeds");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 0, 0, 0, 0}), 0); }, "packet size");
     expectFailure([] { AgcDriver::Pm4::Validate(makePacket(0x58, {0, 0, 0, 0, 0, 0, 0, 0}), 0); }, "packet size");
 }
@@ -689,6 +740,20 @@ void submitWords(std::vector<std::uint32_t>& words, std::uint32_t queue = 0) {
     check((queue == 0 ? sceAgcDriverSubmitDcb(&packet) : sceAgcDriverSubmitAcb(queue, &packet)) == 0, "conditional submission failed");
 }
 
+void testNopPadSubmission() {
+    alignas(8) static std::uint32_t zero = 0;
+    static std::array<std::uint32_t, 3> results{};
+    results.fill(0);
+    auto words = joinPackets({{0xffff1000u, 0xc0027904u, 0x342u, 0xce200000u, 0u, 0xc0017904u, 0x342u, 0xcea00000u}, writeWord(results[0], 81), {0xffff1000u}});
+    submitWords(words);
+    AgcDriverWaitIdle_nid_postfix();
+    check(results[0] == 81, "a one-dword NOP stopped the packets after it");
+    words = joinPackets({conditional(zero, 6), {0xffff1000u}, writeWord(results[1], 82), writeWord(results[2], 83)});
+    submitWords(words);
+    AgcDriverWaitIdle_nid_postfix();
+    check(results[1] == 0 && results[2] == 83, "COND_EXEC did not count a one-dword NOP as one dword");
+}
+
 void testRegisterListsReadAtSubmission() {
     alignas(8) static std::uint32_t gate = 0;
     static std::uint32_t done = 0;
@@ -813,6 +878,7 @@ int main(int argc, char** argv) {
             return 0;
         }
         testCatalog();
+        testNopPad();
         testRegisters();
         testContextAndBases();
         testIndexedDraw();
@@ -831,6 +897,7 @@ int main(int argc, char** argv) {
         testDriverSubmission();
         testConditionalWriteSubmission();
         testRegisterListsReadAtSubmission();
+        testNopPadSubmission();
         LibcRunShutdown_nid_postfix();
         std::puts("PM4 catalog, registers, state, memory and submission tests passed");
         return 0;

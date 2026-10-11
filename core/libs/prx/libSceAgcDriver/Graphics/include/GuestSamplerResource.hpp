@@ -5,7 +5,9 @@
 #define VK_NO_PROTOTYPES
 #endif
 #include <vulkan/vulkan.h>
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 namespace AgcDriver::Graphics {
@@ -28,12 +30,22 @@ struct GuestSamplerResource {
     bool compareEnable = false;
     VkCompareOp compareOp = VK_COMPARE_OP_NEVER;
     bool unnormalizedCoordinates = false;
+    // FORCE_DEGAMMA: decode sRGB, which an sRGB texture's view already does (Sampler::ForcesDegamma).
+    bool forceDegamma = false;
+    // DISABLE_CUBE_WRAP: cube faces filter without seamless wrapping (VK_EXT_non_seamless_cube_map).
+    bool nonSeamlessCube = false;
 };
 
 // unnormalizedProven: the recompiler proved every use of the S# selects the same texels through a
 // Vulkan sampler with unnormalized coordinates (DescriptorBinding::samplerUnnormalized); an S# with
 // FORCE_UNNORMALIZED throws without it, and the proof without the bit throws too.
 GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words, bool unnormalizedProven = false);
+// ANISO_OVERRIDE turns anisotropic filtering off for single-level images (the T#'s own BASE_LEVEL ==
+// LAST_LEVEL): the S# words without the aniso filters when that applies to a sampler paired only with
+// single-level images, nullopt when it does not apply. Throws for a sampler paired with both kinds.
+std::optional<std::array<std::uint32_t, 4>> SingleLevelSamplerWords(std::span<const std::uint32_t, 4> words, bool singleLevelImage, bool mipmappedImage);
+// Whether a T#'s view has one level (BASE_LEVEL == LAST_LEVEL in word 3).
+inline bool DescriptorSingleLevel(std::span<const std::uint32_t> words) { return ((words[3] >> 12u) & 0xfu) == ((words[3] >> 16u) & 0xfu); }
 
 }
 

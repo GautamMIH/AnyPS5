@@ -81,7 +81,7 @@ void testValidation() {
     expectFailure([&] { sceAgcDriverSubmitDcb(&packet); });
     commands[0] = 0xc001105c;
     expectFailure([&] { sceAgcDriverSubmitDcb(&packet); });
-    commands[0] = 0xc0017604;
+    commands[0] = 0xc0017608;
     expectFailure([&] { sceAgcDriverSubmitDcb(&packet); });
     commands[0] = 0xc0017600;
     commands[1] = 0x10000;

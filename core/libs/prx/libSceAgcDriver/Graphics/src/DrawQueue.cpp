@@ -75,6 +75,7 @@ VkCommandBuffer DrawQueue::Begin(const Context& context) {
     }
     if (barrierRequested) {
         barrierRequested = false;
+        barrierSerial = nextEntrySerial - 1;
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
         barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
@@ -169,7 +170,8 @@ void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes) {
     // Queued draws run in submission order on one queue, so a barrier before the accessing draw
     // makes their writes visible to it; only CPU accesses have to wait for them.
     if (GuestMemory::GpuAccessScope::Active()) {
-        barrierRequested = true;
+        static const bool everyOverlap = std::getenv("ANYPS5_BARRIER_PER_OVERLAP") != nullptr;
+        if (!barrierRequested && (everyOverlap || LastWriter(address, bytes) > barrierSerial)) barrierRequested = true;
         timing.Mark("gpu_barrier");
         return;
     }

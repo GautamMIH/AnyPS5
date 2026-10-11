@@ -3,7 +3,9 @@
 
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include <algorithm>
+#include <cstring>
 #include <limits>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -16,8 +18,35 @@ struct VertexFormat {
     const char* scalar;
 };
 
+// A null V# (all four words zero) reads zero (upstream e6e0b691).
+inline bool NullVertexDescriptor(const ShaderRecompiler::VertexAttribute& attribute) {
+    const auto& fields = attribute.resource.fields;
+    return fields[0] == 0 && fields[1] == 0 && fields[2] == 0 && fields[3] == 0;
+}
+
+inline std::uint32_t VertexBufferOutOfBoundsSelect(const ShaderRecompiler::VertexAttribute& attribute) {
+    return (attribute.resource.fields[3] >> 28u) & 3u;
+}
+
+// A zero-stride fetch whose descriptor has no records under OOB_SELECT 2 or 3 is out of range: it
+// reads zero (upstream c17c5ebd).
+inline bool VertexFetchOutOfRange(const ShaderRecompiler::VertexAttribute& attribute) {
+    const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
+    const auto select = VertexBufferOutOfBoundsSelect(attribute);
+    return stride == 0 && (select == 2u || select == 3u) && attribute.resource.fields[2] == 0;
+}
+
+// Vertex attributes that read only zeros: bound to a zero-filled buffer instead of guest memory.
+inline bool ZeroVertexFetch(const ShaderRecompiler::VertexAttribute& attribute) {
+    return NullVertexDescriptor(attribute) || VertexFetchOutOfRange(attribute);
+}
+
 inline VertexFormat DecodeVertexFormat(const ShaderRecompiler::VertexAttribute& attribute) {
     Require(attribute.components >= 1 && attribute.components <= 4, "invalid vertex attribute component count");
+    if (NullVertexDescriptor(attribute)) {
+        const std::array formats{VK_FORMAT_R32_SFLOAT, VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT};
+        return {formats[attribute.components - 1], attribute.components * 4u, 4u, "f32"};
+    }
     const auto components = attribute.formatComponents == 0u ? attribute.components : attribute.formatComponents;
     Require(components >= 1u && components <= 4u, "invalid vertex format component count");
     const auto format = (attribute.resource.fields[3] >> 12u) & 0x7fu;
@@ -106,7 +135,7 @@ inline VertexInputLayout BuildVertexInputLayout(const Context& context, std::spa
         Require((fields[1] & 0x80000000u) == 0 && (fields[3] & 0x00800000u) == 0 && (fields[3] >> 30u) == 0, "unsupported vertex buffer descriptor flags");
         const auto stride = (fields[1] >> 16u) & 0x3fffu;
         const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
-        Require(address != 0 && address % format.alignment == 0 && stride % format.alignment == 0, "unaligned vertex buffer");
+        Require(ZeroVertexFetch(attribute) || (address != 0 && address % format.alignment == 0 && stride % format.alignment == 0), "unaligned vertex buffer");
         Require(stride <= context.limits.maxVertexInputBindingStride, "vertex stride exceeds device limits");
         Require(context.formatProperties != nullptr, "missing vertex format property query");
         VkFormatProperties properties{};
@@ -122,25 +151,57 @@ inline VertexInputLayout BuildVertexInputLayout(const Context& context, std::spa
 inline std::size_t VertexBufferReadSize(const ShaderRecompiler::VertexAttribute& attribute, std::uint32_t maxIndex, std::uint32_t instances, std::uint32_t firstInstance = 0) {
     Require(instances != 0, "vertex input requires nonzero instance count");
     Require(firstInstance <= std::numeric_limits<std::uint32_t>::max() - (instances - 1u), "vertex input instance range overflow");
+    if (ZeroVertexFetch(attribute)) return DecodeVertexFormat(attribute).bytes;
     const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
     const auto records = attribute.resource.fields[2];
     Require(attribute.fetchIndex <= 1, "unsupported vertex fetch index");
     const auto index = attribute.fetchIndex == 0 ? maxIndex : firstInstance + instances - 1u;
     const auto bytes = DecodeVertexFormat(attribute).bytes;
     // OOB_SELECT (word 3, bits 28-29) DISABLED (2): only a descriptor without records is out of range;
-    // every other fetch reads memory. The other modes check the index and bytes against the records.
+    // every other fetch reads memory. Under 0 and 1 a strided fetch past the records reads zero
+    // (upstream 5e326896; VertexBufferValidBytes bounds what is read from memory). A zero-stride
+    // fetch checks its bytes against the records.
     const auto required = static_cast<std::uint64_t>(stride) * index + bytes;
-    if (((attribute.resource.fields[3] >> 28u) & 3u) == 2u) {
+    const auto select = VertexBufferOutOfBoundsSelect(attribute);
+    if (select == 2u) {
         Require(records != 0, "vertex fetch from a descriptor without records");
+    } else if (stride == 0) {
+        Require(required <= records, "vertex fetch exceeds descriptor byte range (stride 0, records " + std::to_string(records) + ", element bytes " + std::to_string(bytes) + ")");
     } else {
-        Require(stride == 0 || index < records, "vertex fetch exceeds descriptor record count");
-        const auto available = stride == 0 ? static_cast<std::uint64_t>(records) : static_cast<std::uint64_t>(records) * stride;
-        Require(required <= available, "vertex fetch exceeds descriptor byte range (stride " + std::to_string(stride) + ", records " + std::to_string(records) + ", element bytes " + std::to_string(bytes) + ", index " + std::to_string(index) + ")");
+        Require(select <= 1u || index < records, "vertex fetch exceeds descriptor record count");
     }
     Require(required <= std::numeric_limits<std::size_t>::max(), "vertex fetch exceeds the host address range");
     const auto address = attribute.resource.fields[0] | (static_cast<std::uint64_t>(attribute.resource.fields[1] & 0xffffu) << 32u);
     Require(address != 0 && required <= std::numeric_limits<std::uint64_t>::max() - address, "invalid vertex buffer address range");
     return static_cast<std::size_t>(required);
+}
+
+// Of the `required` bytes a fetch spans, those inside the descriptor's records; the rest read zero.
+inline std::size_t VertexBufferValidBytes(const ShaderRecompiler::VertexAttribute& attribute, std::size_t required) {
+    const auto stride = (attribute.resource.fields[1] >> 16u) & 0x3fffu;
+    if (stride == 0 || VertexBufferOutOfBoundsSelect(attribute) == 2u) return required;
+    return static_cast<std::size_t>(std::min<std::uint64_t>(required, static_cast<std::uint64_t>(attribute.resource.fields[2]) * stride));
+}
+
+// The highest index of an indexed draw, without primitive restart markers when they restart
+// (upstream c0a88ce3); none when every index is a restart marker (upstream 98b4bdf8).
+inline std::optional<std::uint32_t> HighestDrawIndex(std::span<const std::byte> indices, std::uint32_t indexSize, bool skipRestart) {
+    Require(indexSize == 2 || indexSize == 4, "unsupported index size");
+    const auto restartIndex = indexSize == 2 ? 0xffffu : 0xffffffffu;
+    std::optional<std::uint32_t> highest;
+    for (std::size_t offset = 0; offset + indexSize <= indices.size(); offset += indexSize) {
+        std::uint32_t index = 0;
+        if (indexSize == 2) {
+            std::uint16_t value = 0;
+            std::memcpy(&value, indices.data() + offset, sizeof(value));
+            index = value;
+        } else {
+            std::memcpy(&index, indices.data() + offset, sizeof(index));
+        }
+        if (skipRestart && index == restartIndex) continue;
+        highest = std::max(highest.value_or(0u), index);
+    }
+    return highest;
 }
 
 }

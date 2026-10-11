@@ -200,13 +200,8 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
     if (hasPltRelocations && (dynJmpRelOffset > raw.size() || dynJmpRelSize > raw.size() - dynJmpRelOffset))
         throw RelinkerException("Jump relocation table is out of bounds", dynJmpRelOffset);
 
-    // The whole entries of the RELA table must lie in the file (checked before anything reads the
-    // table, including the symbol count taken from the relocations).
-    if (dynRelaSize >= relaEntSize) {
-        const ByteCount whole = dynRelaSize - dynRelaSize % relaEntSize;
-        if (dynRelaOffset > raw.size() || whole > raw.size() - dynRelaOffset)
-            throw RelinkerException("Relocation entry out of bounds", dynRelaOffset);
-    }
+    if (dynRelaOffset > raw.size() || dynRelaSize > raw.size() - dynRelaOffset)
+        throw RelinkerException("Relocation table is out of bounds", dynRelaOffset);
 
     auto readCStr = [&](FileByteOffset strOff) -> std::string {
         if (strOff >= dynStrTabSize)
@@ -390,6 +385,9 @@ RelinkResult RelinkerPipeline::Relink(const std::vector<std::uint8_t>& sourceElf
                 _validationPolicy->ValidateRelocationTypeSupported(relType, pos);
                 continue;
             }
+            const FileByteOffset symOff = dynSymTabOffset + static_cast<FileByteOffset>(symIdx) * symEntSize;
+            if (symOff < dynSymTabOffset || symOff > raw.size() || raw.size() - symOff < 4)
+                throw RelinkerException("Symbol table entry out of bounds", symOff);
 
             const SymbolEntry symbol = readSymbol(symIdx);
             if (symbol.SectionIndex != 0 && (symbol.Info >> 4) == STB_LOCAL)

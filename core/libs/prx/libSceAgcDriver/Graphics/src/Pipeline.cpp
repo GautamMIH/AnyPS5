@@ -174,6 +174,11 @@ GraphicsPipeline::GraphicsPipeline(const Context& context, const State& state, c
     ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, ShaderDeviceFeatures::Of(context));
     Require(!state.negativeOneToOne || context.depthClipControl, "negative-one-to-one depth clipping requires VK_EXT_depth_clip_control with depthClipControl enabled");
     Require(state.conservativeRasterization == VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT || context.conservativeRasterization, "conservative rasterization requires VK_EXT_conservative_rasterization with at most 1/256 pixel of overestimation and degenerate triangles rasterized");
+    Require(!state.dualSourceBlend || (context.dualSrcBlend && state.ColorSlotCount() <= context.limits.maxFragmentDualSrcAttachments), "device does not support dual-source blending into this many attachments");
+    // PROVOKING_VTX_LAST (upstream 3a8cf3a3): native primitives only; rect lists, tessellation and
+    // mesh programs pick their own provoking vertex.
+    Require(!state.provokingVertexLast || context.provokingVertexLast, "the last provoking vertex requires VK_EXT_provoking_vertex with provokingVertexLast");
+    Require(!state.provokingVertexLast || (!state.rectList && !state.stages.tessellation && !state.stages.mesh), "the last provoking vertex is unsupported for rect lists, tessellation and mesh programs");
     if (state.rectList) Require(context.tessellationShader && context.limits.maxTessellationPatchSize >= 4, "rect-list requires tessellation with four output control points");
     if (state.stages.tessellation) {
         Require(context.tessellationShader, "device does not support tessellation shaders");
@@ -243,6 +248,12 @@ GraphicsPipeline::GraphicsPipeline(const Context& context, const State& state, c
         VkPipelineRasterizationConservativeStateCreateInfoEXT conservative{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_CONSERVATIVE_STATE_CREATE_INFO_EXT};
         conservative.conservativeRasterizationMode = state.conservativeRasterization;
         if (state.conservativeRasterization != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT) raster.pNext = &conservative;
+        VkPipelineRasterizationProvokingVertexStateCreateInfoEXT provoking{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_PROVOKING_VERTEX_STATE_CREATE_INFO_EXT};
+        provoking.provokingVertexMode = VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT;
+        if (state.provokingVertexLast) {
+            provoking.pNext = raster.pNext;
+            raster.pNext = &provoking;
+        }
         VkPipelineMultisampleStateCreateInfo samples{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
         samples.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
         VkPipelineColorBlendStateCreateInfo blend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
@@ -286,6 +297,11 @@ GraphicsPipeline::GraphicsPipeline(const Context& context, const State& state, c
         pipelineInfo.layout = layout;
         pipelineInfo.renderPass = renderPass.Handle();
         Check(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &pipeline), "vkCreateGraphicsPipelines");
+        // The modules are not needed once the pipeline exists (upstream d31100a0).
+        for (auto& module : _modules) {
+            context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, module, nullptr);
+            module = VK_NULL_HANDLE;
+        }
     } catch (...) {
         release();
         throw;

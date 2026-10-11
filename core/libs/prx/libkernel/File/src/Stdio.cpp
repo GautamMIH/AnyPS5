@@ -9,6 +9,9 @@
 #include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/File/include/FileFlags.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
+#include "prx/libkernel/File/include/NativeStat.hpp"
+#include "prx/libkernel/File/include/RandomDevice.hpp"
+#include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include <cstdarg>
 #include <deque>
@@ -132,6 +135,24 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     return readDirectory(fd, buf, nbytes);
 }
 
+int APS5_VABI getdirentries_nid_postfix(int fd, char* buf, int nbytes, int64_t* basep) {
+    const int result = sceKernelGetdirentries(fd, buf, nbytes, basep);
+    return result < 0 ? FileErrors::PosixBsd(result & 0xffff) : result;
+}
+
+int APS5_VABI getdents_nid_postfix(int fd, char* buf, int nbytes) {
+    const int result = sceKernelGetdents(fd, buf, nbytes);
+    return result < 0 ? FileErrors::PosixBsd(result & 0xffff) : result;
+}
+
+int APS5_VABI lstat_nid_postfix(const char* path, FileStat* sb) {
+    if (path == nullptr || sb == nullptr) return FileErrors::PosixBsd(kErrorFault);
+    if (*path == '\0') return FileErrors::PosixBsd(2);
+    GuestMemoryTracking::GuestMemoryTrackingResolve_nid_postfix(reinterpret_cast<std::uint64_t>(sb), sizeof(*sb), true);
+    if (!File::FillLinkStat(ResolvePath_nid_no_patch(path), sb)) return FileErrors::Posix(errno);
+    return 0;
+}
+
 }
 
 // Underscore-prefixed POSIX aliases and file calls some titles import (from upstream).
@@ -164,11 +185,14 @@ int APS5_VABI _open_nid_postfix(const char* path, int flags, ...) {
     return open_nid_postfix(path, flags, mode);
 }
 
+// A socket descriptor reports failures as -1 with errno, as read and write do (upstream).
 std::int64_t APS5_VABI _read_nid_postfix(int descriptor, void* buffer, std::size_t count) {
+    if (descriptor >= GuestSockets::FirstDescriptor) return GuestSockets::Read(descriptor, buffer, count);
     return sceKernelRead(descriptor, buffer, count);
 }
 
 std::int64_t APS5_VABI _write_nid_postfix(int descriptor, const void* buffer, std::size_t count) {
+    if (descriptor >= GuestSockets::FirstDescriptor) return GuestSockets::Write(descriptor, buffer, count);
     return sceKernelWrite(descriptor, buffer, count);
 }
 
@@ -197,6 +221,10 @@ int APS5_VABI sceKernelTruncate_nid_postfix(const char* path, std::int64_t lengt
 
 int APS5_VABI sceKernelUtimes_nid_postfix(const char* path, const KernelTimeval* times) {
     if (path == nullptr) return FileErrors::Sce(EFAULT);
+    if (times != nullptr) {
+        for (int i = 0; i < 2; ++i)
+            if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) return FileErrors::SceBsd(kErrorInvalid);
+    }
     const auto native = ResolvePath_nid_no_patch(path);
 #ifdef _WIN32
     struct _utimbuf values{};
@@ -244,6 +272,15 @@ const struct iovec* nativeIovecs(const KernelIovec* iov) {
 std::int64_t sceResult64(const std::int64_t result) {
     return result < 0 ? FileErrors::Sce(errno) : result;
 }
+
+std::int64_t readRandomIovecs(int d, const KernelIovec* iov, int iovcnt) {
+    std::int64_t total = 0;
+    for (int index = 0; index < iovcnt; ++index) {
+        File::ReadRandomDevice(d, iov[index].base, iov[index].length);
+        total += static_cast<std::int64_t>(iov[index].length);
+    }
+    return total;
+}
 #endif
 
 }
@@ -285,6 +322,7 @@ std::int64_t APS5_VABI sceKernelPwritev(int, const KernelIovec*, int, std::int64
 std::int64_t APS5_VABI sceKernelReadv(int d, const KernelIovec* iov, int iovcnt) {
     if (const int error = checkIovecs(iov, iovcnt)) return error;
     resolveIovecs(iov, iovcnt, true);
+    if (File::IsRandomDevice(d)) return readRandomIovecs(d, iov, iovcnt);
     return sceResult64(static_cast<std::int64_t>(::readv(d, nativeIovecs(iov), iovcnt)));
 }
 
@@ -298,6 +336,7 @@ std::int64_t APS5_VABI sceKernelPreadv(int d, const KernelIovec* iov, int iovcnt
     if (const int error = checkIovecs(iov, iovcnt)) return error;
     if (offset < 0) return FileErrors::SceBsd(kErrorInvalid);
     resolveIovecs(iov, iovcnt, true);
+    if (File::IsRandomDevice(d)) return readRandomIovecs(d, iov, iovcnt);
     return sceResult64(static_cast<std::int64_t>(::preadv(d, nativeIovecs(iov), iovcnt, static_cast<off_t>(offset))));
 }
 
@@ -327,6 +366,16 @@ int APS5_VABI pipe_nid_postfix(int* descriptors) {
 int APS5_VABI fsync_nid_postfix(int fd) {
     const int result = sceKernelFsync(fd);
     return result < 0 ? FileErrors::PosixBsd(result & 0xffff) : 0;
+}
+
+int APS5_VABI fdatasync_nid_postfix(int fd) {
+    if (fd >= GuestSockets::FirstDescriptor) return FileErrors::PosixBsd(GuestSockets::IsOpen(fd) ? kErrorInvalid : 9);
+#ifdef _WIN32
+    if (::_commit(fd) != 0) return FileErrors::Posix(errno);
+#else
+    if (::fdatasync(fd) != 0) return FileErrors::Posix(errno);
+#endif
+    return 0;
 }
 
 }

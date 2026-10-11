@@ -94,6 +94,18 @@ struct Context {
     bool samplerFilterMinmax = false;
     // VK_EXT_conservative_rasterization overestimating by at most 1/256 pixel (upstream 29c22442).
     bool conservativeRasterization = false;
+    // VK_EXT_non_seamless_cube_map: samplers with DISABLE_CUBE_WRAP (upstream bf184200).
+    bool nonSeamlessCubeMap = false;
+    // VK_EXT_provoking_vertex with provokingVertexLast, and whether the mode may differ between
+    // pipelines used in one render pass (upstream 3a8cf3a3).
+    bool provokingVertexLast = false;
+    bool provokingVertexModePerPipeline = false;
+    // dualSrcBlend enabled (upstream b8cc4adb).
+    bool dualSrcBlend = false;
+    // shaderBufferInt64Atomics enabled (upstream a2b049d4).
+    bool bufferInt64Atomics = false;
+    // Float16, RoundingModeRTE and DenormPreserve for 16-bit floats (upstream 8685c14d).
+    bool float16Rte = false;
     // The 8 and 8_8 sRGB formats sampled through UNORM views and decoded in the shader
     // (SrgbDecodeFormats); the shader target carries the same set.
     std::uint32_t srgbDecodeFormats = 0;

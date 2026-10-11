@@ -70,6 +70,8 @@ std::string makeKey(const Context& context, const State& state, const ShaderReso
     append(key, state.conservativeRasterization);
     append(key, state.cullMode);
     append(key, state.frontFace);
+    append(key, state.provokingVertexLast);
+    append(key, state.dualSourceBlend);
     for (std::uint32_t slot = 0; slot < state.ColorSlotCount(); ++slot) {
         const auto& blend = state.blends[slot];
         append(key, blend.blendEnable);

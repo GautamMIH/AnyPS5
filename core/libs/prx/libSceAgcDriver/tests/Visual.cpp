@@ -72,6 +72,7 @@ void Run(SDL_Window* window, const std::filesystem::path& directory, bool verify
     const std::array<std::uint16_t, 3> indices{0, 1, 2};
     const AgcDriver::Pm4::DrawParameters draw{reinterpret_cast<std::uintptr_t>(indices.data()), 3, 2, 1, 0};
     device.Draw(state, draw, shaders);
+    device.WaitIdle();
     const std::vector<std::byte> indexedPixels(Pixels.begin(), Pixels.end());
     for (std::size_t i = 0; i < Pixels.size(); i += 4) {
         Pixels[i] = std::byte{16};
@@ -81,6 +82,7 @@ void Run(SDL_Window* window, const std::filesystem::path& directory, bool verify
     }
     const AgcDriver::Pm4::DrawParameters autoDraw{0, 3, 0, 1, 0, false};
     device.Draw(state, autoDraw, shaders);
+    device.WaitIdle();
     Require(std::equal(Pixels.begin(), Pixels.end(), indexedPixels.begin()), "GPU readback: auto draw differs from indexed triangle");
     const auto center = (Height / 2 * Width + Width / 2) * 4;
     Require(std::to_integer<unsigned>(Pixels[center]) > 30 && std::to_integer<unsigned>(Pixels[center + 1]) > 30 && std::to_integer<unsigned>(Pixels[center + 2]) > 30, "GPU readback: triangle center was not rendered");

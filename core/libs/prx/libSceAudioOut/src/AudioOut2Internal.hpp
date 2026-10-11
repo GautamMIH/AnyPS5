@@ -67,6 +67,9 @@ struct AudioOut2Port {
     // It is guest memory the title rewrites every tick, so it is read when the context mixes, not
     // when it is set.
     const void* data = nullptr;
+    std::deque<const void*> queuedData;
+    const void* lastBuffer = nullptr;
+    const void* repeatedData = nullptr;
     float volume[AUDIO_OUT2_PORT_CHANNELS_MAX] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
     std::uint64_t dataSets = 0;
     std::uint64_t attributeTraces = 0;

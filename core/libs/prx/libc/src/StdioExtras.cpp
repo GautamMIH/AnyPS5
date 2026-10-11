@@ -104,31 +104,7 @@ int APS5_VABI fopen_s_nid_postfix(FileStream** stream, const char* path, const c
     return *stream == nullptr ? errno : 0;
 }
 
-#ifndef _WIN32
-
-int APS5_VABI snprintf_s_nid_postfix(char* buffer, std::size_t size, const char* format, ...) {
-    if (buffer == nullptr || size == 0 || format == nullptr) return -1;
-    std::va_list arguments;
-    va_start(arguments, format);
-    const int result = std::vsnprintf(buffer, size, format, arguments);
-    va_end(arguments);
-    return result;
-}
-
-int APS5_VABI sprintf_s_nid_postfix(char* buffer, std::size_t size, const char* format, ...) {
-    if (buffer == nullptr || size == 0 || format == nullptr) return -1;
-    std::va_list arguments;
-    va_start(arguments, format);
-    const int result = std::vsnprintf(buffer, size, format, arguments);
-    va_end(arguments);
-    if (result < 0 || static_cast<std::size_t>(result) >= size) {
-        buffer[0] = '\0';
-        return -1;
-    }
-    return result;
-}
-
-#endif
+// snprintf_s and sprintf_s are in Formatting.cpp (guest wide-string arguments need its formatter).
 
 std::size_t APS5_VABI strspn_nid_postfix(const char* text, const char* accept) { return std::strspn(text, accept); }
 int APS5_VABI bcmp_nid_postfix(const void* left, const void* right, std::size_t count) { return std::memcmp(left, right, count) == 0 ? 0 : 1; }

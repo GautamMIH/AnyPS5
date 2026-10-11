@@ -1,20 +1,35 @@
 #include <Cli.hpp>
+#include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 
 namespace Cli {
 
+const char* Usage() {
+    return "Usage: relinker [--help] [--windows | --macos] [--windows-diagnostics] [--windows-gui] [--skip-syscall-check] [--skip-sce-module | --sce-module-path <path>] [--exclude-sce-module <file>]... [--to-intel] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf|input.self> <output.elf>\n"
+           "       relinker --game [--libs <anyps5-prx-dir>] [--skip-syscall-check] [unused-filter=0|1|2] [--lazy-binding] <game-dump-dir> <output-dir>\n"
+           "Example: relinker eboot.bin game.elf";
+}
+
 Args ParseArgs(int argc, char* argv[]) {
     Args args;
     bool unusedFilterSpecified = false;
+    bool sceModulePathSpecified = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--skip-syscall-check") {
+        if (arg == "--help") {
+            args.showHelp = true;
+        } else if (arg == "--skip-syscall-check") {
             args.skipSyscallCheck = true;
         } else if (arg == "--skip-sce-module") {
             args.skipSceModule = true;
+        } else if (arg == "--sce-module-path") {
+            if (sceModulePathSpecified) throw std::runtime_error("--sce-module-path must be specified once");
+            if (i + 1 >= argc || std::string(argv[i + 1]).empty() || std::string(argv[i + 1]).starts_with("--")) throw std::runtime_error("--sce-module-path requires a nonempty path");
+            args.sceModulePath = argv[++i];
+            sceModulePathSpecified = true;
         } else if (arg == "--exclude-sce-module") {
             if (i + 1 >= argc)
                 throw std::runtime_error("--exclude-sce-module requires a file name");
@@ -42,6 +57,8 @@ Args ParseArgs(int argc, char* argv[]) {
             args.gameMode = true;
         } else if (arg == "--windows") {
             args.toWindows = true;
+        } else if (arg == "--macos") {
+            args.toMacos = true;
         } else if (arg == "--lazy-binding") {
             args.lazyBinding = true;
         } else if (arg == "--autorun") {
@@ -61,26 +78,28 @@ Args ParseArgs(int argc, char* argv[]) {
         }
     }
 
+    if (args.skipSceModule && sceModulePathSpecified) throw std::runtime_error("--sce-module-path conflicts with --skip-sce-module");
+
     if (args.skipSceModule && !args.excludedSceModules.empty())
         throw std::runtime_error("--exclude-sce-module conflicts with --skip-sce-module");
 
+    if (args.toWindows && args.toMacos)
+        throw std::runtime_error("--windows conflicts with --macos");
     if (args.windowsDiagnostics && !args.toWindows)
         throw std::runtime_error("--windows-diagnostics requires --windows");
 
     if (args.windowsGui && !args.toWindows)
         throw std::runtime_error("--windows-gui requires --windows");
 
-    if (args.gameMode && (args.toIntel || args.autorun || args.runPathSpecified))
-        throw std::runtime_error("--game cannot be combined with --to-intel, --autorun or --rpath");
+    if (args.gameMode && (args.toIntel || args.autorun || args.runPathSpecified || args.toMacos))
+        throw std::runtime_error("--game cannot be combined with --to-intel, --autorun, --rpath or --macos");
     if (!args.gameMode && !args.libsPath.empty())
         throw std::runtime_error("--libs requires --game");
 
-    if (args.inputPath.empty() || args.outputPath.empty())
-        throw std::runtime_error(
-            "Usage: relinker [--windows] [--windows-diagnostics] [--windows-gui] [--skip-syscall-check] [--skip-sce-module] [--exclude-sce-module <file>]... [--to-intel] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf|input.self> <output.elf>\n"
-            "       relinker --game [--libs <anyps5-prx-dir>] [--skip-syscall-check] [unused-filter=0|1|2] [--lazy-binding] <game-dump-dir> <output-dir>\n"
-            "Example: relinker eboot.bin game.elf"
-        );
+    if (!args.showHelp && (args.inputPath.empty() || args.outputPath.empty()))
+        throw std::runtime_error(Usage());
+
+    if (!sceModulePathSpecified && !args.skipSceModule && !args.inputPath.empty()) args.sceModulePath = std::filesystem::absolute(args.inputPath).parent_path().string();
 
     return args;
 }

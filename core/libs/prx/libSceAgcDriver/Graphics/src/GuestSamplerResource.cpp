@@ -103,16 +103,18 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
         Require(!unnormalizedProven, "guest sampler descriptor is bound as unnormalized without FORCE_UNNORMALIZED");
     }
     Require(anisoThreshold == 0, "guest sampler descriptor uses an anisotropy threshold override which is not implemented");
-    Require(!forceSrgb, "guest sampler descriptor forces sRGB decoding which is not implemented");
+    // FORCE_DEGAMMA only pairs with sRGB textures (RequireDegammaFormat).
     Require(anisoBias == 0, "guest sampler descriptor uses an anisotropy bias which is not implemented");
     Require(!truncCoord, "guest sampler descriptor uses coordinate truncation which is not implemented");
-    Require(!disableCubeWrap, "guest sampler descriptor disables seamless cube filtering which is not implemented");
+    // DISABLE_CUBE_WRAP: a non-seamless cube sampler (Sampler; RequireNonSeamlessCube).
     const auto reductionMode = toVkReductionMode(filterMode);
     Require(!disableDegamma, "guest sampler descriptor disables degamma which is not implemented");
     Require(perfMip == 0 && perfZ == 0, "guest sampler descriptor uses performance counters which are not implemented");
     Require(lodBiasSec == 0, "guest sampler descriptor uses a secondary LOD bias which is not implemented");
     Require(!pointPreclamp, "guest sampler descriptor uses point preclamping which is not implemented");
-    Require(!anisoOverride, "guest sampler descriptor uses an anisotropy override which is not implemented");
+    // ANISO_OVERRIDE only matters for single-level images: ShaderResources binds those through the
+    // words SingleLevelSamplerWords returns (Mesa sets it on every sampler).
+    static_cast<void>(anisoOverride);
     Require(!blendZeroPrt, "guest sampler descriptor uses PRT blend-zero which is not implemented");
     Require(mipFilter <= 2u, "guest sampler descriptor uses an unknown mip filter " + std::to_string(mipFilter));
     // lavapipe and NVIDIA disagree on min/max reduction across mip levels (upstream 1afcd202).
@@ -164,6 +166,8 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
     const std::array compareOps{VK_COMPARE_OP_NEVER, VK_COMPARE_OP_LESS, VK_COMPARE_OP_EQUAL, VK_COMPARE_OP_LESS_OR_EQUAL, VK_COMPARE_OP_GREATER, VK_COMPARE_OP_NOT_EQUAL, VK_COMPARE_OP_GREATER_OR_EQUAL, VK_COMPARE_OP_ALWAYS};
     result.compareOp = compareOps.at(depthCompareFunc);
     result.reductionMode = reductionMode;
+    result.forceDegamma = forceSrgb;
+    result.nonSeamlessCube = disableCubeWrap;
     if (forceUnormCoords) {
         result.unnormalizedCoordinates = true;
         result.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
@@ -174,6 +178,13 @@ GuestSamplerResource DecodeSamplerResource(std::span<const std::uint32_t> words,
         result.maxAnisotropy = 1.0f;
     }
     return result;
+}
+
+std::optional<std::array<std::uint32_t, 4>> SingleLevelSamplerWords(std::span<const std::uint32_t, 4> words, bool singleLevelImage, bool mipmappedImage) {
+    const auto filters = words[2];
+    if (((filters >> 29u) & 1u) == 0 || !singleLevelImage || (!isAnisoFilter((filters >> 20u) & 3u) && !isAnisoFilter((filters >> 22u) & 3u))) return std::nullopt;
+    Require(!mipmappedImage, "guest sampler with ANISO_OVERRIDE is paired with both single-level and mipmapped images in one draw, which is not implemented");
+    return std::array<std::uint32_t, 4>{words[0], words[1], filters & ~((2u << 20u) | (2u << 22u)), words[3]};
 }
 
 }

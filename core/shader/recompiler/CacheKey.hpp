@@ -48,6 +48,7 @@ public:
         append(key, request.context.vertex);
         append(key, request.context.floatMode);
         appendMesh(key, request);
+        appendTessellation(key, request);
         append(key, DebugProbeActive());
     }
 

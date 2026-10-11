@@ -1,5 +1,6 @@
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
+#include "../include/WindowsThreadLocal.hpp"
 #include "prx/libc/include/General.hpp"
 #include <array>
 #include <atomic>
@@ -71,9 +72,15 @@ struct ThreadValues {
     }
 };
 
+// On Windows a thread_local of this size goes through MinGW's emulated TLS, whose lock a guest
+// exception delivered mid-access could deadlock (upstream 2d783b796).
 ThreadValues& threadValues() {
+#ifdef _WIN32
+    return WindowsThreadLocal<ThreadValues>::Get();
+#else
     thread_local ThreadValues instance;
     return instance;
+#endif
 }
 
 }

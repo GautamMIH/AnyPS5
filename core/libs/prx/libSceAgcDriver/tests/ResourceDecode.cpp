@@ -5,6 +5,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <array>
 #include <cstdint>
+#include <span>
 #include <cstdio>
 #include <exception>
 #include <stdexcept>
@@ -88,6 +89,28 @@ void borderTableTests() {
     Require(DecodeSamplerResource(SamplerWords{}.clamp(6, 6, 6).border(2).words).borderColor == VK_BORDER_COLOR_INT_OPAQUE_WHITE, "border colour type 2 must stay opaque white");
 }
 
+void samplerOverrideTests() {
+    // ANISO_OVERRIDE (S# word 2 bit 29) is accepted; single-level images drop the aniso filters
+    // (upstream d8bb4411, 17d9efc2, 1a778f75).
+    auto aniso = SamplerWords{}.filters(3, 3);
+    aniso.words[2] |= 1u << 29u;
+    Require(DecodeSamplerResource(aniso.words).anisotropyEnable, "ANISO_OVERRIDE must decode with its aniso filters");
+    const std::span<const std::uint32_t, 4> words(aniso.words);
+    const auto single = SingleLevelSamplerWords(words, true, false);
+    Require(single.has_value() && !DecodeSamplerResource(*single).anisotropyEnable && DecodeSamplerResource(*single).magFilter == VK_FILTER_LINEAR, "ANISO_OVERRIDE must turn anisotropy off for single-level images");
+    Require(!SingleLevelSamplerWords(words, false, true).has_value(), "ANISO_OVERRIDE must keep anisotropy for mipmapped images");
+    Reject([&] { SingleLevelSamplerWords(words, true, true); }, "both single-level and mipmapped images");
+    auto plain = SamplerWords{}.filters(3, 3);
+    Require(!SingleLevelSamplerWords(std::span<const std::uint32_t, 4>(plain.words), true, false).has_value(), "without ANISO_OVERRIDE the S# is kept");
+    const std::array<std::uint32_t, 8> single8{0, 0, 0, (2u << 12u) | (2u << 16u), 0, 0, 0, 0};
+    const std::array<std::uint32_t, 8> mips8{0, 0, 0, (0u << 12u) | (3u << 16u), 0, 0, 0, 0};
+    Require(DescriptorSingleLevel(single8) && !DescriptorSingleLevel(mips8), "a T#'s single level comes from BASE_LEVEL and LAST_LEVEL");
+    // DISABLE_CUBE_WRAP (bf184200) and FORCE_DEGAMMA (619ec7ad) decode.
+    Require(DecodeSamplerResource(SamplerWords{}.word0Bit(28).words).nonSeamlessCube, "DISABLE_CUBE_WRAP must decode as a non-seamless cube sampler");
+    Require(DecodeSamplerResource(SamplerWords{}.word0Bit(20).words).forceDegamma, "FORCE_DEGAMMA must decode");
+    Require(IsSrgbTextureFormat(130) && IsSrgbTextureFormat(170) && !IsSrgbTextureFormat(1), "sRGB guest formats");
+}
+
 VkFormat unsampledFormats[2]{};
 
 void unsampledFormatProperties(VkPhysicalDevice, VkFormat format, VkFormatProperties* properties) {
@@ -106,6 +129,7 @@ void textureFormatTests() {
     Require(ResolveTextureFormat(30) == VK_FORMAT_R32_UINT && BytesPerElement(30) == 4u && IsConvertedTextureFormat(30), "format 30 (10_11_11_UNORM) must be read through R32_UINT");
     Require(ResolveTextureFormat(34) == VK_FORMAT_R32_UINT && IsConvertedTextureFormat(34), "format 34 (10_11_11_UINT) must be read through R32_UINT");
     Require(!IsConvertedTextureFormat(20) && !IsConvertedTextureFormat(6) && !IsConvertedTextureFormat(56), "formats with a Vulkan equivalent are not converted");
+    Require(ResolveTextureFormat(2) == VK_FORMAT_R8_SNORM && BytesPerElement(2) == 1u, "format 2 (8_SNORM) must resolve to R8_SNORM");
 
     constexpr std::uint32_t srgb8 = 1u;
     constexpr std::uint32_t srgb8_8 = 2u;
@@ -138,6 +162,7 @@ int main() {
     try {
         reductionTests();
         unnormalizedTests();
+        samplerOverrideTests();
         borderTableTests();
         textureFormatTests();
         std::puts("AGC resource decode tests passed");

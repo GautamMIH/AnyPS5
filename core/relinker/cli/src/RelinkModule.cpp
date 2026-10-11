@@ -8,6 +8,7 @@
 #include <elfpatcher/general/ProgramHeaderLayoutBuilder.hpp>
 #include <elfpatcher/general/SectionHeaderTableBuilder.hpp>
 #include <elfpatcher/windows/WindowsElfPatcher.hpp>
+#include <elfpatcher/macos/MacOsMachOPatcher.hpp>
 #include <relinker/parsing/ElfReader.hpp>
 #include <relinker/parsing/SelfUnwrapper.hpp>
 #include <relinker/analysis/ValidationPolicy.hpp>
@@ -87,7 +88,7 @@ PreparedModule PrepareModule(const std::vector<std::uint8_t>& inputBytes, const 
         args.unusedFilterLevel
     );
 
-    std::cout << "System: " << (args.toWindows ? "Windows" : "Linux") << "; unused-filter=" << args.unusedFilterLevel << "\n";
+    std::cout << "System: " << (args.toWindows ? "Windows" : args.toMacos ? "macOS" : "Linux") << "; unused-filter=" << args.unusedFilterLevel << "\n";
     module.Result = pipeline->Relink(module.Image);
     for (const auto& patch : module.Result.Patches) {
         if (patch.Offset > module.Image.size() || patch.Bytes.size() > module.Image.size() - patch.Offset)
@@ -113,7 +114,9 @@ ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOut
 
     auto byteWriter = std::make_shared<Io::ByteWriter>();
     std::shared_ptr<Elfpatcher::IElfPatcher> patcher;
-    if (args.toWindows) {
+    if (args.toMacos) {
+        patcher = std::make_shared<Elfpatcher::MacOs::MacOsMachOPatcher>();
+    } else if (args.toWindows) {
         // The game's icon (sce_sys/icon0.png beside the input) becomes the executable's icon (upstream).
         patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui, std::filesystem::path(args.inputPath).parent_path() / "sce_sys" / "icon0.png");
     } else {

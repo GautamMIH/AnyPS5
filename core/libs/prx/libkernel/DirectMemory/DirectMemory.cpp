@@ -1,12 +1,15 @@
 #include "DirectMemory.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
+#include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <system_error>
 
 #if defined(__linux__)
@@ -18,6 +21,8 @@
 #else
 #include <windows.h>
 #endif
+
+extern "C" int APS5_VABI sceKernelClearVirtualRangeName(const void* addr, uint64_t len);
 
 // Guest virtual memory lives in GuestMemoryBacking, which follows the PS5 model (see
 // docs/research-notes.md); these wrappers translate its status into SCE error codes.
@@ -47,6 +52,9 @@ int Map(const char* operation, void** addr, size_t len, size_t alignment, Kind k
     const void* requested = *addr;
     const auto result = SceResult(GuestMemoryBacking::GuestVirtualMap_nid_postfix(addr, len, alignment, kind, prot, flags, physical));
     TraceMemory(operation, result == 0 ? *addr : requested, len, prot, flags, result);
+    // A new mapping starts unnamed: a name set on an earlier mapping of the same addresses (since
+    // unmapped or released) does not carry over and split sceKernelVirtualQuery's extents.
+    if (result == 0) sceKernelClearVirtualRangeName(*addr, len);
     return result;
 }
 
@@ -87,7 +95,10 @@ int ProtectImage(const void* pointer, size_t bytes, int prot) {
         return 0;
     }
 #endif
-    mutation.Protect(pointer, bytes, readable, writable, apply);
+    // The main image is registered without GPU access; the title's own mprotect with GPU bits adds it
+    // (upstream c11a9cb59).
+    const bool gpu = (prot & (GuestMemoryBacking::kProtGpuRead | GuestMemoryBacking::kProtGpuWrite)) != 0;
+    mutation.Protect(pointer, bytes, readable, writable, gpu, apply);
     return 0;
 }
 
@@ -97,8 +108,8 @@ int DoMapDirect(void** addr, size_t len, int prot, int flags, int64_t physStart,
     return Map("map-direct", addr, len, alignment, Kind::Direct, prot, flags, physStart);
 }
 
-int DoMapAnon(void** addr, size_t len, int prot, int flags) {
-    return Map("map-flexible", addr, len, PS5_PAGE_SIZE, Kind::Flexible, prot, flags, -1);
+int DoMapAnon(void** addr, size_t len, int prot, int flags, size_t alignment) {
+    return Map("map-flexible", addr, len, alignment, Kind::Flexible, prot, flags, -1);
 }
 
 int DoReserveVirtual(void** addr, size_t len, int flags, size_t alignment) {

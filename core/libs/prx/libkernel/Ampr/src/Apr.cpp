@@ -50,9 +50,11 @@ struct OpenFile {
     std::uint64_t Size;
 };
 
-std::mutex fileMutex;
-std::map<std::string, std::uint32_t> idsByPath;
-std::map<std::uint32_t, OpenFile> filesById;
+// Leaked so that guest threads still resolving files during static teardown find them alive
+// (upstream f2d201fbb).
+std::mutex& fileMutex = *new std::mutex();
+std::map<std::string, std::uint32_t>& idsByPath = *new std::map<std::string, std::uint32_t>();
+std::map<std::uint32_t, OpenFile>& filesById = *new std::map<std::uint32_t, OpenFile>();
 std::uint32_t nextFileId = 1;
 std::atomic<std::uint32_t> nextSubmitId{1};
 

@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <filesystem>
 #include <limits>
 #include <string>
@@ -16,16 +17,39 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 
-static std::string NativeFileMode(const char* mode) {
-    std::string result(mode);
+struct GuestFileMode {
+    std::string native;
+    bool writes = false;
+    bool exclusive = false;
+};
+
+static std::optional<GuestFileMode> ParseFileMode(const char* mode) {
+    const char access = mode[0];
+    if (access != 'r' && access != 'w' && access != 'a') return std::nullopt;
+    bool update = false;
+    bool exclusive = false;
+    for (const char* flag = mode + 1; *flag != '\0' && std::strchr("b+xev", *flag) != nullptr; ++flag) {
+        if (*flag == '+') update = true;
+        if (*flag == 'x') exclusive = true;
+    }
+    if (exclusive && access == 'r' && !update) return std::nullopt;
+    GuestFileMode result{std::string(1, access), access != 'r' || update, exclusive};
+    if (update) result.native += '+';
 #ifdef _WIN32
-    if (!result.empty() && result.find('b') == std::string::npos) result.insert(1, 1, 'b');
+    result.native += 'b';
 #endif
+    if (exclusive) result.native += 'x';
     return result;
 }
 
-static bool WritesFile(const char* mode) {
-    return std::strpbrk(mode, "wa+") != nullptr;
+static std::FILE* OpenNative(const std::filesystem::path& path, const std::string& nativeMode) {
+#ifdef _WIN32
+    std::wstring wideMode;
+    for (const char character : nativeMode) wideMode.push_back(static_cast<unsigned char>(character));
+    return ::_wfopen(path.c_str(), wideMode.c_str());
+#else
+    return std::fopen(path.c_str(), nativeMode.c_str());
+#endif
 }
 
 extern "C" {
@@ -58,15 +82,12 @@ FileStream* APS5_VABI fdopen_nid_postfix(int descriptor, const char* mode) {
 FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode, FileStream* stream) {
     if (!stream || !mode) { errno = 22; return nullptr; }
     if (!filename) { errno = 45; return nullptr; } // Mode-only reopening is not supported.
-    const char* supported[] = {"r", "w", "a", "rb", "wb", "ab", "r+", "w+", "a+",
-        "rb+", "wb+", "ab+", "r+b", "w+b", "a+b"};
-    bool valid = false;
-    for (const auto* candidate : supported) if (std::strcmp(mode, candidate) == 0) valid = true;
-    if (!valid) { errno = 22; return nullptr; }
+    const auto parsed = ParseFileMode(mode);
+    if (!parsed) { errno = 22; return nullptr; }
     try {
-        const auto path = *filename ? ResolvePath_nid_no_patch(filename).string() : std::string{};
-        if (stream->Reopen(path.c_str(), NativeFileMode(mode).c_str())) {
-            if (!path.empty() && WritesFile(mode)) RecordWrittenPath_nid_no_patch(path);
+        const std::filesystem::path path = *filename ? ResolvePath_nid_no_patch(filename) : std::filesystem::path{};
+        if (stream->Reopen(path, parsed->native.c_str())) {
+            if (!path.empty() && parsed->writes) RecordWrittenPath_nid_no_patch(path);
             return stream;
         }
         const int error = errno;
@@ -79,14 +100,15 @@ FileStream* APS5_VABI freopen_nid_postfix(const char* filename, const char* mode
 
 FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode) {
     // Like any libc: a file that cannot be opened (games probe optional files) returns NULL with
-    // errno set; the guest decides whether that is fatal.
+    // errno set; the guest decides whether that is fatal. Modes are parsed as FreeBSD does.
     if (!filename || !mode) { errno = 22; return nullptr; }
+    const auto parsed = ParseFileMode(mode);
+    if (!parsed) { errno = 22; return nullptr; }
     try {
         const std::filesystem::path fpath = ResolvePath_nid_no_patch(filename);
-        const auto abs_path = fpath.string();
-        std::unique_ptr<std::FILE, decltype(&std::fclose)> handle(std::fopen(abs_path.c_str(), NativeFileMode(mode).c_str()), std::fclose);
+        std::unique_ptr<std::FILE, int (*)(std::FILE*)> handle(OpenNative(fpath, parsed->native), std::fclose);
         if (!handle) return nullptr;
-        if (WritesFile(mode)) RecordWrittenPath_nid_no_patch(fpath);
+        if (parsed->writes) RecordWrittenPath_nid_no_patch(fpath);
         auto stream = std::make_unique<FileStream>(handle.get(), true);
         handle.release();
         return stream.release();

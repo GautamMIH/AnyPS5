@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstring>
 #include <cstdio>
 #include <stdexcept>
@@ -34,14 +35,16 @@ std::uint32_t read(const Registers& registers, std::uint32_t offset) {
     return it->second;
 }
 
-template <typename T> T _readHeaderPod(std::span<const std::byte> header, std::uint64_t headerAddress, const void* pointer) {
+// `bytes`: the leading bytes of T the header holds (a struct's tail padding may lie past the header;
+// upstream 50f1f1aa); the rest is value-initialized.
+template <typename T> T _readHeaderPod(std::span<const std::byte> header, std::uint64_t headerAddress, const void* pointer, std::size_t bytes = sizeof(T)) {
     if (pointer == nullptr) throw std::runtime_error("AGC graphics: null AGC header pointer");
     const auto address = reinterpret_cast<std::uint64_t>(pointer);
     if (address < headerAddress) throw std::runtime_error("AGC graphics: AGC header pointer precedes the shader header");
     const auto offset = address - headerAddress;
-    if (offset + sizeof(T) > header.size()) throw std::runtime_error("AGC graphics: AGC header pointer is outside the registered shader header");
-    T value;
-    std::memcpy(&value, header.data() + offset, sizeof(T));
+    if (offset > header.size() || bytes > header.size() - offset) throw std::runtime_error("AGC graphics: AGC header pointer is outside the registered shader header");
+    T value{};
+    std::memcpy(&value, header.data() + offset, bytes);
     return value;
 }
 
@@ -98,7 +101,7 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     const auto activeInputs = ena & addr;
     // Perspective and linear sample, center and centroid pairs (rendering is single-sampled, so a
     // centroid is the center), POS_X..W, FRONT_FACE, ANCILLARY.
-    constexpr std::uint32_t knownMask = 0x1u | 0x2u | 0x4u | 0x10u | 0x20u | 0x40u | 0x100u | 0x200u | 0x400u | 0x800u | 0x1000u | 0x2000u;
+    constexpr std::uint32_t knownMask = 0x1u | 0x2u | 0x4u | 0x10u | 0x20u | 0x40u | 0x100u | 0x200u | 0x400u | 0x800u | 0x1000u | 0x2000u | 0x4000u | 0x8000u;
     if ((activeInputs & ~knownMask) != 0) {
         char message[128];
         std::snprintf(message, sizeof(message), "AGC graphics: unsupported SPI_PS_INPUT_ENA 0x%x / ADDR 0x%x", ena, addr);
@@ -155,7 +158,11 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         // PRIMITIVE_ORDERED_PIXEL_SHADER: the body runs under fragment shader interlock (e1d4e699).
         .orderedPixelShader = ((shaderControl >> 16u) & 0x1u) != 0,
         .targetOutputMode = targetOutputMode,
-        .targetExportMapping = colorComponentMappings
+        .targetExportMapping = colorComponentMappings,
+        // Packed 10_11_11 targets are not supported here; Driver sets dualSourceBlend from the
+        // draw state.
+        .targetExportPacking = {},
+        .dualSourceBlend = false
     };
 }
 
@@ -168,7 +175,8 @@ PreparedVertexHeader PrepareVertexHeader(std::span<const std::byte> header, std:
     PreparedVertexHeader prepared;
     prepared.shaderType = shader.type;
     if (shader.user_data == nullptr) throw std::runtime_error("AGC graphics: missing AGC user-data header");
-    const auto userDataHeader = _readHeaderPod<ShaderUserData>(header, headerAddress, shader.user_data);
+    constexpr auto userDataBytes = offsetof(ShaderUserData, sharp_resource_count) + sizeof(ShaderUserData{}.sharp_resource_count);
+    const auto userDataHeader = _readHeaderPod<ShaderUserData>(header, headerAddress, shader.user_data, userDataBytes);
     if (userDataHeader.direct_resource_count > ShaderRegs::AGC_DIRECT_RESOURCE_TYPE_COUNT) throw std::runtime_error("AGC graphics: AGC direct-resource count exceeds the known resource domain");
     std::array<std::uint16_t, ShaderRegs::AGC_DIRECT_RESOURCE_TYPE_COUNT> directOffsets{};
     directOffsets.fill(ShaderRegs::AGC_ILLEGAL_DIRECT_OFFSET);

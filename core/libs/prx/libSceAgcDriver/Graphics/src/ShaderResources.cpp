@@ -177,8 +177,31 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
             }
             // Min/max reduction samplers with linear filtering need a view format that filters
             // min/max (upstream 1afcd202); the pairs name elements of this shader's sampler binding.
+            // ANISO_OVERRIDE: a sampler paired only with single-level images is bound without its
+            // anisotropic filters (upstream d8bb4411, 17d9efc2, 1a778f75); the T#'s own levels decide.
+            for (std::size_t index = firstSampler; index < samplers.size(); ++index) {
+                const auto element = index - firstSampler;
+                if (element >= 32u) break;
+                bool single = false;
+                bool mipmapped = false;
+                for (const auto& paired : pairedSamplers) {
+                    if (((paired.mask >> element) & 1u) == 0u) continue;
+                    (paired.singleLevel ? single : mipmapped) = true;
+                }
+                const auto& input = samplerInputs[index];
+                if (const auto variant = SingleLevelSamplerWords(std::span<const std::uint32_t, 4>(input.words), single, mipmapped)) {
+                    auto resource = DecodeSamplerResource(*variant, input.unnormalized);
+                    resource.compareEnable = input.compareEnable;
+                    samplers[index] = context.samplerCache->Get(context, *variant, resource);
+                }
+            }
             const auto shaderSamplers = std::span<const std::shared_ptr<Sampler>>(samplers).subspan(firstSampler);
-            for (const auto& [texture, mask] : pairedSamplers) RequireFilterMinmax(context, textures[texture]->ViewFormat(), mask, shaderSamplers);
+            for (const auto& paired : pairedSamplers) {
+                RequireFilterMinmax(context, textures[paired.texture]->ViewFormat(), paired.mask, shaderSamplers);
+                RequireDegammaFormat(paired.format, paired.mask, shaderSamplers);
+                RequireBorderSwizzle(paired.bcSwizzle, paired.mask, shaderSamplers);
+                RequireNonSeamlessCube(paired.cube, paired.mask, shaderSamplers);
+            }
         }
         Require(storageBuffers <= context.limits.maxDescriptorSetStorageBuffers, "pipeline descriptors exceed device limits");
         timing.Mark("bindings");
@@ -451,7 +474,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
                 if (!singleLevel || (range.type != VK_IMAGE_VIEW_TYPE_1D && range.type != VK_IMAGE_VIEW_TYPE_2D)) throw std::runtime_error("AGC graphics: guest texture sampled with unnormalized coordinates is not a single-level, single-layer 1D or 2D view starting at mip 0, which is not implemented (base level " + std::to_string(resource.baseLevel) + ", levels " + std::to_string(range.levels) + ", layers " + std::to_string(range.layers) + ", view type " + std::to_string(static_cast<int>(range.type)) + ")");
             }
             // The sampler elements paired with it, checked once the shader's samplers are bound.
-            pairedSamplers.push_back({textures.size(), element < binding.imageSamplers.size() ? binding.imageSamplers[element] : 0u});
+            pairedSamplers.push_back({textures.size(), element < binding.imageSamplers.size() ? binding.imageSamplers[element] : 0u, nullBase || DescriptorSingleLevel(words), resource.viewDimension == TextureDimension::kCube, resource.bcSwizzle, resource.format});
             textures.push_back(std::move(texture));
             item.imageAllocations.push_back(textures.size() - 1);
         }
@@ -468,6 +491,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             resource.compareEnable = binding.samplerDepthCompare.at(element);
             if (!context.samplerCache) context.samplerCache = std::make_shared<SamplerCache>();
             samplers.push_back(context.samplerCache->Get(context, words, resource));
+            samplerInputs.push_back({{words[0], words[1], words[2], words[3]}, resource.compareEnable, unnormalized});
             item.imageAllocations.push_back(samplers.size() - 1);
         }
         Require(samplers.size() <= context.limits.maxDescriptorSetSamplers, "pipeline sampler descriptors exceed device limits");

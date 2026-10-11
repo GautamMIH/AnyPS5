@@ -9,6 +9,9 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <atomic>
 #include <stdexcept>
 #include "prx/libc/include/Shutdown.hpp"
@@ -107,6 +110,13 @@ extern "C" {
         std::fprintf(stderr, "[libc] _Exit(%d) called from %p\n", code, __builtin_return_address(0));
         std::fflush(stderr);
     }
+    LibcTerminate_nid_no_patch(code);
+}
+
+[[noreturn]] void LibcTerminate_nid_no_patch(int code) {
+#ifdef _WIN32
+    TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
+#endif
     std::_Exit(code);
 }
 
@@ -114,6 +124,7 @@ extern "C" {
     exitRequested.store(true);
     if (exitStarted.exchange(true)) LibcAwaitExit_nid_postfix();
     LibcRunShutdown_nid_postfix();
+    CxaFinalize_nid_no_patch(nullptr);
     std::exit(code);
 }
 

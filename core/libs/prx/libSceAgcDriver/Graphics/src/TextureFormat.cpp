@@ -20,6 +20,7 @@ struct FormatEntry {
 
 constexpr FormatEntry kFormatLookup[] = {
     {1, VK_FORMAT_R8_UNORM, 1, false},
+    {2, VK_FORMAT_R8_SNORM, 1, false},
     {5, VK_FORMAT_R8_UINT, 1, false},
     {6, VK_FORMAT_R8_SINT, 1, false},
     {7, VK_FORMAT_R16_UNORM, 2, false},
@@ -117,6 +118,19 @@ VkFormat ResolveTextureFormat(std::uint32_t guestFormat) {
 
 std::uint32_t BytesPerElement(std::uint32_t guestFormat) {
     return findFormatEntry(guestFormat).bytesPerElement;
+}
+
+bool IsSrgbTextureFormat(std::uint32_t guestFormat) {
+    switch (findFormatEntry(guestFormat).vkFormat) {
+        case VK_FORMAT_R8_SRGB:
+        case VK_FORMAT_R8G8_SRGB:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+        case VK_FORMAT_BC2_SRGB_BLOCK:
+        case VK_FORMAT_BC3_SRGB_BLOCK:
+        case VK_FORMAT_BC7_SRGB_BLOCK: return true;
+        default: return false;
+    }
 }
 
 bool IsConvertedTextureFormat(std::uint32_t guestFormat) {

@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/Sampler.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <string>
 
 namespace AgcDriver::Graphics {
@@ -33,6 +34,13 @@ namespace AgcDriver::Graphics {
         info.maxLod = descriptor.maxLod;
         info.borderColor = descriptor.borderColor;
         info.unnormalizedCoordinates = descriptor.unnormalizedCoordinates ? VK_TRUE : VK_FALSE;
+        forcesDegamma = descriptor.forceDegamma;
+        const bool clampsToBorder = descriptor.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER || descriptor.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER || descriptor.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        opaqueBlackBorder = clampsToBorder && (descriptor.borderColor == VK_BORDER_COLOR_INT_OPAQUE_BLACK || descriptor.borderColor == VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
+        if (descriptor.nonSeamlessCube) {
+            if (context.nonSeamlessCubeMap) info.flags |= VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT;
+            else requiresNonSeamlessCube = true;
+        }
         Check(context.Function<PFN_vkCreateSampler>("vkCreateSampler")(context.device, &info, nullptr, &sampler), "vkCreateSampler");
     }
 
@@ -71,6 +79,27 @@ namespace AgcDriver::Graphics {
         VkFormatProperties properties{};
         context.formatProperties(context.physical, format, &properties);
         if ((properties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_MINMAX_BIT_EXT) == 0) Require(false, "a sampled texture whose format " + std::to_string(format) + " does not support min/max filtering is sampled through a min or max reduction sampler with linear filtering");
+    }
+
+    void RequireDegammaFormat(std::uint32_t guestFormat, std::uint32_t samplerMask, std::span<const std::shared_ptr<Sampler>> samplers) {
+        for (std::uint32_t element = 0; element < 32u && element < samplers.size(); ++element) {
+            if (((samplerMask >> element) & 1u) != 0u && samplers[element]->ForcesDegamma() && !IsSrgbTextureFormat(guestFormat)) Require(false, "a texture of guest format " + std::to_string(guestFormat) + ", which is not sRGB, is sampled through a sampler that forces sRGB decoding, which is not implemented");
+        }
+    }
+
+    void RequireBorderSwizzle(std::uint32_t bcSwizzle, std::uint32_t samplerMask, std::span<const std::shared_ptr<Sampler>> samplers) {
+        // XYZW and ZYXW keep alpha in place, so an opaque black border reads the same.
+        if (bcSwizzle == 0u || bcSwizzle == 4u) return;
+        for (std::uint32_t element = 0; element < 32u && element < samplers.size(); ++element) {
+            if (((samplerMask >> element) & 1u) != 0u && samplers[element]->ReadsOpaqueBlackBorder()) Require(false, "a sampled texture whose BC swizzle " + std::to_string(bcSwizzle) + " moves the alpha channel is sampled through an opaque black border, which is not implemented");
+        }
+    }
+
+    void RequireNonSeamlessCube(bool cube, std::uint32_t samplerMask, std::span<const std::shared_ptr<Sampler>> samplers) {
+        if (!cube) return;
+        for (std::uint32_t element = 0; element < 32u && element < samplers.size(); ++element) {
+            if (((samplerMask >> element) & 1u) != 0u && samplers[element]->RequiresNonSeamlessCube()) Require(false, "a cube texture is sampled through a sampler that disables seamless cube filtering, which needs VK_EXT_non_seamless_cube_map");
+        }
     }
 
 }

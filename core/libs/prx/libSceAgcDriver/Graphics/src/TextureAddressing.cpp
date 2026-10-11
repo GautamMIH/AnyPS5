@@ -118,7 +118,7 @@ ThickBlock thickBlock(TextureTileMode mode, std::uint32_t elementBytes) {
     static constexpr Log2 thick64KB[5] = {{6, 5, 5}, {5, 5, 5}, {5, 5, 4}, {5, 4, 4}, {4, 4, 4}};
     if (elementBytes == 0 || elementBytes > 16 || (elementBytes & (elementBytes - 1u)) != 0) throw std::runtime_error("AGC graphics: unsupported thick volume element size");
     const auto index = static_cast<std::size_t>(std::countr_zero(elementBytes));
-    // SW_64KB_S_X volumes take the standard 64 KiB thick block (upstream c10401e3).
+    // SW_64KB_S_X and SW_64KB_D_X volumes take the standard 64 KiB thick block (upstream c10401e3, e5da5fd2).
     const auto& shape = mode == TextureTileMode::kStandard4KB ? thick4KB[index] : thick64KB[index];
     return {1u << shape.width, 1u << shape.height, 1u << shape.depth, mode == TextureTileMode::kStandard4KB ? 4096u : 65536u};
 }
@@ -178,7 +178,7 @@ std::uint64_t TexelOffset(TextureTileMode mode, std::uint32_t elementBytes, cons
 }
 
 bool IsThickVolume(const GuestTextureResource& resource) {
-    return resource.dimension == TextureDimension::k3D && (resource.tileMode == TextureTileMode::kStandard4KB || resource.tileMode == TextureTileMode::kStandard64KB || resource.tileMode == TextureTileMode::kS64KBX);
+    return resource.dimension == TextureDimension::k3D && (resource.tileMode == TextureTileMode::kStandard4KB || resource.tileMode == TextureTileMode::kStandard64KB || resource.tileMode == TextureTileMode::kS64KBX || resource.tileMode == TextureTileMode::kD64KBX);
 }
 
 std::uint32_t VolumeSliceXor(TextureTileMode mode, std::uint32_t elementBytes, std::uint32_t z) {
@@ -194,10 +194,11 @@ std::uint64_t ThickVolumeOffset(TextureTileMode mode, std::uint32_t elementBytes
     const auto rows = static_cast<std::uint64_t>((height + block.height - 1u) / block.height);
     const auto index = (static_cast<std::uint64_t>(z / block.depth) * rows + y / block.height) * columns + x / block.width;
     std::uint32_t inner = 0;
-    if (mode == TextureTileMode::kS64KBX) {
-        // The S3 XOR equation (0x100 | SW_64KB_S_X), generated from addrlib (upstream c10401e3).
-        const auto* equation = FindTextureSwizzleEquation(0x119u, elementBytes);
-        if (equation == nullptr) throw std::runtime_error("AGC graphics: no thick SW_64KB_S_X swizzle equation");
+    if (mode == TextureTileMode::kS64KBX || mode == TextureTileMode::kD64KBX) {
+        // The S3 and D3 XOR equations (0x100 | SW_64KB_S_X / SW_64KB_D_X), generated from addrlib
+        // (upstream c10401e3, e5da5fd2).
+        const auto* equation = FindTextureSwizzleEquation(mode == TextureTileMode::kS64KBX ? 0x119u : 0x11au, elementBytes);
+        if (equation == nullptr) throw std::runtime_error("AGC graphics: no thick SW_64KB_S_X or SW_64KB_D_X swizzle equation");
         // The XOR terms take coordinate bits above the block (pipe and bank bits), so the equation
         // sees the whole coordinates.
         inner = EquationOffset(*equation, x, y, z);

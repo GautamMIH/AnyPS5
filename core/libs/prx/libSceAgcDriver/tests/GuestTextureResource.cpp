@@ -1,6 +1,7 @@
 #include "GraphicsTests.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderResources.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include <algorithm>
 #include <array>
@@ -119,6 +120,10 @@ void RunGuestTextureResourceTests() {
     tileModes.tileModeRaw = 0x09;
     Require(DecodeTextureResource(pack(tileModes)).tileMode == TextureTileMode::kStandard64KB, "tile mode 0x09 must decode to standard 64KB");
     tileModes.tileModeRaw = 0x1b;
+    const auto xorBase = DecodeTextureResource(pack(tileModes));
+    Require(xorBase.baseAddress == 0x12340000ull && xorBase.pipeBankXor == 0x5600u, "a 64 KiB XOR swizzle did not split its base into the block base and its pipe/bank XOR");
+    tileModes.base40 = 0x120000ull;
+    Require(DecodeTextureResource(pack(tileModes)).pipeBankXor == 0u, "an aligned 64 KiB XOR base gained a pipe/bank XOR");
     Require(DecodeTextureResource(pack(tileModes)).tileMode == TextureTileMode::RenderTarget64KB, "tile mode 0x1b must decode to render target 64KB");
     constexpr std::array<std::pair<std::uint32_t, TextureTileMode>, 7> added{{{0x02, TextureTileMode::kD256B}, {0x06, TextureTileMode::kD4KB}, {0x0a, TextureTileMode::kD64KB}, {0x11, TextureTileMode::kS64KBT}, {0x12, TextureTileMode::kD64KBT}, {0x15, TextureTileMode::kS4KBX}, {0x16, TextureTileMode::kD4KBX}}};
     for (const auto& [raw, mode] : added) {
@@ -129,10 +134,18 @@ void RunGuestTextureResourceTests() {
     tileModes.base40 = 0x120010ull;
     Require(DecodeTextureResource(pack(tileModes)).tileMode == TextureTileMode::kD4KBX, "a 4 KiB XOR swizzle must accept a 4 KiB aligned base");
     tileModes.base40 = 0x120011ull;
-    rejectFields(tileModes, "pipe/bank XOR base");
+    const auto xor4Kb = DecodeTextureResource(pack(tileModes));
+    Require(xor4Kb.baseAddress == 0x12001000ull && xor4Kb.pipeBankXor == 0x100u, "a 4 KiB XOR swizzle did not split its base into the block base and its pipe/bank XOR");
     tileModes.tileModeRaw = 0x12;
     tileModes.base40 = 0x120010ull;
-    rejectFields(tileModes, "pipe/bank XOR base");
+    const auto xorT = DecodeTextureResource(pack(tileModes));
+    Require(xorT.baseAddress == 0x12000000ull && xorT.pipeBankXor == 0x1000u, "a 64 KiB T swizzle did not split its base into the block base and its pipe/bank XOR");
+    tileModes.tileModeRaw = 0x09;
+    const auto standard = DecodeTextureResource(pack(tileModes));
+    Require(standard.baseAddress == 0x12001000ull && standard.pipeBankXor == 0u, "a swizzle without XOR addressing split its base");
+    tileModes.tileModeRaw = 0x1b;
+    tileModes.base40 = 0x56ull;
+    rejectFields(tileModes, "null base address");
     tileModes.base40 = base.base40;
     tileModes.tileModeRaw = 0x03;
     rejectFields(tileModes, "unsupported tile mode");
@@ -227,13 +240,34 @@ void RunGuestTextureResourceTests() {
     zeroAddress.base40 = 0;
     rejectFields(zeroAddress, "null base address");
 
-    Fields badMinLod = base;
-    badMinLod.minLod = 1;
-    rejectFields(badMinLod, "nonzero minimum LOD clamp");
+    Fields minLod = base;
+    minLod.maxMip = 4;
+    minLod.baseLevel = 1;
+    minLod.lastLevel = 3;
+    minLod.minLod = 0x180;
+    auto clamped = DecodeTextureResource(pack(minLod));
+    Require(clamped.minLod == 0x180 && EffectiveMinLod(clamped) == 1.5f, "MIN_LOD 1.5 over levels 1..3 did not clamp at 1.5");
+    minLod.minLod = 0x100;
+    clamped = DecodeTextureResource(pack(minLod));
+    Require(EffectiveMinLod(clamped) == 0.0f, "MIN_LOD at BASE_LEVEL cannot bind but was applied");
+    minLod.minLod = 0x0c0;
+    clamped = DecodeTextureResource(pack(minLod));
+    Require(EffectiveMinLod(clamped) == 0.0f, "MIN_LOD below BASE_LEVEL cannot bind but was applied");
+    minLod.minLod = 0xfff;
+    clamped = DecodeTextureResource(pack(minLod));
+    Require(EffectiveMinLod(clamped) == 3.0f, "MIN_LOD past the view's last level was not bounded by it");
+    minLod.baseLevel = 0;
+    minLod.minLod = 0x001;
+    clamped = DecodeTextureResource(pack(minLod));
+    Require(EffectiveMinLod(clamped) == 1.0f / 256.0f, "the smallest MIN_LOD step above level 0 was lost");
+    Require(DecodeTextureResource(pack(base)).minLod == 0 && EffectiveMinLod(DecodeTextureResource(pack(base))) == 0.0f, "an unclamped descriptor gained a MIN_LOD");
 
-    Fields badMinLodWarn = base;
-    badMinLodWarn.minLodWarn = 1;
-    rejectFields(badMinLodWarn, "minimum LOD warning threshold");
+    // Streaming feedback fields decode; nothing is reported back.
+    Fields feedback = base;
+    feedback.minLodWarn = 1;
+    feedback.mipStatsCntId = 1;
+    feedback.mipStatsCntEn = true;
+    static_cast<void>(DecodeTextureResource(pack(feedback)));
 
     const auto unmodulated = DecodeTextureResource(pack(base));
     for (std::uint32_t perfMod = 0; perfMod < 8; ++perfMod) {
@@ -247,13 +281,6 @@ void RunGuestTextureResourceTests() {
         modulated.cornerSample = true;
         rejectFields(modulated, "corner sampling");
     }
-
-    Fields badMipStats = base;
-    badMipStats.mipStatsCntId = 1;
-    rejectFields(badMipStats, "mip statistics counters");
-    badMipStats = base;
-    badMipStats.mipStatsCntEn = true;
-    rejectFields(badMipStats, "mip statistics counters");
 
     Fields badCorner = base;
     badCorner.cornerSample = true;
@@ -271,22 +298,22 @@ void RunGuestTextureResourceTests() {
     badMsaa.msaaDepth = true;
     rejectFields(badMsaa, "MSAA");
 
-    // DCC block sizes without compression do not change sampling.
     Fields blockSize = base;
     blockSize.maxUncompBlkSize = 1;
-    blockSize.maxCompBlkSize = 2;
-    static_cast<void>(DecodeTextureResource(pack(blockSize)));
+    blockSize.maxCompBlkSize = 1;
+    Require(DecodeTextureResource(pack(blockSize)).baseAddress == DecodeTextureResource(pack(base)).baseAddress, "DCC block size overrides changed texture storage");
 
-    // Surfaces are stored uncompressed, so DCC state leaves the decoded texture unchanged.
     Fields meta = base;
     meta.metaPipeAligned = true;
     meta.writeCompress = true;
-    meta.metaCompress = true;
-    meta.dccAlphaPos = true;
     meta.dccColorTransf = true;
     meta.metaAddr = 1;
+    const auto uncompressed = DecodeTextureResource(pack(meta));
+    Require(uncompressed.dccAddress == 0 && !uncompressed.dccAlphaOnMsb, "DCC metadata without compression was decoded");
+    meta.metaCompress = true;
+    meta.dccAlphaPos = true;
     const auto compressed = DecodeTextureResource(pack(meta));
-    Require(compressed.baseAddress == result.baseAddress && compressed.width == result.width && compressed.format == result.format, "DCC state changed the decoded texture");
+    Require(compressed.dccAddress == 0x100 && compressed.dccAlphaOnMsb, "DCC metadata was decoded wrongly");
 
     Fields storage = base;
     storage.base40 = 0x1000;
@@ -310,9 +337,16 @@ void RunGuestTextureResourceTests() {
         Require(image.dccPipeAligned == pipeAligned && stored == expected && std::all_of(keys, keys + expected, [](std::uint8_t key) { return key == 0xff; }), std::string("a 1920x1080 SW_64KB_R_X storage image with ") + (pipeAligned ? "pipe-aligned" : "unaligned") + " DCC stored " + std::to_string(stored) + " uncompressed keys, expected " + std::to_string(expected));
     }
 
-    Fields badSwizzle = base;
-    badSwizzle.bcSwizzle = 1;
-    rejectFields(badSwizzle, "BC swizzle");
+    for (std::uint32_t swizzle = 0; swizzle <= 5u; ++swizzle) {
+        Fields borderSwizzle = base;
+        borderSwizzle.bcSwizzle = swizzle;
+        Require(DecodeTextureResource(pack(borderSwizzle)).bcSwizzle == swizzle, "a texture descriptor lost its BC swizzle " + std::to_string(swizzle));
+    }
+    for (std::uint32_t swizzle : {6u, 7u}) {
+        Fields badSwizzle = base;
+        badSwizzle.bcSwizzle = swizzle;
+        rejectFields(badSwizzle, "reserved BC swizzle");
+    }
 
     Fields badLevels = base;
     badLevels.baseLevel = 2;
@@ -320,10 +354,11 @@ void RunGuestTextureResourceTests() {
     badLevels.maxMip = 1;
     rejectFields(badLevels, "base mip level past its last mip level");
 
-    Fields badMaxMip = base;
-    badMaxMip.lastLevel = 1;
-    badMaxMip.maxMip = 2;
-    rejectFields(badMaxMip, "must expose every mip level");
+    Fields partialMips = base;
+    partialMips.lastLevel = 1;
+    partialMips.maxMip = 2;
+    const auto partial = DecodeTextureResource(pack(partialMips));
+    Require(partial.lastLevel == 1 && partial.mipCount == 3, "a view over part of the mip chain decoded wrongly");
 
     Fields pastLast = base;
     pastLast.base40 = 0x55ea000ull;
@@ -384,11 +419,31 @@ void RunGuestTextureResourceTests() {
     Require(MatchesGuestDimension(Shape::Image2D, TextureDimension::k2D), "2D shape must match 2D dimension");
     Require(!MatchesGuestDimension(Shape::Image2D, TextureDimension::k2DArray), "2D shape must not match 2D array dimension");
     Require(MatchesGuestDimension(Shape::Image2DArray, TextureDimension::k2DArray), "2D array shape must match 2D array dimension");
-    Require(!MatchesGuestDimension(Shape::Image2DArray, TextureDimension::kCube), "2D array shape must not match cube dimension");
+    Require(MatchesGuestDimension(Shape::Image2DArray, TextureDimension::kCube), "a cube must be readable as a 2D array of its faces");
     Require(MatchesGuestDimension(Shape::ImageCube, TextureDimension::kCube), "cube shape must match cube dimension");
     Require(!MatchesGuestDimension(Shape::ImageCube, TextureDimension::k1D), "cube shape must not match 1D dimension");
     Require(!MatchesGuestDimension(Shape::Image3D, TextureDimension::k1D), "3D shape must never match a guest dimension");
     Require(!MatchesGuestDimension(Shape::Image3D, TextureDimension::k2D), "3D shape must never match a guest dimension");
     Require(!MatchesGuestDimension(Shape::Image3D, TextureDimension::k2DArray), "3D shape must never match a guest dimension");
     Require(!MatchesGuestDimension(Shape::Image3D, TextureDimension::kCube), "3D shape must never match a guest dimension");
+
+    Fields streamed = base;
+    streamed.minLodWarn = 0xabc;
+    streamed.mipStatsCntEn = true;
+    streamed.mipStatsCntId = 0x5a;
+    Require(SampledTexturesShareEntry(pack(base), pack(streamed)), "T#s differing only in MIN_LOD_WARN, MIP_STATS_COUNTER_EN and MIP_STATS_COUNTER_ID must share a sampled texture entry");
+    for (const auto& field : {&Fields::minLodWarn, &Fields::mipStatsCntId}) {
+        Fields one = base;
+        one.*field = 1;
+        Require(SampledTexturesShareEntry(pack(base), pack(one)), "a T# differing in one streaming-feedback field must share a sampled texture entry");
+    }
+    Fields moved = streamed;
+    moved.base40 = base.base40 + 1;
+    Require(!SampledTexturesShareEntry(pack(base), pack(moved)), "T#s with different base addresses must not share a sampled texture entry");
+    Fields reformatted = streamed;
+    reformatted.format = 57;
+    Require(!SampledTexturesShareEntry(pack(base), pack(reformatted)), "T#s with different formats must not share a sampled texture entry");
+    Fields cornered = base;
+    cornered.cornerSample = true;
+    Require(!SampledTexturesShareEntry(pack(base), pack(cornered)), "T#s differing in a field next to the feedback fields must not share a sampled texture entry");
 }

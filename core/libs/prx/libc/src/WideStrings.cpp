@@ -169,7 +169,7 @@ std::pair<std::string, std::size_t> utf8PrefixByUnits(const char* text, std::siz
     return {std::string(text, index), units};
 }
 
-int formatWide(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list arguments) {
+int formatWideUnchecked(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list arguments) {
     if (destination == nullptr || format == nullptr || count == 0) {
         errno = kErrorInvalid;
         return -1;
@@ -336,6 +336,19 @@ int formatWide(GuestWchar* destination, std::size_t count, const GuestWchar* for
     return static_cast<int>(written);
 }
 
+// An unsupported or invalid conversion fails the call with an empty result and EINVAL, as
+// upstream's vswprintf does, instead of escaping into guest code as a host exception.
+int formatWide(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list arguments) {
+    try {
+        return formatWideUnchecked(destination, count, format, arguments);
+    } catch (const std::exception&) {
+        if (destination != nullptr && count != 0)
+            destination[0] = 0;
+        errno = kErrorInvalid;
+        return -1;
+    }
+}
+
 }
 
 extern "C" {
@@ -428,15 +441,15 @@ GuestWchar* APS5_VABI wmemmove_nid_postfix(GuestWchar* destination, const GuestW
 }
 
 long APS5_VABI wcstol_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
-    return parseNumber<long>(text, end, [base](const char* narrow, char** narrowEnd) { return std::strtol(narrow, narrowEnd, base); });
+    return parseNumber<long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtBinaryPrefix_nid_no_patch(narrow, narrowEnd, base) ? 0L : std::strtol(narrow, narrowEnd, base); });
 }
 
 long long APS5_VABI wcstoll_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
-    return parseNumber<long long>(text, end, [base](const char* narrow, char** narrowEnd) { return std::strtoll(narrow, narrowEnd, base); });
+    return parseNumber<long long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtBinaryPrefix_nid_no_patch(narrow, narrowEnd, base) ? 0LL : std::strtoll(narrow, narrowEnd, base); });
 }
 
 unsigned long long APS5_VABI wcstoull_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
-    return parseNumber<unsigned long long>(text, end, [base](const char* narrow, char** narrowEnd) { return std::strtoull(narrow, narrowEnd, base); });
+    return parseNumber<unsigned long long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtBinaryPrefix_nid_no_patch(narrow, narrowEnd, base) ? 0ULL : std::strtoull(narrow, narrowEnd, base); });
 }
 
 double APS5_VABI wcstod_nid_postfix(const GuestWchar* text, GuestWchar** end) {
@@ -450,7 +463,7 @@ long double APS5_VABI wcstold_nid_postfix(const GuestWchar* text, GuestWchar** e
 }
 
 unsigned long long APS5_VABI wcstoul_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
-    return parseNumber<unsigned long long>(text, end, [base](const char* narrow, char** narrowEnd) { return std::strtoull(narrow, narrowEnd, base); });
+    return parseNumber<unsigned long long>(text, end, [base](const char* narrow, char** narrowEnd) { return StopAtBinaryPrefix_nid_no_patch(narrow, narrowEnd, base) ? 0ULL : std::strtoull(narrow, narrowEnd, base); });
 }
 
 // The guest's wide characters are UTF-16 units (char16_t), not the host's 32-bit wchar_t, so these
@@ -586,16 +599,6 @@ int APS5_VABI _Iswctype_nid_postfix(std::uint32_t character, short description) 
     }
 }
 
-short APS5_VABI wctype_nid_postfix(const char* name) {
-    static constexpr const char* kClasses[] = {"alnum", "alpha", "cntrl", "digit", "graph", "lower", "print", "punct", "space", "upper", "xdigit", "blank"};
-    if (name == nullptr) return 0;
-    for (short index = 0; index < static_cast<short>(sizeof(kClasses) / sizeof(kClasses[0])); ++index)
-        if (std::strcmp(name, kClasses[index]) == 0) return static_cast<short>(index + 1);
-    return 0;
-}
-
-int APS5_VABI iswctype_nid_postfix(std::uint32_t character, short description) {
-    return _Iswctype_nid_postfix(character, description);
-}
+// wctype and iswctype use the rune locale's masks (RuneLocale.cpp).
 
 }
