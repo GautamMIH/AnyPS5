@@ -68,7 +68,7 @@ endforeach()
 
 add_test_executable(agc_command_tests EXCLUDE_FROM_ALL tests/Commands.cpp)
 target_include_directories(agc_command_tests PRIVATE ${LIBS_INCLUDE_DIR})
-target_link_libraries(agc_command_tests PRIVATE libSceAgc libc)
+target_link_libraries(agc_command_tests PRIVATE libSceAgc libSceAgcDriver libc)
 configure_windows_unwind(agc_command_tests)
 if(BUILD_TESTING)
     set_target_properties(agc_command_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
