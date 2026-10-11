@@ -108,7 +108,8 @@ public:
 
     // Queues a job. writes: the guest ranges it may write (render targets, writable buffers);
     // anyWrite: it may write elsewhere too (storage images, address-table stores).
-    void Post(std::function<void()> job, Ranges writes, bool anyWrite) {
+    // Returns the job's serial (see WaitFor, Completed).
+    std::uint64_t Post(std::function<void()> job, Ranges writes, bool anyWrite) {
         // Sorted and merged: reads check them by binary search (address-table stores list every
         // writable registered range).
         std::sort(writes.begin(), writes.end());
@@ -118,13 +119,21 @@ public:
             else merged.push_back(range);
         }
         writes = std::move(merged);
+        std::uint64_t serial = 0;
         {
             std::lock_guard lock(mutex);
             rethrow();
-            jobs.push_back({std::move(job), std::move(writes), anyWrite, ++posted});
+            jobs.push_back({std::move(job), std::move(writes), anyWrite, serial = ++posted});
             index(jobs.back(), true);
         }
         wake.notify_all();
+        return serial;
+    }
+
+    // The serial of the last job that ran.
+    std::uint64_t Completed() {
+        std::lock_guard lock(mutex);
+        return completed;
     }
 
     // Waits until the job with this serial (and every earlier one) ran.

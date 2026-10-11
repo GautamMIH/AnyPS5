@@ -1545,6 +1545,21 @@ std::uint64_t VulkanDevice::LastGpuWriter(std::uint64_t address, std::size_t byt
     return state->drawQueue->LastWriter(address, bytes);
 }
 
+bool VulkanDevice::CanRecordDmaData(const Pm4::DmaCopy& dma) {
+    static const bool cpuOnly = std::getenv("ANYPS5_CPU_DMA") != nullptr;
+    if (cpuOnly || state->guestGpuMemory == nullptr || dma.bytes == 0) return false;
+    if ((dma.immediate || !dma.data.empty()) && ((dma.destination | dma.bytes) & 3u) != 0) return false;
+    if (!dma.data.empty() && dma.bytes > 65536) return false;
+    if (!dma.immediate && dma.source < dma.destination + dma.bytes && dma.destination < dma.source + dma.bytes) return false;
+    const auto destination = state->guestGpuMemory->Resolve(dma.destination, dma.bytes);
+    if (!destination || destination->bytes < dma.bytes) return false;
+    if (!dma.immediate && dma.data.empty()) {
+        const auto source = state->guestGpuMemory->Resolve(dma.source, dma.bytes);
+        if (!source || source->bytes < dma.bytes) return false;
+    }
+    return true;
+}
+
 bool VulkanDevice::RecordDmaData(const Pm4::DmaCopy& dma, std::uint64_t* serial) {
     static const bool cpuOnly = std::getenv("ANYPS5_CPU_DMA") != nullptr;
     if (cpuOnly || state->guestGpuMemory == nullptr || dma.bytes == 0) return false;

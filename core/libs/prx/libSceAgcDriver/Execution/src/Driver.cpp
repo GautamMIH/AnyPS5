@@ -753,13 +753,34 @@ private:
     struct PredictedDword {
         std::uint32_t value;
         std::uint64_t serial;
+        // A write queued to the device thread: its job, and the draw-queue serial it records (0
+        // until then, and if it ran on the CPU instead).
+        std::uint64_t job = 0;
+        std::shared_ptr<std::atomic<std::uint64_t>> recorded;
+        std::uint64_t Serial() const { return recorded ? recorded->load(std::memory_order_acquire) : serial; }
     };
     std::unordered_map<std::uint64_t, PredictedDword> predicted;
-    void predictWrite(const Pm4::DmaCopy& dma, std::uint64_t serial) {
+    void predictWrite(const Pm4::DmaCopy& dma, std::uint64_t serial, std::uint64_t job = 0, std::shared_ptr<std::atomic<std::uint64_t>> recorded = nullptr) {
         if (dma.bytes > 64 || (!dma.immediate && dma.data.empty())) return;
         if (predicted.size() > 4096) predicted.clear();
         for (std::uint64_t offset = 0; offset < dma.bytes; offset += 4)
-            predicted[dma.destination + offset] = {dma.data.empty() ? dma.value : dma.data[offset / 4], serial};
+            predicted[dma.destination + offset] = {dma.data.empty() ? dma.value : dma.data[offset / 4], serial, job, recorded};
+    }
+    // DMA writes queued to the device thread (destination range, job): exact writes, which a label
+    // read must wait for (queued draws' write ranges are only bounds; see the WAIT_REG_MEM read).
+    struct QueuedDmaWrite {
+        std::uint64_t first;
+        std::uint64_t last;
+        std::uint64_t job;
+    };
+    std::deque<QueuedDmaWrite> queuedDmaWrites;
+    bool queuedDmaWriteOverlaps(std::uint64_t address, std::uint64_t bytes) {
+        if (queuedDmaWrites.empty()) return false;
+        const auto completed = pipeline->Completed();
+        while (!queuedDmaWrites.empty() && queuedDmaWrites.front().job <= completed) queuedDmaWrites.pop_front();
+        for (const auto& write : queuedDmaWrites)
+            if (write.first < address + bytes && address < write.last) return true;
+        return false;
     }
     // Whether the queued GPU writes leave a value satisfying the WAIT_REG_MEM.
     bool predictedWaitSatisfied(std::span<const std::uint32_t> packet) {
@@ -768,12 +789,14 @@ private:
         const auto low = predicted.find(target);
         if (low == predicted.end()) return false;
         std::uint64_t value = low->second.value;
+        const auto serial = low->second.Serial();
+        if (serial == 0) return false;
         if (wide) {
             const auto high = predicted.find(target + 4);
-            if (high == predicted.end() || high->second.serial != low->second.serial) return false;
+            if (high == predicted.end() || high->second.Serial() != serial) return false;
             value |= static_cast<std::uint64_t>(high->second.value) << 32u;
         }
-        if (device->LastGpuWriter(target, wide ? 8 : 4) != low->second.serial) {
+        if (device->LastGpuWriter(target, wide ? 8 : 4) != serial) {
             predicted.erase(low);
             return false;
         }
@@ -785,9 +808,21 @@ private:
     bool predictedQueuedWaitSatisfied(std::span<const std::uint32_t> packet) {
         const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93;
         const auto target = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
-        if (!predicted.contains(target)) return false;
+        const auto low = predicted.find(target);
+        if (low == predicted.end()) return false;
         const auto need = pipeline->Check(target, wide ? 8 : 4);
-        if (need.kind == DeviceThread::Need::Wait || need.kind == DeviceThread::Need::Drain) return false;
+        if (need.kind == DeviceThread::Need::Drain) return false;
+        if (need.kind == DeviceThread::Need::Wait) {
+            // Still queued: the prediction holds if its own DMA job is the label's last writer.
+            if (low->second.job == 0 || need.serial != low->second.job) return false;
+            std::uint64_t value = low->second.value;
+            if (wide) {
+                const auto high = predicted.find(target + 4);
+                if (high == predicted.end() || high->second.job != low->second.job) return false;
+                value |= static_cast<std::uint64_t>(high->second.value) << 32u;
+            }
+            return Pm4::ValueSatisfiesWait(packet, value);
+        }
         return predictedWaitSatisfied(packet);
     }
     // Finished under gpuMutex, not yet published (see publishCompletions).
@@ -1736,8 +1771,20 @@ private:
                 spliceIndirectBuffer(submission, cursor);
                 continue;
             }
+            // DMA_DATA the GPU records (in queue order) is queued to the device thread like a draw,
+            // its destination the job's writes: the worker no longer drains for it (Zorro: ~40 a
+            // frame, ~3 ms of worker waits). ANYPS5_DRAIN_DMA=1 drains as before.
+            std::optional<Pm4::DmaCopy> queuedDma;
+            if (opcode == 0x50 && pipeline && device != nullptr) {
+                static const bool drainDma = std::getenv("ANYPS5_DRAIN_DMA") != nullptr;
+                if (!drainDma) {
+                    queuedDma = Pm4::DecodeDmaCopy(packet);
+                    if (queuedDma && !device->CanRecordDmaData(*queuedDma)) queuedDma.reset();
+                }
+            }
             // A DMA_DATA fill (immediate source) of a registered CMASK clears it (shadPS4 FillBuffer).
-            if (opcode == 0x50 && count >= 7 && (((packet[1] >> 29u) & 3u) | ((packet[6] >> 24u) & 4u) | ((packet[6] >> 25u) & 8u)) == 2u) {
+            const bool metadataClear = opcode == 0x50 && count >= 7 && (((packet[1] >> 29u) & 3u) | ((packet[6] >> 24u) & 4u) | ((packet[6] >> 25u) & 8u)) == 2u;
+            if (metadataClear && !queuedDma) {
                 // The metadata registry belongs to device work.
                 if (pipeline) pipeline->Drain();
                 Graphics::NoteMetadataClear(packet[4] | (static_cast<std::uint64_t>(packet[5]) << 32u));
@@ -1791,7 +1838,7 @@ private:
                         const auto labelBytes = ((packet[0] >> 8u) & 0xffu) == 0x93 ? 8u : 4u;
                         bool satisfied = false;
                         bool readNow = false;
-                        if (!waitQueued && pipeline->Check(target, labelBytes).kind == DeviceThread::Need::Wait && !pipeline->ResidentOverlaps(target, labelBytes)) {
+                        if (!waitQueued && pipeline->Check(target, labelBytes).kind == DeviceThread::Need::Wait && !pipeline->ResidentOverlaps(target, labelBytes) && !queuedDmaWriteOverlaps(target, labelBytes)) {
                             // Nothing to resolve: no dirty resident surface covers the label, and the
                             // scope's tracking is handled (a page watch on a label is a write watch).
                             const GuestMemory::MemoryAccessScope memoryScope(nullptr, [](void*, std::uint64_t, std::size_t, bool) {}, true);
@@ -1898,6 +1945,34 @@ private:
                     // A GPU barrier is device work like a draw: queued in order, no drain.
                     pipeline->Post([device = device] { device->AcquireGpuMemory(); }, {}, false);
                     timing.Mark("gpu_barrier_queued");
+                    publishCompletions();
+                    cursor += count;
+                    continue;
+                }
+                if (queuedDma) {
+                    auto recorded = std::make_shared<std::atomic<std::uint64_t>>(0);
+                    const auto destination = queuedDma->destination;
+                    const auto bytes = queuedDma->bytes;
+                    const auto job = pipeline->Post([device = device, dma = *queuedDma, recorded, metadataClear, words = std::vector<std::uint32_t>(packet.begin(), packet.begin() + count)] {
+                        if (metadataClear) Graphics::NoteMetadataClear(dma.destination);
+                        std::uint64_t serial = 0;
+                        if (device->RecordDmaData(dma, &serial)) {
+                            recorded->store(serial, std::memory_order_release);
+                            return;
+                        }
+                        // The mapping changed since the worker checked: the CPU copies, as the
+                        // worker would after waiting for the draws.
+                        device->WaitDraws();
+                        const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t size, bool writable) {
+                            if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, size, writable);
+                        });
+                        const GuestMemory::AccessSite accessSite("pm4_execute_0x50");
+                        static thread_local QueueState unused;
+                        Pm4::Execute(words, unused);
+                    }, {{destination, destination + bytes}}, false);
+                    predictWrite(*queuedDma, 0, job, recorded);
+                    queuedDmaWrites.push_back({destination, destination + bytes, job});
+                    timing.Mark("dma_queued");
                     publishCompletions();
                     cursor += count;
                     continue;

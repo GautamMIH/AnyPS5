@@ -46,6 +46,9 @@ public:
     // ranges are imported guest memory (no CPU wait); false when the CPU must perform it.
     // serial (when given) receives the write's draw-queue serial (DrawQueue::LastWriter).
     bool RecordDmaData(const Pm4::DmaCopy& dma, std::uint64_t* serial = nullptr);
+    // Whether RecordDmaData would record the copy on the GPU (while the guest mapping stays): the
+    // pipelined worker queues those to the device thread instead of draining it.
+    bool CanRecordDmaData(const Pm4::DmaCopy& dma);
     std::uint64_t LastGpuWriter(std::uint64_t address, std::size_t bytes);
     void ResolveFastClears(const Graphics::State& graphics);
     void* Window() const;
