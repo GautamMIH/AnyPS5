@@ -32,6 +32,11 @@ int APS5_VABI sceNpAuthDeleteRequest(int req_id) {
  return 0;
 }
 
+int APS5_VABI sceNpAuthGetAuthorizedAppCode() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
 int APS5_VABI sceNpAuthGetAuthorizationCodeV3(int req_id, const void* param, void* auth_code, int* issuer_id) {
  (void)req_id;
  (void)issuer_id;
