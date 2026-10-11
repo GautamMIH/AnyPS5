@@ -360,6 +360,48 @@ enum class DescriptorRole {
     ShaderData
 };
 
+// A vector its copies share until one is written (copy on write). A descriptor binding's per-element
+// flags are fixed once its prepared binding plan is built, and every materialization copies the plan's
+// bindings: shared, a copy is a reference count instead of an allocation per flag vector (~0.5 ms
+// of the worker a frame in Zorro).
+template<typename TValue>
+class SharedVector {
+public:
+    SharedVector() = default;
+    SharedVector(std::vector<TValue> values) { assign(std::move(values)); }
+    SharedVector(std::initializer_list<TValue> values) : SharedVector(std::vector<TValue>(values)) {}
+    SharedVector& operator=(std::vector<TValue> values) {
+        assign(std::move(values));
+        return *this;
+    }
+    SharedVector& operator=(std::initializer_list<TValue> values) { return *this = std::vector<TValue>(values); }
+
+    [[nodiscard]] const std::vector<TValue>& Values() const { return values ? *values : Empty(); }
+    operator const std::vector<TValue>&() const { return Values(); }
+    [[nodiscard]] std::size_t size() const { return Values().size(); }
+    [[nodiscard]] bool empty() const { return Values().empty(); }
+    [[nodiscard]] decltype(auto) operator[](std::size_t index) const { return Values()[index]; }
+    [[nodiscard]] decltype(auto) at(std::size_t index) const { return Values().at(index); }
+    [[nodiscard]] auto begin() const { return Values().begin(); }
+    [[nodiscard]] auto end() const { return Values().end(); }
+    // The vector to write: this copy's own (made so if shared).
+    std::vector<TValue>& Mutable() {
+        if (!values) values = std::make_shared<std::vector<TValue>>();
+        else if (values.use_count() > 1) values = std::make_shared<std::vector<TValue>>(*values);
+        return *values;
+    }
+    void push_back(TValue value) { Mutable().push_back(value); }
+    friend bool operator==(const SharedVector& left, const SharedVector& right) { return left.Values() == right.Values(); }
+
+private:
+    static const std::vector<TValue>& Empty() {
+        static const std::vector<TValue> empty;
+        return empty;
+    }
+    void assign(std::vector<TValue> next) { values = next.empty() ? nullptr : std::make_shared<std::vector<TValue>>(std::move(next)); }
+    std::shared_ptr<std::vector<TValue>> values;
+};
+
 struct DescriptorBinding {
     DescriptorKind kind;
     DescriptorRole role;
@@ -369,26 +411,26 @@ struct DescriptorBinding {
     std::vector<std::uint32_t> guestDescriptor;
     bool readOnly = false;
     std::optional<DescriptorImageShape> imageShape;
-    std::vector<bool> samplerDepthCompare;
+    SharedVector<bool> samplerDepthCompare;
     // Guest image elements the shader stores to (or updates atomically); the others are only read.
-    std::vector<bool> imageWritten;
-    std::vector<bool> imageDepthCompare;
-    std::vector<bool> imageAtomic;
-    std::vector<bool> imageAtomic64;
+    SharedVector<bool> imageWritten;
+    SharedVector<bool> imageDepthCompare;
+    SharedVector<bool> imageAtomic;
+    SharedVector<bool> imageAtomic64;
     // Guest buffer elements the shader updates atomically (one entry per element of a GuestBuffers
     // binding, empty otherwise). An atomic on a host-imported range is a serialized PCIe round trip
     // (~0.4-0.5 us each on NVIDIA), so a driver may keep these elements in device-local memory.
-    std::vector<bool> bufferAtomic;
+    SharedVector<bool> bufferAtomic;
     // Guest buffer elements the shader may store to through this V# (any store or atomic in the
     // program, whatever its offset), one entry per element of a GuestBuffers binding, empty
     // otherwise. A false entry is proved: every access of that element is a load. A driver may then
     // skip the write-back and the pending-write note for the element; an element beyond the vector
     // (a producer that does not fill it) must be treated as written.
-    std::vector<bool> bufferWritten;
-    std::vector<bool> samplerUnnormalized;
-    std::vector<bool> imageUnnormalized;
-    std::vector<std::uint32_t> imageSamplers;
-    std::vector<bool> bufferRead;
+    SharedVector<bool> bufferWritten;
+    SharedVector<bool> samplerUnnormalized;
+    SharedVector<bool> imageUnnormalized;
+    SharedVector<std::uint32_t> imageSamplers;
+    SharedVector<bool> bufferRead;
 };
 
 struct VertexAttribute {

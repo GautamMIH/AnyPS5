@@ -67,7 +67,7 @@ namespace ShaderRecompiler::ShaderDiskCache {
 static_assert(sizeof(CompiledShaderArtifact) == 192, "CompiledShaderArtifact changed: update the artifact encoder");
 static_assert(sizeof(ShaderInvocation) == 136, "ShaderInvocation changed: update the invocation encoder");
 static_assert(sizeof(RecompileResult) == 336, "RecompileResult changed: update EncodeResult and DecodeResult");
-static_assert(sizeof(DescriptorBinding) == 488, "DescriptorBinding changed: update the binding encoder");
+static_assert(sizeof(DescriptorBinding) == 240, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 16, "VertexInput changed: update the vertex input encoder");
 static_assert(sizeof(FragmentParameter) == 12, "FragmentParameter changed: update the parameter encoder");
@@ -256,7 +256,7 @@ void encodeBinding(Writer& writer, const DescriptorBinding& binding) {
     writer.Flags(binding.bufferWritten);
     writer.Flags(binding.samplerUnnormalized);
     writer.Flags(binding.imageUnnormalized);
-    writer.Values(std::span<const std::uint32_t>(binding.imageSamplers));
+    writer.Values(std::span<const std::uint32_t>(binding.imageSamplers.Values()));
     writer.Flags(binding.bufferRead);
 }
 
@@ -271,17 +271,17 @@ void decodeBinding(Reader& reader, DescriptorBinding& binding) {
     const bool hasShape = reader.Get<bool>();
     const auto shape = reader.Get<DescriptorImageShape>();
     binding.imageShape = hasShape ? std::optional(shape) : std::nullopt;
-    reader.Flags(binding.samplerDepthCompare);
-    reader.Flags(binding.imageWritten);
-    reader.Flags(binding.imageDepthCompare);
-    reader.Flags(binding.imageAtomic);
-    reader.Flags(binding.imageAtomic64);
-    reader.Flags(binding.bufferAtomic);
-    reader.Flags(binding.bufferWritten);
-    reader.Flags(binding.samplerUnnormalized);
-    reader.Flags(binding.imageUnnormalized);
-    reader.Values(binding.imageSamplers);
-    reader.Flags(binding.bufferRead);
+    reader.Flags(binding.samplerDepthCompare.Mutable());
+    reader.Flags(binding.imageWritten.Mutable());
+    reader.Flags(binding.imageDepthCompare.Mutable());
+    reader.Flags(binding.imageAtomic.Mutable());
+    reader.Flags(binding.imageAtomic64.Mutable());
+    reader.Flags(binding.bufferAtomic.Mutable());
+    reader.Flags(binding.bufferWritten.Mutable());
+    reader.Flags(binding.samplerUnnormalized.Mutable());
+    reader.Flags(binding.imageUnnormalized.Mutable());
+    reader.Values(binding.imageSamplers.Mutable());
+    reader.Flags(binding.bufferRead.Mutable());
 }
 
 void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
