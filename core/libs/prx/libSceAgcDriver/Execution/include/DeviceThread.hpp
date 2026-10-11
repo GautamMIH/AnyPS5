@@ -3,6 +3,7 @@
 
 #include "prx/libSceAgcDriver/Execution/include/ThreadPlacement.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include <unordered_map>
 #include <algorithm>
 #include <array>
 #include <condition_variable>
@@ -121,6 +122,7 @@ public:
             std::lock_guard lock(mutex);
             rethrow();
             jobs.push_back({std::move(job), std::move(writes), anyWrite, ++posted});
+            index(jobs.back(), true);
         }
         wake.notify_all();
     }
@@ -180,7 +182,13 @@ public:
         std::uint64_t last = 0;
         bool queued = false;
         if (running && (runningJob.anyWrite || overlapsSorted(runningJob.writes))) last = runningJob.serial;
-        for (const auto& job : jobs) {
+        // No queued job writes the range when none is unindexed and no job range touches its regions
+        // (each is registered in every region it spans): the read skips the job list. ~45 jobs are
+        // queued at a Zorro read. ANYPS5_NO_WRITE_INDEX=1 always walks the list.
+        static const bool noIndex = std::getenv("ANYPS5_NO_WRITE_INDEX") != nullptr;
+        bool listed = noIndex || unindexedJobs != 0 || (end - 1) / RegionBytes - address / RegionBytes >= MaxIndexedRegions;
+        for (auto region = address / RegionBytes; !listed && region <= (end - 1) / RegionBytes; ++region) listed = regionWrites.contains(region);
+        if (listed) for (const auto& job : jobs) {
             if (job.anyWrite || overlapsSorted(job.writes)) {
                 last = job.serial;
                 queued = true;
@@ -231,7 +239,36 @@ private:
         Ranges writes;
         bool anyWrite = false;
         std::uint64_t serial = 0;
+        // Its writes are in regionWrites (else it counts in unindexedJobs while queued or running).
+        bool indexed = false;
     };
+
+    // The queued and running jobs' write ranges by RegionBytes region (a count per region), so a
+    // read of a range no job writes need not walk the job list. Jobs writing anywhere or spanning
+    // more than MaxIndexedRegions regions are counted instead. Caller holds the mutex.
+    static constexpr std::uint64_t RegionBytes = 2ull << 20u;
+    static constexpr std::uint64_t MaxIndexedRegions = 64;
+    void index(Job& job, bool add) {
+        if (add) {
+            std::uint64_t regions = 0;
+            for (const auto& [first, last] : job.writes) regions += last > first ? (last - 1) / RegionBytes - first / RegionBytes + 1 : 0;
+            job.indexed = !job.anyWrite && regions <= MaxIndexedRegions;
+        }
+        if (!job.indexed) {
+            if (add) ++unindexedJobs;
+            else if (unindexedJobs != 0) --unindexedJobs;
+            return;
+        }
+        for (const auto& [first, last] : job.writes) {
+            if (last <= first) continue;
+            for (auto region = first / RegionBytes; region <= (last - 1) / RegionBytes; ++region) {
+                if (add) ++regionWrites[region];
+                else if (const auto found = regionWrites.find(region); found != regionWrites.end() && --found->second == 0) regionWrites.erase(found);
+            }
+        }
+    }
+    std::unordered_map<std::uint64_t, std::uint32_t> regionWrites;
+    std::uint32_t unindexedJobs = 0;
 
     void rethrow() {
         if (failure) std::rethrow_exception(failure);
@@ -297,7 +334,12 @@ private:
                 else if (!failure) {
                     failure = error;
                     jobs.clear();
+                    regionWrites.clear();
+                    unindexedJobs = 0;
+                    runningJob.indexed = false;
+                    runningJob.anyWrite = false;
                 }
+                index(runningJob, false);
                 completed = runningJob.serial;
                 runningJob = {};
                 running = false;
