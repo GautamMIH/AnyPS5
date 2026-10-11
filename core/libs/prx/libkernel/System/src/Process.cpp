@@ -110,9 +110,8 @@ ProcessArguments& getProcessArguments() {
     return arguments;
 }
 
-void validateSchedulingPolicy(int policy) {
-    if (policy < 1 || policy > 3)
-        throw std::invalid_argument("Unsupported guest scheduling policy");
+bool hasPriorityRange(int policy) {
+    return policy == 1 || policy == 3;
 }
 
 constexpr int guestFault = 14;
@@ -312,13 +311,19 @@ void APS5_VABI sync_nid_postfix(void) {
 }
 
 int APS5_VABI sched_get_priority_max_nid_postfix(int policy) {
-    validateSchedulingPolicy(policy);
-    return 256;
+    if (!hasPriorityRange(policy)) {
+        *__error_nid_postfix() = guestInvalid;
+        return -1;
+    }
+    return 767;
 }
 
 int APS5_VABI sched_get_priority_min_nid_postfix(int policy) {
-    validateSchedulingPolicy(policy);
-    return 767;
+    if (!hasPriorityRange(policy)) {
+        *__error_nid_postfix() = guestInvalid;
+        return -1;
+    }
+    return 256;
 }
 
 int APS5_VABI getrusage_nid_postfix(int who, GuestResourceUsage* usage) {
