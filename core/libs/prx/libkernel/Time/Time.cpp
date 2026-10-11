@@ -368,7 +368,7 @@ int APS5_VABI sceKernelUsleep_nid_postfix(KernelUseconds microseconds) {
     return 0;
 }
 
-static int SleepForRequest(const KernelTimespec* rqtp, KernelTimespec* rmtp) {
+static int SleepForRequest(const KernelTimespec* rqtp) {
     constexpr int guestFault = 14;
     constexpr int guestInvalid = 22;
     if (rqtp == nullptr) return guestFault;
@@ -377,20 +377,16 @@ static int SleepForRequest(const KernelTimespec* rqtp, KernelTimespec* rmtp) {
         CancellableSleep(static_cast<std::uint64_t>(rqtp->tv_sec) * 1000000000ULL +
                          static_cast<std::uint64_t>(rqtp->tv_nsec));
     }
-    if (rmtp != nullptr) {
-        rmtp->tv_sec = 0;
-        rmtp->tv_nsec = 0;
-    }
     return 0;
 }
 
 int APS5_VABI sceKernelNanosleep(const KernelTimespec* rqtp, KernelTimespec* rmtp) {
-    const int error = SleepForRequest(rqtp, rmtp);
+    const int error = SleepForRequest(rqtp);
     return error == 0 ? 0 : SceKernelError(error);
 }
 
 int APS5_VABI nanosleep_nid_postfix(const KernelTimespec* rqtp, KernelTimespec* rmtp) {
-    const int error = SleepForRequest(rqtp, rmtp);
+    const int error = SleepForRequest(rqtp);
     if (error == 0) return 0;
     *__error_nid_postfix() = error;
     return -1;
