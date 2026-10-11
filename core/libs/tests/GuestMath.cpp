@@ -33,6 +33,7 @@ extern LibcFloatConstant _FNan_nid_postfix;
 short APS5_VABI _FDtest_nid_postfix(const float*);
 int APS5_VABI __fpclassifyf_nid_postfix(float);
 float APS5_VABI fmodf_nid_postfix(float, float);
+double APS5_VABI fmod_nid_postfix(double, double);
 float APS5_VABI asinf_nid_postfix(float);
 float APS5_VABI acosf_nid_postfix(float);
 float APS5_VABI atan2f_nid_postfix(float, float);
@@ -104,6 +105,13 @@ static void CheckLongDouble() {
     Require(frexpl_nid_postfix(INFINITY, &exponent) == INFINITY && exponent == 77);
     Require(frexpl_nid_postfix(-INFINITY, &exponent) == -INFINITY && exponent == 77);
     Require(std::isnan(frexpl_nid_postfix(NAN, &exponent)) && exponent == 77);
+}
+
+static void CheckFmodErrno() {
+    errno = 0;
+    (void)fmod_nid_postfix(1.0, 0.0);
+    Require(errno == 0);
+    Require(fmod_nid_postfix(1e300, 3.0) == std::fmod(1e300, 3.0));
 }
 
 static void CheckIntegerConversions() {
@@ -345,4 +353,5 @@ int main() {
     Require(negativeDenominator.quot == -3 && negativeDenominator.rem == 1);
     const auto minimum = div_nid_postfix(std::numeric_limits<int>::min(), 10);
     Require(minimum.quot == -214748364 && minimum.rem == -8);
+    CheckFmodErrno();
 }
