@@ -23,6 +23,11 @@ int APS5_VABI sceNpWebApi2AddHttpRequestHeader(int64_t request_id, const char* f
     return 0;
 }
 
+int APS5_VABI sceNpWebApi2AddWebTraceTag() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 void APS5_VABI sceNpWebApi2CheckTimeout(void) {
 }
 
