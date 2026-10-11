@@ -91,7 +91,8 @@ int APS5_VABI sceSystemServiceParamGetInt(int paramId, int* value) {
   return SYSTEM_SERVICE_ERROR_PARAMETER;
  }
  switch (paramId) {
-  case SYSTEM_SERVICE_PARAM_ID_LANG: *value = ConsoleLanguage(); break;
+  case SYSTEM_SERVICE_PARAM_ID_LANG:
+  case SYSTEM_SERVICE_PARAM_ID_400: *value = ConsoleLanguage(); break;
   case SYSTEM_SERVICE_PARAM_ID_DATE_FORMAT: *value = SYSTEM_SERVICE_PARAM_DATE_FORMAT_DDMMYYYY; break;
   case SYSTEM_SERVICE_PARAM_ID_TIME_FORMAT: *value = SYSTEM_SERVICE_PARAM_TIME_FORMAT_24HOUR; break;
   case SYSTEM_SERVICE_PARAM_ID_TIME_ZONE: *value = 0; break;
