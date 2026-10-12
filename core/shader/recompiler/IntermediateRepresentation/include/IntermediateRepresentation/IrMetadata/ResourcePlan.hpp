@@ -34,6 +34,19 @@ struct UniformFill {
     bool operator==(const UniformFill& other) const = default;
 };
 
+// A new value per object and per copy or assignment (a copy may be changed after it is made): what
+// a snapshot holds is fixed for its id once it is materialized, so results can be cached by it.
+std::uint64_t NextSnapshotId();
+struct SnapshotId {
+    std::uint64_t value = NextSnapshotId();
+    SnapshotId() = default;
+    SnapshotId(const SnapshotId&) : value(NextSnapshotId()) {}
+    SnapshotId& operator=(const SnapshotId&) {
+        value = NextSnapshotId();
+        return *this;
+    }
+};
+
 struct ResourceSnapshot {
     std::vector<DescriptorValue> buffers;
     std::vector<DescriptorValue> images;
@@ -43,6 +56,7 @@ struct ResourceSnapshot {
     UniformFill uniformFill;
     std::vector<SrtReadPoison> srtPoison;
     std::uint32_t nullRootReads = 0;
+    SnapshotId id;
 };
 
 struct UniformFillPlan {

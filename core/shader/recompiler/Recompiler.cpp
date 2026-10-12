@@ -51,6 +51,11 @@
 
 namespace ShaderRecompiler {
 
+std::uint64_t NextSnapshotId() {
+    static std::atomic<std::uint64_t> next{1};
+    return next.fetch_add(1, std::memory_order_relaxed);
+}
+
 namespace {
 
 ShaderStageKind toShaderStageKind(ShaderStage stage) {
@@ -1012,6 +1017,34 @@ SnapshotHashes snapshotHashes(const RecompileRequest& request, const ResourceSna
     return {runtime, hash};
 }
 
+// The request fields snapshotHashes mixes in (all but the snapshot's own contents).
+std::uint64_t requestFieldsHash(const RecompileRequest& request) {
+    std::uint64_t hash = 0xcbf29ce484222325ull;
+    const auto mix = [&](std::uint64_t value) {
+        hash ^= value;
+        hash *= 0x100000001b3ull;
+    };
+    for (const auto threads : partialThreads(request)) mix(threads);
+    mix(request.layout.pushConstantOffsetBytes);
+    if (request.context.pixel) {
+        for (const auto mapping : request.context.pixel->targetExportMapping) mix(mapping);
+        for (const auto packing : request.context.pixel->targetExportPacking) mix(static_cast<std::uint64_t>(packing));
+        mix(request.context.pixel->dualSourceBlend);
+    }
+    if (request.context.vertex) {
+        const auto& vertex = *request.context.vertex;
+        const auto count = std::min<std::uint32_t>(vertex.resourcesNum, ShaderVertexStageInfo::MaxResources);
+        mix(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            for (const auto field : vertex.resources[i].fields) mix(field);
+            mix(vertex.resourcesDst[i].fetchIndex);
+        }
+    } else {
+        mix(1ull << 32u);
+    }
+    return hash;
+}
+
 std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapshot& snapshot) {
     return snapshotHashes(request, snapshot).full;
 }
@@ -1111,6 +1144,41 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
     return shared;
 }
 
+// materializePreparedMemoized for a captured snapshot (fixed contents, SnapshotId): the result the
+// same snapshot, variant and request fields gave last time on this thread, without hashing the
+// snapshot or taking the memo's lock (~25% of Zorro's materializations: unpatched capture hits). ANYPS5_NO_RESULT_CACHE=1
+// skips it; ANYPS5_VERIFY_RESULT_CACHE=1 also hashes the snapshot and reports a cached result whose
+// full hash differs.
+std::shared_ptr<const RecompileResult> materializeCaptured(SourceEntry& source, const std::shared_ptr<const CompiledVariant>& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool cacheHit = true, bool* memoHit = nullptr, bool runtimeUserData = false) {
+    static const bool disabled = std::getenv("ANYPS5_NO_RESULT_CACHE") != nullptr;
+    if (disabled) return materializePreparedMemoized(source, variant, request, snapshot, cacheHit, memoHit, runtimeUserData);
+    static const bool verify = std::getenv("ANYPS5_VERIFY_RESULT_CACHE") != nullptr;
+    struct Cached {
+        std::uint64_t snapshot = 0;
+        std::uint64_t variant = 0;
+        std::uint64_t request = 0;
+        std::uint64_t fullHash = 0;
+        std::shared_ptr<const RecompileResult> result;
+    };
+    thread_local std::array<Cached, 1024> cache;
+    const auto variantId = variant->artifact.variantId;
+    const auto requestHash = requestFieldsHash(request) ^ (runtimeUserData ? 0x5275ull : 0u);
+    auto& slot = cache[(snapshot.id.value * 0x9e3779b97f4a7c15ull ^ variantId * 0xc2b2ae3d27d4eb4full ^ requestHash) % cache.size()];
+    if (slot.result != nullptr && slot.snapshot == snapshot.id.value && slot.variant == variantId && slot.request == requestHash) {
+        if (memoHit != nullptr) *memoHit = true;
+        if (verify) {
+            static std::atomic<std::uint64_t> checked{0}, differ{0};
+            const auto count = ++checked;
+            if (snapshotHashes(request, snapshot).full != slot.fullHash) ++differ;
+            if (count % 100000 == 0) std::fprintf(stderr, "[verify-result-cache] %llu hits checked, %llu differ\n", static_cast<unsigned long long>(count), static_cast<unsigned long long>(differ.load()));
+        }
+        return slot.result;
+    }
+    auto result = materializePreparedMemoized(source, variant, request, snapshot, cacheHit, memoHit, runtimeUserData);
+    slot = {snapshot.id.value, variantId, requestHash, verify ? snapshotHashes(request, snapshot).full : 0u, result};
+    return result;
+}
+
 std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool* memoHit, bool runtimeUserData) {
     std::shared_ptr<const CompiledVariant> variant;
     bool cacheHit = false;
@@ -1118,7 +1186,7 @@ std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, 
         std::lock_guard lock(source.mutex);
         variant = findOrCompileVariant(source, request, cacheHit);
     }
-    return materializePreparedMemoized(source, variant, request, snapshot, cacheHit, memoHit, runtimeUserData);
+    return materializeCaptured(source, variant, request, snapshot, cacheHit, memoHit, runtimeUserData);
 }
 
 // The capture already resolved the source entry (stage input validation included) and materialized
@@ -1288,7 +1356,7 @@ std::shared_ptr<const ResourceCapture> PreparedShaderInvocation::Capture(const S
 
 std::shared_ptr<const RecompileResult> PreparedShaderInvocation::Materialize(const ResourceCapture& capture) const {
     if (capture.source != handle->source || capture.plan != handle->source->plan) throw std::runtime_error("ShaderRecompiler: resource capture belongs to another prepared shader");
-    if (request.useCache && ResultMemo()) return materializePreparedMemoized(*handle->source, handle->artifact, request, capture.snapshot, true, nullptr);
+    if (request.useCache && ResultMemo()) return materializeCaptured(*handle->source, handle->artifact, request, capture.snapshot);
     auto result = std::make_shared<RecompileResult>(materializeResult(*handle->artifact, request, capture.snapshot));
     result->cacheHit = true;
     return result;
@@ -1302,7 +1370,7 @@ const CompiledShaderArtifact& GetPreparedArtifact(const SourceHandle& handle) {
 std::shared_ptr<const RecompileResult> MaterializeShader(const RecompileRequest& request, const ResourceCapture& capture, const SourceHandle& handle) {
     if (!MatchesPreparedShader(request, handle)) throw std::runtime_error("ShaderRecompiler: prepared artifact does not match the static ABI");
     if (capture.source != handle.source || capture.plan != handle.source->plan) throw std::runtime_error("ShaderRecompiler: resource capture belongs to another prepared shader");
-    if (request.useCache && ResultMemo()) return materializePreparedMemoized(*handle.source, handle.artifact, request, capture.snapshot, true, nullptr);
+    if (request.useCache && ResultMemo()) return materializeCaptured(*handle.source, handle.artifact, request, capture.snapshot);
     auto result = std::make_shared<RecompileResult>(materializeResult(*handle.artifact, request, capture.snapshot));
     result->cacheHit = true;
     return result;
