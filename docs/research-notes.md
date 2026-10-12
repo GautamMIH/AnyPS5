@@ -409,3 +409,17 @@ Issues that needed research, with a short answer. Check here before researching;
   - `ANYPS5_NO_TIMELINE_WAITS=1` turns the timeline off.
 - **Kept: queued flips.** Asynchronous flips are queued as a device-thread job behind the frame's draws instead of draining it (`ANYPS5_DRAIN_FLIPS=1` restores). `GpuReady` still runs from `finishCompletions`, never under gpuMutex: calling it in the job deadlocked `agc_driver_flip_tests`, whose `GpuReady` waits at a suspend point.
 - **Tried and dropped:** a gpuMutex handoff letting worker resolves go before the device thread's next job (no effect; the long holder was the completer, not unfairness).
+
+## Device-thread profile: flat (2026-10-12, Zorro, gperftools, 25 s of gameplay)
+
+- The device thread (~15.5 ms CPU a frame) samples 8.4 ms a frame (gperftools undercounts ~1.7x). `Graphics::Draw` is 66%, and of that `ShaderResources` is 40%:
+  - image bindings 19% (`TextureCache::Get` 0.72 ms sampled, already on its fast path);
+  - storage images 0.31 (staging buffer, tiling pool and image created per use);
+  - uploads 0.33 and guest buffers 0.31.
+- Pipeline lookup is 0.47 (key building allocates) and range checks ~0.7 (`GuestVirtualAccessible`: call volume; its thread-local area cache already hits).
+- Item 2's premise is small:
+  - descriptor writes are ~0.2 ms sampled;
+  - NVIDIA driver time is 1.5 ms, spread over storage images 0.30, batch submit 0.27, batch reset 0.17, pipeline binds 0.11, render-pass begins 0.09 and the rest;
+  - heap churn (~1.3 ms of new/malloc/free) has no dominant caller.
+- A preloaded allocator is not an option: `LD_PRELOAD` of tcmalloc kills the game (illegal instruction), probably through libc.prx's guest allocator interposition.
+- What is left is many 1–4% items, each below a 2-round A/B's ~0.5 ms resolution. The one lever of size is structural: shader-resource preparation (~36% of the device thread) on a third thread between the worker and the device thread. The earlier attempt moved it onto the worker, which was already loaded. It would need TextureCache and RenderCache access off the device thread.
