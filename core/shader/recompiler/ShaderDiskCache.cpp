@@ -738,7 +738,35 @@ public:
     void Store(std::vector<std::byte> key, std::shared_ptr<const CompiledVariant> variant) {
         {
             std::lock_guard lock(mutex);
-            jobs.push_back({std::move(key), std::move(variant)});
+            jobs.push_back({std::move(key), std::move(variant), {}});
+        }
+        wake.notify_one();
+    }
+
+    // A blob file: magic, format, the key's size and bytes, then the payload.
+    static constexpr std::uint32_t BlobMagic = 0x42535041u;
+
+    bool LoadBlob(std::span<const std::byte> key, std::vector<std::byte>& payload) {
+        std::vector<std::byte> file;
+        // Blobs keep out of the variant counters (Totals).
+        if (!ReadWholeFile(directory / ("blob-" + EntryName(key)), file)) return false;
+        const auto header = sizeof(std::uint32_t) * 2 + sizeof(std::uint64_t);
+        std::uint32_t magic = 0, format = 0;
+        std::uint64_t keyBytes = 0;
+        if (file.size() >= header) {
+            std::memcpy(&magic, file.data(), sizeof(magic));
+            std::memcpy(&format, file.data() + 4, sizeof(format));
+            std::memcpy(&keyBytes, file.data() + 8, sizeof(keyBytes));
+        }
+        if (file.size() < header || magic != BlobMagic || format != FormatVersion || keyBytes != key.size() || file.size() < header + keyBytes || std::memcmp(file.data() + header, key.data(), key.size()) != 0) return false;
+        payload.assign(file.begin() + static_cast<std::ptrdiff_t>(header + keyBytes), file.end());
+        return true;
+    }
+
+    void StoreBlob(std::vector<std::byte> key, std::vector<std::byte> payload) {
+        {
+            std::lock_guard lock(mutex);
+            jobs.push_back({std::move(key), nullptr, std::move(payload)});
         }
         wake.notify_one();
     }
@@ -764,6 +792,8 @@ private:
     struct Job {
         std::vector<std::byte> key;
         std::shared_ptr<const CompiledVariant> variant;
+        // A blob job (no variant).
+        std::vector<std::byte> blob;
     };
 
     void run() {
@@ -790,10 +820,27 @@ private:
     }
 
     void write(const Job& job) {
-        const auto file = EncodeEntry(job.key, *job.variant);
-        if (WriteFileAtomically(directory / EntryName(job.key), file)) {
-            writes.fetch_add(1, std::memory_order_relaxed);
-            bytesWritten.fetch_add(file.size(), std::memory_order_relaxed);
+        std::vector<std::byte> file;
+        std::string name;
+        if (job.variant) {
+            file = EncodeEntry(job.key, *job.variant);
+            name = EntryName(job.key);
+        } else {
+            const std::uint32_t magic = BlobMagic, format = FormatVersion;
+            const std::uint64_t keyBytes = job.key.size();
+            file.resize(sizeof(magic) + sizeof(format) + sizeof(keyBytes));
+            std::memcpy(file.data(), &magic, sizeof(magic));
+            std::memcpy(file.data() + 4, &format, sizeof(format));
+            std::memcpy(file.data() + 8, &keyBytes, sizeof(keyBytes));
+            file.insert(file.end(), job.key.begin(), job.key.end());
+            file.insert(file.end(), job.blob.begin(), job.blob.end());
+            name = "blob-" + EntryName(job.key);
+        }
+        if (WriteFileAtomically(directory / name, file)) {
+            if (job.variant) {
+                writes.fetch_add(1, std::memory_order_relaxed);
+                bytesWritten.fetch_add(file.size(), std::memory_order_relaxed);
+            }
         } else {
             const auto failures = writeFailures.fetch_add(1, std::memory_order_relaxed);
             if (failures < 4) std::fprintf(stderr, "[shader-disk-cache] cannot write %s\n", (directory / EntryName(job.key)).string().c_str());
@@ -966,6 +1013,16 @@ std::filesystem::path EntryDirectory() {
 bool Load(std::span<const std::byte> key, CompiledVariant& variant) {
     auto& instance = store();
     return instance.Enabled() && instance.Load(key, variant);
+}
+
+bool LoadBlob(std::span<const std::byte> key, std::vector<std::byte>& payload) {
+    if (!Enabled()) return false;
+    return store().LoadBlob(key, payload);
+}
+
+void StoreBlob(std::vector<std::byte> key, std::vector<std::byte> payload) {
+    if (!Enabled()) return;
+    store().StoreBlob(std::move(key), std::move(payload));
 }
 
 void Store(std::vector<std::byte> key, std::shared_ptr<const CompiledVariant> variant) {

@@ -48,6 +48,10 @@ void EncodeResult(const RecompileResult& result, std::vector<std::byte>& out);
 
 [[nodiscard]] bool Load(std::span<const std::byte> key, CompiledVariant& variant);
 void Store(std::vector<std::byte> key, std::shared_ptr<const CompiledVariant> variant);
+// Entries other than compiled variants (specialized modules): `payload` stored under `key`, which a
+// load compares byte for byte. Written on the store's thread like variants.
+[[nodiscard]] bool LoadBlob(std::span<const std::byte> key, std::vector<std::byte>& payload);
+void StoreBlob(std::vector<std::byte> key, std::vector<std::byte> payload);
 void Flush();
 [[nodiscard]] Counters Totals();
 

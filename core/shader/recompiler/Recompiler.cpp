@@ -616,6 +616,65 @@ std::shared_ptr<const SpecializedModule> buildSpecializedModule(const CompiledSh
     return module;
 }
 
+// Specialized modules on disk (ShaderDiskCache blobs): a module took spirv-opt runs (up to ~100 ms
+// on the worker), ~114 of them in each Zorro run, rebuilt every launch. The key holds the source
+// variant's SPIR-V (size and hash), the vertex classes, the constants and the target; the payload
+// the module's bindings, push data flag and SPIR-V. ANYPS5_NO_SPECIALIZED_DISK_CACHE=1 rebuilds.
+bool specializedDiskCache() {
+    static const bool enabled = std::getenv("ANYPS5_NO_SPECIALIZED_DISK_CACHE") == nullptr;
+    return enabled && ShaderDiskCache::Enabled();
+}
+
+std::vector<std::byte> specializedModuleKey(const CompiledShaderArtifact& artifact, std::span<const std::uint32_t> classes, std::span<const PipelineSpecializationConstant> constants, const SpirvTarget& target) {
+    std::vector<std::uint64_t> words{0x53504543ull, artifact.spirv.size(), RecompileCacheKey::HashCode(artifact.spirv.Words()), classes.size()};
+    for (const auto value : classes) words.push_back(value);
+    words.push_back(constants.size());
+    for (const auto& constant : constants) words.push_back((static_cast<std::uint64_t>(constant.id) << 32u) | constant.value);
+    RecompileCacheKey::AppendTarget(words, target);
+    std::vector<std::byte> key(words.size() * sizeof(std::uint64_t));
+    std::memcpy(key.data(), words.data(), key.size());
+    return key;
+}
+
+std::shared_ptr<const SpecializedModule> loadSpecializedModule(const CompiledShaderArtifact& artifact, std::span<const std::uint32_t> classes, std::span<const PipelineSpecializationConstant> constants, const SpirvTarget& target) {
+    if (!specializedDiskCache()) return nullptr;
+    std::vector<std::byte> payload;
+    if (!ShaderDiskCache::LoadBlob(specializedModuleKey(artifact, classes, constants, target), payload)) return nullptr;
+    const auto readWord = [&](std::size_t& cursor, std::uint32_t& value) {
+        if (cursor + sizeof(value) > payload.size()) return false;
+        std::memcpy(&value, payload.data() + cursor, sizeof(value));
+        cursor += sizeof(value);
+        return true;
+    };
+    std::size_t cursor = 0;
+    std::uint32_t pushData = 0, bindings = 0, spirvWords = 0;
+    if (!readWord(cursor, pushData) || !readWord(cursor, bindings) || bindings > payload.size()) return nullptr;
+    auto module = std::make_shared<SpecializedModule>();
+    module->pushData = pushData != 0;
+    module->bindings.resize(bindings);
+    for (auto& binding : module->bindings)
+        if (!readWord(cursor, binding)) return nullptr;
+    if (!readWord(cursor, spirvWords) || cursor + static_cast<std::size_t>(spirvWords) * 4u != payload.size() || spirvWords < 5u) return nullptr;
+    std::vector<std::uint32_t> spirv(spirvWords);
+    std::memcpy(spirv.data(), payload.data() + cursor, payload.size() - cursor);
+    if (spirv[0] != spv::MagicNumber) return nullptr;
+    module->spirv = std::move(spirv);
+    module->specializationId = constants.empty() ? 0u : nextVariantId();
+    return module;
+}
+
+void storeSpecializedModule(const CompiledShaderArtifact& artifact, std::span<const std::uint32_t> classes, std::span<const PipelineSpecializationConstant> constants, const SpirvTarget& target, const SpecializedModule& module) {
+    if (!specializedDiskCache()) return;
+    const auto& spirv = module.spirv.Words();
+    std::vector<std::uint32_t> words{module.pushData ? 1u : 0u, static_cast<std::uint32_t>(module.bindings.size())};
+    words.insert(words.end(), module.bindings.begin(), module.bindings.end());
+    words.push_back(static_cast<std::uint32_t>(spirv.size()));
+    words.insert(words.end(), spirv.begin(), spirv.end());
+    std::vector<std::byte> payload(words.size() * sizeof(std::uint32_t));
+    std::memcpy(payload.data(), words.data(), payload.size());
+    ShaderDiskCache::StoreBlob(specializedModuleKey(artifact, classes, constants, target), std::move(payload));
+}
+
 struct SpecializedModuleEntry {
     std::once_flag ready;
     std::exception_ptr failure;
@@ -707,7 +766,11 @@ std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderAr
     }
     std::call_once(entry->ready, [&] {
         try {
-            entry->module = buildSpecializedModule(artifact, classes, constants, target);
+            entry->module = loadSpecializedModule(artifact, classes, constants, target);
+            if (entry->module == nullptr) {
+                entry->module = buildSpecializedModule(artifact, classes, constants, target);
+                storeSpecializedModule(artifact, classes, constants, target, *entry->module);
+            }
         } catch (...) {
             entry->failure = std::current_exception();
         }

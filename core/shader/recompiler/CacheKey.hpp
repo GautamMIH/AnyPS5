@@ -79,6 +79,11 @@ public:
     }
 
     // A 64-bit hash of the code, two dwords per step; collisions are resolved by comparing the code.
+    // The target's part of a key (disk keys of artifacts built from a variant for this target).
+    static void AppendTarget(std::vector<std::uint64_t>& key, const SpirvTarget& target) {
+        append(key, target);
+    }
+
     static std::uint64_t HashCode(std::span<const std::uint32_t> code) {
         std::uint64_t hash = 0x9e3779b97f4a7c15ull ^ (static_cast<std::uint64_t>(code.size()) * 0x100000001b3ull);
         const auto mix = [&](std::uint64_t chunk) {
