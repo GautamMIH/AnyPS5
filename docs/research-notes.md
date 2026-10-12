@@ -423,3 +423,9 @@ Issues that needed research, with a short answer. Check here before researching;
   - heap churn (~1.3 ms of new/malloc/free) has no dominant caller.
 - A preloaded allocator is not an option: `LD_PRELOAD` of tcmalloc kills the game (illegal instruction), probably through libc.prx's guest allocator interposition.
 - What is left is many 1–4% items, each below a 2-round A/B's ~0.5 ms resolution. The one lever of size is structural: shader-resource preparation (~36% of the device thread) on a third thread between the worker and the device thread. The earlier attempt moved it onto the worker, which was already loaded. It would need TextureCache and RenderCache access off the device thread.
+- **Third-thread prototype: not built (2026-10-12).** `APS5_TIMERS` split of `ShaderResources` on Zorro gameplay:
+  - bindings 87.6% (texture lookups, guest-buffer range checks, storage images);
+  - memory upload 4.6%;
+  - descriptor-set acquire and update 6.3%.
+- Bindings and upload read and change state that the previous draw's recording changes: resident render targets, texture-upload copies recorded into the batch, draw-queue barrier requests, the write tracker. All of it is under gpuMutex.
+- So a prep thread running ahead could only take the descriptor part, ~0.4 ms of the device thread's ~15.5 ms a frame, before handoff costs. The rest needs TextureCache, RenderCache and DrawQueue made concurrent first: a large refactor with an unknown payoff.
