@@ -29,15 +29,32 @@ void appendStencil(std::string& key, const VkStencilOpState& stencil) {
 }
 
 // The vertex input layout of a vertex program's attributes: a function of the attributes and the
-// device's format support, so it is remembered by their bytes (rebuilding it cost about 0.35 ms of
-// a heavy frame). Equal bytes are equal attributes.
+// device's format support, so it is remembered (rebuilding it cost about 0.35 ms of a heavy frame).
+// The key leaves out the buffer address and record count, which change from draw to draw while the
+// layout does not (keyed by them, nearly every draw missed): what the layout and its checks take from
+// them is kept as flags (null descriptor, zero fetch, address aligned for the format), so a draw the
+// build would reject still misses and is rejected.
 const VertexInputLayout& vertexInputLayout(const Context& context, std::span<const ShaderRecompiler::VertexAttribute> attributes) {
     static_assert(std::is_trivially_copyable_v<ShaderRecompiler::VertexAttribute>);
     thread_local std::unordered_map<std::string, VertexInputLayout> layouts;
     std::string key;
-    key.reserve(sizeof(VkPhysicalDevice) + attributes.size_bytes());
+    key.reserve(sizeof(VkPhysicalDevice) + attributes.size() * (sizeof(ShaderRecompiler::VertexAttribute) + 1));
     append(key, context.physical);
-    if (!attributes.empty()) key.append(reinterpret_cast<const char*>(attributes.data()), attributes.size_bytes());
+    for (const auto& attribute : attributes) {
+        auto masked = attribute;
+        masked.resource.fields[0] = 0;
+        masked.resource.fields[1] &= 0xffff0000u;
+        masked.resource.fields[2] = 0;
+        append(key, masked);
+        const bool zero = ZeroVertexFetch(attribute);
+        bool aligned = zero;
+        if (!zero) {
+            const auto& fields = attribute.resource.fields;
+            const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
+            aligned = address != 0 && address % DecodeVertexFormat(attribute).alignment == 0;
+        }
+        append(key, static_cast<std::uint8_t>((NullVertexDescriptor(attribute) ? 1u : 0u) | (zero ? 2u : 0u) | (aligned ? 4u : 0u)));
+    }
     if (const auto found = layouts.find(key); found != layouts.end()) return found->second;
     if (layouts.size() >= 4096) layouts.clear();
     return layouts.emplace(std::move(key), BuildVertexInputLayout(context, attributes)).first->second;

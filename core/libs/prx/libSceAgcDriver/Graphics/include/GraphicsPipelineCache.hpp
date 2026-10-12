@@ -6,6 +6,7 @@
 #include <list>
 #include <map>
 #include <string>
+#include <unordered_map>
 
 namespace AgcDriver::Graphics {
 
@@ -36,7 +37,9 @@ private:
     static constexpr std::size_t MaxFramebuffers = 128;
     Context context;
     std::list<Entry> entries;
-    std::map<std::string, std::list<Entry>::iterator> lookup;
+    // Hashed: keys are a few hundred bytes with long common prefixes, so an ordered map compared
+    // them at length about a dozen times a draw.
+    std::unordered_map<std::string, std::list<Entry>::iterator> lookup;
     std::list<FramebufferEntry> framebuffers;
     std::map<std::vector<std::uint64_t>, std::list<FramebufferEntry>::iterator> framebufferLookup;
     std::map<std::vector<std::uint64_t>, std::shared_ptr<const RenderPass>> renderPasses;

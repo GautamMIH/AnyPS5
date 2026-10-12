@@ -157,8 +157,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         maxIndex = static_cast<std::uint32_t>(highest);
     }
     timing.Mark("index_upload");
+    // The vertex input layout is built (and checked) with the pipeline key (GraphicsPipelineCache).
     const auto& attributes = shaders.front().program->vertexAttributes;
-    static_cast<void>(BuildVertexInputLayout(context, attributes));
     auto& vertexBuffers = storage->vertices;
     std::vector<VkBuffer> vertexHandles;
     std::vector<VkDeviceSize> vertexOffsets(attributes.size(), 0);
