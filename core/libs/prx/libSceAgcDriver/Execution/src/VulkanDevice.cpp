@@ -110,6 +110,9 @@ struct DispatchStorage {
 }
 
 struct VulkanDevice::State {
+    // graphicsContext() once the device is set up: its fields do not change after the constructor,
+    // and rebuilding it per call (two loader lookups, ~1.3 KB) cost ~0.14 ms sampled a Zorro frame.
+    std::optional<Graphics::Context> context;
     // 1 for the process's first device, counting every device created (VulkanDevice::Serial).
     std::uint64_t serial = 0;
     bool storageImageMultisample = false;
@@ -356,6 +359,7 @@ struct VulkanDevice::State {
             if (renderCache) renderCache->Flush();
             const auto idle = reinterpret_cast<PFN_vkDeviceWaitIdle>(deviceProc(device, "vkDeviceWaitIdle"))(device);
             if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) std::terminate();
+            context.reset();
             drawQueue.reset();
             computePipelines.clear();
             workgroupMemory.reset();
@@ -1101,6 +1105,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->scaler = std::make_unique<PresentationScaler>(graphicsContext(), VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM);
         state->rgbaScaler = std::make_unique<PresentationScaler>(graphicsContext(), VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_UNORM);
     }
+    state->context.emplace(graphicsContext());
 }
 
 VulkanDevice::~VulkanDevice() = default;
@@ -1457,6 +1462,7 @@ ShaderRecompiler::SpirvTarget VulkanDevice::Target() const {
 }
 
 Graphics::Context VulkanDevice::graphicsContext() const {
+    if (state->context) return *state->context;
     auto context = Graphics::Context{
         state->device,
         state->physical,
