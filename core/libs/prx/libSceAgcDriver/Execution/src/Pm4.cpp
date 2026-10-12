@@ -27,6 +27,20 @@ std::uint64_t GdsAddress() {
 
 namespace {
 
+// A draw's index range when its packet is decoded: only that the indices lie in accessible guest
+// memory (the area map). The decoder never reads them; the draw's device work checks the range
+// again, resolving pending writes, before it scans and binds them. A full check here made the
+// pipelined worker wait for the queued GPU work that writes the indices (~9 draws, ~3 ms a Zorro
+// frame). ANYPS5_WORKER_INDEX_WAIT=1 checks it fully.
+void checkIndexRange(std::uint64_t address, std::uint64_t bytes, std::uint32_t indexSize) {
+    static const bool full = std::getenv("ANYPS5_WORKER_INDEX_WAIT") != nullptr;
+    if (bytes > std::numeric_limits<std::size_t>::max()) throw std::runtime_error("index range size overflow");
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - address) throw std::runtime_error("address range overflow");
+    if (full) GuestMemory::CheckRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(bytes), indexSize);
+    else if (bytes != 0) GuestMemory::CheckGpuRange(reinterpret_cast<const void*>(address), static_cast<std::size_t>(bytes), indexSize);
+}
+
+
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(reason);
 }
@@ -676,7 +690,7 @@ DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueSta
     }
     const auto bytes = static_cast<std::uint64_t>(indexCount) * indexSize;
     require(bytes <= std::numeric_limits<std::size_t>::max(), "index range size overflow");
-    GuestMemory::CheckRange(reinterpret_cast<const void*>(indexAddress), static_cast<std::size_t>(bytes), indexSize);
+    checkIndexRange(indexAddress, bytes, indexSize);
     // The GE adds GE_INDX_OFFSET to every index it fetches: the base vertex (upstream f4143d61).
     const auto indexOffset = queue.userConfig.find(0x24a);
     require(indexOffset != queue.userConfig.end(), "missing GE_INDX_OFFSET register");
@@ -738,7 +752,7 @@ std::vector<IndirectDraw> ResolveIndirectDraws(std::span<const std::uint32_t> pa
             const auto start = static_cast<std::uint64_t>(arguments[2]) * indexSize;
             require(start <= std::numeric_limits<std::uint64_t>::max() - queue.indexBase, "index address overflow");
             draw.parameters = {queue.indexBase + start, indexCount, indexSize, arguments[1], packet.back() & 0x20u};
-            if (indexCount != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.parameters.indexAddress), static_cast<std::size_t>(static_cast<std::uint64_t>(indexCount) * indexSize), indexSize);
+            if (indexCount != 0) checkIndexRange(draw.parameters.indexAddress, static_cast<std::uint64_t>(indexCount) * indexSize, indexSize);
         } else {
             draw.parameters = {0, arguments[0], 0, arguments[1], packet.back() & 0x20u, false};
         }
