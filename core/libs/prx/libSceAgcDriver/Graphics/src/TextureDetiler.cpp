@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/shaders/TextureDetile_spv.h"
 #include "prx/libSceAgcDriver/Graphics/shaders/TextureMerge_spv.h"
+#include "prx/libSceAgcDriver/Graphics/shaders/TextureDetileImage_spv.h"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -154,7 +155,78 @@ void TextureDetiler::Merge(VkCommandBuffer commands, VkBuffer source, std::uint6
     context.Function<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, (push[3] + 63u) / 64u, 1, 1);
 }
 
+void TextureDetiler::createImagePasses() {
+    const std::array<VkDescriptorSetLayoutBinding, 2> bindings{{{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, {1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}}};
+    VkDescriptorSetLayoutCreateInfo layoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    layoutInfo.bindingCount = static_cast<std::uint32_t>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+    Check(context.Function<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(context.device, &layoutInfo, nullptr, &imageDescriptorLayout), "vkCreateDescriptorSetLayout image tiling");
+    VkPushConstantRange push{VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(Push)};
+    VkPipelineLayoutCreateInfo pipelineInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pipelineInfo.setLayoutCount = 1;
+    pipelineInfo.pSetLayouts = &imageDescriptorLayout;
+    pipelineInfo.pushConstantRangeCount = 1;
+    pipelineInfo.pPushConstantRanges = &push;
+    Check(context.Function<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(context.device, &pipelineInfo, nullptr, &imagePipelineLayout), "vkCreatePipelineLayout image tiling");
+    VkShaderModuleCreateInfo moduleInfo{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    moduleInfo.codeSize = sizeof(TEXTURE_DETILE_IMAGE_SPV);
+    moduleInfo.pCode = TEXTURE_DETILE_IMAGE_SPV;
+    Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &moduleInfo, nullptr, &imageModule), "vkCreateShaderModule image tiling");
+}
+
+void TextureDetiler::DispatchImage(VkCommandBuffer commands, TextureTileMode tileMode, VkBuffer guest, std::uint64_t guestOffset, VkImageView view, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool, std::uint32_t sliceXor) {
+    Require(commands != VK_NULL_HANDLE && guest != VK_NULL_HANDLE && view != VK_NULL_HANDLE && pool != VK_NULL_HANDLE, "image tiling requires a command buffer, guest buffer, view and descriptor pool");
+    Require(layout.width != 0 && layout.height != 0 && layout.tiledSize != 0, "image tiling requires a non-empty mip layout");
+    if (imageModule == VK_NULL_HANDLE) createImagePasses();
+    const auto key = PipelineKey(tileMode, 4u) | (tile ? 0x80000000u : 0u);
+    VkPipeline pass = VK_NULL_HANDLE;
+    for (const auto& entry : imagePipelines)
+        if (entry.first == key) pass = entry.second;
+    if (pass == VK_NULL_HANDLE) {
+        pass = createPipeline(imageModule, imagePipelineLayout, tileMode, 4u, tile);
+        imagePipelines.emplace_back(key, pass);
+    }
+    const auto alignment = std::max<VkDeviceSize>(context.limits.minStorageBufferOffsetAlignment, 4);
+    const auto descriptorOffset = guestOffset - guestOffset % alignment;
+    const auto base = guestOffset - descriptorOffset;
+    const auto range = (base + layout.tiledSize + 3) / 4 * 4;
+    Require(base <= UINT32_MAX && range <= context.limits.maxStorageBufferRange, "image tiling buffer range exceeds device limits");
+    VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    allocation.descriptorPool = pool;
+    allocation.descriptorSetCount = 1;
+    allocation.pSetLayouts = &imageDescriptorLayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    Check(context.Function<PFN_vkAllocateDescriptorSets>("vkAllocateDescriptorSets")(context.device, &allocation, &set), "vkAllocateDescriptorSets image tiling");
+    const VkDescriptorBufferInfo bufferInfo{guest, descriptorOffset, range};
+    const VkDescriptorImageInfo imageInfo{VK_NULL_HANDLE, view, VK_IMAGE_LAYOUT_GENERAL};
+    std::array<VkWriteDescriptorSet, 2> writes{};
+    writes[0] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 0, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &bufferInfo, nullptr};
+    writes[1] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, set, 1, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, &imageInfo, nullptr, nullptr};
+    context.Function<PFN_vkUpdateDescriptorSets>("vkUpdateDescriptorSets")(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    Push push{};
+    push.srcBase = static_cast<std::uint32_t>(base);
+    push.dstBase = static_cast<std::uint32_t>(base);
+    push.width = layout.width;
+    push.height = layout.height;
+    push.pitchBytes = layout.pitchBytes;
+    push.blocksPerRow = layout.blocksPerRow;
+    push.tail = layout.tail ? 1u : 0u;
+    push.tailX = layout.tailX;
+    push.tailY = layout.tailY;
+    push.elementBytes = 4u;
+    push.arrayLayer = arrayLayer;
+    push.sliceXor = sliceXor;
+    context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, pass);
+    context.Function<PFN_vkCmdBindDescriptorSets>("vkCmdBindDescriptorSets")(commands, VK_PIPELINE_BIND_POINT_COMPUTE, imagePipelineLayout, 0, 1, &set, 0, nullptr);
+    context.Function<PFN_vkCmdPushConstants>("vkCmdPushConstants")(commands, imagePipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+    context.Function<PFN_vkCmdDispatch>("vkCmdDispatch")(commands, (layout.width + 7u) / 8u, (layout.height + 7u) / 8u, 1);
+}
+
 void TextureDetiler::release() noexcept {
+    for (const auto& entry : imagePipelines) context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline")(context.device, entry.second, nullptr);
+    if (imageModule) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, imageModule, nullptr);
+    if (imagePipelineLayout) context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout")(context.device, imagePipelineLayout, nullptr);
+    if (imageDescriptorLayout) context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")(context.device, imageDescriptorLayout, nullptr);
     if (mergePipeline) context.Function<PFN_vkDestroyPipeline>("vkDestroyPipeline")(context.device, mergePipeline, nullptr);
     if (mergeModule) context.Function<PFN_vkDestroyShaderModule>("vkDestroyShaderModule")(context.device, mergeModule, nullptr);
     if (mergePipelineLayout) context.Function<PFN_vkDestroyPipelineLayout>("vkDestroyPipelineLayout")(context.device, mergePipelineLayout, nullptr);
@@ -172,6 +244,12 @@ VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elem
     for (const auto& entry : pipelines) {
         if (entry.first == key) return entry.second;
     }
+    const auto result = createPipeline(module, pipelineLayout, tileMode, elementBytes, tile);
+    pipelines.emplace_back(key, result);
+    return result;
+}
+
+VkPipeline TextureDetiler::createPipeline(VkShaderModule shader, VkPipelineLayout layout, TextureTileMode tileMode, std::uint32_t elementBytes, bool tile) {
     // Constants 0-3 select element size, block size, addressing family (0 linear, 1 standard, 2
     // SW_64KB_R_X, 3 SW_64KB_Z_X, 4 equation) and direction; 4-19 carry the per-bit XOR equation of
     // the equation family (the display, T and other XOR swizzles; upstream ace10fdb).
@@ -191,15 +269,14 @@ VkPipeline TextureDetiler::pipeline(TextureTileMode tileMode, std::uint32_t elem
     specialization.pData = values.data();
     VkPipelineShaderStageCreateInfo stage{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
     stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-    stage.module = module;
+    stage.module = shader;
     stage.pName = "main";
     stage.pSpecializationInfo = &specialization;
     VkComputePipelineCreateInfo createInfo{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
     createInfo.stage = stage;
-    createInfo.layout = pipelineLayout;
+    createInfo.layout = layout;
     VkPipeline result = VK_NULL_HANDLE;
     Check(context.Function<PFN_vkCreateComputePipelines>("vkCreateComputePipelines")(context.device, context.pipelineCache, 1, &createInfo, nullptr, &result), "vkCreateComputePipelines");
-    pipelines.emplace_back(key, result);
     return result;
 }
 

@@ -429,3 +429,16 @@ Issues that needed research, with a short answer. Check here before researching;
   - descriptor-set acquire and update 6.3%.
 - Bindings and upload read and change state that the previous draw's recording changes: resident render targets, texture-upload copies recorded into the batch, draw-queue barrier requests, the write tracker. All of it is under gpuMutex.
 - So a prep thread running ahead could only take the descriptor part, ~0.4 ms of the device thread's ~15.5 ms a frame, before handoff costs. The rest needs TextureCache, RenderCache and DrawQueue made concurrent first: a large refactor with an unknown payoff.
+
+## GPU side (2026-10-12, Zorro gameplay)
+
+- **Where the GPU time goes.** GPU busy 13.8 ms a frame, 13.5 of it draws and dispatches; copies are 0.3 and texture uploads ~0 (ANYPS5_GPU_TIMING). Per-draw profile (APS5_PROFILE_GPU_DRAWS, merging off, so shares only):
+  - the 1080p G-buffer draws, hundreds at 17–21 µs each;
+  - a 4096² shadow map at ~11 µs a draw;
+  - one post-processing dispatch at 1.53 ms, of which 0.10 work, 0.69 setup and 0.75 teardown. It writes the display buffer (1920x1080, 4-byte texels, tile mode 4, the two flip buffers in turn) as a storage image: detile into a staging buffer, then copy the buffer to the image, and the reverse for write-back.
+- **The upload's real cost.** Skipping the upload outright (unsafe experiment) cut the GPU tail from 4.01 to 3.14 ms and the frame from 22.09 to 21.27 ms.
+- **Residency tried and dropped.** Keeping the image after write-back and reusing it when nothing wrote the range since (the texture cache's checks) adopted for a while, then never. In gameplay the UI is drawn over the display buffer after the pass, so guest memory really differs. Skipping the upload soundly needs proof that the shader overwrites every texel.
+- **One-pass tiling (kept).** `TextureDetile.comp` built with `LINEAR_IMAGE` (`TEXTURE_DETILE_IMAGE_SPV`) reads and writes the image through an R32_UINT view (the image is created MUTABLE_FORMAT), with no staging buffer. It is used for 4-byte, single-layer 2D storage images on the GPU tiling path (`TextureDetiler::DispatchImage`); `ANYPS5_STORAGE_TWO_PASS=1` restores the old path. Results:
+  - GPU tail 3.80 -> 3.48 ms;
+  - A/B 60-88 s 23.45 -> 22.20 ms (one noisy round; realistically a few tenths of a millisecond);
+  - device thread 15.52 -> 14.99 ms (no staging buffer created).

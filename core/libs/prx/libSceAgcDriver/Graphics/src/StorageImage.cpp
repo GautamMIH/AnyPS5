@@ -58,6 +58,15 @@ ImagePool& imagePool() {
     return *pool;
 }
 
+// One-pass tiling between guest memory and the image for 4-byte single-layer 2D images (Zorro's
+// post-processing image, 1080p): the detile into a linear buffer and the buffer-to-image copy (and
+// the reverse on write-back) were two passes over the texels each way. ANYPS5_STORAGE_TWO_PASS=1
+// keeps the two passes.
+bool onePassTiling() {
+    static const bool enabled = std::getenv("ANYPS5_STORAGE_TWO_PASS") == nullptr;
+    return enabled;
+}
+
 bool poolEnabled() {
     static const bool enabled = std::getenv("ANYPS5_STORAGE_IMAGE_POOL") != nullptr;
     return enabled;
@@ -120,8 +129,9 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
             tiledMask = std::make_unique<Buffer>(context, static_cast<std::size_t>(guestBytes), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
             ones = std::make_unique<Buffer>(context, static_cast<std::size_t>(mip.linearSize * layers), deviceUsage, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         }
+        imageTiling = onePassTiling() && !mergeDownload() && !checkTiling() && elementBytes == 4u && layers == 1u && !volume;
         const VkMemoryPropertyFlags linearMemory = checkTiling() ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
-        staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(mip.linearSize * layers), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, linearMemory);
+        if (!imageTiling) staging = std::make_unique<Buffer>(context, static_cast<std::size_t>(mip.linearSize * layers), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, linearMemory);
         if (checkTiling()) {
             tiled.resize(static_cast<std::size_t>(guestBytes));
             GuestMemory::Read(guestBase, tiled, 1);
@@ -153,7 +163,7 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
         const VkExtent3D extent{mip.width, mip.height, volume ? layers : 1u};
         const auto arrayLayers = volume ? 1u : layers;
         const auto viewType = volume ? VK_IMAGE_VIEW_TYPE_3D : resource.dimension == TextureDimension::k2DArray ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
-        if (poolEnabled()) {
+        if (poolEnabled() && !imageTiling) {
             poolShape = poolKey(context.device, imageType, format, extent, arrayLayers, viewType);
             auto& pool = imagePool();
             std::lock_guard lock(pool.mutex);
@@ -178,6 +188,8 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
         info.samples = VK_SAMPLE_COUNT_1_BIT;
         info.tiling = VK_IMAGE_TILING_OPTIMAL;
         info.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        // The R32_UINT tiling view reinterprets the 32-bit texels (same size class).
+        if (imageTiling) info.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;
         info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         Check(context.Function<PFN_vkCreateImage>("vkCreateImage")(context.device, &info, nullptr, &image), "vkCreateImage storage image");
@@ -194,6 +206,10 @@ StorageImage::StorageImage(const Context& context, const GuestTextureResource& r
         viewInfo.format = format;
         viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, volume ? 1u : layers};
         Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &view), "vkCreateImageView storage image");
+        if (imageTiling) {
+            viewInfo.format = VK_FORMAT_R32_UINT;
+            Check(context.Function<PFN_vkCreateImageView>("vkCreateImageView")(context.device, &viewInfo, nullptr, &uintView), "vkCreateImageView storage image tiling");
+        }
     } catch (...) {
         release();
         throw;
@@ -207,6 +223,8 @@ StorageImage::~StorageImage() {
 void StorageImage::release() noexcept {
     if (tilingPool != VK_NULL_HANDLE && context.detiler != nullptr) context.detiler->DestroyPool(tilingPool);
     tilingPool = VK_NULL_HANDLE;
+    if (uintView) context.Function<PFN_vkDestroyImageView>("vkDestroyImageView")(context.device, uintView, nullptr);
+    uintView = VK_NULL_HANDLE;
     if (poolShape && image && memory && view) {
         auto& pool = imagePool();
         std::lock_guard lock(pool.mutex);
@@ -269,6 +287,23 @@ void StorageImage::recordGpuUpload(VkCommandBuffer commands) {
     VkMemoryBarrier earlier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     earlier.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
     earlier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    if (imageTiling) {
+        VkImageMemoryBarrier toGeneral{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        toGeneral.dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        toGeneral.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toGeneral.image = image;
+        toGeneral.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &earlier, 0, nullptr, 1, &toGeneral);
+        context.detiler->DispatchImage(commands, resource.tileMode, guest->buffer, guest->offset + mip.tiledOffset, uintView, mip, resource.baseArray, false, tilingPool);
+        VkMemoryBarrier detiled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        detiled.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        detiled.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &detiled, 0, nullptr, 0, nullptr);
+        return;
+    }
     barrier(commands, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &earlier, 0, nullptr, 0, nullptr);
     for (std::uint32_t layer = 0; layer < layers; ++layer) {
         context.detiler->Dispatch(commands, resource.tileMode, elementBytes, guest->buffer, guest->offset + layer * sliceBytes + mip.tiledOffset, staging->Handle(), layer * mip.linearSize, mip, layer + resource.baseArray, false, tilingPool, volume ? VolumeSliceXor(resource.tileMode, elementBytes, layer + resource.baseArray) : 0u);
@@ -299,6 +334,18 @@ void StorageImage::recordGpuUpload(VkCommandBuffer commands) {
 void StorageImage::recordGpuDownload(VkCommandBuffer commands) {
     const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     const auto fill = context.Function<PFN_vkCmdFillBuffer>("vkCmdFillBuffer");
+    if (imageTiling) {
+        VkMemoryBarrier written{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        written.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        written.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &written, 0, nullptr, 0, nullptr);
+        context.detiler->DispatchImage(commands, resource.tileMode, guest->buffer, guest->offset + mip.tiledOffset, uintView, mip, resource.baseArray, true, tilingPool);
+        VkMemoryBarrier tiled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        tiled.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        tiled.dstAccessMask = VK_ACCESS_HOST_READ_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &tiled, 0, nullptr, 0, nullptr);
+        return;
+    }
     VkImageMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;

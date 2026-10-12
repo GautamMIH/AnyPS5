@@ -34,6 +34,10 @@ namespace AgcDriver::Graphics {
             std::uint32_t groupsX = 0;
             std::uint32_t groupsY = 0;
         };
+        // Detiles guest memory into (or, with tile, tiles out of) a storage image in one pass, for
+        // 4-byte elements: view is an R32_UINT view of the image in the GENERAL layout, guestOffset the
+        // mip layer's tiled bytes in guest. pool is the caller's (CreatePool).
+        void DispatchImage(VkCommandBuffer commands, TextureTileMode tileMode, VkBuffer guest, std::uint64_t guestOffset, VkImageView view, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool, std::uint32_t sliceXor = 0);
         PreparedPass Prepare(TextureTileMode tileMode, std::uint32_t elementBytes, VkBuffer source, std::uint64_t sourceOffset, VkBuffer destination, std::uint64_t destinationOffset, const TileMipLayout& layout, std::uint32_t arrayLayer, bool tile, VkDescriptorPool pool, std::uint32_t sliceXor = 0);
         void Record(VkCommandBuffer commands, const PreparedPass& pass);
         void BeginBatch();
@@ -58,6 +62,13 @@ namespace AgcDriver::Graphics {
         VkShaderModule mergeModule = VK_NULL_HANDLE;
         VkPipeline mergePipeline = VK_NULL_HANDLE;
         void createMerge();
+        // The image passes (TEXTURE_DETILE_IMAGE_SPV), created on first use.
+        VkDescriptorSetLayout imageDescriptorLayout = VK_NULL_HANDLE;
+        VkPipelineLayout imagePipelineLayout = VK_NULL_HANDLE;
+        VkShaderModule imageModule = VK_NULL_HANDLE;
+        std::vector<std::pair<std::uint32_t, VkPipeline>> imagePipelines;
+        void createImagePasses();
+        VkPipeline createPipeline(VkShaderModule shader, VkPipelineLayout layout, TextureTileMode tileMode, std::uint32_t elementBytes, bool tile);
         std::vector<std::pair<std::uint32_t, VkPipeline>> pipelines;
         std::vector<VkDescriptorPool> descriptorPools;
         std::size_t allocatedSets = 0;

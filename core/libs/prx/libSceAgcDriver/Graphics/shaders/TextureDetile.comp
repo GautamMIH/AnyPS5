@@ -26,8 +26,15 @@ layout(constant_id = 19) const uint EQ15 = 0u;
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
+#ifdef LINEAR_IMAGE
+// Built with LINEAR_IMAGE (TEXTURE_DETILE_IMAGE_SPV): the linear side is a storage image viewed as
+// r32ui (4-byte elements only), the tiled side the guest buffer, read or written by direction.
+layout(set = 0, binding = 0, std430) buffer Tiled { uint data[]; } tiledBuffer;
+layout(set = 0, binding = 1, r32ui) uniform uimage2D linearImage;
+#else
 layout(set = 0, binding = 0, std430) readonly buffer Input { uint data[]; } inputBuffer;
 layout(set = 0, binding = 1, std430) buffer Output { uint data[]; } outputBuffer;
+#endif
 
 layout(push_constant) uniform Push {
     uint srcBase;
@@ -220,6 +227,7 @@ uvec2 blockExtent() {
     return uvec2(width, BLOCK_BYTES / (width * ELEMENT_BYTES));
 }
 
+#ifndef LINEAR_IMAGE
 void copyElement(uint src, uint dst) {
     if (ELEMENT_BYTES >= 4u) {
         for (uint i = 0u; i < ELEMENT_BYTES; i += 4u) {
@@ -233,6 +241,7 @@ void copyElement(uint src, uint dst) {
         atomicOr(outputBuffer.data[dst >> 2], value << shift);
     }
 }
+#endif
 
 void main() {
     uvec2 p = gl_GlobalInvocationID.xy;
@@ -242,6 +251,26 @@ void main() {
 
     uint linearOffset = p.y * params.pitchBytes + p.x * ELEMENT_BYTES;
 
+#ifdef LINEAR_IMAGE
+    // The tiled side's byte offset (the guest pitch layout for kLinear); srcBase is the buffer's base.
+    uint guestOffset = linearOffset;
+    if (TILE_FAMILY != 0u) {
+        uvec2 imageSwizzle = p;
+        uvec2 imageBlock = uvec2(0u);
+        if (params.tail != 0u) {
+            imageSwizzle += uvec2(params.tailX, params.tailY);
+        } else {
+            imageBlock = p / blockExtent();
+        }
+        guestOffset = (imageBlock.y * params.blocksPerRow + imageBlock.x) * BLOCK_BYTES + (blockOffset(imageSwizzle) ^ params.sliceXor);
+    }
+    uint word = (params.srcBase + guestOffset) >> 2;
+    if (TILE_DIRECTION == 0u) {
+        imageStore(linearImage, ivec2(p), uvec4(tiledBuffer.data[word], 0u, 0u, 0u));
+    } else {
+        tiledBuffer.data[word] = imageLoad(linearImage, ivec2(p)).x;
+    }
+#else
     if (TILE_FAMILY == 0u) {
         // kLinear: guest and host layouts match; a straight copy at the
         // same pitch, no swizzle.
@@ -265,5 +294,6 @@ void main() {
     } else {
         copyElement(params.srcBase + linearOffset, params.dstBase + tiledOffset);
     }
+#endif
 }
 

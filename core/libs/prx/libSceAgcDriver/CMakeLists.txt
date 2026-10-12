@@ -46,6 +46,18 @@ add_custom_command(
         VERBATIM
 )
 
+set(agcTextureDetileImageShaderSpv ${agcTextureDetileGeneratedDir}/TextureDetileImage.spv)
+set(agcTextureDetileImageShaderHeader ${agcTextureDetileGeneratedDir}/TextureDetileImage_spv.h)
+add_custom_command(
+        OUTPUT "${agcTextureDetileImageShaderHeader}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${agcTextureDetileGeneratedDir}"
+        COMMAND "$<TARGET_FILE:glslang-standalone>" -V --target-env vulkan1.1 -DLINEAR_IMAGE -o "${agcTextureDetileImageShaderSpv}" "${agcTextureDetileShaderSource}"
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${agcTextureDetileImageShaderSpv} -DOUTPUT=${agcTextureDetileImageShaderHeader}
+        -DSYMBOL=TEXTURE_DETILE_IMAGE_SPV -P "${CMAKE_CURRENT_SOURCE_DIR}/embed_spirv.cmake"
+        DEPENDS "${agcTextureDetileShaderSource}" glslang-standalone
+        VERBATIM
+)
+
 set(agcTextureMergeShaderSource ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/shaders/TextureMerge.comp)
 set(agcTextureMergeShaderSpv ${agcTextureDetileGeneratedDir}/TextureMerge.spv)
 set(agcTextureMergeShaderHeader ${agcTextureDetileGeneratedDir}/TextureMerge_spv.h)
@@ -102,6 +114,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
         ${agcTextureMergeShaderHeader}
+        ${agcTextureDetileImageShaderHeader}
         ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Event.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Query.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Resource/src/Lifecycle.cpp
@@ -458,6 +471,7 @@ add_test_executable(agc_driver_graphics_tests EXCLUDE_FROM_ALL
         Graphics/src/Sampler.cpp
         ${agcTextureDetileShaderHeader}
         ${agcTextureMergeShaderHeader}
+        ${agcTextureDetileImageShaderHeader}
         Execution/src/GuestMemory.cpp
         Execution/src/WriteTracker.cpp
 )
@@ -733,6 +747,7 @@ if(AGC_BUILD_VISUAL_TEST)
             Graphics/src/Sampler.cpp
             ${agcTextureDetileShaderHeader}
             ${agcTextureMergeShaderHeader}
+            ${agcTextureDetileImageShaderHeader}
         ${agcTextureMergeShaderHeader}
             ${visualShaders}
     )

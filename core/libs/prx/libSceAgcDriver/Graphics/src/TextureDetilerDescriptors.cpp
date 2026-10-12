@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
+#include <array>
 
 namespace AgcDriver::Graphics {
 
@@ -10,12 +11,12 @@ void TextureDetiler::BeginBatch() {
 }
 
 VkDescriptorPool TextureDetiler::CreatePool(std::uint32_t sets) {
-    // Tiling sets bind two buffers, merge sets three.
-    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets * 3};
+    // Tiling sets bind two buffers, merge sets three, image tiling sets a buffer and an image.
+    const std::array<VkDescriptorPoolSize, 2> sizes{{{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets * 3}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, sets}}};
     VkDescriptorPoolCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     info.maxSets = sets;
-    info.poolSizeCount = 1;
-    info.pPoolSizes = &size;
+    info.poolSizeCount = static_cast<std::uint32_t>(sizes.size());
+    info.pPoolSizes = sizes.data();
     VkDescriptorPool pool = VK_NULL_HANDLE;
     Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(context.device, &info, nullptr, &pool), "vkCreateDescriptorPool texture tiling");
     return pool;

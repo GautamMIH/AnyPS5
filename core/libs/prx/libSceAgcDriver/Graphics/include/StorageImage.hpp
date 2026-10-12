@@ -59,6 +59,10 @@ private:
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
+    // One-pass GPU tiling (4-byte elements, one 2D layer): the detiler reads and writes the image
+    // through an R32_UINT view (the image is created MUTABLE_FORMAT), with no linear staging buffer.
+    bool imageTiling = false;
+    VkImageView uintView = VK_NULL_HANDLE;
     // The pool shape the image returns to on release (ANYPS5_STORAGE_IMAGE_POOL=1).
     std::optional<std::array<std::uint64_t, 7>> poolShape;
 };
