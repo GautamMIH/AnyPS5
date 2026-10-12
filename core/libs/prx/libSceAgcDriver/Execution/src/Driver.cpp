@@ -1604,6 +1604,8 @@ private:
             if (draws % 100000 == 0) std::fprintf(stderr, "[anywrite] draws %llu: storage images %llu, writable texel buffers %llu, address-table stores %llu\n", static_cast<unsigned long long>(draws), static_cast<unsigned long long>(images), static_cast<unsigned long long>(texels), static_cast<unsigned long long>(stores));
         }
         struct Job {
+            // The job's lambda captures only the Job (inline in std::function, no allocation per draw).
+            Driver* driver;
             std::shared_ptr<VulkanDevice> device;
             Graphics::State graphics;
             Pm4::DrawParameters parameters;
@@ -1616,19 +1618,20 @@ private:
             // The stages' push data overrides (CompiledShader::pushData points into them).
             std::vector<std::shared_ptr<const std::vector<std::byte>>> pushes;
         };
-        auto job = std::make_shared<Job>(Job{device, graphics, parameters, std::move(results), std::move(stages), std::move(shaderMemory), std::move(memory), std::move(snapshots), frameTiming, std::move(pushes)});
-        pipeline->Post([this, job]() mutable {
+        auto job = std::make_shared<Job>(Job{this, device, graphics, parameters, std::move(results), std::move(stages), std::move(shaderMemory), std::move(memory), std::move(snapshots), frameTiming, std::move(pushes)});
+        pipeline->Post([job]() mutable {
+            auto* const self = job->driver;
             {
                 PerformanceContext timingContext(job->timing.get());
                 const auto deferred = WriteTracker::DeferredGpuWrites();
                 job->device->EnqueueDraw(job->graphics, job->parameters, job->stages, job->snapshots);
                 // Writes noted at recording are in the write tracker; ones that land at completion are not.
-                if (WriteTracker::DeferredGpuWrites() != deferred) pipeline->NoteUnknownGpuWrites();
+                if (WriteTracker::DeferredGpuWrites() != deferred) self->pipeline->NoteUnknownGpuWrites();
             }
             // The device and frame timing are released here, as before; the rest is freed by the reaper.
             job->device.reset();
             job->timing.reset();
-            reaper.Retire(std::move(job));
+            self->reaper.Retire(std::move(job));
         }, std::move(writes), anyWrite);
     }
 

@@ -114,21 +114,26 @@ public:
     std::uint64_t Post(std::function<void()> job, Ranges writes, bool anyWrite) {
         // Sorted and merged: reads check them by binary search (address-table stores list every
         // writable registered range).
+        // Merged in place (a new vector per job was an allocation per draw).
         std::sort(writes.begin(), writes.end());
-        Ranges merged;
-        for (const auto& range : writes) {
-            if (!merged.empty() && range.first <= merged.back().second) merged.back().second = std::max(merged.back().second, range.second);
-            else merged.push_back(range);
+        std::size_t kept = 0;
+        for (std::size_t index = 0; index < writes.size(); ++index) {
+            if (kept != 0 && writes[index].first <= writes[kept - 1].second) writes[kept - 1].second = std::max(writes[kept - 1].second, writes[index].second);
+            else writes[kept++] = writes[index];
         }
-        writes = std::move(merged);
+        writes.resize(kept);
         std::uint64_t serial = 0;
+        bool sleeping = false;
         {
             std::lock_guard lock(mutex);
             rethrow();
             jobs.push_back({std::move(job), std::move(writes), anyWrite, serial = ++posted});
             index(jobs.back(), true);
+            sleeping = deviceSleeping;
         }
-        wake.notify_all();
+        // Only a sleeping device thread needs the wakeup (a running one takes the job next): a
+        // notify per job (~1300 a Zorro frame) was a futex call each.
+        if (sleeping) wake.notify_all();
         return serial;
     }
 
@@ -141,7 +146,9 @@ public:
     // Waits until the job with this serial (and every earlier one) ran.
     void WaitFor(std::uint64_t serial) {
         std::unique_lock lock(mutex);
+        ++idleWaiters;
         idle.wait(lock, [&] { return completed >= serial || failure != nullptr; });
+        --idleWaiters;
         rethrow();
     }
 
@@ -149,7 +156,9 @@ public:
     // tracking mutex (jobs take it).
     void Drain() {
         std::unique_lock lock(mutex);
+        ++idleWaiters;
         idle.wait(lock, [&] { return (jobs.empty() && !running) || failure != nullptr; });
+        --idleWaiters;
         rethrow();
     }
 
@@ -311,7 +320,10 @@ private:
                 std::unique_lock lock(mutex);
                 // Only a real gap (no job within 200 us): short gaps between draws keep the batch
                 // and its render pass open.
-                if (jobs.empty() && !stopping && !idleRan && onIdle && !wake.wait_for(lock, std::chrono::microseconds(200), [&] { return stopping || !jobs.empty(); })) {
+                deviceSleeping = true;
+                const bool gap = jobs.empty() && !stopping && !idleRan && onIdle && !wake.wait_for(lock, std::chrono::microseconds(200), [&] { return stopping || !jobs.empty(); });
+                deviceSleeping = false;
+                if (gap) {
                     idleRan = true;
                     lock.unlock();
                     try {
@@ -320,11 +332,14 @@ private:
                         lock.lock();
                         if (!failure) failure = std::current_exception();
                         lock.unlock();
+                        idle.notify_all();
                     }
                     lock.lock();
                 }
                 const auto idleStart = std::chrono::steady_clock::now();
+                deviceSleeping = true;
                 wake.wait(lock, [&] { return stopping || !jobs.empty(); });
+                deviceSleeping = false;
                 if (trace) idleMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - idleStart).count();
                 if (jobs.empty()) return;
                 runningJob = std::move(jobs.front());
@@ -370,14 +385,20 @@ private:
                 completed = runningJob.serial;
                 runningJob = {};
                 running = false;
+                notifyIdle = idleWaiters != 0 || failure != nullptr;
             }
-            idle.notify_all();
+            // Only threads in WaitFor/Drain wait on `idle` (they count themselves under the mutex).
+            if (notifyIdle) idle.notify_all();
         }
     }
 
     std::function<Ranges(const std::function<void()>&)> runJob;
     std::function<void()> onIdle;
     std::mutex mutex;
+    // The device thread is in (or about to enter) a wait on `wake`; threads in WaitFor/Drain.
+    bool deviceSleeping = false;
+    std::uint32_t idleWaiters = 0;
+    bool notifyIdle = false;
     std::condition_variable wake;
     std::condition_variable idle;
     std::deque<Job> jobs;
