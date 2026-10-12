@@ -12,6 +12,7 @@ int APS5_VABI fcntl_nid_postfix(int, int, ...);
 int APS5_VABI setsockopt_nid_postfix(int, int, int, const void*, std::uint32_t);
 int APS5_VABI getsockopt_nid_postfix(int, int, int, void*, std::uint32_t*);
 int APS5_VABI bind_nid_postfix(int, const void*, std::uint32_t);
+int APS5_VABI connect_nid_postfix(int, const void*, std::uint32_t);
 int APS5_VABI getsockname_nid_postfix(int, void*, std::uint32_t*);
 int APS5_VABI ioctl_nid_postfix(int, std::uint64_t, void*);
 int APS5_VABI _ioctl_nid_postfix(int, std::uint64_t, void*);

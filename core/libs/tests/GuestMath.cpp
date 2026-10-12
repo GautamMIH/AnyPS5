@@ -1,4 +1,5 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
+#include <cerrno>
 #include <bit>
 #include <cfenv>
 #include <cmath>

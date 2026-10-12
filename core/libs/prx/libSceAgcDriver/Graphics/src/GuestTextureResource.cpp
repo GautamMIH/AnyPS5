@@ -132,7 +132,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
             if (depth != 0 && tileMode == TextureTileMode::kLinear) {
                 const auto elementsPerPitchUnit = 256u / BytesPerElement(format);
                 const auto defaultPitch = (width + elementsPerPitchUnit - 1u) / elementsPerPitchUnit * elementsPerPitchUnit;
-                Require(!IsBlockCompressed(format) && maxMip == 0 && baseArray == 0 && depth + 1u == defaultPitch, "guest 2D linear texture descriptor sets a custom pitch other than its default pitch, which is not implemented" + describe());
+                Require(!IsBlockCompressed(format) && maxMip == 0 && baseArray == 0 && depth + 1u == defaultPitch, "guest 2D linear texture descriptor sets a custom pitch other than its default pitch, which is not implemented");
                 depth = 0;
             }
             Require(depth == 0 && baseArray == 0, "guest 2D texture descriptor has a nonzero depth or base array");

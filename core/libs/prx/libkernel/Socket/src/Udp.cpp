@@ -93,6 +93,7 @@ int NativeError() {
         case EINTR: return 4;
         case EINVAL: return 22;
         case EPIPE: return 32;
+        case EDESTADDRREQ: return 39;
         default: return 5;
     }
 #endif

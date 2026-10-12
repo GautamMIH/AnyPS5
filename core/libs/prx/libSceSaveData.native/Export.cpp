@@ -314,10 +314,12 @@ static int dirNameSearch(const SaveDataDirNameSearchCond* cond, SaveDataDirNameS
             if (result->params != nullptr) {
                 result->params[set] = load_param(entry.path().string());
             }
+            // Each returned name has its search info (blocks and free blocks), as every native save
+            // reports SAVE_DATA_BLOCKS_MAX blocks.
+            if (result->infos != nullptr) {
+                result->infos[set] = SaveDataSearchInfo{SAVE_DATA_BLOCKS_MAX, SAVE_DATA_BLOCKS_MAX, {}};
+            }
             set++;
-        }
-        if (result->infos != nullptr) {
-            result->infos[i] = SaveDataSearchInfo{SAVE_DATA_BLOCKS_MAX, SAVE_DATA_BLOCKS_MAX, {}};
         }
     }
     result->hit_num = hit;
