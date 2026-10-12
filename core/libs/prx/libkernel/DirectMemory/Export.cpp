@@ -201,6 +201,10 @@ size_t APS5_VABI sceKernelGetDirectMemorySize(void) {
  return DIRECT_MEMORY_SIZE;
 }
 
+int APS5_VABI sceKernelEnableDmemAliasing(void) {
+ return 0;
+}
+
 int APS5_VABI sceKernelMapDirectMemory(void** addr, size_t len, int prot, int flags, int64_t direct_memory_start, size_t alignment) {
  (void)alignment;
  return DoMapDirect(addr, len, prot, flags, direct_memory_start, alignment);
