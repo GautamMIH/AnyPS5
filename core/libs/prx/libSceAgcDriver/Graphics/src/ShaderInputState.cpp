@@ -129,6 +129,7 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
     const bool pixelKillEnable = ((shaderControl >> 6u) & 0x1u) != 0;
     const bool depthExportEnable = (shaderControl & 0x1u) != 0;
     const bool sampleMaskExportEnable = ((shaderControl >> 8u) & 0x1u) != 0;
+    const bool stencilRefExportEnable = ((shaderControl >> 1u) & 0x1u) != 0;
     const auto zOrder = (shaderControl >> 4u) & 0x3u;
     // SPI_PS_INPUT_ENA/ADDR bits: 0 PERSP_SAMPLE, 1 PERSP_CENTER, 2 PERSP_CENTROID, 4 LINEAR_SAMPLE,
     // 5 LINEAR_CENTER, 6 LINEAR_CENTROID, 8-11 POS_X..W, 12 FRONT_FACE, 13 ANCILLARY. The flags are
@@ -153,7 +154,7 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         .pixelKillEnable = pixelKillEnable,
         .depthExportEnable = depthExportEnable,
         .sampleMaskExportEnable = sampleMaskExportEnable,
-        .earlyZ = zOrder == 1u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable,
+        .earlyZ = zOrder == 1u && !pixelKillEnable && !depthExportEnable && !sampleMaskExportEnable && !stencilRefExportEnable,
         .executeOnNoop = ((shaderControl >> 10u) & 0x1u) != 0,
         // PRIMITIVE_ORDERED_PIXEL_SHADER: the body runs under fragment shader interlock (e1d4e699).
         .orderedPixelShader = ((shaderControl >> 16u) & 0x1u) != 0,
@@ -162,7 +163,8 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         // Packed 10_11_11 targets are not supported here; Driver sets dualSourceBlend from the
         // draw state.
         .targetExportPacking = {},
-        .dualSourceBlend = false
+        .dualSourceBlend = false,
+        .stencilRefExportEnable = stencilRefExportEnable
     };
 }
 

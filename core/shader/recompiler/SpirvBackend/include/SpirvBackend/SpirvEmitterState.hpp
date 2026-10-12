@@ -166,6 +166,7 @@ struct SpirvEmitterState {
     std::uint32_t viewportIndexVariable = 0;
     std::uint32_t depthVariable = 0;
     std::uint32_t sampleMaskVariable = 0;
+    std::uint32_t stencilRefVariable = 0;
     std::vector<SpirvInputBinding> inputs;
     std::vector<SpirvOutputBinding> outputs;
     std::vector<std::uint32_t> interfaceVariables;

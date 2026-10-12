@@ -540,7 +540,7 @@ list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(PreparedShaders|PreparedGra
 # cover that apply here were ported (per-face depth bias, provoking vertex, dual-source blending,
 # zero-stride and null vertex fetches, compute LDS beyond the device limit); the tests need porting
 # to this driver's interfaces first.
-list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(DepthBiasPerFace|DrawOffsetIndices|DualSourceBlend|DwordPatternFill|FillCoverKeys|GatedDispatchCapture|GuardedNullPointer|ImagePipeBankXor|ImagePlaneAddressOnLine|ImageStoreLineThroughPlane|ImageVolumeAddressOnPlane|LdsBeyondDeviceLimit|PackedUnormColorTarget|PatternBufferFill|PendingExactSurface|PixelBarycentricEmulation|PixelFixedPointPosition|PixelUint16Export|ProvokingVertex|Uint8x4ColorTarget|UnimportedLabelOrder|ZeroStrideVertexFetch)\\.cpp$")
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(DepthBiasPerFace|DrawOffsetIndices|DualSourceBlend|DwordPatternFill|FillCoverKeys|GatedDispatchCapture|GuardedNullPointer|ImagePipeBankXor|ImagePlaneAddressOnLine|ImageStoreLineThroughPlane|ImageVolumeAddressOnPlane|LdsBeyondDeviceLimit|PackedUnormColorTarget|PatternBufferFill|PendingExactSurface|PixelBarycentricEmulation|PixelFixedPointPosition|PixelUint16Export|ProvokingVertex|StencilRefExport|Uint8x4ColorTarget|UnimportedLabelOrder|ZeroStrideVertexFetch)\\.cpp$")
 # Likewise from the 961b25fe merge: upstream Recorder, DrawCache, CopyBuffer/FillBuffer, GpuMutex,
 # registration preparation and AgcDriverShutdown internals.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(CopiedWriterCopy|DrawCacheReuse|HostImportAtMap|IndirectArgumentsWrittenAhead|PooledBufferRange|RecordedKeptBytes|RegistrationPrepareShutdown)\\.cpp$")

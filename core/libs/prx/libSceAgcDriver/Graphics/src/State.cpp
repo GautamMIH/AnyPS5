@@ -219,8 +219,10 @@ VkStencilOp stencilOp(std::uint32_t value, std::uint32_t writeMask, std::uint32_
 }
 
 // Vulkan has one reference per face for both the comparison and every replacement, so the
-// PS5 test value and operation value (REPLACE_OP) must agree on every bit that matters.
-VkStencilOpState stencilState(std::uint32_t compare, std::uint32_t operations, std::uint32_t refMask, bool writable) {
+// PS5 test value and operation value (REPLACE_OP) must agree on every bit that matters. When the
+// pixel shader exports the stencil test value (STENCIL_TEST_VAL_EXPORT_ENABLE, gl_FragStencilRefARB)
+// the reference is per pixel, so only replacement by the test value can be expressed.
+VkStencilOpState stencilState(std::uint32_t compare, std::uint32_t operations, std::uint32_t refMask, bool writable, bool testValueExport) {
     const auto testValue = refMask & 0xffu;
     const auto compareMask = (refMask >> 8u) & 0xffu;
     const auto writeMask = writable ? (refMask >> 16u) & 0xffu : 0u;
@@ -236,6 +238,8 @@ VkStencilOpState stencilState(std::uint32_t compare, std::uint32_t operations, s
         const auto operation = (operations >> (4u * i)) & 0xfu;
         *targets[i] = stencilOp(operation, writeMask, opValue);
         if (*targets[i] != VK_STENCIL_OP_REPLACE) continue;
+        Require(!testValueExport || operation == 3, "stencil replacement by a value other than the test value is unsupported with a pixel shader that exports the stencil test value");
+        if (testValueExport) continue;
         const auto replacement = operation == 4 ? opValue : testValue;
         Require(((reference ^ replacement) & requiredBits & writeMask) == 0, "stencil replacement value conflicts with the stencil test value");
         reference = (reference & ~writeMask) | (replacement & writeMask);
@@ -350,6 +354,7 @@ void decodeDepth(const Registers& cx, State& result) {
     auto& state = result.depthState;
     state.clearDepth = depthFormat && (render & 1u) != 0;
     state.clearStencil = hasStencil && (render & 2u) != 0 && !stencilReadOnly;
+    Require(!state.clearStencil || (read(cx, 0x203) & 2u) == 0, "stencil clear with a pixel shader that exports the stencil test value is unsupported");
     state.depthClearValue = std::bit_cast<float>(read(cx, 0x00b));
     state.stencilClearValue = read(cx, 0x00a) & 0xffu;
     Require(!state.clearDepth || (state.depthClearValue >= 0 && state.depthClearValue <= 1), "depth clear value outside [0, 1]");
@@ -368,8 +373,9 @@ void decodeDepth(const Registers& cx, State& result) {
     if (state.stencilTest) {
         const bool writable = !state.clearStencil && !stencilReadOnly;
         const auto operations = read(cx, 0x10b);
-        state.front = stencilState((control >> 8u) & 7u, operations & 0xfffu, read(cx, 0x10c), writable);
-        state.back = (control & 0x80u) != 0 ? stencilState((control >> 20u) & 7u, (operations >> 12u) & 0xfffu, read(cx, 0x10d), writable) : state.front;
+        const bool testValueExport = (read(cx, 0x203) & 2u) != 0;
+        state.front = stencilState((control >> 8u) & 7u, operations & 0xfffu, read(cx, 0x10c), writable, testValueExport);
+        state.back = (control & 0x80u) != 0 ? stencilState((control >> 20u) & 7u, (operations >> 12u) & 0xfffu, read(cx, 0x10d), writable, testValueExport) : state.front;
     }
 }
 
@@ -563,9 +569,10 @@ State DecodeState(const QueueState& queue) {
         throw std::runtime_error(message.str());
     }
     // Z_EXPORT_ENABLE (bit 0): the pixel shader writes depth (recompiled to gl_FragDepth).
+    // STENCIL_TEST_VAL_EXPORT_ENABLE (bit 1): it writes the stencil test value (gl_FragStencilRefARB).
     // PRIMITIVE_ORDERED_PIXEL_SHADER (bit 16) runs the pixel shader under fragment shader interlock
     // (upstream e1d4e699, DecodePixelStageInfo).
-    zero(cx, 0x203, ~0x00019871u, "stencil or mask export or shader coverage");
+    zero(cx, 0x203, ~0x00019873u, "stencil operation value or mask export or shader coverage");
     zero(cx, 0x2dc, ~0x0001ff00u, "alpha-to-coverage");
     zero(cx, 0x2f8, ~0u, "multisampling or coverage conversion");
     // ALTERNATE_RBS_PER_TILE (bit 5) only distributes tiles between render backends (upstream 831ba5d2).

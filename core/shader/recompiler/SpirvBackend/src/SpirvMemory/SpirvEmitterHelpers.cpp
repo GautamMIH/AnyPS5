@@ -348,6 +348,9 @@ void DefineOutputs(SpirvEmitterState& state) {
         case StageOutputKind::SampleMask:
             binding.variableId = BuiltIn(state.sampleMaskVariable, SampleMaskArrayType(state), "gl_SampleMask", spv::BuiltInSampleMask);
             break;
+        case StageOutputKind::StencilRef:
+            binding.variableId = BuiltIn(state.stencilRefVariable, TypeI32(state), "gl_FragStencilRefARB", spv::BuiltInFragStencilRefEXT);
+            break;
         case StageOutputKind::Parameter:
         case StageOutputKind::Mrt: {
             const bool uintOutput = binding.kind == StageOutputKind::Mrt && state.program.Resources().stage == IrShaderStage::Pixel && binding.index < std::size(PixelInfo(state).targetOutputMode) && PixelInfo(state).targetOutputMode[binding.index] == 7u;

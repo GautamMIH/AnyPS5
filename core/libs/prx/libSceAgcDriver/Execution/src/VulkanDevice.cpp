@@ -672,6 +672,12 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         state->capabilities.push_back(spv::CapabilityFragmentShaderPixelInterlockEXT);
         state->spirvExtensions.push_back("SPV_EXT_fragment_shader_interlock");
     }
+    // Pixel shaders exporting the stencil test value (DB_SHADER_CONTROL.STENCIL_TEST_VAL_EXPORT_ENABLE).
+    if (hasExtension(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME)) {
+        deviceExtensions.push_back(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
+        state->capabilities.push_back(spv::CapabilityStencilExportEXT);
+        state->spirvExtensions.push_back("SPV_EXT_shader_stencil_export");
+    }
     // Vertex-pipeline stages writing the layer or viewport index: core in SPIR-V 1.5 (Vulkan 1.2),
     // available to the 1.3/1.4 modules this device takes through VK_EXT_shader_viewport_index_layer
     // (Balatro's vertex shaders write one).
