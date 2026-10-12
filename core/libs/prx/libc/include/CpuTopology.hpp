@@ -160,6 +160,31 @@ inline std::uint64_t PinTraced(const char* role, void* handle, std::uint64_t mas
     return applied;
 }
 
+#ifdef __linux__
+// The logical CPUs of the physical cores the AGC driver pins its worker and device thread to
+// (AgcDriver::PinToPerformanceCore ranks 0 and 1: the last two physical performance cores), or 0 when
+// the driver does not pin (ANYPS5_PIN_DRIVER_THREADS=0) or the machine has fewer than four cores.
+inline std::uint64_t DriverReservedMask() {
+    static const std::uint64_t mask = [] {
+        const char* pin = std::getenv("ANYPS5_PIN_DRIVER_THREADS");
+        if (pin != nullptr && std::string(pin) == "0") return std::uint64_t{0};
+        auto performance = MaskFromCpuList("/sys/devices/cpu_core/cpus");
+        if (performance == 0) performance = MaskFromCpuList("/sys/devices/system/cpu/online");
+        // Physical cores (sibling masks), in order of their lowest logical CPU.
+        std::vector<std::uint64_t> cores;
+        for (unsigned cpu = 0; cpu < 64; ++cpu) {
+            if ((performance & (std::uint64_t{1} << cpu)) == 0) continue;
+            auto siblings = MaskFromCpuList(("/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/topology/thread_siblings_list").c_str());
+            if (siblings == 0) siblings = std::uint64_t{1} << cpu;
+            if ((siblings & ((std::uint64_t{1} << cpu) - 1)) == 0) cores.push_back(siblings);
+        }
+        if (cores.size() < 4) return std::uint64_t{0};
+        return cores[cores.size() - 1] | cores[cores.size() - 2];
+    }();
+    return mask;
+}
+#endif
+
 // Helper threads (deferred release, mirror refresh) are pinned only when APS5_HELPER_AFFINITY_MASK
 // names their cores.
 inline void PinHelperThread(const char* role) {

@@ -422,6 +422,32 @@ static void* StartNativeThread(void* opaque) {
         self->threadId = std::this_thread::get_id();
         // The host thread carries the guest name (15 characters on Linux), for debuggers and /proc.
         if (!self->name.empty()) pthread_setname_np(pthread_self(), self->name.substr(0, 15).c_str());
+        // Guest threads keep off the driver's worker and device thread cores: those threads pace the
+        // frame, and a game thread on one of their CPUs or hyperthread siblings (Zorro: 12 job workers
+        // and an audio thread polling an event flag at a full core) slows them. The game keeps the
+        // other CPUs (the PS5 gives games about 6.5 cores). ANYPS5_GUEST_ON_DRIVER_CORES=1 leaves
+        // guest threads on every CPU.
+        static const std::uint64_t guestMask = [] {
+            if (std::getenv("ANYPS5_GUEST_ON_DRIVER_CORES") != nullptr) return std::uint64_t{0};
+            const auto reserved = CpuTopology::DriverReservedMask();
+            if (reserved == 0) return std::uint64_t{0};
+            cpu_set_t process;
+            CPU_ZERO(&process);
+            if (sched_getaffinity(0, sizeof(process), &process) != 0) return std::uint64_t{0};
+            std::uint64_t allowed = 0;
+            for (unsigned cpu = 0; cpu < 64; ++cpu)
+                if (CPU_ISSET(cpu, &process)) allowed |= std::uint64_t{1} << cpu;
+            const auto mask = allowed & ~reserved;
+            if (std::getenv("APS5_TRACE_AFFINITY") != nullptr) std::fprintf(stderr, "[affinity] guest threads -> 0x%llx (driver cores 0x%llx)\n", static_cast<unsigned long long>(mask), static_cast<unsigned long long>(reserved));
+            return mask;
+        }();
+        if (guestMask != 0) {
+            cpu_set_t set;
+            CPU_ZERO(&set);
+            for (unsigned cpu = 0; cpu < 64; ++cpu)
+                if ((guestMask & (std::uint64_t{1} << cpu)) != 0) CPU_SET(cpu, &set);
+            pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+        }
         args->initialized.set_value();
     } catch (...) {
         args->initialized.set_exception(std::current_exception());
