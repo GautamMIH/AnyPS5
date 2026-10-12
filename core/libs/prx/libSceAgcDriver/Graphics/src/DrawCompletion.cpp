@@ -1,3 +1,4 @@
+#include <atomic>
 #include <algorithm>
 #include <cstdlib>
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
@@ -78,7 +79,36 @@ void DrawQueue::RecordMemoryBarrier(const Context& context) {
     workSinceBarrier = false;
 }
 
+namespace {
+std::atomic<bool> deferredMarkers{false};
+}
+
+void DrawQueue::DeferMarkers(bool defer) {
+    deferredMarkers.store(defer, std::memory_order_release);
+}
+
 std::uint64_t DrawQueue::SubmitMarker(const Context& context) {
+    // Hellboy completed ~80 submissions a frame, each with a marker that submitted the batch being
+    // recorded: batches averaged ~13 draws and submissions, fences and command-buffer begins cost the
+    // device thread several ms a frame. With deferred markers the marker rides on the open batch
+    // (reached when it retires) or raises the last submitted batch's; a wait for it submits the open
+    // batch first, and the idle flush submits it when the device thread runs out of work.
+    // ANYPS5_FLUSH_MARKERS=1 submits at every marker.
+    static const bool flushMarkers = std::getenv("ANYPS5_FLUSH_MARKERS") != nullptr;
+    if (!flushMarkers && deferredMarkers.load(std::memory_order_acquire)) {
+        if (recording.commands) {
+            const auto serial = nextMarker++;
+            recording.marker = serial;
+            markers.push_back({serial, nullptr});
+            return serial;
+        }
+        if (!pending.empty() && lastBatchSubmission == CommandBatch::Submissions()) {
+            const auto serial = nextMarker++;
+            pending.back().marker = serial;
+            markers.push_back({serial, nullptr});
+            return serial;
+        }
+    }
     Flush();
     // The last draw batch is the latest submission: its completion is the marker (an empty batch
     // cost a submission and a fence per release and per finished submission).
@@ -109,7 +139,9 @@ void DrawQueue::collectMarkers(bool wait, std::uint64_t serial) {
     while (!markers.empty() && markers.front().serial <= serial) {
         auto& front = markers.front();
         if (!front.commands) {
-            // Carried by a draw batch: reached when that batch retires (batches retire in order).
+            // Carried by a draw batch: reached when that batch retires (batches retire in order). A
+            // wait for one the open batch carries submits it.
+            if (wait && recording.commands && recording.marker >= front.serial) Flush();
             Collect();
             while (wait && retiredMarker < front.serial && !pending.empty()) {
                 pending.front().commands->Wait();

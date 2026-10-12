@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderPreparationScope.hpp"
@@ -565,6 +566,8 @@ private:
         // Out of jobs, the device thread submits the draws it recorded (the batch would otherwise wait
         // for 32 draws or a marker while the GPU idles). ANYPS5_NO_IDLE_FLUSH=1 leaves it recording.
         static const bool idleFlush = std::getenv("ANYPS5_NO_IDLE_FLUSH") == nullptr;
+        // The idle flush submits open batches, so markers may ride on them (DrawQueue::DeferMarkers).
+        Graphics::DrawQueue::DeferMarkers(idleFlush);
         return std::make_unique<DeviceThread>([this](const std::function<void()>& job) {
             std::lock_guard gpuLock(gpuMutex);
             job();

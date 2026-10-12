@@ -467,3 +467,19 @@ Issues that needed research, with a short answer. Check here before researching;
   - True resolution scaling would remap pixel coordinates in shaders, copies, compute and write-back. Instead, pipelines of render passes larger than 1920x1080 shade 2x2 fragments (VK_KHR_fragment_shading_rate, pipeline rate, enabled only with the switch). Targets, coordinates and copies stay at the game's sizes.
   - Fragment shaders that write depth, stencil or the sample mask, run per sample or use interlock stay 1x1 (SPIR-V scan, `CoarseShadingAllowed`).
   - Hellboy gameplay, same area: GPU busy 48 -> 28 ms a frame, frames ~82 -> 62.5 ms; the user found it looked fine. The device thread (~41 ms CPU) and worker (~40 ms) now pace it.
+- **Device thread, batches and dirty ranges (2026-10-12).**
+  - **Flush attribution.** `APS5_TRACE_FLUSHES=1` attributes batch submissions to their caller. In Hellboy, ~19,730 of every 20,000 came from `SubmitMarker`: each of the ~80 submissions a frame completed with a marker that submitted the open batch, so batches averaged ~13 draws.
+  - **Markers ride on the open batch.** With the pipelined driver and idle flush (`DrawQueue::DeferMarkers`), a marker now rides on the batch being recorded, or raises the last submitted batch's. A wait for it submits the open batch, and the idle flush submits it when the device thread runs out of jobs. `ANYPS5_FLUSH_MARKERS=1` submits per marker.
+  - **Dirty ranges cached.** `RenderCache::DirtyRanges` (published after every device job) is recomputed only when `ResidentDirtyGeneration` moves, which is when a surface's dirty state flips or the entry set changes. `ANYPS5_NO_DIRTY_CACHE=1` walks every time; `APS5_VERIFY_DIRTY_CACHE=1` compares (Zorro 3.5M and Hellboy 1.5M cached answers, 0 stale).
+  - **Hellboy (profile, render scale on), sampled ms a frame:**
+
+    | | Before | After |
+    |---|---|---|
+    | SubmitMarker | 1.28 | 0.02 |
+    | Submit | 1.23 | 0.34 |
+    | Flush | 1.29 | 0.41 |
+    | Begin | 2.16 | 1.20 |
+    | Collect + retire | 3.13 | 1.76 |
+    | Device thread | 27.6 | 25.1 |
+
+  - **Zorro:** device thread 15.62 -> 14.85 ms CPU a frame; frame unchanged (the worker paces it).

@@ -1,3 +1,5 @@
+#include <map>
+#include <dlfcn.h>
 #include <cstdio>
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
@@ -172,6 +174,23 @@ void DrawQueue::Flush() {
     // A batch may hold only commands recorded ahead of draws that did not follow (mirror copies,
     // write-backs): it is submitted all the same.
     if (!recording.commands) return;
+    // Debug aid: APS5_TRACE_FLUSHES=1 counts submitted batches by the calling code (module+offset, for
+    // addr2line) every 20000 flushes.
+    static const bool traceFlushes = std::getenv("APS5_TRACE_FLUSHES") != nullptr;
+    if (traceFlushes) {
+        static std::map<std::pair<const void*, const void*>, std::uint64_t> callers;
+        static std::uint64_t flushes = 0;
+        ++callers[{__builtin_return_address(0), nullptr}];
+        if (++flushes % 20000 == 0) {
+            for (const auto& [site, count] : callers) {
+                Dl_info first{}, second{};
+                const auto a = dladdr(site.first, &first) != 0 && first.dli_fbase ? reinterpret_cast<std::uintptr_t>(site.first) - reinterpret_cast<std::uintptr_t>(first.dli_fbase) : 0;
+                const auto b = site.second && dladdr(site.second, &second) != 0 && second.dli_fbase ? reinterpret_cast<std::uintptr_t>(site.second) - reinterpret_cast<std::uintptr_t>(second.dli_fbase) : 0;
+                std::fprintf(stderr, "[flushes] %8llu  +0x%llx <- +0x%llx\n", static_cast<unsigned long long>(count), static_cast<unsigned long long>(a), static_cast<unsigned long long>(b));
+            }
+            callers.clear();
+        }
+    }
     EndPass();
     // The CPU reads what the batch wrote only after its fence: one barrier at the end makes every
     // write visible to the host (draws record none of their own).

@@ -157,6 +157,7 @@ bool ResidentDepth::WriteBackOnGpu() {
         context.drawQueue->NoteGuestWrite(depth.stencilAddress, depth.stencilAddress + depth.stencilBytes, keepAlive);
         WriteTracker::NoteGpuWrite(depth.stencilAddress, depth.stencilBytes);
     }
+    if (dirty != false) NoteResidentChange();
     dirty = false;
     gpuWritePending = true;
     timing.Mark("recorded", depth.depthBytes + depth.stencilBytes);
@@ -245,6 +246,7 @@ void ResidentDepth::Begin(VkCommandBuffer commands) {
     }
     transition(commands, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
     valid = true;
+    if (dirty != true) NoteResidentChange();
     dirty = true;
     gpuWritePending = false;
     ++generation;
@@ -303,6 +305,7 @@ void ResidentDepth::Commit() {
         GuestMemory::WriteThroughAlias(depth.stencilAddress, stencilTiled.data(), stencilTiled.size());
     }
     timing.Mark("guest_write", depth.depthBytes + depth.stencilBytes);
+    if (dirty != false) NoteResidentChange();
     dirty = false;
     protect(GuestMemoryTracking::Protection::Read);
 }
@@ -380,7 +383,7 @@ std::shared_ptr<ResidentDepth> RenderCache::GetDepth(const DepthTarget& depth) {
             if (previous.stencilBytes != 0) Resolve(previous.stencilAddress, previous.stencilBytes, true);
         }
         (*it)->ReleaseMemory();
-        it = depthEntries.erase(it);
+        it = depthEntries.erase(it); NoteResidentChange();
     }
     // A color target overlapping this depth surface holds the same bytes: it goes first.
     for (auto it = entries.begin(); it != entries.end();) {
@@ -392,15 +395,15 @@ std::shared_ptr<ResidentDepth> RenderCache::GetDepth(const DepthTarget& depth) {
         const GuestMemory::AccessSite replaceSite("rt_replace");
         Resolve(it->second->Description().address, it->second->Description().bytes, true);
         it->second->ReleaseMemory();
-        it = entries.erase(it);
+        it = entries.erase(it); NoteResidentChange();
     }
     if (depthEntries.size() >= 16) {
         Flush();
         for (const auto& resident : depthEntries) resident->ReleaseMemory();
-        depthEntries.clear();
+        depthEntries.clear(); NoteResidentChange();
     }
     auto entry = std::make_shared<ResidentDepth>(context, depth);
-    depthEntries.push_back(entry);
+    depthEntries.push_back(entry); NoteResidentChange();
     return entry;
 }
 

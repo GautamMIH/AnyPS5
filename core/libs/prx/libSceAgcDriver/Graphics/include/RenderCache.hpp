@@ -6,6 +6,7 @@
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureDetiler.hpp"
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <optional>
@@ -20,6 +21,11 @@ inline bool TraceRenderTargets() {
     static const bool enabled = std::getenv("APS5_TRACE_RT") != nullptr;
     return enabled;
 }
+
+// Changes whenever a resident surface's dirty state changes or a render cache adds or drops one:
+// RenderCache::DirtyRanges, which the device thread publishes after every job, recomputes only then.
+inline std::atomic<std::uint64_t> ResidentDirtyGeneration{1};
+inline void NoteResidentChange() { ResidentDirtyGeneration.fetch_add(1, std::memory_order_relaxed); }
 
 class ResidentColor : public std::enable_shared_from_this<ResidentColor> {
 public:
@@ -159,6 +165,9 @@ public:
     // Resolve and the page watches act on nothing else (clean surfaces match guest memory and their
     // pages are readable).
     void DirtyRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const;
+    // The last DirtyRanges result and the ResidentDirtyGeneration it was computed at.
+    mutable std::vector<std::pair<std::uint64_t, std::uint64_t>> dirtyCache;
+    mutable std::uint64_t dirtyCacheGeneration = 0;
     // Whether any resident surface (colour, or a depth or stencil plane) overlaps the range.
     bool Overlaps(std::uint64_t address, std::size_t bytes) const;
     void Flush();

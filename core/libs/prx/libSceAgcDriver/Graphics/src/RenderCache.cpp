@@ -73,6 +73,7 @@ void ResidentColor::Begin(VkCommandBuffer commands) {
     }
     Transition(commands, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
     valid = true;
+    if (dirty != true) NoteResidentChange();
     dirty = true;
     gpuWritePending = false;
     memoryWatch->Protect(GuestMemoryTracking::Protection::None);
@@ -114,6 +115,7 @@ bool ResidentColor::WriteBackOnGpu() {
         layered->RecordGpuWriteBack(commands);
         context.drawQueue->NoteGuestWrite(color.address, color.address + color.bytes, shared_from_this());
         WriteTracker::NoteGpuWrite(color.address, color.bytes);
+        if (dirty != false) NoteResidentChange();
         dirty = false;
         gpuWritePending = true;
         timing.Mark("recorded", color.bytes);
@@ -130,6 +132,7 @@ bool ResidentColor::WriteBackOnGpu() {
     // CPU accesses of the range wait for the batch; the texture cache sees the range as written.
     context.drawQueue->NoteGuestWrite(color.address, color.address + layout.Bytes(), shared_from_this());
     WriteTracker::NoteGpuWrite(color.address, layout.Bytes());
+    if (dirty != false) NoteResidentChange();
     dirty = false;
     gpuWritePending = true;
     timing.Mark("recorded", layout.Bytes());
@@ -165,6 +168,7 @@ void ResidentColor::Commit() {
     const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
     if (layered) layered->WriteBackTracked();
     else transfer.WriteBackTracked(color.address);
+    if (dirty != false) NoteResidentChange();
     dirty = false;
     memoryWatch->Protect(GuestMemoryTracking::Protection::Read);
 }
@@ -189,7 +193,7 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         const GuestMemory::AccessSite replaceSite("rt_replace");
         Resolve(previous.address, previous.bytes, true, true);
         it->second->ReleaseMemory();
-        it = entries.erase(it);
+        it = entries.erase(it); NoteResidentChange();
     }
     for (auto it = depthEntries.begin(); it != depthEntries.end();) {
         if (!(*it)->Overlaps(color.address, color.bytes)) {
@@ -201,15 +205,15 @@ std::shared_ptr<ResidentColor> RenderCache::Get(const ColorTarget& color, bool b
         if (previous.depthBytes != 0) Resolve(previous.depthAddress, previous.depthBytes, true);
         if (previous.stencilBytes != 0) Resolve(previous.stencilAddress, previous.stencilBytes, true);
         (*it)->ReleaseMemory();
-        it = depthEntries.erase(it);
+        it = depthEntries.erase(it); NoteResidentChange();
     }
     if (entries.size() >= 64) {
         Flush();
         for (const auto& [address, resident] : entries) resident->ReleaseMemory();
-        entries.clear();
+        entries.clear(); NoteResidentChange();
     }
     auto entry = std::make_shared<ResidentColor>(context, color);
-    entries.emplace(color.address, entry);
+    entries.emplace(color.address, entry); NoteResidentChange();
     largestColor = std::max<std::uint64_t>(largestColor, color.bytes);
     return entry;
 }
@@ -227,6 +231,19 @@ std::shared_ptr<ResidentDepth> RenderCache::FindDepth(std::uint64_t address) con
 }
 
 void RenderCache::DirtyRanges(std::vector<std::pair<std::uint64_t, std::uint64_t>>& ranges) const {
+    // Recomputed only when a surface's dirty state or the entry set changed (ANYPS5_NO_DIRTY_CACHE=1
+    // always walks the entries).
+    static const bool walk = std::getenv("ANYPS5_NO_DIRTY_CACHE") != nullptr;
+    const auto generation = ResidentDirtyGeneration.load(std::memory_order_relaxed);
+    // Debug aid: APS5_VERIFY_DIRTY_CACHE=1 walks the entries anyway and reports a stale cache.
+    static const bool verify = std::getenv("APS5_VERIFY_DIRTY_CACHE") != nullptr;
+    if (!walk && generation == dirtyCacheGeneration && !verify) {
+        ranges.insert(ranges.end(), dirtyCache.begin(), dirtyCache.end());
+        return;
+    }
+    const bool cached = generation == dirtyCacheGeneration;
+    const auto stale = dirtyCache;
+    const auto first = ranges.size();
     for (const auto& [base, entry] : entries) {
         if (entry->Dirty()) ranges.emplace_back(base, base + entry->Description().bytes);
     }
@@ -235,6 +252,19 @@ void RenderCache::DirtyRanges(std::vector<std::pair<std::uint64_t, std::uint64_t
         const auto& depth = entry->Description();
         if (depth.depthBytes != 0) ranges.emplace_back(depth.depthAddress, depth.depthAddress + depth.depthBytes);
         if (depth.stencilBytes != 0) ranges.emplace_back(depth.stencilAddress, depth.stencilAddress + depth.stencilBytes);
+    }
+    dirtyCache.assign(ranges.begin() + static_cast<std::ptrdiff_t>(first), ranges.end());
+    dirtyCacheGeneration = generation;
+    if (verify) {
+        static std::uint64_t checks = 0, mismatches = 0;
+        if (cached) {
+            ++checks;
+            if (stale != dirtyCache) {
+                ++mismatches;
+                std::fprintf(stderr, "[dirty-cache] STALE: cached %zu ranges, walked %zu\n", stale.size(), dirtyCache.size());
+            }
+            if (checks % 100000 == 0) std::fprintf(stderr, "[dirty-cache] %llu cached answers checked, %llu stale\n", static_cast<unsigned long long>(checks), static_cast<unsigned long long>(mismatches));
+        }
     }
 }
 

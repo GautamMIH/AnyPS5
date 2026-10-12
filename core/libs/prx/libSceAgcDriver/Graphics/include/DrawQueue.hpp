@@ -26,6 +26,9 @@ public:
     // or 0 when none does.
     std::uint64_t LastWriter(std::uint64_t address, std::size_t bytes) const;
     void Flush();
+    // Markers may ride on the batch being recorded instead of submitting it (SubmitMarker): only when
+    // something submits an open batch eventually, the pipelined driver's idle flush.
+    static void DeferMarkers(bool defer);
     // The submission-timeline value a CPU access of [address, address + bytes) waits for before
     // Resolve finds the range's writers complete (0: none pending, or no timeline). A batch being
     // recorded that writes the range is submitted first.
