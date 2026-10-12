@@ -61,6 +61,13 @@ void DrawQueue::Wait() {
 }
 
 void DrawQueue::RecordMemoryBarrier(const Context& context) {
+    // Nothing recorded since the last full barrier: this one would order nothing more (host writes
+    // are visible to work submitted after them). ANYPS5_ALL_GPU_BARRIERS=1 records each one.
+    static const bool everyBarrier = std::getenv("ANYPS5_ALL_GPU_BARRIERS") != nullptr;
+    if (!workSinceBarrier && !everyBarrier) {
+        barrierSerial = nextEntrySerial - 1;
+        return;
+    }
     const auto commands = Begin(context);
     VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
@@ -68,6 +75,7 @@ void DrawQueue::RecordMemoryBarrier(const Context& context) {
     context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     recording.hasBarrier = true;
     barrierSerial = nextEntrySerial - 1;
+    workSinceBarrier = false;
 }
 
 std::uint64_t DrawQueue::SubmitMarker(const Context& context) {

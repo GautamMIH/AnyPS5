@@ -1614,10 +1614,17 @@ bool VulkanDevice::RecordDmaData(const Pm4::DmaCopy& dma, std::uint64_t* serial)
         const VkBufferCopy region{source->offset, destination->offset, dma.bytes};
         context.Function<PFN_vkCmdCopyBuffer>("vkCmdCopyBuffer")(commands, source->buffer, destination->buffer, 1, &region);
     }
-    VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
-    barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+    // No barrier after the copy: the destination is noted as a queued GPU write below, so a later GPU
+    // access of it (its range check resolves against the draw queue) records a barrier first, and the
+    // CPU reads it after the batch's fence and its closing host barrier. ~45 DMA/WRITE_DATA a Zorro
+    // frame each drained the GPU here. ANYPS5_DMA_AFTER_BARRIER=1 records it.
+    static const bool afterBarrier = std::getenv("ANYPS5_DMA_AFTER_BARRIER") != nullptr;
+    if (afterBarrier) {
+        VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_HOST_READ_BIT;
+        barrier(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &after, 0, nullptr, 0, nullptr);
+    }
     // CPU accesses of the destination wait for the batch; the texture cache sees it as written.
     static const auto keepAlive = std::make_shared<int>(0);
     const auto written = state->drawQueue->NoteGuestWrite(dma.destination, dma.destination + dma.bytes, keepAlive);

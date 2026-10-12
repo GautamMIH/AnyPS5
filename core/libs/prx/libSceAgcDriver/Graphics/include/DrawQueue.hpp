@@ -119,6 +119,8 @@ private:
     // going (the idea of upstream's PassHazards, 0211ee7c/ecc14b0f: hazards count only against the
     // work since the last barrier). ANYPS5_BARRIER_PER_OVERLAP=1 requests one for every overlap.
     std::uint64_t barrierSerial = 0;
+    // Work was recorded (Begin) since the last full memory barrier (RecordMemoryBarrier).
+    bool workSinceBarrier = true;
 };
 
 }

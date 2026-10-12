@@ -81,6 +81,8 @@ VkCommandBuffer DrawQueue::Begin(const Context& context) {
         barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
         context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(recording.commands->Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
     }
+    // Every recording takes its command buffer here.
+    workSinceBarrier = true;
     return recording.commands->Handle();
 }
 
