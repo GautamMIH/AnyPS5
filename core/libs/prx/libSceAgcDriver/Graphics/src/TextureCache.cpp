@@ -353,7 +353,7 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
                 // Write tracking vouches for the entry from now on, so it keeps no snapshot.
                 if (!it->tracked && !verify) {
                     retainedBytes -= it->snapshot.size();
-                    std::vector<std::byte>().swap(it->snapshot);
+                    TextureSnapshot().swap(it->snapshot);
                     it->tracked = true;
                 }
                 auto result = it->texture;
@@ -413,7 +413,7 @@ create:
     }
     const auto bytes = GuestTextureBytes(resource);
     Require(bytes != 0 && bytes <= std::numeric_limits<std::size_t>::max(), "texture cache surface size overflow");
-    std::vector<std::byte> snapshot(static_cast<std::size_t>(bytes));
+    TextureSnapshot snapshot(static_cast<std::size_t>(bytes));
     const auto aliasGeneration = WriteTracker::AliasWriteGeneration();
     const auto gpuSequence = WriteTracker::GpuWriteSequence();
     const auto cpuGeneration = WriteTracker::CpuMark(resource.baseAddress, bytes);

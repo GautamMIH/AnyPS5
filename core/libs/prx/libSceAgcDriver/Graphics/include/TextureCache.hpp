@@ -6,10 +6,34 @@
 #include <chrono>
 #include <list>
 #include <memory>
+#include <type_traits>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
 namespace AgcDriver::Graphics {
+
+// Allocates without zero-filling: a texture's guest bytes are copied in right after (zero-filling a
+// new texture's copy first doubled the work of a cache miss, ~4 ms for a large texture in a stall).
+template<typename TValue>
+struct UninitializedAllocator : std::allocator<TValue> {
+    template<typename TOther>
+    struct rebind {
+        using other = UninitializedAllocator<TOther>;
+    };
+    UninitializedAllocator() = default;
+    template<typename TOther>
+    UninitializedAllocator(const UninitializedAllocator<TOther>&) noexcept {}
+    template<typename TObject>
+    void construct(TObject* object) noexcept(std::is_nothrow_default_constructible_v<TObject>) {
+        ::new (static_cast<void*>(object)) TObject;
+    }
+    template<typename TObject, typename... TArgs>
+    void construct(TObject* object, TArgs&&... args) {
+        ::new (static_cast<void*>(object)) TObject(std::forward<TArgs>(args)...);
+    }
+};
+using TextureSnapshot = std::vector<std::byte, UninitializedAllocator<std::byte>>;
 
 struct TextureWatch;
 
@@ -45,7 +69,7 @@ private:
     };
     struct Entry {
         Key descriptor;
-        std::vector<std::byte> snapshot;
+        TextureSnapshot snapshot;
         std::shared_ptr<Texture> texture;
         std::weak_ptr<ResidentColor> source;
         // Non-zero for entries copied from a resident target: that target's generation at the copy.
