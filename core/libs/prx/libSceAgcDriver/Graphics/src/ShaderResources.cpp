@@ -1,4 +1,5 @@
 #include <algorithm>
+#include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <optional>
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
@@ -332,6 +333,16 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
 std::size_t ShaderResources::addDataBuffer(std::span<const std::uint32_t> words) {
     const auto size = words.size() * sizeof(std::uint32_t);
     Require(size <= context.limits.maxStorageBufferRange, "shader data buffer exceeds descriptor range limit");
+    // Placed in a chunk shared by queued draws (ANYPS5_DATA_BUFFERS=1: a pooled buffer each).
+    static const bool ownBuffers = std::getenv("ANYPS5_DATA_BUFFERS") != nullptr;
+    if (!ownBuffers && context.drawQueue != nullptr) {
+        auto [chunk, offset] = context.drawQueue->TakeData(context, size);
+        if (chunk) {
+            std::memcpy(chunk->Bytes().data() + offset, words.data(), size);
+            allocations.push_back({0, size, false, nullptr, ShaderRecompiler::DescriptorRole::ShaderData, std::move(chunk), offset});
+            return allocations.size() - 1;
+        }
+    }
     auto buffer = std::make_unique<Buffer>(context, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
     std::memcpy(buffer->Bytes().data(), words.data(), size);
     allocations.push_back({0, size, false, std::move(buffer)});

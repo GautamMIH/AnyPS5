@@ -52,6 +52,9 @@ private:
         bool guest;
         std::unique_ptr<Buffer> buffer;
         ShaderRecompiler::DescriptorRole role = ShaderRecompiler::DescriptorRole::ShaderData;
+        // Shader data placed in a chunk shared with other draws (DrawQueue::TakeData), at chunkOffset.
+        std::shared_ptr<Buffer> chunk;
+        VkDeviceSize chunkOffset = 0;
     };
 
     struct Binding {

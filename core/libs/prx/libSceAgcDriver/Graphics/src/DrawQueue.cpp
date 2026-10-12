@@ -31,6 +31,18 @@ void DrawQueue::EndPass() {
     if (recording.commands) endRenderPass(recording.commands->Handle());
 }
 
+std::pair<std::shared_ptr<Buffer>, VkDeviceSize> DrawQueue::TakeData(const Context& context, std::size_t bytes) {
+    if (bytes == 0 || bytes > DataChunkBytes) return {nullptr, 0};
+    const auto alignment = std::max<VkDeviceSize>(context.limits.minStorageBufferOffsetAlignment, 16);
+    auto offset = (dataChunkUsed + alignment - 1) / alignment * alignment;
+    if (!dataChunk || offset + bytes > DataChunkBytes) {
+        dataChunk = std::make_shared<Buffer>(context, DataChunkBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        offset = 0;
+    }
+    dataChunkUsed = offset + bytes;
+    return {dataChunk, offset};
+}
+
 VkCommandBuffer DrawQueue::Begin(const Context& context) {
     EndPass();
     if (pipelineBarrier == nullptr) pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");

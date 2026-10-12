@@ -10,6 +10,11 @@ namespace AgcDriver::Graphics {
 class DrawQueue {
 public:
     ~DrawQueue();
+    // Room for `bytes` of shader data in a chunk shared by queued work (one pooled host-visible
+    // buffer per DataChunkBytes instead of one per data buffer): the chunk, which returns to the
+    // buffer pool once the last work holding it retires, and the offset. Null when it does not fit.
+    static constexpr std::size_t DataChunkBytes = 1u << 20u;
+    std::pair<std::shared_ptr<Buffer>, VkDeviceSize> TakeData(const Context& context, std::size_t bytes);
     VkCommandBuffer Begin(const Context& context);
     void Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_ptr<void> storage);
     // A GPU write of guest memory recorded in the current batch that is not a draw (a resident
@@ -119,6 +124,8 @@ private:
     // going (the idea of upstream's PassHazards, 0211ee7c/ecc14b0f: hazards count only against the
     // work since the last barrier). ANYPS5_BARRIER_PER_OVERLAP=1 requests one for every overlap.
     std::uint64_t barrierSerial = 0;
+    std::shared_ptr<Buffer> dataChunk;
+    std::size_t dataChunkUsed = 0;
     // Work was recorded (Begin) since the last full memory barrier (RecordMemoryBarrier).
     bool workSinceBarrier = true;
 };
