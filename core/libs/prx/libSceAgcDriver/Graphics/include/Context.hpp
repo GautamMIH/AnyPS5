@@ -77,6 +77,10 @@ struct Context {
     // VK_KHR_timeline_semaphore: every command batch signals its submission number on it, so a
     // thread can wait for a batch without the locks that guard the batch (null without the feature).
     VkSemaphore submitTimeline = VK_NULL_HANDLE;
+    // Opt-in render scale (ANYPS5_RENDER_SCALE=0.5): render passes larger than coarseMinExtent shade
+    // one fragment per coarseShading block (VK_KHR_fragment_shading_rate); {1, 1} when off.
+    VkExtent2D coarseShading{1, 1};
+    VkExtent2D coarseMinExtent{1920, 1080};
     bool depthBounds = false;
     bool depthBiasClamp = false;
     bool independentBlend = false;

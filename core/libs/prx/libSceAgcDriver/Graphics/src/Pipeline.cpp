@@ -166,6 +166,33 @@ void ValidateDynamicState(const Context& context, const State& state) {
     Require(!state.hasDepthTarget || !state.depthState.depthBias || state.depthState.depthBiasClamp == 0.0f || context.depthBiasClamp, "clamped depth bias requires the depthBiasClamp device feature");
 }
 
+bool CoarseShadingAllowed(std::span<const std::uint32_t> spirv) {
+    // Fragment shaders that write depth, stencil or the sample mask, run per sample or use interlock
+    // keep 1x1 shading (Vulkan restricts coarse shading with them).
+    for (std::size_t cursor = 5; cursor < spirv.size();) {
+        const auto words = spirv[cursor] >> 16u;
+        const auto opcode = spirv[cursor] & 0xffffu;
+        if (words == 0 || cursor + words > spirv.size()) return false;
+        if (opcode == 17u && words >= 2) {
+            const auto capability = spirv[cursor + 1];
+            if (capability == 35u || capability == 5363u || capability == 5372u || capability == 5378u || capability == 5013u) return false;
+        }
+        if (opcode == 71u && words >= 4 && spirv[cursor + 2] == 11u) {
+            const auto builtIn = spirv[cursor + 3];
+            if (builtIn == 22u || builtIn == 20u || builtIn == 5014u || builtIn == 18u || builtIn == 19u) return false;
+        }
+        cursor += words;
+    }
+    return true;
+}
+
+bool CoarseShading(const Context& context, const State& state, std::span<const CompiledShader> shaders) {
+    if (context.coarseShading.width <= 1 || state.renderExtent.width <= context.coarseMinExtent.width || state.renderExtent.height <= context.coarseMinExtent.height) return false;
+    for (const auto& shader : shaders)
+        if (shader.stage == ShaderRecompiler::ShaderStage::Fragment) return CoarseShadingAllowed(static_cast<const std::vector<std::uint32_t>&>(shader.program->spirv));
+    return false;
+}
+
 GraphicsPipeline::GraphicsPipeline(const Context& context, const State& state, const RenderPass& renderPass, const ShaderResources& resources, std::span<const CompiledShader> shaders) : context(context), _modules(shaders.size()), depthStencil(state.hasDepthTarget) {
     const auto slots = state.ColorSlotCount();
     const auto sameBlend = [](const VkPipelineColorBlendAttachmentState& a, const VkPipelineColorBlendAttachmentState& b) {
@@ -300,6 +327,14 @@ GraphicsPipeline::GraphicsPipeline(const Context& context, const State& state, c
         }
         pipelineInfo.layout = layout;
         pipelineInfo.renderPass = renderPass.Handle();
+        VkPipelineFragmentShadingRateStateCreateInfoKHR shadingRate{VK_STRUCTURE_TYPE_PIPELINE_FRAGMENT_SHADING_RATE_STATE_CREATE_INFO_KHR};
+        if (CoarseShading(context, state, shaders)) {
+            shadingRate.fragmentSize = context.coarseShading;
+            shadingRate.combinerOps[0] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+            shadingRate.combinerOps[1] = VK_FRAGMENT_SHADING_RATE_COMBINER_OP_KEEP_KHR;
+            shadingRate.pNext = pipelineInfo.pNext;
+            pipelineInfo.pNext = &shadingRate;
+        }
         Check(context.Function<PFN_vkCreateGraphicsPipelines>("vkCreateGraphicsPipelines")(context.device, context.pipelineCache, 1, &pipelineInfo, nullptr, &pipeline), "vkCreateGraphicsPipelines");
         // The modules are not needed once the pipeline exists (upstream d31100a0).
         for (auto& module : _modules) {

@@ -462,3 +462,8 @@ Issues that needed research, with a short answer. Check here before researching;
   - GPU waits at dispatch captures went from 500–740 to 3 ms per 10 s, and at draw captures from 700–1,070 to 160 ms. Decode went 68.7 -> 61.7 ms.
   - The wait moved to the device thread (draw captures waiting on its jobs, ~1.2 s per 10 s) and the GPU tail grew to 17 ms.
 - **Left.** The device thread (~49 ms CPU a frame) and the GPU (~48 ms at 4K) now pace Hellboy.
+- **Render scale, stage 1 (opt-in, `ANYPS5_RENDER_SCALE=0.5`).** Neither KytyPS5 nor shadPS4 has a way to lower a game's internal resolution.
+  - KytyPS5 reports a 4K output unless param.json `attribute3 & 0x4` opts in to detection. Hellboy's 0x1004 does, and we report 1080p, as Kyty would. It still renders 3840x2160 by its own design.
+  - True resolution scaling would remap pixel coordinates in shaders, copies, compute and write-back. Instead, pipelines of render passes larger than 1920x1080 shade 2x2 fragments (VK_KHR_fragment_shading_rate, pipeline rate, enabled only with the switch). Targets, coordinates and copies stay at the game's sizes.
+  - Fragment shaders that write depth, stencil or the sample mask, run per sample or use interlock stay 1x1 (SPIR-V scan, `CoarseShadingAllowed`).
+  - Hellboy gameplay, same area: GPU busy 48 -> 28 ms a frame, frames ~82 -> 62.5 ms; the user found it looked fine. The device thread (~41 ms CPU) and worker (~40 ms) now pace it.

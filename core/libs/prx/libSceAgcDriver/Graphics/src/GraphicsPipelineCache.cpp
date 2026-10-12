@@ -65,6 +65,8 @@ std::string makeKey(const Context& context, const State& state, const ShaderReso
     std::string key;
     key.reserve(512);
     append(key, state.colorTargetMask);
+    // Opt-in render scale: passes larger than coarseMinExtent may shade coarsely (Pipeline.cpp).
+    append(key, context.coarseShading.width > 1 && state.renderExtent.width > context.coarseMinExtent.width && state.renderExtent.height > context.coarseMinExtent.height);
     for (const auto word : RenderPass::FormatKey(state)) append(key, word);
     append(key, state.hasDepthTarget);
     if (state.hasDepthTarget) {

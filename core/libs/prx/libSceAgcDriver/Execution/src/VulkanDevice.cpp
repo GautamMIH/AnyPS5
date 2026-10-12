@@ -167,6 +167,9 @@ struct VulkanDevice::State {
     bool maintenance8 = false;
     // VK_KHR_timeline_semaphore: command batches signal their submission number (Graphics::Context).
     bool timelineSemaphore = false;
+    // ANYPS5_RENDER_SCALE=0.5 with VK_KHR_fragment_shading_rate (pipeline rate): coarse shading of
+    // render passes larger than 1080p (Graphics::Context::coarseShading).
+    VkExtent2D coarseShading{1, 1};
     VkSemaphore submitTimeline = VK_NULL_HANDLE;
     PFN_vkWaitSemaphoresKHR waitSemaphores = nullptr;
     // VK_KHR_shader_clock (s_memtime, upstream 1043f90d).
@@ -836,6 +839,24 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     }
     timelineFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR};
     timelineFeatures.timelineSemaphore = VK_TRUE;
+    // Opt-in render scale: only 0.5 (2x2 fragments) for now.
+    VkPhysicalDeviceFragmentShadingRateFeaturesKHR shadingRateFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR};
+    if (const char* scale = std::getenv("ANYPS5_RENDER_SCALE"); scale != nullptr && std::string(scale) == "0.5") {
+        if (hasExtension(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME) && hasExtension(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME)) {
+            VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &shadingRateFeatures};
+            state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        }
+        if (shadingRateFeatures.pipelineFragmentShadingRate == VK_TRUE) {
+            deviceExtensions.push_back(VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME);
+            deviceExtensions.push_back(VK_KHR_FRAGMENT_SHADING_RATE_EXTENSION_NAME);
+            state->coarseShading = {2, 2};
+            std::fprintf(stderr, "[AnyPS5] render scale 0.5: 2x2 fragment shading above 1920x1080\n");
+        } else {
+            std::fprintf(stderr, "[AnyPS5] ANYPS5_RENDER_SCALE: the device has no pipeline fragment shading rate; ignored\n");
+        }
+    }
+    shadingRateFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR};
+    shadingRateFeatures.pipelineFragmentShadingRate = VK_TRUE;
     listRestartFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT};
     listRestartFeatures.primitiveTopologyListRestart = state->primitiveListRestart ? VK_TRUE : VK_FALSE;
     // PROVOKING_VTX_LAST (upstream 3a8cf3a3).
@@ -1009,6 +1030,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     if (state->timelineSemaphore) {
         timelineFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &timelineFeatures;
+    }
+    if (state->coarseShading.width > 1) {
+        shadingRateFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
+        deviceInfo.pNext = &shadingRateFeatures;
     }
     byteFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
     if (state->fragmentShaderBarycentric) {
@@ -1526,6 +1551,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
         state->samplerCache
     };
     context.submitTimeline = state->submitTimeline;
+    context.coarseShading = state->coarseShading;
     context.depthBounds = state->depthBounds;
     context.depthBiasClamp = state->depthBiasClamp;
     context.independentBlend = state->independentBlend;
