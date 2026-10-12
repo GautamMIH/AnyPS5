@@ -1,5 +1,6 @@
 #include "SpirvBackend/SpirvEmitterInstructions.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvSubgroup.hpp"
+#include "IntermediateRepresentation/IrBlock.hpp"
 #include "IntermediateRepresentation/IrValue.hpp"
 #include <spirv/unified1/GLSL.std.450.h>
 #include <spirv/unified1/spirv.hpp>
@@ -252,8 +253,31 @@ struct HalfWaveScan {
     const IrValue* source = nullptr;
 };
 
+const IrValue* StoredWindowValue(const IrValue* load) {
+    const auto* slot = load->Argument(0)->Resolve();
+    const auto* block = load->Parent();
+    if (slot == nullptr || !slot->HasImmediate() || block == nullptr) return nullptr;
+    const auto& instructions = block->Instructions();
+    auto at = std::find(instructions.begin(), instructions.end(), load);
+    if (at == instructions.end()) return nullptr;
+    while (at != instructions.begin()) {
+        const auto* previous = *--at;
+        if (previous->HasImmediate() || previous->Opcode() != IrOpcode::StoreVectorWindow) continue;
+        const auto* stored = previous->Argument(0)->Resolve();
+        if (stored == nullptr || !stored->HasImmediate()) return nullptr;
+        if (stored->ImmediateU32() == slot->ImmediateU32()) return previous->Argument(1)->Resolve();
+    }
+    return nullptr;
+}
+
 const IrValue* Resolved(const IrValue* value) {
-    return value != nullptr ? value->Resolve() : nullptr;
+    value = value != nullptr ? value->Resolve() : nullptr;
+    while (value != nullptr && !value->HasImmediate() && value->Opcode() == IrOpcode::LoadVectorWindow) {
+        const auto* stored = StoredWindowValue(value);
+        if (stored == nullptr) break;
+        value = stored;
+    }
+    return value;
 }
 
 bool Is(const IrValue* value, IrOpcode opcode) {
