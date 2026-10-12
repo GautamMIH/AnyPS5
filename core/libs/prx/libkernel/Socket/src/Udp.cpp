@@ -216,8 +216,9 @@ void GuestAddress(const sockaddr_storage& native, void* output, std::uint32_t* l
         std::memcpy(bytes + 8, &v6.sin6_addr, 16);
         std::memcpy(bytes + 24, &v6.sin6_scope_id, 4);
     }
-    std::memcpy(output, bytes, std::min<std::uint32_t>(*length, bytes[0]));
-    *length = bytes[0];
+    const auto copied = std::min<std::uint32_t>(*length, bytes[0]);
+    std::memcpy(output, bytes, copied);
+    *length = copied;
 }
 }
 
