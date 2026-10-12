@@ -12,6 +12,9 @@
 
 namespace AgcDriver::Graphics {
 
+// Command buffers begun (CommandBatch::Begins).
+std::atomic<std::uint64_t> beginCount{0};
+
 Buffer::Buffer(const Context& context, std::size_t size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties) : context(context), size(size), usage(usage), properties(properties) {
     Require(size != 0, "zero-sized GPU buffer");
     const bool addressable = (usage & VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT) != 0;
@@ -240,6 +243,7 @@ CommandBatch::CommandBatch(const Context& context) : context(context) {
             VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
             begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             Check(context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer recycled batch");
+            beginCount.fetch_add(1, std::memory_order_relaxed);
             beginTiming();
             return;
         }
@@ -253,6 +257,7 @@ CommandBatch::CommandBatch(const Context& context) : context(context) {
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
         begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         Check(context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer");
+        beginCount.fetch_add(1, std::memory_order_relaxed);
         beginTiming();
     } catch (...) {
         release();
@@ -295,11 +300,16 @@ void CommandBatch::Reset() {
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     Check(context.Function<PFN_vkBeginCommandBuffer>("vkBeginCommandBuffer")(commands, &begin), "vkBeginCommandBuffer graphics");
     submitted = false;
+    beginCount.fetch_add(1, std::memory_order_relaxed);
     beginTiming();
 }
 
 namespace {
 std::atomic<std::uint64_t> submissionCount{0};
+}
+
+std::uint64_t CommandBatch::Begins() {
+    return beginCount.load(std::memory_order_relaxed);
 }
 
 std::uint64_t CommandBatch::Submissions() {

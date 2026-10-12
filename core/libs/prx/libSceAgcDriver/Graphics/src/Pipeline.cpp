@@ -3,6 +3,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include <algorithm>
 #include <array>
+#include <cstdlib>
+#include <cstring>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -322,29 +324,75 @@ void GraphicsPipeline::release() noexcept {
     }
 }
 
+namespace {
+
+// What the command buffer being recorded already has bound: the pipeline and its dynamic state.
+// Consecutive draws often repeat them (merged passes), and each vkCmd* is a driver call. Valid for
+// one command buffer recording (CommandBatch::Begins); the depth and stencil values only while
+// pipelines with them dynamic are bound (one without leaves them undefined). This is the only
+// graphics pipeline bind (other binds are compute, which keeps graphics state).
+struct BoundGraphicsState {
+    VkCommandBuffer commands = VK_NULL_HANDLE;
+    std::uint64_t begins = ~std::uint64_t{0};
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    bool fixed = false;
+    VkViewport viewport{};
+    VkRect2D scissor{};
+    std::array<float, 4> blend{};
+    bool depth = false;
+    std::array<float, 3> bias{};
+    std::array<float, 2> bounds{};
+    std::array<std::uint32_t, 6> stencil{};
+};
+
+}
+
 void GraphicsPipeline::Bind(VkCommandBuffer commands, const State& state) const {
-    context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-    context.Function<PFN_vkCmdSetViewport>("vkCmdSetViewport")(commands, 0, 1, &state.viewport);
-    context.Function<PFN_vkCmdSetScissor>("vkCmdSetScissor")(commands, 0, 1, &state.scissor);
-    context.Function<PFN_vkCmdSetBlendConstants>("vkCmdSetBlendConstants")(commands, state.blendConstants.data());
-    if (!depthStencil) return;
-    const auto& depthState = state.depthState;
-    if (depthState.depthBias) context.Function<PFN_vkCmdSetDepthBias>("vkCmdSetDepthBias")(commands, depthState.depthBiasConstant, depthState.depthBiasClamp, depthState.depthBiasSlope);
-    else context.Function<PFN_vkCmdSetDepthBias>("vkCmdSetDepthBias")(commands, 0.0f, 0.0f, 0.0f);
-    if (context.depthBounds) {
-        // Without the test the bounds are unused; without VK_EXT_depth_range_unrestricted they must lie in [0, 1].
-        const bool clamp = !context.depthRangeUnrestricted;
-        const auto minBounds = !depthState.depthBounds ? 0.0f : clamp ? std::clamp(depthState.minDepthBounds, 0.0f, 1.0f) : depthState.minDepthBounds;
-        const auto maxBounds = !depthState.depthBounds ? 1.0f : clamp ? std::clamp(depthState.maxDepthBounds, 0.0f, 1.0f) : depthState.maxDepthBounds;
-        context.Function<PFN_vkCmdSetDepthBounds>("vkCmdSetDepthBounds")(commands, minBounds, maxBounds);
+    thread_local BoundGraphicsState bound;
+    static const bool rebind = std::getenv("ANYPS5_REBIND_STATE") != nullptr;
+    const auto begins = CommandBatch::Begins();
+    if (rebind || bound.commands != commands || bound.begins != begins) {
+        bound = {};
+        bound.commands = commands;
+        bound.begins = begins;
     }
-    const auto setStencil = [&](VkStencilFaceFlags face, const VkStencilOpState& stencil) {
-        context.Function<PFN_vkCmdSetStencilCompareMask>("vkCmdSetStencilCompareMask")(commands, face, stencil.compareMask);
-        context.Function<PFN_vkCmdSetStencilWriteMask>("vkCmdSetStencilWriteMask")(commands, face, stencil.writeMask);
-        context.Function<PFN_vkCmdSetStencilReference>("vkCmdSetStencilReference")(commands, face, stencil.reference);
+    if (bound.pipeline != pipeline) {
+        context.Function<PFN_vkCmdBindPipeline>("vkCmdBindPipeline")(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        bound.pipeline = pipeline;
+    }
+    const std::array<float, 4> blend{state.blendConstants[0], state.blendConstants[1], state.blendConstants[2], state.blendConstants[3]};
+    if (!bound.fixed || std::memcmp(&bound.viewport, &state.viewport, sizeof(VkViewport)) != 0) context.Function<PFN_vkCmdSetViewport>("vkCmdSetViewport")(commands, 0, 1, &state.viewport);
+    if (!bound.fixed || std::memcmp(&bound.scissor, &state.scissor, sizeof(VkRect2D)) != 0) context.Function<PFN_vkCmdSetScissor>("vkCmdSetScissor")(commands, 0, 1, &state.scissor);
+    if (!bound.fixed || std::memcmp(bound.blend.data(), blend.data(), sizeof(blend)) != 0) context.Function<PFN_vkCmdSetBlendConstants>("vkCmdSetBlendConstants")(commands, state.blendConstants.data());
+    bound.fixed = true;
+    bound.viewport = state.viewport;
+    bound.scissor = state.scissor;
+    bound.blend = blend;
+    if (!depthStencil) {
+        bound.depth = false;
+        return;
+    }
+    const auto& depthState = state.depthState;
+    const std::array<float, 3> bias = depthState.depthBias ? std::array<float, 3>{depthState.depthBiasConstant, depthState.depthBiasClamp, depthState.depthBiasSlope} : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+    // Without the test the bounds are unused; without VK_EXT_depth_range_unrestricted they must lie in [0, 1].
+    const bool clamp = !context.depthRangeUnrestricted;
+    const std::array<float, 2> bounds{!depthState.depthBounds ? 0.0f : clamp ? std::clamp(depthState.minDepthBounds, 0.0f, 1.0f) : depthState.minDepthBounds,
+        !depthState.depthBounds ? 1.0f : clamp ? std::clamp(depthState.maxDepthBounds, 0.0f, 1.0f) : depthState.maxDepthBounds};
+    const std::array<std::uint32_t, 6> stencil{depthState.front.compareMask, depthState.front.writeMask, depthState.front.reference, depthState.back.compareMask, depthState.back.writeMask, depthState.back.reference};
+    const bool all = !bound.depth;
+    if (all || std::memcmp(bound.bias.data(), bias.data(), sizeof(bias)) != 0) context.Function<PFN_vkCmdSetDepthBias>("vkCmdSetDepthBias")(commands, bias[0], bias[1], bias[2]);
+    if (context.depthBounds && (all || std::memcmp(bound.bounds.data(), bounds.data(), sizeof(bounds)) != 0)) context.Function<PFN_vkCmdSetDepthBounds>("vkCmdSetDepthBounds")(commands, bounds[0], bounds[1]);
+    const auto setStencil = [&](VkStencilFaceFlags face, std::size_t first) {
+        if (all || bound.stencil[first] != stencil[first]) context.Function<PFN_vkCmdSetStencilCompareMask>("vkCmdSetStencilCompareMask")(commands, face, stencil[first]);
+        if (all || bound.stencil[first + 1] != stencil[first + 1]) context.Function<PFN_vkCmdSetStencilWriteMask>("vkCmdSetStencilWriteMask")(commands, face, stencil[first + 1]);
+        if (all || bound.stencil[first + 2] != stencil[first + 2]) context.Function<PFN_vkCmdSetStencilReference>("vkCmdSetStencilReference")(commands, face, stencil[first + 2]);
     };
-    setStencil(VK_STENCIL_FACE_FRONT_BIT, depthState.front);
-    setStencil(VK_STENCIL_FACE_BACK_BIT, depthState.back);
+    setStencil(VK_STENCIL_FACE_FRONT_BIT, 0);
+    setStencil(VK_STENCIL_FACE_BACK_BIT, 3);
+    bound.depth = true;
+    bound.bias = bias;
+    bound.bounds = bounds;
+    bound.stencil = stencil;
 }
 
 void Pipeline::Begin(VkCommandBuffer commands, const State& state) const {

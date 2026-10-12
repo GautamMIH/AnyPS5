@@ -185,6 +185,8 @@ public:
     void Submit();
     // Submissions of any command batch so far (one queue: later submissions complete later).
     static std::uint64_t Submissions();
+    // Command buffers begun so far (any batch): state recorded before a begin is gone after it.
+    static std::uint64_t Begins();
     void Wait();
     bool IsComplete();
     void Reset();
