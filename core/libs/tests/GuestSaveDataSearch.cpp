@@ -30,10 +30,22 @@ static void SearchAndMount() {
     SaveDataDirNameSearchResult result{};
     result.dir_names = reinterpret_cast<SceSaveDataDirName*>(buffer.data());
     result.dir_names_num = 2;
+    alignas(SaveDataSearchInfo) std::array<unsigned char, 112> infos;
+    infos.fill(0x21);
+    result.infos = reinterpret_cast<SaveDataSearchInfo*>(infos.data());
     Require(sceSaveDataDirNameSearch(&cond, &result) == 0, "search failed");
     Require(result.hit_num == 2 && result.set_num == 2, "search must return both saves");
     for (std::size_t i = 64; i < buffer.size(); ++i) {
         Require(buffer[i] == '!', "directory search overran two 32-byte guest records");
+    }
+    for (std::size_t i = 96; i < infos.size(); ++i) {
+        Require(infos[i] == 0x21, "directory search overran two 48-byte search infos");
+    }
+    for (std::size_t i = 0; i < 2; ++i) {
+        SaveDataSearchInfo info{};
+        std::memcpy(&info, infos.data() + i * 48, sizeof(info));
+        Require(info.blocks == 32768 && info.free_blocks == 32768, "search info must report the save's blocks and free blocks");
+        for (const auto byte : info.reserved) Require(byte == 0, "search info reserved bytes must be zero");
     }
     std::array<bool, 2> found{};
     for (int i = 0; i < 2; ++i) {

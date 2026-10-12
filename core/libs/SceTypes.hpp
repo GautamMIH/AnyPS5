@@ -1411,7 +1411,12 @@ struct SaveDataMountInfo {
 
 struct SceSaveDataTitleId { char data[10]; char pad[2]; };
 struct SceSaveDataDirName { char data[32]; };
-struct SaveDataSearchInfo { std::uint8_t opaque[128]; };
+struct SaveDataSearchInfo {
+    std::uint64_t blocks;
+    std::uint64_t free_blocks;
+    std::uint8_t reserved[32];
+};
+static_assert(sizeof(SaveDataSearchInfo) == 48);
 struct SaveDataMemoryData { void* buf; std::size_t buf_size; std::size_t offset; };
 
 struct SaveDataMount3 {

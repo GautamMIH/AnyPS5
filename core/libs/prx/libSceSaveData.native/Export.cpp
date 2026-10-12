@@ -316,6 +316,9 @@ static int dirNameSearch(const SaveDataDirNameSearchCond* cond, SaveDataDirNameS
             }
             set++;
         }
+        if (result->infos != nullptr) {
+            result->infos[i] = SaveDataSearchInfo{SAVE_DATA_BLOCKS_MAX, SAVE_DATA_BLOCKS_MAX, {}};
+        }
     }
     result->hit_num = hit;
     result->set_num = set;
