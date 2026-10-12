@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdlib>
 #include <iterator>
@@ -96,6 +97,17 @@ struct State {
 
     LastWrites aliasWrites;
     std::atomic<std::uint64_t> aliasGeneration{0};
+
+    // Lock-free filter for GpuWrittenSince: the sequence of the last GPU write per 2 MiB region,
+    // in a hashed table (regions sharing a slot share the newest sequence: never too old). A read
+    // whose regions saw nothing newer answers without the mutex (the device thread notes GPU
+    // writes under it while the worker checks ranges ~12k times a frame). Writes spanning more
+    // than WideRegions regions bump `wideGpuSequence` instead. Stored before gpuSequence is published.
+    static constexpr std::uint64_t RegionShift = 21;
+    static constexpr std::size_t RegionSlots = 1u << 16u;
+    static constexpr std::uint64_t WideRegions = 4096;
+    std::array<std::atomic<std::uint64_t>, RegionSlots> gpuRegions{};
+    std::atomic<std::uint64_t> wideGpuSequence{0};
 
     std::atomic<WriteListener> listener{nullptr};
     std::atomic<void*> listenerContext{nullptr};
@@ -240,6 +252,10 @@ void NoteGpuWrite(std::uint64_t address, std::uint64_t bytes) {
     std::lock_guard lock(tracker.mutex);
     const auto sequence = tracker.gpuSequence.load(std::memory_order_relaxed) + 1;
     tracker.gpuWrites.Note(begin, end, sequence);
+    const auto firstRegion = begin >> State::RegionShift;
+    const auto lastRegion = (end - 1) >> State::RegionShift;
+    if (lastRegion - firstRegion >= State::WideRegions) tracker.wideGpuSequence.store(sequence, std::memory_order_relaxed);
+    else for (auto region = firstRegion; region <= lastRegion; ++region) tracker.gpuRegions[region % State::RegionSlots].store(sequence, std::memory_order_relaxed);
     tracker.gpuSequence.store(sequence, std::memory_order_release);
     auto& ranges = tracker.gpuRanges;
     auto it = ranges.upper_bound(begin);
@@ -261,6 +277,17 @@ std::uint64_t GpuWriteSequence() {
 bool GpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t sequence) {
     auto& tracker = state();
     if (tracker.gpuSequence.load(std::memory_order_acquire) == sequence) return false;
+    // ANYPS5_NO_GPU_WRITE_FILTER=1 always asks the map.
+    static const bool noFilter = std::getenv("ANYPS5_NO_GPU_WRITE_FILTER") != nullptr;
+    if (!noFilter && bytes != 0 && tracker.wideGpuSequence.load(std::memory_order_relaxed) <= sequence) {
+        const auto firstRegion = address >> State::RegionShift;
+        const auto lastRegion = (address + bytes - 1) >> State::RegionShift;
+        if (lastRegion - firstRegion < State::WideRegions) {
+            bool newer = false;
+            for (auto region = firstRegion; region <= lastRegion && !newer; ++region) newer = tracker.gpuRegions[region % State::RegionSlots].load(std::memory_order_relaxed) > sequence;
+            if (!newer) return false;
+        }
+    }
     std::lock_guard lock(tracker.mutex);
     return tracker.gpuWrites.Since(address, address + bytes, sequence);
 }

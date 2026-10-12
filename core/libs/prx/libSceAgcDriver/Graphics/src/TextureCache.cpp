@@ -294,7 +294,17 @@ std::shared_ptr<Texture> TextureCache::Get(std::span<const std::uint32_t> words,
                 return std::array<std::uint64_t, 6>{WriteTracker::Epoch(), WriteTracker::GpuWriteSequence(), WriteTracker::DriverWriteSequence(), WriteTracker::AliasWriteGeneration(), WriteTracker::DeferredGpuWrites(), GuestMemoryBacking::GuestMemoryBackingGeneration_nid_postfix()};
             };
             const auto counters = writeCounters();
-            const bool fast = !noFastPath && it->validated && it->validatedAt == counters && !(context.renderCache && context.renderCache->Overlaps(resource.baseAddress, static_cast<std::size_t>(it->bytes)));
+            // GPU writes are checked over the entry's own range (any GPU write anywhere moved the
+            // global sequence, so the fast path seldom held). ANYPS5_TEXTURE_FAST_GLOBAL_GPU=1 keys
+            // on the global sequence.
+            static const bool globalGpu = std::getenv("ANYPS5_TEXTURE_FAST_GLOBAL_GPU") != nullptr;
+            const auto sameCounters = [&] {
+                if (globalGpu) return it->validatedAt == counters;
+                for (std::size_t index = 0; index < counters.size(); ++index)
+                    if (index != 1 && it->validatedAt[index] != counters[index]) return false;
+                return it->validatedAt[1] == counters[1] || !WriteTracker::GpuWrittenSince(resource.baseAddress, it->bytes, it->validatedAt[1]);
+            };
+            const bool fast = !noFastPath && it->validated && sameCounters() && !(context.renderCache && context.renderCache->Overlaps(resource.baseAddress, static_cast<std::size_t>(it->bytes)));
             if (fast && !verifyFastPath) {
                 timing.Mark("fast_path");
                 auto result = it->texture;
