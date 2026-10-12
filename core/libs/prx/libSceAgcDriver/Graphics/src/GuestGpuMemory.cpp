@@ -1,4 +1,6 @@
+#include <chrono>
 #include "prx/libSceAgcDriver/Graphics/include/GuestGpuMemory.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libc/include/GuestMemoryBacking.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
@@ -18,6 +20,22 @@ constexpr std::uint64_t kChunkBytes = 32ull << 20;
 constexpr std::uint64_t kMirrorPageShift = 16;
 // Ranges up to this size are read through the mirror.
 constexpr std::uint64_t kMirrorMaxRange = 8ull << 20;
+// A range with a page written this recently is read in place: data the game rewrites every frame
+// (constants, streamed vertices) would otherwise be copied before every use, each copy behind full
+// barriers (Hellboy: GPU 48 -> 70 ms a frame with every stale page copied). Static data (meshes,
+// indices) is copied once and read from device memory, as KytyPS5's buffer cache keeps it.
+// ANYPS5_MIRROR_DYNAMIC_MS sets the window (0 copies every stale page, as before).
+std::uint32_t dynamicWindowMs() {
+    static const std::uint32_t window = [] {
+        const char* value = std::getenv("ANYPS5_MIRROR_DYNAMIC_MS");
+        return value != nullptr ? static_cast<std::uint32_t>(std::strtoul(value, nullptr, 10)) : 500u;
+    }();
+    return window;
+}
+
+std::uint32_t nowMs() {
+    return static_cast<std::uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
 
 }
 
@@ -81,7 +99,11 @@ void GuestGpuMemory::invalidate(std::uint64_t address, std::uint64_t bytes) {
             if (import.current.empty() || last <= first || begin >= import.end) return;
             const auto from = (std::max(begin, first) - first) >> kMirrorPageShift;
             const auto to = (std::min(last, import.end) - first - 1) >> kMirrorPageShift;
-            for (auto page = from; page <= to && page < import.current.size(); ++page) import.current[page] = false;
+            const auto now = nowMs();
+            for (auto page = from; page <= to && page < import.current.size(); ++page) {
+                import.current[page] = false;
+                if (page < import.written.size()) import.written[page] = now;
+            }
         };
         for (auto& [key, import] : imports)
             if (key.first == translation.segment) clear(import, key.second);
@@ -89,10 +111,10 @@ void GuestGpuMemory::invalidate(std::uint64_t address, std::uint64_t bytes) {
     }
 }
 
-std::optional<GuestGpuMemory::View> GuestGpuMemory::ResolveRead(std::uint64_t address, std::uint64_t bytes, VkCommandBuffer commands) {
+std::optional<GuestGpuMemory::View> GuestGpuMemory::ResolveRead(std::uint64_t address, std::uint64_t bytes, DrawQueue* queue) {
     // Large ranges (heaps bound whole, of which a draw reads little) are read in place: copying
     // every stale page would move far more than the shader reads.
-    if (!mirrorEnabled || commands == VK_NULL_HANDLE || bytes > kMirrorMaxRange) return Resolve(address, bytes);
+    if (!mirrorEnabled || queue == nullptr || bytes > kMirrorMaxRange) return Resolve(address, bytes);
     // Collected before the lock: collecting reports CPU writes to invalidate (which locks).
     if (!WriteTracker::CpuCollect(address, bytes)) {
         static const bool traceMirror = std::getenv("APS5_TRACE_MIRROR") != nullptr;
@@ -119,6 +141,13 @@ std::optional<GuestGpuMemory::View> GuestGpuMemory::ResolveRead(std::uint64_t ad
         }
         mirrorBytes += size;
         import.current.assign(static_cast<std::size_t>((size + (std::uint64_t{1} << kMirrorPageShift) - 1) >> kMirrorPageShift), false);
+        import.written.assign(import.current.size(), nowMs() - dynamicWindowMs() - 1u);
+    }
+    // A range with a stale page written lately is dynamic: read in place.
+    if (const auto window = dynamicWindowMs(); window != 0) {
+        const auto now = nowMs();
+        for (auto page = (begin - first) >> kMirrorPageShift; page <= (end - first - 1) >> kMirrorPageShift; ++page)
+            if (!import.current[page] && now - import.written[page] <= window) return View{import.buffer, begin - first, import.address + (begin - first), translation.bytes};
     }
     // Copies the stale pages of the range, as runs.
     std::vector<VkBufferCopy> copies;
@@ -132,6 +161,7 @@ std::optional<GuestGpuMemory::View> GuestGpuMemory::ResolveRead(std::uint64_t ad
         else copies.push_back({offset, offset, length});
     }
     if (!copies.empty()) {
+        const auto commands = queue->Begin(context);
         const auto barrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
         // CPU writes before submission and earlier GPU writes reach the copy; earlier reads of the
         // mirror finish before it is overwritten.

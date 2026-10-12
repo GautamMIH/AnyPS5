@@ -126,7 +126,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         if (!copyIndices && context.guestGpuMemory != nullptr) {
             // The CPU check above already waited for the range's queued writes (the indices are
             // scanned here), so a GPU-access check has nothing left to order.
-            const auto view = context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->ResolveRead(draw.indexAddress, indexBytes, context.drawQueue->Begin(context)) : context.guestGpuMemory->Resolve(draw.indexAddress, indexBytes);
+            const auto view = context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->ResolveRead(draw.indexAddress, indexBytes, context.drawQueue) : context.guestGpuMemory->Resolve(draw.indexAddress, indexBytes);
             if (view && view->bytes >= indexBytes && view->offset % draw.indexSize == 0) {
                 indexHandle = view->buffer;
                 indexOffset = view->offset;
@@ -200,7 +200,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                 const GuestMemory::GpuAccessScope gpuAccess;
                 GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1);
             }
-            const auto view = context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->ResolveRead(address, bytes, context.drawQueue->Begin(context)) : context.guestGpuMemory->Resolve(address, bytes);
+            const auto view = context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->ResolveRead(address, bytes, context.drawQueue) : context.guestGpuMemory->Resolve(address, bytes);
             if (view && view->bytes >= bytes) {
                 vertexHandles.push_back(view->buffer);
                 vertexOffsets[index] = view->offset;

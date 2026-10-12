@@ -151,7 +151,7 @@ void GuestBufferMemory::Upload(bool addressable) {
                 else if (padding != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(padding), 1, false);
             }
             // Read-only regions read the device-local mirror (stale pages copied first, in queue order).
-            region.view = region.writable || context.drawQueue == nullptr || !context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->Resolve(region.begin, bytes) : context.guestGpuMemory->ResolveRead(region.begin, bytes, context.drawQueue->Begin(context));
+            region.view = region.writable || context.drawQueue == nullptr || !context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->Resolve(region.begin, bytes) : context.guestGpuMemory->ResolveRead(region.begin, bytes, context.drawQueue);
             if (!region.view && !region.writable && region.image && region.begin == region.image->address && bytes == region.image->bytes) region.view = context.guestGpuMemory->ResolveImage(region.image);
             if (region.view && region.view->bytes == bytes) {
                 // Shaders write writable regions straight into guest memory.

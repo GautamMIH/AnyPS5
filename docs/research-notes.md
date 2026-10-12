@@ -483,3 +483,17 @@ Issues that needed research, with a short answer. Check here before researching;
     | Device thread | 27.6 | 25.1 |
 
   - **Zorro:** device thread 15.62 -> 14.85 ms CPU a frame; frame unchanged (the worker paces it).
+- **Hellboy against KytyPS5 (2026-10-12, same area, user driving).**
+  - **Measured:**
+
+    | | Kyty | AnyPS5 (live sessions, glibc allocator) |
+    |---|---|---|
+    | Frame rate | 30 fps | — |
+    | Driver CPU per frame | one GPU thread, ~25 ms | worker ~40-55 + device ~42-67 ms |
+    | GPU busy per frame | ~18 ms (55% at 30 fps) | ~46-48 ms at 4K |
+    | PCIe receive | 720 MB/s (~24 MB a frame) | ~1 GB/s (~84 MB a frame) |
+
+  - **Source comparison (/tmp/rr/KytyPS5):** Kyty walks the SRT per draw too. It records on one thread, uses push descriptors and a device-local buffer cache with a ≤16 KiB stream path for CPU-dirty constants, and writes release labels at record time. Its shaders are from the same family (same bounds checks); its float handling is no cheaper.
+  - **VRAM mirror tested on Hellboy (opt-in `ANYPS5_GPU_MIRROR=1`):** GPU 48 -> 71 ms, because every mirrored read called DrawQueue::Begin and so ended the render pass (merging lost at 4K). Fixed: `ResolveRead` takes the queue and begins only when it copies. Ranges with a page written in the last 500 ms are read in place (`ANYPS5_MIRROR_DYNAMIC_MS`), so rewritten constants are not copied per draw.
+  - **With both fixes:** GPU 46 ms (no mirror: 48) and PCIe receive halved at best, but the device thread rose to ~67 ms CPU. In-place PCIe reads are not what makes our GPU frame 2.5x Kyty's, and the mirror stays opt-in.
+  - In these sessions Hellboy was CPU-bound: GPU busy 46 of 97 ms.

@@ -13,6 +13,8 @@
 
 namespace AgcDriver::Graphics {
 
+class DrawQueue;
+
 class Buffer;
 
 // Guest memory as the GPU sees it, without copies: the host memory behind guest mappings (the
@@ -42,7 +44,9 @@ public:
     // they were last copied (by the CPU, the GPU through Resolve's view, or the driver) are copied
     // from guest memory first, recorded into commands in queue order. Falls back to Resolve's view.
     // The GPU must not write through it.
-    std::optional<View> ResolveRead(std::uint64_t address, std::uint64_t bytes, VkCommandBuffer commands);
+    // The copies go into the queue's batch outside a render pass (DrawQueue::Begin), which is entered
+    // only when a stale page is copied: a read of current pages leaves the open pass alone.
+    std::optional<View> ResolveRead(std::uint64_t address, std::uint64_t bytes, DrawQueue* queue);
     // Whether ResolveRead may record copies (ANYPS5_GPU_MIRROR); otherwise it is Resolve.
     bool Mirrors() const { return mirrorEnabled; }
     // A GPU-readable copy of a registered range outside guest segments that stays mapped (the
@@ -62,6 +66,8 @@ private:
         // The device-local mirror (made on first read) and which of its pages are current.
         std::shared_ptr<Buffer> mirror;
         std::vector<bool> current;
+        // When each page was last written (GuestGpuMemory::nowMs): pages written lately are dynamic.
+        std::vector<std::uint32_t> written;
     };
     // Imports by (segment, first segment offset).
     using Key = std::pair<std::uint64_t, std::uint64_t>;
