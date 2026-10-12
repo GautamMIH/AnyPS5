@@ -374,4 +374,7 @@ Issues that needed research, with a short answer. Check here before researching;
 - Three imports were reverted after build or test failures, because each depends on upstream changes we don't carry. cbf125654 (half-wave reductions) needs the recompiler's `LoadVectorWindow`/`StoreVectorWindow` IR ops. 6f0ee78fb (POSIX deadline clamp) breaks `guest_pthread_rwlock` against our `PthreadSync` waits. 9c5c74c0c (array callback ABI) aborts in `__cxa_vec_new2` rollback with our libc exception code. Port each one together with its prerequisites.
 - Linux reported send on an unconnected UDP socket as EIO (5): the host EDESTADDRREQ was not mapped. It now maps to FreeBSD 39.
 - Zorro after the import, with a warm cache: median 22.7 ms, unchanged.
-- Deferred ADAPT items: a3cba2d1f (move indices past vertex records; Goat Simulator 3's 160 GiB allocation) and 22d662eda (stencil export).
+- Then ported by hand (both are compatibility fixes, not performance):
+  - a3cba2d1f: indices at least 64Ki past every per-vertex record count move to the first zero-fetch vertex, in a private copy of the indices (our in-place index views are copied first).
+  - 22d662eda: DB_SHADER_CONTROL bit 1 becomes FragStencilRefEXT. Our `stencilState` then only allows "replace with the test value", the recompile request serializer moves to version 17 (ours, not upstream's numbering), and the upstream execution test is excluded with the others written for upstream's device draw API.
+  - Zorro afterwards: median 22.1 / 22.4 ms, unchanged.
