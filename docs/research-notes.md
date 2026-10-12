@@ -392,3 +392,20 @@ Issues that needed research, with a short answer. Check here before researching;
   - The NID patcher renamed the `__gcov_*` exports, which split the profile runtime's registry (`__gcov_master`) per library, so no library wrote a profile. It now keeps `__gcov_*` names.
 - A/B of another build's libraries: relink with that build's relinker. LIBS_OVERRIDE copies pristine `.prx` files over the relinker's per-game patched ones, and Zorro aborts at the PS5Util load even with the normal build's own libraries.
 - The profile is Zorro-only. Code the run never reached stays optimized for speed (`-fprofile-partial-training`). Training runs of more titles can be added before `use`, since runs accumulate.
+
+## Frame overlap: ceiling measured, not worth building (2026-10-12, Zorro)
+
+- **Ceiling experiment** (unsafe, not kept). Releases completed when the device thread reaches them, and address-table stores counted as writing nothing.
+  - First run: slower, 24.3 vs 22.2 ms. The GPU tail went from 3.8 to 0.25 ms, but the worker's decode grew from 16.45 to 21.4 ms with its CPU unchanged.
+  - The worker was blocked on gpuMutex (~2.4 ms a frame). Its holder was `AgcCompleter`: the early label write resolved its range and waited for the GPU (`CommandBatch::Wait`) under gpuMutex, and the worker's resolves did the same.
+  - The flip packet also drained the device thread once a frame (~2.1 ms with the device thread behind).
+- **After fixing those** (below), the ceiling equals normal mode: 22.16 vs 22.36 ms, chain 17.3 + 3.3 + 0.9.
+  - Zorro submits a frame only after the previous frame's end-of-frame interrupt. A release can complete no earlier than when the device thread reaches it, so the GPU tail is replaced 1:1 by device-thread lag.
+  - So precise address-table store ranges (BDA write tracking) would gain at most ~0.2 ms here. Not built. The lever is the CPU per frame of the worker (~14 ms) and the device thread (~15.5 ms).
+- **Kept** (neutral on Zorro, 22.30 vs 22.29 ms; they keep one thread's GPU wait from stalling the others):
+  - **Timeline semaphore** (VK_KHR_timeline_semaphore): every CommandBatch signals its submission number on `Context::submitTimeline`.
+  - **Worker reads**: a worker read finds the timeline value of the last batch writing its range (`DrawQueue::WriterTimeline`) under gpuMutex, waits for it without locks (`VulkanDevice::WaitTimeline`), then resolves.
+  - **Completer**: it waits the same way for the label writers of ready releases.
+  - `ANYPS5_NO_TIMELINE_WAITS=1` turns the timeline off.
+- **Kept: queued flips.** Asynchronous flips are queued as a device-thread job behind the frame's draws instead of draining it (`ANYPS5_DRAIN_FLIPS=1` restores). `GpuReady` still runs from `finishCompletions`, never under gpuMutex: calling it in the job deadlocked `agc_driver_flip_tests`, whose `GpuReady` waits at a suspend point.
+- **Tried and dropped:** a gpuMutex handoff letting worker resolves go before the device thread's next job (no effect; the long holder was the completer, not unfairness).

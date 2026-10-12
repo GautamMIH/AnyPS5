@@ -39,6 +39,10 @@ public:
     bool MarkerReached(std::uint64_t marker);
     void WaitMarker(std::uint64_t marker);
     void ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable);
+    // The submission-timeline value ResolveMemory of the range would wait for (0: none), and a wait
+    // for such a value that takes no lock, so the GPU wait leaves the device free to other threads.
+    std::uint64_t GpuWriterTimeline(std::uint64_t address, std::size_t bytes);
+    void WaitTimeline(std::uint64_t value);
     // The guest ranges ResolveMemory and the resident surfaces' page watches can act on for a read
     // (besides queued GPU writes, which the write tracker records): the dirty surfaces'.
     std::vector<std::pair<std::uint64_t, std::uint64_t>> DirtyRanges();

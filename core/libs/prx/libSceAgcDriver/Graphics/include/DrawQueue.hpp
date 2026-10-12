@@ -26,6 +26,10 @@ public:
     // or 0 when none does.
     std::uint64_t LastWriter(std::uint64_t address, std::size_t bytes) const;
     void Flush();
+    // The submission-timeline value a CPU access of [address, address + bytes) waits for before
+    // Resolve finds the range's writers complete (0: none pending, or no timeline). A batch being
+    // recorded that writes the range is submitted first.
+    std::uint64_t WriterTimeline(std::uint64_t address, std::size_t bytes);
     void Resolve(std::uint64_t address, std::size_t bytes);
     void Wait();
     void WaitGpu();

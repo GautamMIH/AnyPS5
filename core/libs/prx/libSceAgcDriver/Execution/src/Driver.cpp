@@ -552,6 +552,7 @@ private:
     std::unique_ptr<DeviceThread> pipeline = makePipeline();
     std::thread worker;
 
+
     std::unique_ptr<DeviceThread> makePipeline() {
         const char* setting = std::getenv("ANYPS5_PIPELINED_DRIVER");
         static const bool pipelined = setting == nullptr || std::string(setting) != "0";
@@ -680,6 +681,23 @@ private:
             timing.Mark(need.kind == DeviceThread::Need::Drain ? "read_drain" : "read_wait");
         }
         // Later queued jobs do not write the range: the device's present state is the one to resolve.
+        // A read whose range submitted GPU work writes waits for that work first without gpuMutex
+        // (the timeline only grows), so the device thread keeps recording meanwhile; ResolveMemory
+        // then finds those batches complete.
+        if (!writable && self.device) {
+            std::uint64_t value = 0;
+            {
+                const auto lockStarted = std::chrono::steady_clock::now();
+                std::lock_guard gpuLock(self.gpuMutex);
+                noteReadWait("timeline: gpu mutex", false, lockStarted);
+                value = self.device->GpuWriterTimeline(address, bytes);
+            }
+            if (value != 0) {
+                const auto waitStarted = std::chrono::steady_clock::now();
+                self.device->WaitTimeline(value);
+                noteReadWait("timeline: gpu wait", false, waitStarted);
+            }
+        }
         const auto lockStarted = std::chrono::steady_clock::now();
         std::lock_guard gpuLock(self.gpuMutex);
         noteReadWait(need.kind == DeviceThread::Need::Resolve ? "resolve: gpu mutex" : "after wait: gpu mutex", false, lockStarted);
@@ -854,6 +872,13 @@ private:
         completerWake.notify_all();
     }
 
+    // Asynchronous flips with the device thread and a device: queued behind the frame's draws as a
+    // device job instead of draining it. ANYPS5_DRAIN_FLIPS=1 drains as before.
+    bool queuedFlip() const {
+        static const bool drain = std::getenv("ANYPS5_DRAIN_FLIPS") != nullptr;
+        return pipeline != nullptr && device != nullptr && !drain && VulkanDevice::AsyncFlip();
+    }
+
     // Caller holds gpuMutex. The marker orders the completion after all GPU work submitted so far.
     void queueCompletion(Completion completion) {
         completion.queuedAt = std::chrono::steady_clock::now();
@@ -876,6 +901,20 @@ private:
             const auto gpuLock = lockDevice(where);
             queueCompletion(std::move(completion));
         }
+    }
+
+    // Caller holds gpuMutex. The submission-timeline value the labels of the completions
+    // pollCompletions(false) would finish now wait for (queued GPU writes of the label), or 0.
+    std::uint64_t readyLabelWriters() {
+        if (device == nullptr) return 0;
+        std::uint64_t value = 0;
+        for (const auto& next : completions) {
+            if (next.marker != 0 && !device->MarkerReached(next.marker)) break;
+            if (next.release.size() < 5) continue;
+            const auto label = next.release[3] | (static_cast<std::uint64_t>(next.release[4]) << 32u);
+            if (label != 0) value = std::max(value, device->GpuWriterTimeline(label, 8));
+        }
+        return value;
     }
 
     // Caller holds gpuMutex. Finishes the completions whose GPU work is done (all of them if wait),
@@ -965,6 +1004,16 @@ private:
                     continue;
                 }
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
+                // A release label that queued GPU work still writes is waited for here, without
+                // gpuMutex, so writing it in pollCompletions does not hold the device meanwhile.
+                std::uint64_t labelWriters = 0;
+                std::shared_ptr<VulkanDevice> waitDevice;
+                {
+                    std::lock_guard gpuLock(gpuMutex);
+                    labelWriters = readyLabelWriters();
+                    if (labelWriters != 0) waitDevice = device;
+                }
+                if (waitDevice) waitDevice->WaitTimeline(labelWriters);
                 {
                     std::lock_guard gpuLock(gpuMutex);
                     stashCompletions(pollCompletions(false));
@@ -1989,7 +2038,7 @@ private:
                     cursor += count;
                     continue;
                 }
-                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x45 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x58 || header == FlipPacketHeader) {
+                if (opcode == 0x37 || opcode == 0x40 || opcode == 0x45 || opcode == 0x50 || opcode == 0x42 || opcode == 0x46 || opcode == 0x58 || (header == FlipPacketHeader && !queuedFlip())) {
                     const auto gpuLock = lockDevice();
                     timing.Mark("gpu_mutex_wait");
                     // Cache and partial-flush events and ACQUIRE_MEM order GPU work against GPU work:
@@ -2112,9 +2161,24 @@ private:
                 WriteTracker::NextEpoch();
                 frameTiming->SetFlip(submission.serial, cursor, submission.received, FrameTiming::Clock::now());
                 if (TraceTimeline()) std::fprintf(stderr, "[tl] %lld flip serial=%llu\n", TimelineNow(), static_cast<unsigned long long>(submission.serial));
-                {
+                if (!queuedFlip()) {
                     const auto gpuLock = lockDevice();
                     if (device) device->ReportGpuTime(*frameTiming);
+                }
+                if (queuedFlip()) {
+                    // The flip completes on a GPU marker like a release: queued on the device thread
+                    // behind the frame's draws, the worker goes on without draining it.
+                    // GpuReady runs from finishCompletions, never under gpuMutex on the device thread
+                    // (it may wait for the guest).
+                    pipeline->Post([this, flip = submission.flips.at(cursor), frame = std::exchange(frameTiming, nullptr)]() mutable {
+                        if (device != nullptr) device->ReportGpuTime(*frame);
+                        Completion completion;
+                        completion.flip = std::move(flip);
+                        completion.flipTiming = std::move(frame);
+                        queueCompletion(std::move(completion));
+                    }, {}, false);
+                    cursor += count;
+                    continue;
                 }
                 const auto completedFrame = std::exchange(frameTiming, nullptr);
                 bool queued = false;

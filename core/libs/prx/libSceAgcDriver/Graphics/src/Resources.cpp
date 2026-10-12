@@ -306,6 +306,9 @@ void CommandBatch::Reset() {
 
 namespace {
 std::atomic<std::uint64_t> submissionCount{0};
+// Values signalled on the submission timeline; queue submissions are externally synchronized, so
+// they are signalled in increasing order.
+std::atomic<std::uint64_t> timelineCount{0};
 }
 
 std::uint64_t CommandBatch::Begins() {
@@ -325,8 +328,19 @@ void CommandBatch::Submit() {
     VkSubmitInfo submission{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submission.commandBufferCount = 1;
     submission.pCommandBuffers = &commands;
+    VkTimelineSemaphoreSubmitInfoKHR timeline{VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO_KHR};
+    std::uint64_t value = 0;
+    if (context.submitTimeline != VK_NULL_HANDLE) {
+        value = timelineCount.fetch_add(1, std::memory_order_acq_rel) + 1;
+        timeline.signalSemaphoreValueCount = 1;
+        timeline.pSignalSemaphoreValues = &value;
+        submission.pNext = &timeline;
+        submission.signalSemaphoreCount = 1;
+        submission.pSignalSemaphores = &context.submitTimeline;
+    }
     timing.Mark("command_end");
     Check(context.Function<PFN_vkQueueSubmit>("vkQueueSubmit")(context.queue, 1, &submission, fence), "vkQueueSubmit graphics");
+    timelineValue = value;
     timing.Mark("queue_submit");
     pending = true;
     submitted = true;

@@ -186,6 +186,24 @@ void DrawQueue::Flush() {
     lastBatchSubmission = CommandBatch::Submissions();
 }
 
+std::uint64_t DrawQueue::WriterTimeline(std::uint64_t address, std::size_t bytes) {
+    if (!writes.Overlaps(address, bytes)) return 0;
+    Collect();
+    if (!writes.Overlaps(address, bytes)) return 0;
+    const auto end = address + bytes;
+    const auto writesRange = [&](const Batch& batch) {
+        for (const auto& entry : batch.entries)
+            for (const auto& [first, last] : entry.writes)
+                if (first < end && address < last) return true;
+        return false;
+    };
+    if (recording.commands && writesRange(recording)) Flush();
+    std::uint64_t value = 0;
+    for (const auto& batch : pending)
+        if (writesRange(batch)) value = batch.commands->TimelineValue();
+    return value;
+}
+
 void DrawQueue::Resolve(std::uint64_t address, std::size_t bytes) {
     if (!writes.Overlaps(address, bytes)) return;
     PerformanceTimer timing("Graphics.DrawQueue.Resolve");

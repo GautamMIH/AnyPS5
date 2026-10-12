@@ -165,6 +165,10 @@ struct VulkanDevice::State {
     bool imageInt64Atomics = false;
     // VK_KHR_maintenance8: sampling takes a non-constant texel Offset (upstream 301f3b16).
     bool maintenance8 = false;
+    // VK_KHR_timeline_semaphore: command batches signal their submission number (Graphics::Context).
+    bool timelineSemaphore = false;
+    VkSemaphore submitTimeline = VK_NULL_HANDLE;
+    PFN_vkWaitSemaphoresKHR waitSemaphores = nullptr;
     // VK_KHR_shader_clock (s_memtime, upstream 1043f90d).
     bool shaderClock = false;
     // RADV reports a 20-bit subgroup clock on some GPUs: s_memtime reads the device clock there
@@ -394,6 +398,7 @@ struct VulkanDevice::State {
             if (swapchain) reinterpret_cast<PFN_vkDestroySwapchainKHR>(deviceProc(device, "vkDestroySwapchainKHR"))(device, swapchain, nullptr);
             const auto destroyPool = reinterpret_cast<PFN_vkDestroyCommandPool>(deviceProc(device, "vkDestroyCommandPool"));
             const auto destroyDevice = reinterpret_cast<PFN_vkDestroyDevice>(deviceProc(device, "vkDestroyDevice"));
+            if (submitTimeline) reinterpret_cast<PFN_vkDestroySemaphore>(deviceProc(device, "vkDestroySemaphore"))(device, submitTimeline, nullptr);
             Graphics::DropPooledStorageImages(device, deviceProc);
             if (pool != VK_NULL_HANDLE) {
                 Graphics::DropRecycledCommandBatches(device, pool, deviceProc);
@@ -822,6 +827,15 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     }
     maintenance8Features = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_8_FEATURES_KHR};
     maintenance8Features.maintenance8 = VK_TRUE;
+    VkPhysicalDeviceTimelineSemaphoreFeaturesKHR timelineFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR};
+    if (hasExtension(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) && std::getenv("ANYPS5_NO_TIMELINE_WAITS") == nullptr) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &timelineFeatures};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        state->timelineSemaphore = timelineFeatures.timelineSemaphore == VK_TRUE;
+        if (state->timelineSemaphore) deviceExtensions.push_back(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    }
+    timelineFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES_KHR};
+    timelineFeatures.timelineSemaphore = VK_TRUE;
     listRestartFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT};
     listRestartFeatures.primitiveTopologyListRestart = state->primitiveListRestart ? VK_TRUE : VK_FALSE;
     // PROVOKING_VTX_LAST (upstream 3a8cf3a3).
@@ -992,6 +1006,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         maintenance8Features.pNext = const_cast<void*>(deviceInfo.pNext);
         deviceInfo.pNext = &maintenance8Features;
     }
+    if (state->timelineSemaphore) {
+        timelineFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
+        deviceInfo.pNext = &timelineFeatures;
+    }
     byteFeatures.pNext = const_cast<void*>(deviceInfo.pNext);
     if (state->fragmentShaderBarycentric) {
         barycentricFeatures.pNext = byteFeatures.pNext;
@@ -1037,6 +1055,13 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = family;
     check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &poolInfo, nullptr, &state->pool), "vkCreateCommandPool");
+    if (state->timelineSemaphore) {
+        VkSemaphoreTypeCreateInfoKHR type{VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO_KHR};
+        type.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE_KHR;
+        VkSemaphoreCreateInfo semaphoreInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO, &type};
+        check(state->DeviceFunction<PFN_vkCreateSemaphore>("vkCreateSemaphore")(state->device, &semaphoreInfo, nullptr, &state->submitTimeline), "vkCreateSemaphore timeline");
+        state->waitSemaphores = state->DeviceFunction<PFN_vkWaitSemaphoresKHR>("vkWaitSemaphoresKHR");
+    }
     state->imageMemory = std::make_shared<Graphics::ImageMemory>(state->device, state->deviceProc, state->memoryProperties);
     if (std::getenv("ANYPS5_GPU_TIMING") != nullptr) {
         if (state->properties.limits.timestampComputeAndGraphics) state->gpuTimestamps = std::make_shared<Graphics::GpuTimestamps>(state->device, state->deviceProc, state->properties.limits.timestampPeriod);
@@ -1500,6 +1525,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
         state->descriptorCache,
         state->samplerCache
     };
+    context.submitTimeline = state->submitTimeline;
     context.depthBounds = state->depthBounds;
     context.depthBiasClamp = state->depthBiasClamp;
     context.independentBlend = state->independentBlend;
@@ -1536,6 +1562,22 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.gpuTimestamps = state->gpuTimestamps;
     context.drawProfiler = state->drawProfiler;
     return context;
+}
+
+std::uint64_t VulkanDevice::GpuWriterTimeline(std::uint64_t address, std::size_t bytes) {
+    if (state->submitTimeline == VK_NULL_HANDLE) return 0;
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    return state->drawQueue->WriterTimeline(address, bytes);
+}
+
+void VulkanDevice::WaitTimeline(std::uint64_t value) {
+    if (value == 0 || state->submitTimeline == VK_NULL_HANDLE) return;
+    PerformanceTimer timing("Vulkan.WaitTimeline");
+    VkSemaphoreWaitInfoKHR info{VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO_KHR};
+    info.semaphoreCount = 1;
+    info.pSemaphores = &state->submitTimeline;
+    info.pValues = &value;
+    check(state->waitSemaphores(state->device, &info, 5'000'000'000ULL), "vkWaitSemaphores timeline");
 }
 
 void VulkanDevice::ResolveMemory(std::uint64_t address, std::size_t bytes, bool writable) {

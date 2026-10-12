@@ -190,6 +190,9 @@ public:
     void Wait();
     bool IsComplete();
     void Reset();
+    // The submission number the batch signals on Context::submitTimeline (0 before it is submitted
+    // or without a timeline).
+    std::uint64_t TimelineValue() const { return timelineValue; }
     // What the batch does, for GPU timing (a string literal).
     void Label(const char* name) { label = name; }
 
@@ -200,6 +203,7 @@ private:
     VkFence fence = VK_NULL_HANDLE;
     bool pending = false;
     bool submitted = false;
+    std::uint64_t timelineValue = 0;
     const char* label = "other";
     std::uint32_t timestamp = UINT32_MAX;
     void beginTiming();

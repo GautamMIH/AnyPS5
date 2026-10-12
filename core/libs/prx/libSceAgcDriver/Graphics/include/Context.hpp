@@ -74,6 +74,9 @@ struct Context {
     GraphicsPipelineCache* graphicsPipelines = nullptr;
     mutable std::shared_ptr<DescriptorCache> descriptorCache;
     mutable std::shared_ptr<SamplerCache> samplerCache;
+    // VK_KHR_timeline_semaphore: every command batch signals its submission number on it, so a
+    // thread can wait for a batch without the locks that guard the batch (null without the feature).
+    VkSemaphore submitTimeline = VK_NULL_HANDLE;
     bool depthBounds = false;
     bool depthBiasClamp = false;
     bool independentBlend = false;
