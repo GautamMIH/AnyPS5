@@ -49,6 +49,8 @@ public:
     // Whether RecordDmaData would record the copy on the GPU (while the guest mapping stays): the
     // pipelined worker queues those to the device thread instead of draining it.
     bool CanRecordDmaData(const Pm4::DmaCopy& dma);
+    // Submits the draw batch being recorded (the device thread, out of work, hands it to the GPU).
+    void FlushDraws();
     std::uint64_t LastGpuWriter(std::uint64_t address, std::size_t bytes);
     void ResolveFastClears(const Graphics::State& graphics);
     void* Window() const;

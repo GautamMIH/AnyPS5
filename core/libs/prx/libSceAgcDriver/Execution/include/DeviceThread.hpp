@@ -92,7 +92,9 @@ public:
 
     // runJob runs one job on the device thread (it takes the locks and scopes the job needs) and
     // returns the device's resident ranges afterwards, published for MayAffect.
-    explicit DeviceThread(std::function<Ranges(const std::function<void()>&)> runJob) : runJob(std::move(runJob)), thread([this] { run(); }) {}
+    // onIdle runs on the device thread when it runs out of jobs (once per idle period of 200 us or more,
+    // outside the queue's mutex): it submits what the jobs recorded.
+    explicit DeviceThread(std::function<Ranges(const std::function<void()>&)> runJob, std::function<void()> onIdle = {}) : runJob(std::move(runJob)), onIdle(std::move(onIdle)), thread([this] { run(); }) {}
 
     ~DeviceThread() {
         {
@@ -303,9 +305,24 @@ private:
         auto window = std::chrono::steady_clock::now();
         double idleMs = 0, jobWallMs = 0, jobCpuMs = 0;
         std::uint64_t jobCount = 0;
+        bool idleRan = true;
         for (;;) {
             {
                 std::unique_lock lock(mutex);
+                // Only a real gap (no job within 200 us): short gaps between draws keep the batch
+                // and its render pass open.
+                if (jobs.empty() && !stopping && !idleRan && onIdle && !wake.wait_for(lock, std::chrono::microseconds(200), [&] { return stopping || !jobs.empty(); })) {
+                    idleRan = true;
+                    lock.unlock();
+                    try {
+                        onIdle();
+                    } catch (...) {
+                        lock.lock();
+                        if (!failure) failure = std::current_exception();
+                        lock.unlock();
+                    }
+                    lock.lock();
+                }
                 const auto idleStart = std::chrono::steady_clock::now();
                 wake.wait(lock, [&] { return stopping || !jobs.empty(); });
                 if (trace) idleMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - idleStart).count();
@@ -313,6 +330,7 @@ private:
                 runningJob = std::move(jobs.front());
                 jobs.pop_front();
                 running = true;
+                idleRan = false;
             }
             Ranges published;
             std::exception_ptr error;
@@ -358,6 +376,7 @@ private:
     }
 
     std::function<Ranges(const std::function<void()>&)> runJob;
+    std::function<void()> onIdle;
     std::mutex mutex;
     std::condition_variable wake;
     std::condition_variable idle;

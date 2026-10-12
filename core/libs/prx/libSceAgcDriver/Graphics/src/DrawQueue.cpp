@@ -118,7 +118,15 @@ void DrawQueue::Enqueue(std::shared_ptr<ShaderResources> resources, std::shared_
     for (const auto& [begin, end] : entry.writes) writes.Add(begin, end);
     recording.entries.push_back(std::move(entry));
     ++drawCount;
-    if (recording.entries.size() >= 8) Flush();
+    // A batch is submitted every 32 draws (fewer fenced submits and pass breaks; 8 was 0.6 ms a
+    // Zorro frame slower). The device thread also submits what it recorded when it runs out of
+    // work (VulkanDevice::FlushDraws), so the GPU does not wait for the next draws. ANYPS5_DRAW_BATCH
+    // overrides the count.
+    static const std::size_t batchDraws = [] {
+        const auto* value = std::getenv("ANYPS5_DRAW_BATCH");
+        return value != nullptr ? std::max<std::size_t>(1, std::strtoull(value, nullptr, 10)) : std::size_t{32};
+    }();
+    if (recording.entries.size() >= batchDraws) Flush();
 }
 
 std::uint64_t DrawQueue::NoteGuestWrite(std::uint64_t begin, std::uint64_t end, std::shared_ptr<void> storage) {

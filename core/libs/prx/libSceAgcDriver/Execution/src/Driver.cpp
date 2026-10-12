@@ -556,12 +556,18 @@ private:
         const char* setting = std::getenv("ANYPS5_PIPELINED_DRIVER");
         static const bool pipelined = setting == nullptr || std::string(setting) != "0";
         if (!pipelined) return nullptr;
+        // Out of jobs, the device thread submits the draws it recorded (the batch would otherwise wait
+        // for 32 draws or a marker while the GPU idles). ANYPS5_NO_IDLE_FLUSH=1 leaves it recording.
+        static const bool idleFlush = std::getenv("ANYPS5_NO_IDLE_FLUSH") == nullptr;
         return std::make_unique<DeviceThread>([this](const std::function<void()>& job) {
             std::lock_guard gpuLock(gpuMutex);
             job();
             refreshRegistered();
             return device != nullptr ? device->DirtyRanges() : DeviceThread::Ranges{};
-        });
+        }, idleFlush ? std::function<void()>([this] {
+            std::lock_guard gpuLock(gpuMutex);
+            if (device != nullptr) device->FlushDraws();
+        }) : std::function<void()>());
     }
 
     // Device work outside the device thread: what it queued runs first (the caller must not hold

@@ -1545,6 +1545,11 @@ std::uint64_t VulkanDevice::LastGpuWriter(std::uint64_t address, std::size_t byt
     return state->drawQueue->LastWriter(address, bytes);
 }
 
+void VulkanDevice::FlushDraws() {
+    std::lock_guard memoryLock(GuestMemoryTracking::GuestMemoryTrackingMutex_nid_postfix());
+    state->drawQueue->Flush();
+}
+
 bool VulkanDevice::CanRecordDmaData(const Pm4::DmaCopy& dma) {
     static const bool cpuOnly = std::getenv("ANYPS5_CPU_DMA") != nullptr;
     if (cpuOnly || state->guestGpuMemory == nullptr || dma.bytes == 0) return false;
