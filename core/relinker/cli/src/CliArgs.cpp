@@ -73,6 +73,8 @@ Args ParseArgs(int argc, char* argv[]) {
             args.windowsGui = true;
         } else if (arg.rfind("--", 0) == 0 || arg == "unused-filter") {
             throw std::runtime_error("unknown option: " + arg);
+        } else if (arg.empty()) {
+            throw std::runtime_error("input and output paths must be nonempty");
         } else if (args.inputPath.empty()) {
             args.inputPath = arg;
         } else if (args.outputPath.empty()) {

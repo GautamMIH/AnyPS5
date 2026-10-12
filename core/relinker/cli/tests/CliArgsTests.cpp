@@ -156,6 +156,13 @@ void unknownOption() {
     expectThrows({"--", "input.elf", "output.elf"}, "unknown option: --");
 }
 
+void emptyPositionals() {
+    for (const auto& arguments : std::vector<std::vector<std::string>>{
+            {"", "input.elf", "output.elf"}, {"input.elf", "", "output.elf"},
+            {"", "output.elf"}, {"input.elf", ""}})
+        expectThrows(arguments, "input and output paths must be nonempty");
+}
+
 void tooManyPositionals() {
     expectThrows({"input.elf", "output.elf", "extra.elf"}, "unexpected argument: extra.elf");
 }
@@ -203,6 +210,7 @@ int main() {
         unusedFilterRejectsDuplicates();
         unusedFilterBareWordIsUnknown();
         unknownOption();
+        emptyPositionals();
         tooManyPositionals();
         windowsDiagnosticsRequiresWindows();
         windowsGuiRequiresWindows();
