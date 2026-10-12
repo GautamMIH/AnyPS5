@@ -58,6 +58,8 @@ private:
         // The registered range outside guest segments it is (the loaded executable), whose copy
         // GuestGpuMemory keeps between uses.
         std::shared_ptr<const GuestAllocations::Range> image;
+        // Its whole range was checked (with resolves) when it was added, as `writable` says.
+        bool checked = false;
     };
 
     void validate(std::uint64_t address, std::size_t bytes) const;

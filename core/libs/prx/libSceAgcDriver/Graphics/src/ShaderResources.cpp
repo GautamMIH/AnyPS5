@@ -300,12 +300,19 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     // which waits as a CPU access).
     std::optional<GuestMemory::GpuAccessScope> gpuAccess;
     if (context.guestGpuMemory != nullptr) gpuAccess.emplace();
+    // A written buffer's write check covers the read check (it validates readability too); the
+    // read check then only tells an unmapped range (unusable) from a read-only one (an error).
     try {
-        GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, false);
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, written);
     } catch (const std::runtime_error&) {
-        return unusable("unmapped range");
+        if (!written) return unusable("unmapped range");
+        try {
+            GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, false);
+        } catch (const std::runtime_error&) {
+            return unusable("unmapped range");
+        }
+        throw;
     }
-    if (written) GuestMemory::CheckRange(reinterpret_cast<const void*>(address), size, 1, true);
     for (const auto& target : targets) Require(!overlap(address, size, target.address, target.bytes), "shader buffer aliases the render target");
     Require(!written || !overlap(address, size, indexAddress, indexBytes), "writable shader buffer aliases the index buffer");
     // The view starts BufferViewMisalignment bytes below the base to meet the descriptor offset

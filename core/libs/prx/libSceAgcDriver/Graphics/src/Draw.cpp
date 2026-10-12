@@ -124,10 +124,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         static const bool copyIndices = std::getenv("ANYPS5_COPY_INDICES") != nullptr;
         std::span<const std::byte> source;
         if (!copyIndices && context.guestGpuMemory != nullptr) {
-            {
-                const GuestMemory::GpuAccessScope gpuAccess;
-                GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), static_cast<std::size_t>(indexBytes), draw.indexSize);
-            }
+            // The CPU check above already waited for the range's queued writes (the indices are
+            // scanned here), so a GPU-access check has nothing left to order.
             const auto view = context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->ResolveRead(draw.indexAddress, indexBytes, context.drawQueue->Begin(context)) : context.guestGpuMemory->Resolve(draw.indexAddress, indexBytes);
             if (view && view->bytes >= indexBytes && view->offset % draw.indexSize == 0) {
                 indexHandle = view->buffer;

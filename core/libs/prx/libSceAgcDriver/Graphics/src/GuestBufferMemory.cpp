@@ -58,6 +58,7 @@ void GuestBufferMemory::AddWritable(std::uint64_t address, std::size_t bytes, st
     if (!checked) GuestMemory::CheckRange(reinterpret_cast<const void*>(address), bytes, 1, true);
     if (leading != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), leading, 1, false);
     regions.push_back({address - leading, address + bytes, true, {}, nullptr});
+    regions.back().checked = true;
     writes.emplace_back(address, address + bytes);
 }
 
@@ -69,6 +70,7 @@ void GuestBufferMemory::AddReadOnly(std::uint64_t address, std::size_t bytes, st
     if (!checked) GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), bytes + leading, 1, false);
     else if (leading != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(address - leading), leading, 1, false);
     regions.push_back({address - leading, address + bytes, false, {}, nullptr, true});
+    regions.back().checked = true;
 }
 
 void GuestBufferMemory::AddSnapshot(const GuestMemorySnapshot& snapshot) {
@@ -99,6 +101,9 @@ void GuestBufferMemory::Upload(bool addressable) {
         if (!merged.empty() && region.begin < merged.back().end) {
             auto& previous = merged.back();
             const bool captured = !previous.writable && !previous.live && !region.writable && !region.live;
+            // Checked as a whole only if both parts were, the same way (a read-only part joining a
+            // writable region still needs the write check).
+            previous.checked = previous.checked && region.checked && previous.writable == region.writable;
             Require(captured || previous.live || region.live || previous.writable == region.writable, "writable guest memory overlaps an immutable snapshot");
             if (captured) {
                 const auto offset = static_cast<std::size_t>(region.begin - previous.begin);
@@ -136,9 +141,14 @@ void GuestBufferMemory::Upload(bool addressable) {
         if (traceViews) std::fprintf(stderr, "[buffer-view] 0x%llx+0x%llx %s\n", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes), region.writable ? "writable" : region.live ? "live" : "snapshot");
         if (context.guestGpuMemory != nullptr && (region.writable || region.live)) {
             // Resident render targets over the range reach guest memory first, as a read would.
+            // Ranges checked when added need only the alignment padding below them checked
+            // (re-checking them cost ~0.18 ms sampled a Zorro frame). ANYPS5_RECHECK_UPLOADS=1
+            // checks every region whole.
+            static const bool recheck = std::getenv("ANYPS5_RECHECK_UPLOADS") != nullptr;
             {
                 const GuestMemory::GpuAccessScope gpuAccess;
-                GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(bytes), 1, region.writable);
+                if (recheck || !region.checked) GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(bytes), 1, region.writable);
+                else if (padding != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(padding), 1, false);
             }
             // Read-only regions read the device-local mirror (stale pages copied first, in queue order).
             region.view = region.writable || context.drawQueue == nullptr || !context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->Resolve(region.begin, bytes) : context.guestGpuMemory->ResolveRead(region.begin, bytes, context.drawQueue->Begin(context));
