@@ -1774,11 +1774,14 @@ private:
             // DMA_DATA the GPU records (in queue order) is queued to the device thread like a draw,
             // its destination the job's writes: the worker no longer drains for it (Zorro: ~40 a
             // frame, ~3 ms of worker waits). ANYPS5_DRAIN_DMA=1 drains as before.
+            // WRITE_DATA to memory is queued the same way (Zorro: 5 a frame, ~2.6 ms of worker waits
+            // drained). ANYPS5_DRAIN_WRITE_DATA=1 drains for it as before.
             std::optional<Pm4::DmaCopy> queuedDma;
-            if (opcode == 0x50 && pipeline && device != nullptr) {
+            if ((opcode == 0x50 || opcode == 0x37) && pipeline && device != nullptr) {
                 static const bool drainDma = std::getenv("ANYPS5_DRAIN_DMA") != nullptr;
-                if (!drainDma) {
-                    queuedDma = Pm4::DecodeDmaCopy(packet);
+                static const bool drainWriteData = std::getenv("ANYPS5_DRAIN_WRITE_DATA") != nullptr;
+                if (opcode == 0x50 ? !drainDma : !drainWriteData) {
+                    queuedDma = opcode == 0x50 ? Pm4::DecodeDmaCopy(packet) : Pm4::DecodeWriteData(packet);
                     if (queuedDma && !device->CanRecordDmaData(*queuedDma)) queuedDma.reset();
                 }
             }
@@ -1966,7 +1969,7 @@ private:
                         const GuestMemory::MemoryAccessScope memoryScope(device.get(), [](void* context, std::uint64_t address, std::size_t size, bool writable) {
                             if (context) static_cast<VulkanDevice*>(context)->ResolveMemory(address, size, writable);
                         });
-                        const GuestMemory::AccessSite accessSite("pm4_execute_0x50");
+                        const GuestMemory::AccessSite accessSite("queued_dma_cpu_fallback");
                         static thread_local QueueState unused;
                         Pm4::Execute(words, unused);
                     }, {{destination, destination + bytes}}, false);
