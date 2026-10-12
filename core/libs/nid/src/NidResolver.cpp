@@ -38,6 +38,12 @@ std::unordered_map<std::string, std::string> ResolveNids(const std::vector<std::
     result.reserve(exportedNames.size());
 
     for (const std::string& name : exportedNames) {
+        // GCC's profile runtime (instrumented builds, tools/pgo.sh) keeps one registry that every
+        // library joins by symbol name; renamed, each library writes no profile.
+        if (name.starts_with("__gcov_")) {
+            result[name] = name;
+            continue;
+        }
         if (excludedExports.contains(NormalizeExportName(name))) {
             result[name] = name;
             continue;

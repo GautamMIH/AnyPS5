@@ -25,6 +25,11 @@
 #include "prx/libc/include/PreciseWait.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 
+
+#ifdef APS5_PGO_GENERATE
+extern "C" void __gcov_dump(void);
+#endif
+
 namespace {
 
 void require(bool condition, const char* reason) {
@@ -576,6 +581,11 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                     // way the console's power menu does: immediately. Guest threads are still running,
                     // so no guest destructors run; buffered output is flushed.
                     std::fprintf(stderr, "[videoout] window closed; exiting\n");
+#ifdef APS5_PGO_GENERATE
+                    // Profile-generating builds (tools/pgo.sh): _Exit skips the exit handlers that
+                    // write the profile, so every loaded library's profile is written here.
+                    __gcov_dump();
+#endif
                     std::fflush(nullptr);
                     std::_Exit(0);
                 }

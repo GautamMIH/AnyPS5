@@ -378,3 +378,17 @@ Issues that needed research, with a short answer. Check here before researching;
   - a3cba2d1f: indices at least 64Ki past every per-vertex record count move to the first zero-fetch vertex, in a private copy of the indices (our in-place index views are copied first).
   - 22d662eda: DB_SHADER_CONTROL bit 1 becomes FragStencilRefEXT. Our `stencilState` then only allows "replace with the test value", the recompile request serializer moves to version 17 (ours, not upstream's numbering), and the upstream execution test is excluded with the others written for upstream's device draw API.
   - Zorro afterwards: median 22.1 / 22.4 ms, unchanged.
+
+## Link-time and profile-guided optimization (2026-10-12)
+
+- **PGO** (`tools/pgo.sh generate`, then a 150 s Zorro gameplay run relinked with `build-pgo`'s relinker and a warm cache, then `tools/pgo.sh use`). Zorro A/B, 2 rounds of 90 s:
+  - frame time 22.21 → 21.24 ms (−4.4%);
+  - worker CPU 14.29 → 13.13 ms per frame (−8%);
+  - device thread CPU 15.51 → 14.56 ms per frame (−6%).
+  - All 657 tests pass; rendering checked.
+- **LTO** (GCC 16): no gain (device 15.83 vs 16.40 ms per frame), and unsafe. lto1 gives some C++ frames the C personality (`__gcc_personality_v0`), so a C++ exception thrown through the guest libc, the HLE libraries or the AGC driver aborts (43 tests failed, then `linear_display_buffer` under PGO). Asm-defined symbols (`LibcCaptureRegisters`) also vanish from the LTO symbol table. Not used.
+- Collecting the profile needed two fixes:
+  - The quit path ends in `_Exit`, so instrumented builds (`APS5_PGO_GENERATE`) call `__gcov_dump()` first.
+  - The NID patcher renamed the `__gcov_*` exports, which split the profile runtime's registry (`__gcov_master`) per library, so no library wrote a profile. It now keeps `__gcov_*` names.
+- A/B of another build's libraries: relink with that build's relinker. LIBS_OVERRIDE copies pristine `.prx` files over the relinker's per-game patched ones, and Zorro aborts at the PS5Util load even with the normal build's own libraries.
+- The profile is Zorro-only. Code the run never reached stays optimized for speed (`-fprofile-partial-training`). Training runs of more titles can be added before `use`, since runs accumulate.
