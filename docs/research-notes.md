@@ -442,3 +442,23 @@ Issues that needed research, with a short answer. Check here before researching;
   - GPU tail 3.80 -> 3.48 ms;
   - A/B 60-88 s 23.45 -> 22.20 ms (one noisy round; realistically a few tenths of a millisecond);
   - device thread 15.52 -> 14.99 ms (no staging buffer created).
+
+## Hellboy gameplay (2026-10-12, measured live: the user drives, hellboy_live.sh + live_sample.py)
+
+- **Baseline.** ~85–90 ms frames.
+  - Worker ~55 ms and device thread ~45 ms of CPU a frame (gperftools; glibc allocator for the profiler).
+  - GPU busy ~48 ms: ~3,700 draws and dispatches a frame, the scene rendered at 3840x2160 into 1920x1080 display buffers. The game chooses that itself: default output mode, 1080p status, 1080p display buffers.
+  - The chain is serial, like Zorro's: decode 68.7 ms + GPU tail 12.7 + 1.2.
+- **Capture memo churn (fixed).**
+  - The memo filled to 16,384 entries and cleared ~45 times per 10 s. Erasing the entries (destroying ResourceCaptures) cost the worker ~10% of its time.
+  - Only ~1.5% of lookups hit: 730k "walks" per 10 s, a known program with new user data.
+  - Dropped entries are now destroyed on the reaper (`CaptureMemo::SetRetire`).
+  - Programs whose captures hit under 1 in 8 after 64 lookups stop storing entries, re-probed after 4,096 draws (`ANYPS5_CAPTURE_MEMO_ALWAYS=1` stores all). Clears fell to 5–6 per 10 s and hits rose ~13x (~150k per 10 s).
+  - `APS5_TRACE_CAPTURE_MEMO=1` counts outcomes. Zorro is unchanged (22.45 vs 22.64 ms).
+- **Captures waiting for the GPU (fixed).**
+  - Read waits (`APS5_TRACE_READ_WAITS`, GPU waits now attributed by site) showed 0.5–1.1 s per 10 s at dispatch and draw captures.
+  - `APS5_TRACE_WRITER_WAITS=1` showed they were 8-byte WRITE_DATA / DMA patches inside the 64-byte lines captures read, queued on the GPU just before the dispatch.
+  - The worker predicts those dwords (`predictWrite`), so a capture line now overlays them while their write is still the last writer, and reads the rest directly (`Driver::predictedLine`). `ANYPS5_NO_PREDICTED_CAPTURE=1` waits; `APS5_VERIFY_PREDICTED_CAPTURE=1` re-reads and compares (8,000 lines in gameplay, 0 mismatches).
+  - GPU waits at dispatch captures went from 500–740 to 3 ms per 10 s, and at draw captures from 700–1,070 to 160 ms. Decode went 68.7 -> 61.7 ms.
+  - The wait moved to the device thread (draw captures waiting on its jobs, ~1.2 s per 10 s) and the GPU tail grew to 17 ms.
+- **Left.** The device thread (~49 ms CPU a frame) and the GPU (~48 ms at 4K) now pace Hellboy.

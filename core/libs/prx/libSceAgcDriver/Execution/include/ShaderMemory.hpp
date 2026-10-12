@@ -4,6 +4,7 @@
 #include "Recompiler.hpp"
 #include "Optimization/SrtWalker.hpp"
 #include <map>
+#include <functional>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -17,6 +18,12 @@ namespace AgcDriver {
 
 class ShaderMemory {
 public:
+    // A reader the capturing thread may install for guest lines (64-byte aligned, clipped) that it can
+    // fill without the waiting read: true when it filled `out`. The pipelined worker's reads lines whose
+    // pending GPU writes are values it predicted (Driver::predictedLine).
+    using LineReader = bool (*)(void* context, std::uint64_t begin, std::span<std::byte> out);
+    static void SetLineReader(LineReader reader, void* context);
+
     explicit ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initial);
     // The initial regions lie in memory `owners` keep alive and unchanged (registered shader code
     // and headers): they are viewed, not copied.
@@ -81,8 +88,13 @@ public:
     // walked every time, no capture is reused. `prepared` reports whether the source was prepared.
     std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureProgram(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request, ShaderMemory& memory, bool* prepared = nullptr);
     void Clear();
+    // Where entries the memo drops are destroyed (the driver's reaper): a full memo held ~16k captures,
+    // and destroying them, or a changed entry's old capture, on the worker cost Hellboy ~10% of it.
+    // Without one they are destroyed in place.
+    void SetRetire(std::function<void(std::shared_ptr<void>)> retire) { retireDropped = std::move(retire); }
 
 private:
+    std::function<void(std::shared_ptr<void>)> retireDropped;
     struct Entry {
         std::shared_ptr<const void> owner;
         std::vector<std::uint64_t> key;
@@ -106,6 +118,11 @@ private:
         // PlanUserDataSlots of the capture's plan (masked: it had a plan to read them from).
         std::vector<std::uint32_t> slots;
         bool masked = false;
+        // Lookups of the program's captures and how many hit: a program whose captures hit under 1
+        // in 8 (Hellboy: ~1.5% of ~70k a second) stops storing them, and is probed again later.
+        std::uint32_t lookups = 0;
+        std::uint32_t hits = 0;
+        std::uint32_t skipped = 0;
     };
     std::unordered_map<std::uint64_t, Program> programs;
     std::vector<std::uint64_t> key;

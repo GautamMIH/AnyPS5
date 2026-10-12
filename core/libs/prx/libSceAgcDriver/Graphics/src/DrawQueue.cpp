@@ -197,6 +197,27 @@ std::uint64_t DrawQueue::WriterTimeline(std::uint64_t address, std::size_t bytes
                 if (first < end && address < last) return true;
         return false;
     };
+    // Debug aid: APS5_TRACE_WRITER_WAITS=1 logs (the first 300, then every 200th) CPU reads that must
+    // wait for submitted GPU work: the read range, its site and the queued write it overlaps.
+    static const bool trace = std::getenv("APS5_TRACE_WRITER_WAITS") != nullptr;
+    if (trace) {
+        static std::uint64_t traced = 0;
+        const auto report = [&](const Batch& batch) {
+            for (const auto& entry : batch.entries)
+                for (const auto& [first, last] : entry.writes)
+                    if (first < end && address < last) {
+                        std::fprintf(stderr, "[writer-wait] %s read 0x%llx+0x%zx waits for write 0x%llx-0x%llx (%llu bytes)\n", GuestMemory::AccessSite::Current(), static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(first), static_cast<unsigned long long>(last), static_cast<unsigned long long>(last - first));
+                        return true;
+                    }
+            return false;
+        };
+        const auto count = traced++;
+        if (count < 300 || count % 200 == 0) {
+            if (!(recording.commands && report(recording)))
+                for (const auto& batch : pending)
+                    if (report(batch)) break;
+        }
+    }
     if (recording.commands && writesRange(recording)) Flush();
     std::uint64_t value = 0;
     for (const auto& batch : pending)

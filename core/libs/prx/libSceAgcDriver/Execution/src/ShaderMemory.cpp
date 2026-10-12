@@ -1,3 +1,6 @@
+#include <cstdio>
+#include <array>
+#include <chrono>
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "Optimization/RequestMemoryView.hpp"
@@ -30,6 +33,16 @@ ShaderMemory::ShaderMemory(std::span<const ShaderRecompiler::MemoryRegion> initi
         regions.emplace(region.guestAddress, Region(region.bytes));
         initialRanges.emplace_back(region.guestAddress, region.guestAddress + region.bytes.size());
     }
+}
+
+namespace {
+thread_local ShaderMemory::LineReader lineReader = nullptr;
+thread_local void* lineReaderContext = nullptr;
+}
+
+void ShaderMemory::SetLineReader(LineReader reader, void* context) {
+    lineReader = reader;
+    lineReaderContext = context;
 }
 
 bool ShaderMemory::initial(std::uint64_t address) const {
@@ -69,7 +82,7 @@ bool ShaderMemory::read(void* context, std::uint64_t address, std::uint32_t* val
         begin = std::max(begin, base + bytes.size());
     }
     std::vector<std::byte> bytes(static_cast<std::size_t>(end - begin));
-    GuestMemory::Read(begin, bytes, 1);
+    if (lineReader == nullptr || !lineReader(lineReaderContext, begin, bytes)) GuestMemory::Read(begin, bytes, 1);
     std::memcpy(value, bytes.data() + (address - begin), sizeof(*value));
     self.regions.emplace(begin, Region(std::move(bytes)));
     return true;
@@ -177,6 +190,26 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::CapturePro
     return capture;
 }
 
+namespace {
+
+// Debug aid: APS5_TRACE_CAPTURE_MEMO=1 counts the memo's outcomes every 10 s: hits, hits with patched
+// user data, walks (known program, new user data), misses, changed entries (same key, other words) and
+// clears (the memo full).
+void noteMemo(int outcome) {
+    static const bool trace = std::getenv("APS5_TRACE_CAPTURE_MEMO") != nullptr;
+    if (!trace) return;
+    static std::array<std::uint64_t, 6> counts{};
+    static auto window = std::chrono::steady_clock::now();
+    ++counts[static_cast<std::size_t>(outcome)];
+    const auto now = std::chrono::steady_clock::now();
+    if (now - window < std::chrono::seconds(10)) return;
+    std::fprintf(stderr, "[capture-memo] hit %llu patched %llu walk %llu miss %llu changed %llu clears %llu\n", static_cast<unsigned long long>(counts[0]), static_cast<unsigned long long>(counts[1]), static_cast<unsigned long long>(counts[2]), static_cast<unsigned long long>(counts[3]), static_cast<unsigned long long>(counts[4]), static_cast<unsigned long long>(counts[5]));
+    counts = {};
+    window = now;
+}
+
+}
+
 std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(const std::shared_ptr<const void>& owner, const ShaderRecompiler::RecompileRequest& request, ShaderMemory& memory) {
     if (owner == nullptr) return memory.Capture(request);
     std::uint64_t hash = programKey(owner, request);
@@ -186,6 +219,22 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     // The program's resolved source (same code, context and owner), whatever its user data.
     const auto program = programs.find(programHash);
     const bool sameProgram = program != programs.end() && program->second.owner == owner && program->second.key.size() == programWords && std::equal(program->second.key.begin(), program->second.key.end(), key.begin());
+    // A program whose captures rarely repeat is walked without a lookup or a stored entry (copying its
+    // words and keeping the entry cost more than the rare hit saves); after 4096 such draws it is
+    // probed again. ANYPS5_CAPTURE_MEMO_ALWAYS=1 stores every capture.
+    static const bool always = std::getenv("ANYPS5_CAPTURE_MEMO_ALWAYS") != nullptr;
+    constexpr std::uint32_t ProbeLookups = 64;
+    if (sameProgram && !always) {
+        auto& stats = program->second;
+        if (stats.lookups >= ProbeLookups && stats.hits * 8u < stats.lookups) {
+            if (++stats.skipped < 4096u) {
+                noteMemo(2);
+                timing.Mark("cold_program");
+                return memory.Capture(request, stats.handle.get());
+            }
+            stats.lookups = stats.hits = stats.skipped = 0;
+        }
+    }
     static const bool allUserData = std::getenv("ANYPS5_CAPTURE_MEMO_ALL_USER_DATA") != nullptr;
     const auto& userData = request.context.userData;
     // Keyed on the user-data slots the plan reads once the program is known (a slot count marks
@@ -203,12 +252,16 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     for (auto index = programWords; index < key.size(); ++index) hash = (hash ^ key[index]) * 0x100000001b3ull;
     const auto found = entries.find(hash);
     const bool known = found != entries.end() && found->second.key == key && found->second.owner == owner;
+    if (sameProgram) ++program->second.lookups;
     if (known && reusable(found->second, memory)) {
+        if (sameProgram) ++program->second.hits;
         timing.Mark("hit");
         const auto& capture = found->second.capture;
         // Only the snapshot's copy of the user data may differ from this draw's.
         const auto& copied = capture->snapshot.userData;
-        if (copied.size() <= userData.size() && std::equal(copied.begin(), copied.end(), userData.begin())) return capture;
+        const bool same = copied.size() <= userData.size() && std::equal(copied.begin(), copied.end(), userData.begin());
+        noteMemo(same ? 0 : 1);
+        if (same) return capture;
         auto patched = std::make_shared<ShaderRecompiler::ResourceCapture>(*capture);
         patched->snapshot.userData.assign(userData.begin(), userData.begin() + static_cast<std::ptrdiff_t>(copied.size()));
         timing.Mark("hit_patched");
@@ -220,10 +273,17 @@ std::shared_ptr<const ShaderRecompiler::ResourceCapture> CaptureMemo::Capture(co
     timing.Mark("program_lookup");
     auto capture = sameProgram ? memory.Capture(request, program->second.handle.get()) : memory.Capture(request);
     timing.Mark("materialize");
-    if (entries.size() >= 16384) entries.clear();
+    if (entries.size() >= 16384) {
+        noteMemo(5);
+        if (retireDropped) retireDropped(std::make_shared<decltype(entries)>(std::move(entries)));
+        entries = {};
+    }
     auto words = memory.CapturedWords();
     timing.Mark("captured_words");
-    entries[hash] = Entry{owner, key, capture, std::move(words), mappingGeneration};
+    auto& slot = entries[hash];
+    if (retireDropped && slot.capture) retireDropped(std::make_shared<Entry>(std::move(slot)));
+    slot = Entry{owner, key, capture, std::move(words), mappingGeneration};
+    noteMemo(known ? 4 : sameProgram ? 2 : 3);
     timing.Mark("store");
     if (!sameProgram) storeProgram(programHash, owner, programWords, *capture);
     timing.Mark(known ? "changed" : sameProgram ? "walk" : "miss");
@@ -259,7 +319,8 @@ bool CaptureMemo::reusable(const Entry& entry, ShaderMemory& memory) const {
 }
 
 void CaptureMemo::Clear() {
-    entries.clear();
+    if (retireDropped && !entries.empty()) retireDropped(std::make_shared<decltype(entries)>(std::move(entries)));
+    entries = {};
     programs.clear();
 }
 

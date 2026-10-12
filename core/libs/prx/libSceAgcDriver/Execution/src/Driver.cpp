@@ -551,6 +551,11 @@ private:
     // on the worker.
     std::unique_ptr<DeviceThread> pipeline = makePipeline();
     std::thread worker;
+    // Dropped capture-memo entries are destroyed on the reaper, not the worker.
+    const bool memoRetire = [this] {
+        captureMemo.SetRetire([this](std::shared_ptr<void> dropped) { reaper.Retire(std::move(dropped)); });
+        return true;
+    }();
 
 
     std::unique_ptr<DeviceThread> makePipeline() {
@@ -695,7 +700,7 @@ private:
             if (value != 0) {
                 const auto waitStarted = std::chrono::steady_clock::now();
                 self.device->WaitTimeline(value);
-                noteReadWait("timeline: gpu wait", false, waitStarted);
+                noteReadWait((std::string("timeline: gpu wait at ") + GuestMemory::AccessSite::Current()).c_str(), false, waitStarted);
             }
         }
         const auto lockStarted = std::chrono::steady_clock::now();
@@ -806,6 +811,69 @@ private:
             if (write.first < address + bytes && address < write.last) return true;
         return false;
     }
+    // A capture's guest line (ShaderMemory::SetLineReader) whose pending GPU writes are predicted
+    // dwords: Hellboy patches 8 bytes with WRITE_DATA right before the dispatch that reads them, and
+    // the capture's read waited ~5 ms for the GPU to reach that write (~10 ms a frame). Each predicted
+    // dword is overlaid while its write is still the dword's last writer (queued: its own job; recorded:
+    // its draw-queue serial); every other dword must have no pending writer at all and is read directly.
+    // Anything else falls back to the waiting read. ANYPS5_NO_PREDICTED_CAPTURE=1 always waits.
+    static bool predictedLineThunk(void* context, std::uint64_t begin, std::span<std::byte> out) {
+        return static_cast<Driver*>(context)->predictedLine(begin, out);
+    }
+    bool predictedLine(std::uint64_t begin, std::span<std::byte> out) {
+        if (predicted.empty() || !pipeline || device == nullptr || begin % 4 != 0 || out.size() % 4 != 0 || out.size() > 64) return false;
+        const auto words = out.size() / 4;
+        bool any = false;
+        for (std::size_t index = 0; index < words && !any; ++index) any = predicted.contains(begin + index * 4);
+        if (!any) return false;
+        std::array<bool, 16> overlay{};
+        std::array<std::uint32_t, 16> values{};
+        for (std::size_t index = 0; index < words; ++index) {
+            const auto address = begin + index * 4;
+            const auto need = pipeline->Check(address, 4);
+            const auto it = predicted.find(address);
+            if (need.kind == DeviceThread::Need::None) continue;
+            if (it == predicted.end()) return false;
+            if (need.kind == DeviceThread::Need::Wait) {
+                if (it->second.job == 0 || need.serial != it->second.job) return false;
+            } else if (need.kind == DeviceThread::Need::Resolve) {
+                const auto serial = it->second.Serial();
+                if (serial == 0 || pipeline->ResidentOverlaps(address, 4) || device->LastGpuWriter(address, 4) != serial) return false;
+            } else {
+                return false;
+            }
+            overlay[index] = true;
+            values[index] = it->second.value;
+        }
+        // The other dwords have no pending writer: their reads do not wait.
+        for (std::size_t index = 0; index < words;) {
+            if (overlay[index]) {
+                std::memcpy(out.data() + index * 4, &values[index], 4);
+                ++index;
+                continue;
+            }
+            auto last = index + 1;
+            while (last < words && !overlay[last]) ++last;
+            GuestMemory::Read(begin + index * 4, out.subspan(index * 4, (last - index) * 4), 1);
+            index = last;
+        }
+        // Debug aid: APS5_VERIFY_PREDICTED_CAPTURE=1 also reads the line the waiting way and counts
+        // the lines whose overlay differs.
+        static const bool verify = std::getenv("APS5_VERIFY_PREDICTED_CAPTURE") != nullptr;
+        if (verify) {
+            static std::uint64_t lines = 0, mismatches = 0;
+            std::vector<std::byte> waited(out.size());
+            GuestMemory::Read(begin, waited, 1);
+            ++lines;
+            if (std::memcmp(waited.data(), out.data(), out.size()) != 0) {
+                ++mismatches;
+                std::fprintf(stderr, "[predicted-capture] MISMATCH line 0x%llx\n", static_cast<unsigned long long>(begin));
+            }
+            if (lines % 500 == 0) std::fprintf(stderr, "[predicted-capture] %llu lines overlaid, %llu mismatched\n", static_cast<unsigned long long>(lines), static_cast<unsigned long long>(mismatches));
+        }
+        return true;
+    }
+
     // Whether the queued GPU writes leave a value satisfying the WAIT_REG_MEM.
     bool predictedWaitSatisfied(std::span<const std::uint32_t> packet) {
         const auto wide = ((packet[0] >> 8u) & 0xffu) == 0x93;
@@ -2249,6 +2317,8 @@ private:
 
     void run() noexcept {
         NameThread("AgcWorker");
+        static const bool predictedCapture = std::getenv("ANYPS5_NO_PREDICTED_CAPTURE") == nullptr;
+        if (pipeline && predictedCapture) ShaderMemory::SetLineReader(&Driver::predictedLineThunk, this);
         PinToPerformanceCore(0);
         // Memory waits normally resolve within microseconds; one that stays blocked this long with no
         // other work able to run is a synchronization the emulation cannot satisfy.
