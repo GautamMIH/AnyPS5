@@ -7,6 +7,8 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
 #include <cstdio>
+#include <dlfcn.h>
+#include <execinfo.h>
 #include <cstdlib>
 #include <cstring>
 
@@ -284,6 +286,16 @@ const GuestGpuMemory::Import& GuestGpuMemory::importRange(std::uint64_t segment,
         addressInfo.buffer = import.buffer;
         import.address = context.Function<PFN_vkGetBufferDeviceAddressKHR>("vkGetBufferDeviceAddressKHR")(context.device, &addressInfo);
     } catch (...) {
+        std::uint64_t live = 0;
+        for (const auto& [key, entry] : imports) live += entry.end - key.second;
+        std::fprintf(stderr, "[guest-gpu-memory] import of 0x%llx bytes (segment 0x%llx of 0x%llx, offset 0x%llx) failed; %zu imports cover 0x%llx bytes, %zu retired\n", static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(segment), static_cast<unsigned long long>(segmentBytes), static_cast<unsigned long long>(first), imports.size(), static_cast<unsigned long long>(live), retired.size());
+        // Who asked for the range: module+offset per frame, for addr2line.
+        void* frames[32];
+        const int count = backtrace(frames, 32);
+        for (int index = 1; index < count; ++index) {
+            Dl_info info{};
+            if (dladdr(frames[index], &info) != 0 && info.dli_fname != nullptr) std::fprintf(stderr, "[guest-gpu-memory]   %s+0x%llx\n", info.dli_fname, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[index]) - reinterpret_cast<std::uintptr_t>(info.dli_fbase)));
+        }
         release(import);
         throw;
     }

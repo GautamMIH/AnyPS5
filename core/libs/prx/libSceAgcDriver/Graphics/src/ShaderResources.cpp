@@ -284,6 +284,12 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
     const auto address = descriptor.Base48();
     const auto byteSize = descriptor.GetSize();
+    // Debug aid: APS5_TRACE_LARGE_BUFFERS=1 prints the first 20 guest buffers over 256 MB.
+    static const bool traceLarge = std::getenv("APS5_TRACE_LARGE_BUFFERS") != nullptr;
+    if (traceLarge && byteSize > (256ull << 20)) {
+        static std::atomic<int> printed{0};
+        if (printed.fetch_add(1) < 20) std::fprintf(stderr, "[large-buffer] 0x%llx bytes at 0x%llx (stride %u, records %u, written %d): %08x %08x %08x %08x\n", static_cast<unsigned long long>(byteSize), static_cast<unsigned long long>(address), descriptor.Stride(), descriptor.NumRecords(), written ? 1 : 0, words[0], words[1], words[2], words[3]);
+    }
     // Games leave descriptor slots unfilled for resources a draw never reaches; the hardware only
     // faults if such a descriptor is used. An unusable one binds an empty buffer: shader accesses
     // are bounds-checked against the bound size, so reads return zero as with NUM_RECORDS = 0.
