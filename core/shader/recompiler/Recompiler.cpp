@@ -278,6 +278,14 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
 // A materialized result of one variant over one snapshot (Recompile(request, capture)): the
 // shared immutable object every later capture that reproduces the snapshot receives, so Populate
 // and the per-request copy run once per distinct snapshot.
+std::atomic<void (*)(std::shared_ptr<const void>)> resultRetire{nullptr};
+
+// Destroys `result` where SetResultRetire says (in place without a retire function).
+void retireResult(std::shared_ptr<const RecompileResult> result) {
+    if (result == nullptr) return;
+    if (const auto retire = resultRetire.load(std::memory_order_acquire)) retire(std::move(result));
+}
+
 struct ResultMemoEntry {
     std::uint64_t variantId;
     std::uint64_t hash;
@@ -1196,8 +1204,9 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
             source.memo.push_front({variantId, hash, shared});
             source.memoIndex.emplace(index, source.memo.begin());
             while (source.memo.size() > ResultMemoEntries) {
-                const auto& last = source.memo.back();
+                auto& last = source.memo.back();
                 source.memoIndex.erase((last.variantId * 0x9e3779b97f4a7c15ull) ^ last.hash);
+                retireResult(std::move(last.result));
                 source.memo.pop_back();
                 counters.evictions.fetch_add(1, std::memory_order_relaxed);
             }
@@ -1238,6 +1247,7 @@ std::shared_ptr<const RecompileResult> materializeCaptured(SourceEntry& source, 
         return slot.result;
     }
     auto result = materializePreparedMemoized(source, variant, request, snapshot, cacheHit, memoHit, runtimeUserData);
+    retireResult(std::move(slot.result));
     slot = {snapshot.id.value, variantId, requestHash, verify ? snapshotHashes(request, snapshot).full : 0u, result};
     return result;
 }
@@ -1480,6 +1490,10 @@ bool ApplyRuntimeUserData(const RecompileResult& result, std::span<const std::ui
         std::memcpy(push.data() + i * sizeof(std::uint32_t), &userData[slots[i]], sizeof(std::uint32_t));
     }
     return true;
+}
+
+void SetResultRetire(void (*retire)(std::shared_ptr<const void> result)) {
+    resultRetire.store(retire, std::memory_order_release);
 }
 
 }

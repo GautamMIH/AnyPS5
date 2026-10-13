@@ -600,6 +600,10 @@ struct ResourceCapture;
 // only applied while a driver has it active, so it can be limited to one dispatch; the recompile
 // cache keys on it.
 void SetDebugProbeActive(bool active);
+// Where results the recompiler's caches drop are destroyed (a driver's background thread): Hellboy's
+// worker spent ~5% destroying evicted results, nearly every draw replacing one. Without a retire
+// function they are destroyed in place. The function may be called from any thread.
+void SetResultRetire(void (*retire)(std::shared_ptr<const void> result));
 [[nodiscard]] bool DebugProbeActive();
 [[nodiscard]] bool RayTracingStrict();
 [[nodiscard]] bool RayTracingMiss();

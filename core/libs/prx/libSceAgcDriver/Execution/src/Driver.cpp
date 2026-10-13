@@ -555,6 +555,10 @@ private:
     // Dropped capture-memo entries are destroyed on the reaper, not the worker.
     const bool memoRetire = [this] {
         captureMemo.SetRetire([this](std::shared_ptr<void> dropped) { reaper.Retire(std::move(dropped)); });
+        // So are recompile results the recompiler's caches drop (ANYPS5_RESULTS_IN_PLACE=1: on the worker).
+        static Driver* retireTo = nullptr;
+        retireTo = this;
+        if (std::getenv("ANYPS5_RESULTS_IN_PLACE") == nullptr) ShaderRecompiler::SetResultRetire([](std::shared_ptr<const void> result) { retireTo->reaper.Retire(std::const_pointer_cast<void>(std::move(result))); });
         return true;
     }();
 
