@@ -28,7 +28,8 @@ std::uint32_t read(const Registers& registers, std::uint32_t offset, const char*
 
 float readFloat(const Registers& registers, std::uint32_t offset) {
     const auto value = std::bit_cast<float>(read(registers, offset));
-    Require(std::isfinite(value), "non-finite register at DWORD " + std::to_string(offset));
+    // The message is built only on failure (this runs for every float register of every draw).
+    if (!std::isfinite(value)) Require(false, "non-finite register at DWORD " + std::to_string(offset));
     return value;
 }
 
@@ -666,7 +667,7 @@ State DecodeState(const QueueState& queue) {
     // so the format does not matter.
     const auto depthExport = (read(cx, 0x203) & 1u) != 0;
     const auto depthFormat = read(cx, 0x1c4);
-    Require(!depthExport || depthFormat == 1u, "stencil or sample-mask export, or a depth export format other than 32_R (SPI_SHADER_Z_FORMAT=" + std::to_string(depthFormat) + ")");
+    if (depthExport && depthFormat != 1u) Require(false, "stencil or sample-mask export, or a depth export format other than 32_R (SPI_SHADER_Z_FORMAT=" + std::to_string(depthFormat) + ")");
     const auto exportFormat = read(cx, 0x1c5);
     // Each written target needs a float export: FP16, UNORM16 or SNORM16 (unpacked by the shader), or
     // 32_R, 32_GR, 32_AR or 32_ABGR (the components a format leaves out read as 0, alpha 1). Exports

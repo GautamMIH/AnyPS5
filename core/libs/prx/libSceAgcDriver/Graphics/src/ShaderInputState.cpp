@@ -235,8 +235,17 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(const PreparedVert
     }
     std::array<std::uint32_t, ShaderRecompiler::ShaderVertexStageInfo::MaxResources> attribWords{};
     {
-        std::vector<std::uint32_t> words(lastSemantic - firstSemantic + 1u);
-        AgcDriver::GuestMemory::Read(attribTableAddr + static_cast<std::uint64_t>(firstSemantic) * 4u, std::as_writable_bytes(std::span(words)), 4);
+        // Read into a stack buffer when the semantics span few words (every draw runs this).
+        const std::size_t count = lastSemantic - firstSemantic + 1u;
+        std::array<std::uint32_t, 64> local{};
+        std::vector<std::uint32_t> large;
+        std::span<std::uint32_t> words;
+        if (count <= local.size()) words = std::span(local).first(count);
+        else {
+            large.resize(count);
+            words = large;
+        }
+        AgcDriver::GuestMemory::Read(attribTableAddr + static_cast<std::uint64_t>(firstSemantic) * 4u, std::as_writable_bytes(words), 4);
         for (std::size_t i = 0; i < prepared.semantics.size(); ++i) attribWords[i] = words[prepared.semantics[i].semantic - firstSemantic];
     }
     std::uint32_t firstIndex = ~0u, lastIndex = 0;
@@ -246,8 +255,10 @@ ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(const PreparedVert
         firstIndex = std::min(firstIndex, index);
         lastIndex = std::max(lastIndex, index);
     }
-    std::vector<std::uint32_t> sharps((lastIndex - firstIndex + 1u) * 4u);
-    AgcDriver::GuestMemory::Read(bufferTableAddr + static_cast<std::uint64_t>(firstIndex) * 16u, std::as_writable_bytes(std::span(sharps)), 4);
+    // Buffer indices are 5 bits: at most 32 V#s of four words, on the stack.
+    std::array<std::uint32_t, 32u * 4u> sharpWords{};
+    const auto sharps = std::span(sharpWords).first((lastIndex - firstIndex + 1u) * 4u);
+    AgcDriver::GuestMemory::Read(bufferTableAddr + static_cast<std::uint64_t>(firstIndex) * 16u, std::as_writable_bytes(sharps), 4);
     for (std::size_t i = 0; i < prepared.semantics.size(); ++i) {
         const auto& semantic = prepared.semantics[i];
         const auto attribWord = attribWords[i];

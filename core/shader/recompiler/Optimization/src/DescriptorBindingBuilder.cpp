@@ -252,6 +252,9 @@ DescriptorBindingPlan DescriptorBindingBuilder::Prepare(const IrBindingLayout& l
     if (stage == IrShaderStage::Pixel && exportMappings.size() != 8u) fail("fragment runtime export mappings are missing");
     if (info.images.size() > ShaderInfo::MaxImages) fail("runtime image count exceeds the static capacity");
     DescriptorBindingPlan plan;
+    // Every draw builds this list: its size is known up front (buffers, images, compare states,
+    // export mappings), so it is reserved once instead of regrowing.
+    plan.specialization.reserve(info.buffers.size() * 4u + info.images.size() * (5u + 1u + PipelineSpecialization::CompareWords + PipelineSpecialization::ImageModeStride) + exportMappings.size() * 4u);
     const auto unnormalized = ProveUnnormalized(info, snapshot);
     std::vector<std::uint32_t> compareStates(info.images.size());
     for (std::uint32_t index = 0; index < info.images.size(); ++index) {
