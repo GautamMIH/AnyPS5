@@ -49,13 +49,14 @@ VkCommandBuffer DrawQueue::Begin(const Context& context) {
     EndPass();
     if (pipelineBarrier == nullptr) pipelineBarrier = context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier");
     Collect();
-    // Back-pressure: at most this many queued draws (256: deep enough that
-    // a ~1000-draw frame keeps the GPU fed) keep their resources alive. The oldest batches
+    // Back-pressure: at most this many queued draws keep their resources alive. The oldest batches
     // are waited for until the count drops, not the whole queue: the GPU keeps the rest in flight.
-    // ANYPS5_DRAWS_IN_FLIGHT overrides it.
+    // 1024: Hellboy's frames have several thousand draws, and at 256 the device thread waited for
+    // the GPU (holding gpuMutex, which blocked the worker) several times a frame. Hellboy 4K 67.3 ->
+    // 60.4 ms a frame, GPU 68% -> 74% busy; Zorro 21.4 -> 20.9 ms. ANYPS5_DRAWS_IN_FLIGHT overrides it.
     static const std::size_t inFlight = [] {
         const auto* value = std::getenv("ANYPS5_DRAWS_IN_FLIGHT");
-        return value != nullptr ? std::max<std::size_t>(8, std::strtoull(value, nullptr, 10)) : std::size_t{256};
+        return value != nullptr ? std::max<std::size_t>(8, std::strtoull(value, nullptr, 10)) : std::size_t{1024};
     }();
     if (drawCount >= inFlight) {
         PerformanceTimer timing("Graphics.DrawQueue.Throttle");
