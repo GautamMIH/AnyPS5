@@ -124,7 +124,7 @@ std::string makeKey(const Context& context, const State& state, const ShaderReso
         append(key, tessellation.outputTopology);
     }
     timing.Mark("state");
-    const auto& input = vertexInputLayout(context, shaders.front().program->vertexAttributes);
+    const auto& input = vertexInputLayout(context, shaders.front().VertexAttributes());
     timing.Mark("vertex_layout");
     append(key, input.bindings.size());
     for (const auto& binding : input.bindings) {

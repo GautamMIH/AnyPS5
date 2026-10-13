@@ -173,7 +173,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
         Require(shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version, "incompatible rect-list fault ABI version");
         Require(shader.bindings.size() == 1, "rect-list control shader must declare exactly one fault buffer");
         const auto& binding = shader.bindings.front();
-        Require(binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer && binding.kind == ShaderRecompiler::DescriptorKind::StorageBuffer && binding.descriptorSet == 0 && binding.count == 1 && binding.guestDescriptor.empty() && !binding.readOnly, "invalid rect-list fault buffer contract");
+        Require(binding.role == ShaderRecompiler::DescriptorRole::FaultBuffer && binding.kind == ShaderRecompiler::DescriptorKind::StorageBuffer && binding.descriptorSet == 0 && binding.count == 1 && compiled.Words(0).empty() && !binding.readOnly, "invalid rect-list fault buffer contract");
     }
     const auto model = mesh ? spv::ExecutionModelMeshEXT : control ? spv::ExecutionModelTessellationControl : evaluation ? spv::ExecutionModelTessellationEvaluation : vertex ? spv::ExecutionModelVertex : spv::ExecutionModelFragment;
     const auto& words = shader.spirv;
@@ -550,14 +550,14 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
     }
     if (vertex) {
         std::set<std::uint32_t> locations;
-        for (const auto& attribute : shader.vertexAttributes) {
+        for (const auto& attribute : compiled.VertexAttributes()) {
             Require(locations.insert(attribute.location).second, "duplicate vertex attribute metadata");
             const auto input = module.inputs.find(attribute.location);
             Require(input != module.inputs.end() && input->second == "vertex:" + VertexAttributeSignature(attribute), "vertex attribute metadata disagrees with shader input");
         }
         Require(locations.size() == module.inputs.size(), "vertex input is missing attribute metadata");
     } else {
-        Require(shader.vertexAttributes.empty(), "vertex attribute metadata is invalid for this stage");
+        Require(compiled.VertexAttributes().empty(), "vertex attribute metadata is invalid for this stage");
     }
     Require(descriptors.size() == shader.bindings.size(), "recompiler binding metadata contains undeclared resources");
     // Every mesh program declares the push block (its draw parameters), with or without push data.
@@ -617,17 +617,18 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
     append(shader.bdaAbiVersion);
     append(shader.pushConstants.empty());
     append(shader.bindings.size());
-    for (const auto& binding : shader.bindings) {
+    for (std::size_t index = 0; index < shader.bindings.size(); ++index) {
+        const auto& binding = shader.bindings[index];
         append(binding.kind);
         append(binding.role);
         append(binding.descriptorSet);
         append(binding.binding);
         append(binding.count);
         append(binding.readOnly);
-        append(binding.guestDescriptor.empty());
+        append(compiled.Words(index).empty());
     }
-    append(shader.vertexAttributes.size());
-    for (const auto& attribute : shader.vertexAttributes) {
+    append(compiled.VertexAttributes().size());
+    for (const auto& attribute : compiled.VertexAttributes()) {
         append(attribute.location);
         append(attribute.components);
         append(attribute.resource.fields[3]);

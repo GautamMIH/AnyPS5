@@ -30,6 +30,12 @@ struct CompiledShader {
     const std::vector<std::byte>* pushData = nullptr;
 
     [[nodiscard]] const std::vector<std::byte>& PushData() const { return pushData != nullptr ? *pushData : program->pushConstants; }
+    // This draw's guest words of program->bindings[binding] (buffer V#s, image T#s, sampler S#s,
+    // the flattened SRT or the shader data) and its vertex attributes. Read through these, not the
+    // program, so a program can be one shared by every draw of its variant (design:
+    // docs/dev/per-draw-dataflow-design.md).
+    [[nodiscard]] std::span<const std::uint32_t> Words(std::size_t binding) const { return program->bindings[binding].guestDescriptor; }
+    [[nodiscard]] std::span<const ShaderRecompiler::VertexAttribute> VertexAttributes() const { return program->vertexAttributes; }
 };
 
 inline VkShaderStageFlagBits VulkanStage(ShaderRecompiler::ShaderStage stage) {

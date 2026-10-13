@@ -116,6 +116,20 @@ Rect-list and barycentric shaders are built from results and have `variantId` 0.
 plus one fixed draw record. Their pipeline key keeps hashing the SPIR-V. The adapter is also the
 migration path: any consumer can be fed either source.
 
+## Revision after stage 1 (2026-10-12)
+
+- **Seam.** The device thread reads per-variant fields through `CompiledShader::program`, ~30 sites;
+  only about a dozen read per-draw data. So the shared variant stays a `RecompileResult` (one per
+  specialized module, words empty, cached with the module entry, which is never evicted). Per-draw
+  data is read through `CompiledShader::Words(binding)`, `VertexAttributes()` and `PushData()`.
+  Stage 1 routed every device-side per-draw read through these accessors; they still return the
+  full result's data. Stage 2 points them at the compact record.
+- **Device-side estimate corrected.** `ShaderResources::build` (7.4 ms sampled) is mostly real
+  resource work: guest buffers 1.5, image lookups 1.45, uploads 1.1, descriptor cache 0.5. Walking
+  the binding metadata is only `build`'s own 0.65 ms. Reachable on the device: `makeKey` (1.1),
+  `build`'s own walk (0.65), and the per-draw `ShaderResources` allocation and free (~2, glibc). That
+  is about 1–2 ms of real time, not 3–5. The worker estimate stands.
+
 ## Stages
 
 Each stage builds, passes the 657 tests, and is A/B'd on Zorro (hidden, 2 rounds, normal
@@ -137,10 +151,8 @@ configuration). Stages 2–4 are also checked visually and timed on Hellboy. A s
 
 - **Worker:** most of materializeResult and Populate, plus the destruction the reaper now absorbs.
   Estimate 4–6 ms a frame of real (mimalloc) CPU in Hellboy.
-- **Device thread:** the binding walk keeps its Vulkan work but loses decoding and allocation.
-  Estimate 3–5 ms.
-- **Hellboy target:** ~68 → ~50–55 ms a frame at 4K (CPU-bound threads at ~30 ms instead of
-  ~37). This is an estimate; each stage is measured, and a stage that doesn't pay is reverted.
+- **Device thread:** about 1–2 ms (see the revision above).
+- **Hellboy target:** ~68 → ~55–60 ms a frame at 4K. This is an estimate; each stage is measured, and a stage that doesn't pay is reverted.
 
 ## Risks
 

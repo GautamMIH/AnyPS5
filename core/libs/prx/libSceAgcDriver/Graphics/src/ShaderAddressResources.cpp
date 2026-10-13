@@ -8,9 +8,10 @@ void ShaderResources::prepareAddressBindings(std::span<const CompiledShader> sha
         Require(shader.program != nullptr, "missing compiled shader");
         std::uint32_t tables = 0;
         std::uint32_t faults = 0;
-        for (const auto& binding : shader.program->bindings) {
+        for (std::size_t index = 0; index < shader.program->bindings.size(); ++index) {
+            const auto& binding = shader.program->bindings[index];
             if (binding.role != ShaderRecompiler::DescriptorRole::BdaPagetable && binding.role != ShaderRecompiler::DescriptorRole::FaultBuffer) continue;
-            Require(binding.kind == ShaderRecompiler::DescriptorKind::StorageBuffer && binding.count == 1 && binding.guestDescriptor.empty() && !binding.readOnly, "invalid BDA descriptor contract");
+            Require(binding.kind == ShaderRecompiler::DescriptorKind::StorageBuffer && binding.count == 1 && shader.Words(index).empty() && !binding.readOnly, "invalid BDA descriptor contract");
             if (binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable) ++tables;
             else ++faults;
         }

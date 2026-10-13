@@ -131,7 +131,9 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
             std::uint64_t stageDescriptors = 0;
             const auto firstSampler = samplers.size();
             pairedSamplers.clear();
-            for (const auto& binding : shader.program->bindings) {
+            for (std::size_t index = 0; index < shader.program->bindings.size(); ++index) {
+                const auto& binding = shader.program->bindings[index];
+                const auto words = shader.Words(index);
                 Require(binding.descriptorSet == 0, "unexpected descriptor set: every shader resource must use descriptor set zero");
                 Require(occupied.insert(binding.binding).second, "duplicate shader binding");
                 ShaderRecompiler::RuntimeAbi::RequireVersion(shader.program->runtimeAbiVersion);
@@ -139,7 +141,7 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
                 const bool bufferRole = addressRole || binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers || binding.role == ShaderRecompiler::DescriptorRole::ShaderData || binding.role == ShaderRecompiler::DescriptorRole::FlattenedSrt || binding.role == ShaderRecompiler::DescriptorRole::Gds;
                 const bool imageRole = binding.role == ShaderRecompiler::DescriptorRole::GuestImages || binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers;
                 if (imageRole) {
-                    addImageBinding(binding, flags, bindings);
+                    addImageBinding(binding, words, flags, bindings);
                     continue;
                 }
                 if (!(bufferRole)) Require(false, std::string("unsupported descriptor role ") + roleName(binding.role));
@@ -151,11 +153,11 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
                 Require(stageDescriptors <= context.limits.maxPerStageDescriptorStorageBuffers && stageDescriptors <= context.limits.maxPerStageResources, "shader descriptors exceed per-stage limits");
                 Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, binding.count, flags, nullptr}, {}};
                 if (binding.role == ShaderRecompiler::DescriptorRole::GuestBuffers) {
-                    Require(binding.guestDescriptor.size() == static_cast<std::uint64_t>(binding.count) * 4, "guest buffer descriptor must contain four DWORDs per array element");
+                    Require(words.size() == static_cast<std::uint64_t>(binding.count) * 4, "guest buffer descriptor must contain four DWORDs per array element");
                     for (std::uint32_t element = 0; element < binding.count; ++element) {
                         // The recompiler proves elements read-only (bufferWritten false); the rest may be written.
                         const bool written = !binding.readOnly && (element >= binding.bufferWritten.size() || binding.bufferWritten[element]);
-                        item.allocations.push_back(addGuestBuffer(std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 4, 4), targets, indexAddress, indexBytes, written));
+                        item.allocations.push_back(addGuestBuffer(words.subspan(static_cast<std::size_t>(element) * 4, 4), targets, indexAddress, indexBytes, written));
                     }
                 } else if (addressRole) {
                     item.allocations.push_back(allocations.size());
@@ -163,16 +165,16 @@ void ShaderResources::build(std::span<const CompiledShader> shaders, std::span<c
                 } else if (binding.role == ShaderRecompiler::DescriptorRole::Gds) {
                     // The global data share: the driver-owned guest range DMA_DATA reads and writes
                     // (Pm4::GdsAddress), bound as a writable guest buffer.
-                    Require(binding.count == 1 && binding.guestDescriptor.empty(), "invalid GDS descriptor contract");
+                    Require(binding.count == 1 && words.empty(), "invalid GDS descriptor contract");
                     const auto gds = Pm4::GdsAddress();
                     guestMemory.AddWritable(gds, Pm4::GdsBytes, 0, true);
                     item.allocations.push_back(allocations.size());
                     allocations.push_back({gds, Pm4::GdsBytes, true, nullptr});
                 } else {
                     Require(binding.count == 1, "shader data and flattened SRT descriptors must not be arrays");
-                    Require(!binding.guestDescriptor.empty(), "empty shader data descriptor");
-                    if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) ValidateRuntimeResources(*shader.program, binding.guestDescriptor);
-                    item.allocations.push_back(addDataBuffer(binding.guestDescriptor));
+                    Require(!words.empty(), "empty shader data descriptor");
+                    if (binding.role == ShaderRecompiler::DescriptorRole::ShaderData) ValidateRuntimeResources(*shader.program, words);
+                    item.allocations.push_back(addDataBuffer(words));
                 }
                 bindings.push_back(std::move(item));
             }
@@ -375,18 +377,18 @@ std::uint64_t NullTextureMemory() {
 
 }
 
-void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, VkShaderStageFlags flags, std::vector<Binding>& bindings) {
+void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding& binding, std::span<const std::uint32_t> descriptorWords, VkShaderStageFlags flags, std::vector<Binding>& bindings) {
     Require(binding.count != 0, "empty descriptor binding");
     const bool sampledImage = binding.kind == ShaderRecompiler::DescriptorKind::SampledImage;
     const bool samplerKind = binding.kind == ShaderRecompiler::DescriptorKind::Sampler;
     if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) {
         Require(binding.role == ShaderRecompiler::DescriptorRole::GuestImages, "storage image descriptor role disagrees with its kind");
-        Require(binding.guestDescriptor.size() == static_cast<std::size_t>(binding.count) * 8, "guest storage image descriptor must contain 8 dwords per element");
+        Require(descriptorWords.size() == static_cast<std::size_t>(binding.count) * 8, "guest storage image descriptor must contain 8 dwords per element");
         Require(binding.imageShape.has_value(), "guest storage image binding is missing an image shape");
         Require(binding.count <= context.limits.maxPerStageDescriptorStorageImages, "shader storage-image descriptors exceed per-stage limits");
         Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, binding.count, flags, nullptr}, {}, {}};
         for (std::uint32_t element = 0; element < binding.count; ++element) {
-            const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * 8, 8);
+            const auto words = descriptorWords.subspan(static_cast<std::size_t>(element) * 8, 8);
             // A null T# (no base address) in a typed heap: with nullDescriptor the element binds no
             // view, so its loads read zero and its stores are dropped, as on the hardware.
             if (words[0] == 0u && (words[1] & 0xffu) == 0u && context.nullDescriptors) {
@@ -414,8 +416,8 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
     }
     if (!(sampledImage || samplerKind)) Require(false, std::string("unsupported descriptor kind ") + kindName(binding.kind) + " for role " + roleName(binding.role));
     Require((sampledImage && binding.role == ShaderRecompiler::DescriptorRole::GuestImages) || (samplerKind && binding.role == ShaderRecompiler::DescriptorRole::GuestSamplers), "guest image descriptor role disagrees with its kind");
-    Require(binding.guestDescriptor.size() % binding.count == 0, "guest image descriptor size is not a multiple of the binding count");
-    const auto elementWords = binding.guestDescriptor.size() / binding.count;
+    Require(descriptorWords.size() % binding.count == 0, "guest image descriptor size is not a multiple of the binding count");
+    const auto elementWords = descriptorWords.size() / binding.count;
 
     Binding item{{binding.binding, sampledImage ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_SAMPLER, binding.count, flags, nullptr}, {}, {}};
 
@@ -431,9 +433,9 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         // looks every element up.
         static const bool lookUpRepeats = std::getenv("ANYPS5_NO_REPEATED_TEXTURE") != nullptr;
         for (std::uint32_t element = 0; element < binding.count; ++element) {
-            auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
+            auto words = descriptorWords.subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
             if (!lookUpRepeats && element != 0 && !pairedSamplers.empty() && pairedSamplers.back().texture + 1 == textures.size()) {
-                const auto previous = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element - 1) * elementWords, elementWords);
+                const auto previous = descriptorWords.subspan(static_cast<std::size_t>(element - 1) * elementWords, elementWords);
                 const auto flag = [](const std::vector<bool>& flags, std::uint32_t index) { return index < flags.size() && flags[index]; };
                 if (std::equal(words.begin(), words.end(), previous.begin()) && flag(binding.imageDepthCompare, element) == flag(binding.imageDepthCompare, element - 1) && flag(binding.imageUnnormalized, element) == flag(binding.imageUnnormalized, element - 1)) {
                     auto paired = pairedSamplers.back();
@@ -521,7 +523,7 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Require(binding.samplerDepthCompare.size() == binding.count, "guest sampler binding is missing depth comparison metadata");
         Require(binding.samplerUnnormalized.empty() || binding.samplerUnnormalized.size() == binding.count, "guest sampler binding has unnormalized coordinate metadata of another size");
         for (std::uint32_t element = 0; element < binding.count; ++element) {
-            const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
+            const auto words = descriptorWords.subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
             const bool unnormalized = element < binding.samplerUnnormalized.size() && binding.samplerUnnormalized[element];
             auto resource = DecodeSamplerResource(words, unnormalized);
             resource.compareEnable = binding.samplerDepthCompare.at(element);

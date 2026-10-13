@@ -153,7 +153,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         // first such zero vertex in a private copy; zero-padded vertex copies would otherwise be sized
         // to the original index (160 GiB). Only the vertex index the shader sees changes.
         constexpr std::uint32_t ZeroFetchSlack = 0x10000u;
-        if (const auto zeroFrom = state.stages.mesh ? std::nullopt : ZeroFetchVertex(shaders.front().program->vertexAttributes)) {
+        if (const auto zeroFrom = state.stages.mesh ? std::nullopt : ZeroFetchVertex(shaders.front().VertexAttributes())) {
             const auto limit = *zeroFrom > draw.firstVertex ? *zeroFrom - draw.firstVertex : 0u;
             if (*highestIndex >= limit && *highestIndex - limit >= ZeroFetchSlack) {
                 if (!indices) {
@@ -174,7 +174,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     }
     timing.Mark("index_upload");
     // The vertex input layout is built (and checked) with the pipeline key (GraphicsPipelineCache).
-    const auto& attributes = shaders.front().program->vertexAttributes;
+    const auto attributes = shaders.front().VertexAttributes();
     auto& vertexBuffers = storage->vertices;
     std::vector<VkBuffer> vertexHandles;
     std::vector<VkDeviceSize> vertexOffsets(attributes.size(), 0);
