@@ -552,3 +552,22 @@ Issues that needed research, with a short answer. Check here before researching;
   - **Per-draw profile.** APS5_PROFILE_GPU_DRAWS (120 frames): 4,320 draws and dispatches a frame, work 63 ms against setup 4.6 ms. Biggest buckets are 1,224 small 4K draws (11.7 us each) and 1,361 shadow draws (6.8 us each). But the profiler disables pass merging, so these per-draw costs are inflated.
   - **Merging is working.** APS5_TRACE_MERGE=1 (new): 93% of draws continue the open pass. New passes: other attachments 4.7%, uploads/downloads 2%, target transitions 0.2%.
   - **Where the 46 ms goes with merging on is unmeasured.** Next: a frame capture with GPU timing (RenderDoc) in both emulators, or timestamps that work inside merged passes.
+- **Hellboy: what is established (2026-10-13; replays, GPU timestamps, nvidia-smi).**
+  - **Frame.** 62.7 ms = worker from the game's burst to the frame's last command decoded 45.0 ms (~32 ms CPU, the rest waiting) + GPU after it 18.0 ms. The game keeps one frame in flight (it submits the next frame on the completion interrupt). GPU busy 46.3 ms a frame, so the GPU and the worker each need ~45 ms and overlap only partly. KytyPS5 on the same scene: ~25 ms of CPU on one thread, ~18 ms GPU (55% utilization at 30 fps). We are slower on both halves.
+  - **Ruled out by measurement.**
+    - Early labels: the game paces on completion interrupts.
+    - Interrupt latency: 0.04 ms.
+    - Pass breaks: 93% of draws continue an open pass.
+    - Memory location: ANYPS5_GPU_MEMORY_COPY=1 (copies in device memory) ran the same draws 1.5x *slower*, but the GPU was at ~850–980 MHz there against ~1,785–1,897 MHz in normal runs (copy mode leaves it idle). Clock-adjusted, copies save at most ~15–20%, consistent with the mirror result (46 vs 48 ms). Not the 2.5x.
+  - **Caveats.**
+    - The laptop GPU is power-capped in gameplay (~60 of ~70 W, SW Power Cap active, 78 °C), so GPU-time comparisons between runs with different load are confounded by clocks.
+    - The draw profiler disables merging, so its per-draw costs are upper bounds.
+  - **Unknown.** Why the same draws cost ~2x+ the GPU time of Kyty's. Needs a same-frame GPU capture of both (RenderDoc).
+  - **shadPS4 (23c4133) for reference.**
+    - One GPU thread with coroutine queues.
+    - Fences and interrupts written at decode time.
+    - Device-local sparse arenas plus a device-local stream buffer for small read-only data.
+    - Push descriptors, a JIT-compiled SRT walker, specialization on formats.
+    - Hazard-tracked barriers: one batched global barrier only on real read-after-write.
+    - Raw typed buffer arrays with bounds left to robustBufferAccess2, no in-shader checks.
+    - Fast clears as loadOp, compute clears and copies replaced by vkCmd equivalents.
