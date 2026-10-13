@@ -48,6 +48,7 @@ public:
 
 private:
     static bool read(void* context, std::uint64_t address, std::uint32_t* value);
+    static bool accessible(void* context, std::uint64_t address, std::uint64_t bytes);
     bool initial(std::uint64_t address) const;
     ShaderRecompiler::SrtRuntime runtime(const ShaderRecompiler::RecompileRequest& request);
     // A region's bytes: its own copy, or a view of memory `owners` hold. Moving a region (or the

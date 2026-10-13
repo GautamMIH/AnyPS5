@@ -2,6 +2,8 @@
 #include "prx/libc/include/MallocStatistics.hpp"
 #include <algorithm>
 #include <cstdint>
+#include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
@@ -74,12 +76,39 @@ void RemoveFree(Arena& arena, ChunkIterator chunk) {
 void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
     if (!arena) return nullptr;
     alignment = std::max<std::size_t>(alignment, BlockAlignment);
-    const auto needed = AlignUp(std::max<std::size_t>(size, 1), Granule);
+    // Sizes are whole blocks (BlockAlignment), so chunk boundaries stay block-aligned: rounding to the
+    // Granule left a 16-byte hole after each small block that no 32-aligned request fits, and every
+    // allocation scanned them all (Astro Bot: 44,000 holes, its 8-byte allocations stalled startup).
+    const auto needed = AlignUp(std::max<std::size_t>(size, 1), BlockAlignment);
     if (needed < size || needed > std::numeric_limits<std::uintptr_t>::max() - alignment) {
         Error(12);
         return nullptr;
     }
-    for (auto candidate = arena->free.lower_bound({needed, 0}); candidate != arena->free.end(); ++candidate) {
+    // Debug aid: APS5_TRACE_MSPACE=1 reports failed allocations and scans of many candidates (at
+    // most once a second each).
+    static const bool trace = std::getenv("APS5_TRACE_MSPACE") != nullptr;
+    std::size_t scanned = 0;
+    const auto report = [&](const char* what) {
+        static std::chrono::steady_clock::time_point last{};
+        static std::size_t calls = 0;
+        ++calls;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last < std::chrono::seconds(1)) return;
+        last = now;
+        std::fprintf(stderr, "[mspace] %s: size 0x%zx align 0x%zx scanned %zu; arena 0x%zx bytes, in use 0x%zx, %zu free chunks (largest 0x%zx); %zu such calls\n", what, size, alignment, scanned,
+            static_cast<std::size_t>(arena->end - arena->base), arena->inUse, arena->free.size(), arena->free.empty() ? std::size_t{0} : arena->free.rbegin()->first, calls);
+    };
+    // A free chunk of needed + alignment - Granule bytes fits whatever its (Granule-aligned) start:
+    // looked up first (the smallest such), so a large alignment does not scan the chunks it cannot
+    // use. Only without one are the smaller candidates tried.
+    auto candidate = arena->free.end();
+    if (alignment > BlockAlignment) {
+        const auto sure = arena->free.lower_bound({needed + alignment - Granule, 0});
+        if (sure != arena->free.end()) candidate = sure;
+    }
+    if (candidate == arena->free.end()) candidate = arena->free.lower_bound({needed, 0});
+    for (; candidate != arena->free.end(); ++candidate) {
+        ++scanned;
         const auto start = candidate->second;
         const auto chunk = arena->chunks.find(start);
         const auto end = chunk->second.end;
@@ -93,8 +122,10 @@ void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
         arena->chunks[aligned] = {finish, true, size};
         arena->inUse += needed;
         arena->peakInUse = std::max(arena->peakInUse, arena->inUse);
+        if (trace && scanned > 1000) report("slow scan");
         return reinterpret_cast<void*>(aligned);
     }
+    if (trace) report("failed");
     Error(12);
     return nullptr;
 }
@@ -156,7 +187,7 @@ void* Reallocate(Arena* arena, void* pointer, std::size_t size, std::size_t alig
     ChunkIterator chunk;
     if (!FindUsed(arena, pointer, chunk)) return nullptr;
     if (!size) { Release(*arena, chunk); return nullptr; }
-    const auto needed = AlignUp(size, Granule);
+    const auto needed = AlignUp(size, BlockAlignment);
     if (needed < size) {
         Error(12);
         return nullptr;
@@ -235,7 +266,7 @@ void* APS5_VABI sceLibcMspaceCreate_nid_postfix(const char* name, void* base,
     arena->base = start;
     arena->end = start + size;
     arena->ownsMemory = ownsMemory;
-    AddFree(*arena, start + ArenaHeaderBytes, start + (size & ~(Granule - 1)));
+    AddFree(*arena, AlignUp(start + ArenaHeaderBytes, BlockAlignment), start + (size & ~(Granule - 1)));
     arenas.emplace(start, std::move(arena));
     return base;
 }

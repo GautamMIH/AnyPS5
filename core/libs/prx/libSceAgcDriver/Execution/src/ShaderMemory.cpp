@@ -96,7 +96,16 @@ ShaderRecompiler::SrtRuntime ShaderMemory::runtime(const ShaderRecompiler::Recom
     result.userContext = this;
     result.readMemory = &read;
     result.readSpecializationMemory = &read;
+    result.accessible = &accessible;
     return result;
+}
+
+// A read through a null nested pointer (a table entry the shader's taken paths never use, as in
+// Astro Bot's first dispatches) is inaccessible: the evaluator poisons it (zero words), as it does
+// reads through a null user-data root, instead of the capture failing the submission.
+bool ShaderMemory::accessible(void*, std::uint64_t address, std::uint64_t bytes) {
+    constexpr std::uint64_t NullPageEnd = 0x10000;
+    return address >= NullPageEnd && bytes != 0;
 }
 
 std::shared_ptr<const ShaderRecompiler::ResourceCapture> ShaderMemory::Capture(const ShaderRecompiler::RecompileRequest& request, const ShaderRecompiler::SourceHandle* handle) {

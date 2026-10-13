@@ -2179,7 +2179,9 @@ int main(int argc, char** argv) {
         request.context.userDataBaseRegister = 8;
         request.context.memory = {};
         AgcDriver::ShaderMemory invalid({});
-        expectFailure([&] { invalid.Capture(request); }, "null or misaligned address", "null nested pointer was accepted");
+        // A null nested pointer reads as poisoned zero words (as a null user-data root does), not a failure.
+        const auto nullNested = invalid.Capture(request);
+        require(nullNested != nullptr && !nullNested->snapshot.srtPoison.empty(), "null nested pointer was not poisoned");
         std::cout << "Shader memory capture, strict validation and deterministic replay passed\n";
         return 0;
     } catch (const std::exception& error) {
