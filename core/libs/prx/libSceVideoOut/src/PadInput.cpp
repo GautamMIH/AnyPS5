@@ -16,7 +16,45 @@
 PadInput::PadInput()
     : bindings(Pad::LoadInputMapping()), pressed(bindings.size()), wheelReleaseTimes(bindings.size()) {
     loadScript();
+    loadReplay();
+    if (const char* path = std::getenv("ANYPS5_RECORD_INPUT"); path != nullptr) {
+        recordFile = std::fopen(path, "w");
+        if (recordFile == nullptr) APS5_LOG_ERR("Pad: cannot record input to %s", path);
+        else APS5_LOG_OUT("Pad: recording input to %s", path);
+    }
     openFirstAvailableController();
+}
+
+void PadInput::loadReplay() {
+    const char* path = std::getenv("ANYPS5_REPLAY_INPUT");
+    if (path == nullptr) return;
+    std::FILE* file = std::fopen(path, "r");
+    if (file == nullptr) throw std::runtime_error(std::string("ANYPS5_REPLAY_INPUT: cannot open ") + path);
+    Recorded entry{};
+    unsigned buttons = 0, s0 = 0, s1 = 0, s2 = 0, s3 = 0, l2 = 0, r2 = 0, tl = 0, tr = 0;
+    while (std::fscanf(file, "%lf %x %u %u %u %u %u %u %u %u", &entry.at, &buttons, &s0, &s1, &s2, &s3, &l2, &r2, &tl, &tr) == 10) {
+        entry.state = {};
+        entry.state.buttons = buttons;
+        entry.state.sticks = {static_cast<std::uint8_t>(s0), static_cast<std::uint8_t>(s1), static_cast<std::uint8_t>(s2), static_cast<std::uint8_t>(s3)};
+        entry.state.analogButtonsL2 = static_cast<std::uint8_t>(l2);
+        entry.state.analogButtonsR2 = static_cast<std::uint8_t>(r2);
+        entry.state.touchLeft = tl != 0;
+        entry.state.touchRight = tr != 0;
+        replay.push_back(entry);
+    }
+    std::fclose(file);
+    APS5_LOG_OUT("Pad: replaying %zu input changes from %s", replay.size(), path);
+}
+
+void PadInput::record(const PadInputState& state) {
+    if (recordFile == nullptr) return;
+    if (recordedAny && state.buttons == lastRecorded.buttons && state.sticks == lastRecorded.sticks && state.analogButtonsL2 == lastRecorded.analogButtonsL2 &&
+        state.analogButtonsR2 == lastRecorded.analogButtonsR2 && state.touchLeft == lastRecorded.touchLeft && state.touchRight == lastRecorded.touchRight) return;
+    recordedAny = true;
+    lastRecorded = state;
+    const auto at = std::chrono::duration<double>(std::chrono::steady_clock::now() - scriptStart).count();
+    std::fprintf(recordFile, "%.3f %x %u %u %u %u %u %u %d %d\n", at, state.buttons, state.sticks[0], state.sticks[1], state.sticks[2], state.sticks[3], state.analogButtonsL2, state.analogButtonsR2, state.touchLeft ? 1 : 0, state.touchRight ? 1 : 0);
+    std::fflush(recordFile);
 }
 
 void PadInput::loadScript() {
@@ -56,6 +94,7 @@ std::uint32_t PadInput::scriptedButtons(std::chrono::steady_clock::time_point no
 }
 
 PadInput::~PadInput() {
+    if (recordFile != nullptr) std::fclose(recordFile);
     closeController();
 }
 
@@ -299,6 +338,22 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
 
 void PadInput::Update() {
     const auto now = std::chrono::steady_clock::now();
+    if (!replay.empty()) {
+        // The recording replaces the controller: each change is published once its time comes.
+        const auto elapsed = std::chrono::duration<double>(now - scriptStart).count();
+        bool changed = false;
+        while (replayNext < replay.size() && replay[replayNext].at <= elapsed) {
+            ++replayNext;
+            changed = true;
+        }
+        if (changed) {
+            auto state = replay[replayNext - 1].state;
+            if (state.analogButtonsL2 != 0) state.buttons |= static_cast<std::uint32_t>(Pad::PadButton::L2);
+            if (state.analogButtonsR2 != 0) state.buttons |= static_cast<std::uint32_t>(Pad::PadButton::R2);
+            PadPublishInput_nid_postfix(state);
+        }
+        return;
+    }
     if (!script.empty()) {
         const auto scripted = scriptedButtons(now);
         if (scripted != scriptedPressed) {
@@ -345,6 +400,8 @@ void PadInput::Update() {
 }
 
 void PadInput::publish() {
+    // A replay owns the published state (live events would override it).
+    if (!replay.empty()) return;
     PadInputState state;
     state.buttons = controllerState.buttons;
     state.sticks = controllerState.sticks;
@@ -391,5 +448,6 @@ void PadInput::publish() {
     state.buttons |= scriptedPressed;
     if (state.analogButtonsL2 != 0) state.buttons |= static_cast<std::uint32_t>(Pad::PadButton::L2);
     if (state.analogButtonsR2 != 0) state.buttons |= static_cast<std::uint32_t>(Pad::PadButton::R2);
+    record(state);
     PadPublishInput_nid_postfix(state);
 }

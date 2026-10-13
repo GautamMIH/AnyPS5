@@ -7,6 +7,7 @@
 #include "prx/libScePad/include/PadState.hpp"
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <vector>
 
 class DisplayWindow;
@@ -37,6 +38,21 @@ private:
         std::uint32_t button;
     };
     std::vector<ScriptedPress> script;
+    // Debug aid: ANYPS5_RECORD_INPUT=<file> appends every change of the published pad state (seconds
+    // since input started, buttons, sticks, analog triggers, touchpad halves), and
+    // ANYPS5_REPLAY_INPUT=<file> publishes such a recording on the same clock instead of the
+    // controller, so a test run repeats a player's inputs (reaching gameplay hidden).
+    void loadReplay();
+    void record(const PadInputState& state);
+    struct Recorded {
+        double at;
+        PadInputState state;
+    };
+    std::vector<Recorded> replay;
+    std::size_t replayNext = 0;
+    std::FILE* recordFile = nullptr;
+    PadInputState lastRecorded{};
+    bool recordedAny = false;
     std::chrono::steady_clock::time_point scriptStart = std::chrono::steady_clock::now();
     std::uint32_t scriptedPressed = 0;
     std::vector<Pad::InputBinding> bindings;

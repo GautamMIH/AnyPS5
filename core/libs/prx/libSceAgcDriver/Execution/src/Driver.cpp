@@ -827,6 +827,22 @@ private:
     static bool predictedLineThunk(void* context, std::uint64_t begin, std::span<std::byte> out) {
         return static_cast<Driver*>(context)->predictedLine(begin, out);
     }
+    // Debug aid: APS5_TRACE_PREDICTED=1 counts why lines holding predicted dwords fall back to the
+    // waiting read, every 10 s.
+    enum PredictedMiss { Overlaid, UnpredictedPending, OtherJob, StaleSerial, Drain, PredictedMissCount };
+    static bool notePredicted(PredictedMiss outcome) {
+        static const bool trace = std::getenv("APS5_TRACE_PREDICTED") != nullptr;
+        if (!trace) return outcome == Overlaid;
+        static std::array<std::uint64_t, PredictedMissCount> counts{};
+        static auto window = std::chrono::steady_clock::now();
+        ++counts[outcome];
+        if (const auto now = std::chrono::steady_clock::now(); now - window >= std::chrono::seconds(10)) {
+            std::fprintf(stderr, "[predicted] 10 s: overlaid %llu, unpredicted dword pending %llu, other job last writer %llu, stale serial %llu, drain %llu\n", static_cast<unsigned long long>(counts[Overlaid]), static_cast<unsigned long long>(counts[UnpredictedPending]), static_cast<unsigned long long>(counts[OtherJob]), static_cast<unsigned long long>(counts[StaleSerial]), static_cast<unsigned long long>(counts[Drain]));
+            counts = {};
+            window = now;
+        }
+        return outcome == Overlaid;
+    }
     bool predictedLine(std::uint64_t begin, std::span<std::byte> out) {
         if (predicted.empty() || !pipeline || device == nullptr || begin % 4 != 0 || out.size() % 4 != 0 || out.size() > 64) return false;
         const auto words = out.size() / 4;
@@ -840,14 +856,14 @@ private:
             const auto need = pipeline->Check(address, 4);
             const auto it = predicted.find(address);
             if (need.kind == DeviceThread::Need::None) continue;
-            if (it == predicted.end()) return false;
+            if (it == predicted.end()) return notePredicted(UnpredictedPending);
             if (need.kind == DeviceThread::Need::Wait) {
-                if (it->second.job == 0 || need.serial != it->second.job) return false;
+                if (it->second.job == 0 || need.serial != it->second.job) return notePredicted(OtherJob);
             } else if (need.kind == DeviceThread::Need::Resolve) {
                 const auto serial = it->second.Serial();
-                if (serial == 0 || pipeline->ResidentOverlaps(address, 4) || device->LastGpuWriter(address, 4) != serial) return false;
+                if (serial == 0 || pipeline->ResidentOverlaps(address, 4) || device->LastGpuWriter(address, 4) != serial) return notePredicted(StaleSerial);
             } else {
-                return false;
+                return notePredicted(Drain);
             }
             overlay[index] = true;
             values[index] = it->second.value;
@@ -878,7 +894,7 @@ private:
             }
             if (lines % 500 == 0) std::fprintf(stderr, "[predicted-capture] %llu lines overlaid, %llu mismatched\n", static_cast<unsigned long long>(lines), static_cast<unsigned long long>(mismatches));
         }
-        return true;
+        return notePredicted(Overlaid);
     }
 
     // Whether the queued GPU writes leave a value satisfying the WAIT_REG_MEM.
@@ -1386,7 +1402,7 @@ private:
             job->device.reset();
             job->timing.reset();
             reaper.Retire(std::move(job));
-        }, std::move(writes), anyWrite);
+        }, std::move(writes), anyWrite, "dispatch");
     }
 
     void draw(QueueState& queue, Pm4::DrawParameters drawParameters, const Submission& submission) {
@@ -1759,7 +1775,7 @@ private:
             job->device.reset();
             job->timing.reset();
             self->reaper.Retire(std::move(job));
-        }, std::move(writes), anyWrite);
+        }, std::move(writes), anyWrite, addressStores ? "draw-bda" : "draw");
     }
 
     // The writable registered guest ranges (what address-table stores can reach). The registry is
@@ -2108,7 +2124,7 @@ private:
                         const GuestMemory::AccessSite accessSite("queued_dma_cpu_fallback");
                         static thread_local QueueState unused;
                         Pm4::Execute(words, unused);
-                    }, {{destination, destination + bytes}}, false);
+                    }, {{destination, destination + bytes}}, false, opcode == 0x37 ? "write-data" : queuedDma->immediate ? "dma-fill" : "dma-copy", bytes);
                     predictWrite(*queuedDma, 0, job, recorded);
                     queuedDmaWrites.push_back({destination, destination + bytes, job});
                     timing.Mark("dma_queued");

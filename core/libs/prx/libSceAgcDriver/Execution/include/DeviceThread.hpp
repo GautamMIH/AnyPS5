@@ -110,8 +110,8 @@ public:
 
     // Queues a job. writes: the guest ranges it may write (render targets, writable buffers);
     // anyWrite: it may write elsewhere too (storage images, address-table stores).
-    // Returns the job's serial (see WaitFor, Completed).
-    std::uint64_t Post(std::function<void()> job, Ranges writes, bool anyWrite) {
+    // Returns the job's serial (see WaitFor, Completed). kind and detail name the job in traces.
+    std::uint64_t Post(std::function<void()> job, Ranges writes, bool anyWrite, const char* kind = "job", std::uint64_t detail = 0) {
         // Sorted and merged: reads check them by binary search (address-table stores list every
         // writable registered range).
         // Merged in place (a new vector per job was an allocation per draw).
@@ -127,7 +127,7 @@ public:
         {
             std::lock_guard lock(mutex);
             rethrow();
-            jobs.push_back({std::move(job), std::move(writes), anyWrite, serial = ++posted});
+            jobs.push_back({std::move(job), std::move(writes), anyWrite, serial = ++posted, false, kind, detail});
             index(jobs.back(), true);
             sleeping = deviceSleeping;
         }
@@ -212,10 +212,13 @@ public:
             if (job.anyWrite || overlapsSorted(job.writes)) {
                 last = job.serial;
                 queued = true;
-                static int logged = 0;
-                if (trace && logged < 30) {
-                    ++logged;
-                    std::fprintf(stderr, "[pipeline] wait read 0x%llx+0x%zx anyWrite %d ranges %zu\n", static_cast<unsigned long long>(address), bytes, job.anyWrite, job.writes.size());
+                // Every 1000th waiting job match, through the whole run.
+                static std::uint64_t seen = 0;
+                if (trace && ++seen % 1000 == 0) {
+                    // The job's write range the read overlaps (none for anyWrite).
+                    auto it = std::upper_bound(job.writes.begin(), job.writes.end(), address, [](std::uint64_t value, const auto& range) { return value < range.second; });
+                    const bool hit = it != job.writes.end() && it->first < end;
+                    std::fprintf(stderr, "[pipeline] wait read 0x%llx+0x%zx %s %llu anyWrite %d ranges %zu overlap 0x%llx+0x%llx\n", static_cast<unsigned long long>(address), bytes, job.kind, static_cast<unsigned long long>(job.detail), job.anyWrite, job.writes.size(), hit ? static_cast<unsigned long long>(it->first) : 0ull, hit ? static_cast<unsigned long long>(it->second - it->first) : 0ull);
                 }
             }
         }
@@ -261,6 +264,8 @@ private:
         std::uint64_t serial = 0;
         // Its writes are in regionWrites (else it counts in unindexedJobs while queued or running).
         bool indexed = false;
+        const char* kind = "job";
+        std::uint64_t detail = 0;
     };
 
     // The queued and running jobs' write ranges by RegionBytes region (a count per region), so a
