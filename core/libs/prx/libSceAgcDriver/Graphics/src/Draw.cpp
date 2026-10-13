@@ -267,6 +267,19 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
     for (const auto& color : storage->colors) mergeable = mergeable && (!color || !color->BeginRecords());
     mergeable = mergeable && (!storage->depth || !storage->depth->BeginRecords());
     const auto continued = mergeable ? context.drawQueue->ContinuePass(pipeline.PassKey()) : VkCommandBuffer{VK_NULL_HANDLE};
+    // Debug aid: APS5_TRACE_MERGE=1 counts draws that continued the open pass and, for the others, why
+    // not, every 20000 draws.
+    static const bool traceMerge = std::getenv("APS5_TRACE_MERGE") != nullptr;
+    if (traceMerge) {
+        static std::array<std::uint64_t, 6> counts{};
+        static std::uint64_t draws = 0;
+        bool targetRecords = false;
+        for (const auto& color : storage->colors) targetRecords = targetRecords || (color && color->BeginRecords());
+        targetRecords = targetRecords || (storage->depth && storage->depth->BeginRecords());
+        const int reason = continued != VK_NULL_HANDLE ? 0 : resources->RecordsOutsidePass() ? 1 : targetRecords ? 2 : (state.provokingVertexLast && !context.provokingVertexModePerPipeline) ? 3 : mergeable ? 4 : 5;
+        ++counts[reason];
+        if (++draws % 20000 == 0) std::fprintf(stderr, "[merge] %llu draws: continued %llu; new pass: uploads/downloads %llu, target transition %llu, provoking vertex %llu, other pass open or closed %llu, other %llu\n", static_cast<unsigned long long>(draws), static_cast<unsigned long long>(counts[0]), static_cast<unsigned long long>(counts[1]), static_cast<unsigned long long>(counts[2]), static_cast<unsigned long long>(counts[3]), static_cast<unsigned long long>(counts[4]), static_cast<unsigned long long>(counts[5]));
+    }
     const auto commands = continued != VK_NULL_HANDLE ? continued : context.drawQueue->Begin(context);
     std::uint32_t profile = UINT32_MAX;
     if (context.drawProfiler) {

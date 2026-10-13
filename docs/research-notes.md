@@ -547,3 +547,8 @@ Issues that needed research, with a short answer. Check here before researching;
   - **So the frame is a series.** Frame ≈ time for the driver to process the frame's commands (~44 ms) + the GPU tail after the last command (~18 ms).
   - **Early labels (KytyPS5 writes labels at decode time) would not help here.** Kyty also signals interrupts at real completion; it wins on decode-and-record CPU time (~25 ms on one thread vs our worker ~32 + device ~35) and on a short GPU tail (VRAM-resident buffers).
   - **Safety caveat for early labels in AnyPS5.** Kyty is safe only because it copies buffer contents at bind time. Our GPU reads imported guest memory when it executes, so an early label could let a game recycle data a queued draw hasn't read yet.
+- **Hellboy GPU time: buffer reads and passes ruled out (2026-10-13, replay).**
+  - **Buffer cache not justified.** Two earlier experiments (Smurfs mirror best case 115 vs 112 ms; Hellboy 46 vs 48 ms) showed VRAM copies don't cut GPU time here, so a Kyty-style buffer cache is for memory (Astro Bot), not speed.
+  - **Per-draw profile.** APS5_PROFILE_GPU_DRAWS (120 frames): 4,320 draws and dispatches a frame, work 63 ms against setup 4.6 ms. Biggest buckets are 1,224 small 4K draws (11.7 us each) and 1,361 shadow draws (6.8 us each). But the profiler disables pass merging, so these per-draw costs are inflated.
+  - **Merging is working.** APS5_TRACE_MERGE=1 (new): 93% of draws continue the open pass. New passes: other attachments 4.7%, uploads/downloads 2%, target transitions 0.2%.
+  - **Where the 46 ms goes with merging on is unmeasured.** Next: a frame capture with GPU timing (RenderDoc) in both emulators, or timestamps that work inside merged passes.
