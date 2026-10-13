@@ -212,6 +212,10 @@ function(add_shader_recompiler target runtimeTarget)
     set(shaderCacheReviewedNames
             # SetResultRetire only chooses the thread that destroys results caches drop.
             SetResultRetire
+            # RecompileDraw is Recompile's materialization as a draw record (same request, same
+            # inputs); DrawOf repackages a whole result.
+            RecompileDraw
+            DrawOf
             BuildBarycentricGeometryShader
             BuildPreparedShaderKey
             BuildRectListShaders

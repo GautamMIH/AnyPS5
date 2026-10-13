@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <utility>
@@ -595,6 +596,38 @@ struct ResourceCapture;
 // The push data of `result` for `userData` (see Recompile's runtimeUserData): false when the
 // result's own push data already holds it, else true with the bytes to use in `push`.
 [[nodiscard]] bool ApplyRuntimeUserData(const RecompileResult& result, std::span<const std::uint32_t> userData, std::vector<std::byte>& push);
+
+// One draw of a program shared by every draw of its variant (RecompileDraw): `program` holds what
+// those draws have in common, with its bindings' guestDescriptor and its vertexAttributes empty and
+// its pushConstants zeroed (at their size). The draw holds those itself, so a draw costs its words
+// instead of a whole RecompileResult (docs/dev/per-draw-dataflow-design.md).
+struct ShaderDraw {
+    std::shared_ptr<const RecompileResult> program;
+    // Binding i of program->bindings has the guest words words[offsets[i], offsets[i + 1]).
+    std::vector<std::uint32_t> words;
+    std::vector<std::uint32_t> offsets;
+    std::vector<std::byte> pushConstants;
+    std::vector<VertexAttribute> vertexAttributes;
+    std::uint32_t poisonedSrtReads = 0;
+    bool cacheHit = false;
+
+    [[nodiscard]] std::span<const std::uint32_t> Words(std::size_t binding) const {
+        return std::span<const std::uint32_t>(words).subspan(offsets[binding], offsets[binding + 1] - offsets[binding]);
+    }
+    // The whole result (the program with this draw's data), built at the first call.
+    [[nodiscard]] const std::shared_ptr<const RecompileResult>& Expanded() const;
+
+private:
+    mutable std::once_flag expandedOnce;
+    mutable std::shared_ptr<const RecompileResult> expanded;
+};
+
+// Recompile(request, capture, ...) as a draw record; Recompile returns RecompileDraw(...)->Expanded().
+[[nodiscard]] std::shared_ptr<const ShaderDraw> RecompileDraw(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit = nullptr, bool runtimeUserData = false);
+// A record of a whole result (one not made by RecompileDraw, such as a rect-list stage): its program
+// is the result itself.
+[[nodiscard]] std::shared_ptr<const ShaderDraw> DrawOf(std::shared_ptr<const RecompileResult> result);
+[[nodiscard]] bool ApplyRuntimeUserData(const ShaderDraw& draw, std::span<const std::uint32_t> userData, std::vector<std::byte>& push);
 
 // Debug aid (see DebugProbe in Translation/TranslationContext.hpp): the APS5_PROBE register probe is
 // only applied while a driver has it active, so it can be limited to one dispatch; the recompile

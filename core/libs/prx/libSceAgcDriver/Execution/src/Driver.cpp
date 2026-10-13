@@ -507,7 +507,7 @@ private:
     std::unordered_map<std::uint64_t, PreparedVertexEntry> preparedVertexHeaders;
     // The rect-list stages of each linked pair, by what BuildRectListShaders reads (the device's
     // serial, the fragment parameters, which of them the vertex stage exports, the highest binding).
-    std::map<std::vector<std::uint64_t>, std::pair<std::shared_ptr<const ShaderRecompiler::RecompileResult>, std::shared_ptr<const ShaderRecompiler::RecompileResult>>> preparedRectangles;
+    std::map<std::vector<std::uint64_t>, std::pair<std::shared_ptr<const ShaderRecompiler::ShaderDraw>, std::shared_ptr<const ShaderRecompiler::ShaderDraw>>> preparedRectangles;
 
     const Graphics::PreparedVertexHeader& preparedVertexHeader(const std::shared_ptr<const void>& owner, std::span<const std::byte> header, std::uint64_t headerAddress, std::uint32_t userSgprBase) {
         auto hash = (reinterpret_cast<std::uintptr_t>(owner.get()) * 0x9e3779b97f4a7c15ull) ^ headerAddress;
@@ -520,7 +520,7 @@ private:
         return entry.header;
     }
 
-    std::pair<std::shared_ptr<const ShaderRecompiler::RecompileResult>, std::shared_ptr<const ShaderRecompiler::RecompileResult>> preparedRectangle(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment) {
+    std::pair<std::shared_ptr<const ShaderRecompiler::ShaderDraw>, std::shared_ptr<const ShaderRecompiler::ShaderDraw>> preparedRectangle(const ShaderRecompiler::RecompileResult& vertex, const ShaderRecompiler::RecompileResult& fragment) {
         std::vector<std::uint64_t> key{device->Serial()};
         for (const auto& input : fragment.fragmentParameters) {
             const bool exported = std::find(vertex.parameterExports.begin(), vertex.parameterExports.end(), input.sourceLocation) != vertex.parameterExports.end();
@@ -534,7 +534,7 @@ private:
         if (const auto found = preparedRectangles.find(key); found != preparedRectangles.end()) return found->second;
         auto rectangle = ShaderRecompiler::BuildRectListShaders(vertex, fragment, device->Target());
         if (preparedRectangles.size() >= 1024) preparedRectangles.clear();
-        return preparedRectangles[key] = {std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.control)), std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.evaluation))};
+        return preparedRectangles[key] = {ShaderRecompiler::DrawOf(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.control))), ShaderRecompiler::DrawOf(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.evaluation)))};
     }
     std::uint64_t accepted = 0;
     std::uint64_t completed = 0;
@@ -1306,7 +1306,7 @@ private:
         bool memoHit = false;
         const auto compiledResult = [&] {
             try {
-                return ShaderRecompiler::Recompile(request, *capture, &memoHit, prepared);
+                return ShaderRecompiler::RecompileDraw(request, *capture, &memoHit, prepared);
             } catch (const std::exception& error) {
                 char context[160]{};
                 std::snprintf(context, sizeof(context), "compute shader 0x%llx (header 0x%llx, PGM_RSRC2 0x%08x, %u user SGPRs): ",
@@ -1314,7 +1314,7 @@ private:
                 throw std::runtime_error(std::string(context) + error.what());
             }
         }();
-        const auto& compiled = *compiledResult;
+        const auto& compiled = *compiledResult->Expanded();
         timing.Mark(compiled.cacheHit ? "shader_cache_hit" : "shader_compile");
         PreparedTrace::Add(memoHit ? PreparedTrace::MemoHit : PreparedTrace::MemoMiss);
         // Runtime user data: the shared result may carry another dispatch's user-data words.
@@ -1361,13 +1361,13 @@ private:
 
     // Queues a dispatch's device half (pipelined), like queueDraw: the job owns the compiled result
     // and the captured shader memory its snapshots view.
-    void queueDispatch(std::shared_ptr<const ShaderRecompiler::RecompileResult> result, const std::array<std::uint32_t, 3>& groups, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const std::vector<std::byte>> push) {
+    void queueDispatch(std::shared_ptr<const ShaderRecompiler::ShaderDraw> result, const std::array<std::uint32_t, 3>& groups, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const std::vector<std::byte>> push) {
         DeviceThread::Ranges writes;
         bool anyWrite = false;
         appendShaderWrites(std::span(&result, 1), writes, anyWrite);
         struct Job {
             std::shared_ptr<VulkanDevice> device;
-            std::shared_ptr<const ShaderRecompiler::RecompileResult> result;
+            std::shared_ptr<const ShaderRecompiler::ShaderDraw> result;
             std::array<std::uint32_t, 3> groups;
             ShaderMemory shaderMemory;
             std::vector<ShaderRecompiler::MemoryRegion> memory;
@@ -1380,7 +1380,7 @@ private:
             {
                 PerformanceContext timingContext(job->timing.get());
                 const auto deferred = WriteTracker::DeferredGpuWrites();
-                recordDispatch(*job->device, *job->result, job->groups, job->snapshots, job->push.get());
+                recordDispatch(*job->device, *job->result->Expanded(), job->groups, job->snapshots, job->push.get());
                 if (WriteTracker::DeferredGpuWrites() != deferred) pipeline->NoteUnknownGpuWrites();
             }
             job->device.reset();
@@ -1544,7 +1544,7 @@ private:
         // The stages' push data where it differs from their results' (runtime user data).
         std::vector<std::shared_ptr<const std::vector<std::byte>>> pushes;
         // Shared with the recompiler's result memo (immutable): stage pointers stay valid as the list grows.
-        std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results;
+        std::vector<std::shared_ptr<const ShaderRecompiler::ShaderDraw>> results;
         std::vector<Graphics::CompiledShader> stages;
         results.reserve(programs.size() + (graphics.rectList ? 2u : 0u));
         stages.reserve(programs.size());
@@ -1589,10 +1589,11 @@ private:
             request.context.memory = memory;
             shaderTiming.Mark("request_memory");
             bool memoHit = false;
-            results.push_back(ShaderRecompiler::Recompile(request, *capture, &memoHit, prepared));
+            results.push_back(ShaderRecompiler::RecompileDraw(request, *capture, &memoHit, prepared));
             PreparedTrace::Add(memoHit ? PreparedTrace::MemoHit : PreparedTrace::MemoMiss);
             shaderTiming.Mark(results.back()->cacheHit ? "cache_hit" : "compile");
-            const auto& result = *results.back();
+            const auto& draw = *results.back();
+            const auto& result = *draw.program;
             // Mesh draws read indices in-shader and take no indexed offsets.
             if (i == 0 && !(drawParameters.indexed && graphics.stages.mesh)) {
                 const auto offsetValue = [&](std::int32_t sgpr) {
@@ -1610,18 +1611,18 @@ private:
                 }
                 if (result.instanceOffsetSgpr >= 0) drawParameters.firstInstance = offsetValue(result.instanceOffsetSgpr);
             }
-            require(result.pushConstants.size() <= pushLimitBytes - pushCursorBytes, "stage push constants exceed the pipeline push constant block");
+            require(draw.pushConstants.size() <= pushLimitBytes - pushCursorBytes, "stage push constants exceed the pipeline push constant block");
             const std::vector<std::byte>* push = nullptr;
             if (prepared) {
                 std::vector<std::byte> bytes;
-                if (ShaderRecompiler::ApplyRuntimeUserData(result, program.userData, bytes)) {
+                if (ShaderRecompiler::ApplyRuntimeUserData(draw, program.userData, bytes)) {
                     pushes.push_back(std::make_shared<const std::vector<std::byte>>(std::move(bytes)));
                     push = pushes.back().get();
                     PreparedTrace::Add(PreparedTrace::PushOverride);
                 }
             }
-            stages.push_back({program.binary.stage, &result, result.pushConstants.empty() ? 0u : pushCursorBytes, push});
-            pushCursorBytes += static_cast<std::uint32_t>(result.pushConstants.size());
+            stages.push_back({program.binary.stage, &result, draw.pushConstants.empty() ? 0u : pushCursorBytes, push, &draw});
+            pushCursorBytes += static_cast<std::uint32_t>(draw.pushConstants.size());
         }
         timing.Mark("shaders");
         if (graphics.rectList) {
@@ -1629,16 +1630,16 @@ private:
             // Without a pixel shader no parameters are interpolated.
             const ShaderRecompiler::RecompileResult noFragment{};
             if (prepared) {
-                auto rectangle = preparedRectangle(*results[0], graphics.hasFragmentShader ? *results[1] : noFragment);
+                auto rectangle = preparedRectangle(*results[0]->program, graphics.hasFragmentShader ? *results[1]->program : noFragment);
                 results.push_back(std::move(rectangle.first));
                 results.push_back(std::move(rectangle.second));
             } else {
-                auto rectangle = ShaderRecompiler::BuildRectListShaders(*results[0], graphics.hasFragmentShader ? *results[1] : noFragment, device->Target());
-                results.push_back(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.control)));
-                results.push_back(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.evaluation)));
+                auto rectangle = ShaderRecompiler::BuildRectListShaders(*results[0]->Expanded(), graphics.hasFragmentShader ? *results[1]->Expanded() : noFragment, device->Target());
+                results.push_back(ShaderRecompiler::DrawOf(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.control))));
+                results.push_back(ShaderRecompiler::DrawOf(std::make_shared<const ShaderRecompiler::RecompileResult>(std::move(rectangle.evaluation))));
             }
             const auto control = results.size() - 2;
-            stages.insert(stages.begin() + 1, {{Stage::TessellationControl, results[control].get(), 0}, {Stage::TessellationEvaluation, results[control + 1].get(), 0}});
+            stages.insert(stages.begin() + 1, {{Stage::TessellationControl, results[control]->program.get(), 0, nullptr, results[control].get()}, {Stage::TessellationEvaluation, results[control + 1]->program.get(), 0, nullptr, results[control + 1].get()}});
         }
         std::vector<Graphics::GuestMemorySnapshot> snapshots;
         for (const auto& region : memory) snapshots.push_back({region.guestAddress, region.bytes});
@@ -1662,12 +1663,14 @@ private:
     // descriptors' ranges, address-table stores within writable registered memory); anyWrite when
     // they may reach anywhere (storage images, writable texel buffers, unknown elements). Returns
     // whether a stage makes address-table stores.
-    bool appendShaderWrites(std::span<const std::shared_ptr<const ShaderRecompiler::RecompileResult>> results, DeviceThread::Ranges& writes, bool& anyWrite) {
+    bool appendShaderWrites(std::span<const std::shared_ptr<const ShaderRecompiler::ShaderDraw>> results, DeviceThread::Ranges& writes, bool& anyWrite) {
         bool addressStores = false;
-        for (const auto& resultPointer : results) {
-            const auto& result = *resultPointer;
+        for (const auto& drawPointer : results) {
+            const auto& result = *drawPointer->program;
             addressStores = addressStores || result.bdaWrites;
-            for (const auto& binding : result.bindings) {
+            for (std::size_t index = 0; index < result.bindings.size(); ++index) {
+                const auto& binding = result.bindings[index];
+                const auto guestDescriptor = drawPointer->Words(index);
                 if (binding.kind == ShaderRecompiler::DescriptorKind::StorageImage) anyWrite = true;
                 if (binding.kind == ShaderRecompiler::DescriptorKind::StorageTexelBuffer && !binding.readOnly) anyWrite = true;
                 if (binding.kind != ShaderRecompiler::DescriptorKind::StorageBuffer || binding.readOnly) continue;
@@ -1677,13 +1680,13 @@ private:
                 if (binding.role != ShaderRecompiler::DescriptorRole::GuestBuffers) continue;
                 // Writable buffers write within their descriptors' ranges (as ShaderResources binds them).
                 for (std::size_t element = 0; element < binding.count; ++element) {
-                    if ((element + 1u) * 4u > binding.guestDescriptor.size()) {
+                    if ((element + 1u) * 4u > guestDescriptor.size()) {
                         anyWrite = true;
                         break;
                     }
                     // Elements the recompiler proved read-only are bound read-only.
                     if (element < binding.bufferWritten.size() && !binding.bufferWritten[element]) continue;
-                    const auto* words = binding.guestDescriptor.data() + element * 4u;
+                    const auto* words = guestDescriptor.data() + element * 4u;
                     const ShaderRecompiler::ShaderBufferResource descriptor{{words[0], words[1], words[2], words[3]}};
                     const auto base = descriptor.Base48();
                     const auto size = descriptor.GetSize();
@@ -1698,7 +1701,7 @@ private:
 
     // Queues a draw's device half (pipelined). The job owns what it reads: the compiled stages (the
     // stage list points into the results) and the captured shader memory (the snapshots view it).
-    void queueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& parameters, std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results, std::vector<Graphics::CompiledShader> stages, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots, std::vector<std::shared_ptr<const std::vector<std::byte>>> pushes) {
+    void queueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& parameters, std::vector<std::shared_ptr<const ShaderRecompiler::ShaderDraw>> results, std::vector<Graphics::CompiledShader> stages, ShaderMemory shaderMemory, std::vector<ShaderRecompiler::MemoryRegion> memory, std::vector<Graphics::GuestMemorySnapshot> snapshots, std::vector<std::shared_ptr<const std::vector<std::byte>>> pushes) {
         DeviceThread::Ranges writes;
         for (std::uint32_t slot = 0; slot < graphics.colors.size(); ++slot) {
             if ((graphics.colorTargetMask & (1u << slot)) == 0) continue;
@@ -1717,7 +1720,7 @@ private:
             static std::uint64_t draws = 0, images = 0, texels = 0, stores = 0;
             bool image = false, texel = false;
             for (const auto& result : results)
-                for (const auto& binding : result->bindings) {
+                for (const auto& binding : result->program->bindings) {
                     image = image || binding.kind == ShaderRecompiler::DescriptorKind::StorageImage;
                     texel = texel || (binding.kind == ShaderRecompiler::DescriptorKind::StorageTexelBuffer && !binding.readOnly);
                 }
@@ -1733,7 +1736,7 @@ private:
             std::shared_ptr<VulkanDevice> device;
             Graphics::State graphics;
             Pm4::DrawParameters parameters;
-            std::vector<std::shared_ptr<const ShaderRecompiler::RecompileResult>> results;
+            std::vector<std::shared_ptr<const ShaderRecompiler::ShaderDraw>> results;
             std::vector<Graphics::CompiledShader> stages;
             ShaderMemory shaderMemory;
             std::vector<ShaderRecompiler::MemoryRegion> memory;

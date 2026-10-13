@@ -28,14 +28,17 @@ struct CompiledShader {
     // The invocation's push data when it differs from the program's (runtime user data, see
     // ShaderRecompiler::ApplyRuntimeUserData): same size, other user-data words.
     const std::vector<std::byte>* pushData = nullptr;
+    // The draw's own data when program is shared by every draw of its variant (its per-draw fields
+    // then empty): its words, push data and vertex attributes.
+    const ShaderRecompiler::ShaderDraw* draw = nullptr;
 
-    [[nodiscard]] const std::vector<std::byte>& PushData() const { return pushData != nullptr ? *pushData : program->pushConstants; }
+    [[nodiscard]] const std::vector<std::byte>& PushData() const { return pushData != nullptr ? *pushData : draw != nullptr ? draw->pushConstants : program->pushConstants; }
     // This draw's guest words of program->bindings[binding] (buffer V#s, image T#s, sampler S#s,
     // the flattened SRT or the shader data) and its vertex attributes. Read through these, not the
     // program, so a program can be one shared by every draw of its variant (design:
     // docs/dev/per-draw-dataflow-design.md).
-    [[nodiscard]] std::span<const std::uint32_t> Words(std::size_t binding) const { return program->bindings[binding].guestDescriptor; }
-    [[nodiscard]] std::span<const ShaderRecompiler::VertexAttribute> VertexAttributes() const { return program->vertexAttributes; }
+    [[nodiscard]] std::span<const std::uint32_t> Words(std::size_t binding) const { return draw != nullptr ? draw->Words(binding) : std::span<const std::uint32_t>(program->bindings[binding].guestDescriptor); }
+    [[nodiscard]] std::span<const ShaderRecompiler::VertexAttribute> VertexAttributes() const { return draw != nullptr ? draw->vertexAttributes : program->vertexAttributes; }
 };
 
 inline VkShaderStageFlagBits VulkanStage(ShaderRecompiler::ShaderStage stage) {

@@ -38,6 +38,10 @@ public:
     // bufferOffsetAlignment: the device's storage buffer offset alignment; each guest buffer's
     // BufferViewMisalignment is written to its byte of the shader data's buffer offsets (0: none).
     void Populate(BindingAllocationResult& allocation, const CompiledBindingLayout& compiled, const DescriptorBindingPlan& plan, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::uint32_t bufferOffsetAlignment = 0u) const;
+    // Populate's guest words without a DescriptorBinding per binding: binding i of the plan gets
+    // words[offsets[i], offsets[i + 1]) (offsets has one entry more than the plan has bindings), and
+    // push the push data. The vectors are cleared first.
+    void PopulateWords(std::vector<std::uint32_t>& words, std::vector<std::uint32_t>& offsets, std::vector<std::byte>& push, const CompiledBindingLayout& compiled, const DescriptorBindingPlan& plan, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::uint32_t bufferOffsetAlignment = 0u) const;
     void Populate(BindingAllocationResult& allocation, const IrProgram& program, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint8_t> exportMappings = {}) const;
     void Populate(BindingAllocationResult& allocation, const ShaderInfo& info, IrShaderStage stage, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::span<const std::uint8_t> exportMappings = {}) const;
 };

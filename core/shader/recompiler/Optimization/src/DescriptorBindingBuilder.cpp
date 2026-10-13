@@ -462,6 +462,22 @@ DescriptorBindingPlan DescriptorBindingBuilder::Select(const DescriptorBindingPl
 }
 
 void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, const CompiledBindingLayout& compiled, const DescriptorBindingPlan& plan, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::uint32_t bufferOffsetAlignment) const {
+    std::vector<std::uint32_t> words;
+    std::vector<std::uint32_t> offsets;
+    std::vector<std::byte> push;
+    PopulateWords(words, offsets, push, compiled, plan, userDataBase, snapshot, partialThreads, bufferOffsetAlignment);
+    std::vector<DescriptorBinding> bindings;
+    bindings.reserve(plan.bindings.size());
+    for (std::size_t index = 0; index < plan.bindings.size(); ++index) {
+        auto physical = plan.bindings[index].descriptor;
+        physical.guestDescriptor.assign(words.begin() + offsets[index], words.begin() + offsets[index + 1]);
+        bindings.push_back(std::move(physical));
+    }
+    allocation.bindings = std::move(bindings);
+    allocation.pushConstants = std::move(push);
+}
+
+void DescriptorBindingBuilder::PopulateWords(std::vector<std::uint32_t>& words, std::vector<std::uint32_t>& offsets, std::vector<std::byte>& push, const CompiledBindingLayout& compiled, const DescriptorBindingPlan& plan, std::uint32_t userDataBase, const ResourceSnapshot& snapshot, const std::array<std::uint32_t, 3>& partialThreads, std::uint32_t bufferOffsetAlignment) const {
     const auto& layout = compiled.layout;
     const bool needsShaderData = layout.UsesPushData() || plan.storageData;
     auto shaderData = needsShaderData ? ShaderDataDwordsFor(layout, userDataBase, snapshot, partialThreads, plan.imageMetadata) : std::vector<std::uint32_t>{};
@@ -481,43 +497,64 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
             }
         }
     }
-    std::vector<DescriptorBinding> bindings;
-    bindings.reserve(plan.bindings.size());
+    words.clear();
+    offsets.clear();
+    offsets.reserve(plan.bindings.size() + 1u);
+    offsets.push_back(0u);
+    // The shader data binding takes the words; push data is then empty (as when it was moved out).
+    bool shaderDataTaken = false;
     std::size_t writtenHere = 0;
     std::size_t readOnlyHere = 0;
     for (const auto& entry : plan.bindings) {
-        auto physical = entry.descriptor;
+        const auto& physical = entry.descriptor;
+        const auto first = words.size();
         switch (physical.role) {
         case DescriptorRole::GuestBuffers:
-            physical.guestDescriptor = GuestBuffersDescriptor(entry.resources, snapshot);
+            for (const std::uint32_t r : entry.resources) {
+                if (r >= snapshot.buffers.size()) fail("DescriptorBindingBuilder::Populate guest buffer index is out of range");
+                const DescriptorValue& value = snapshot.buffers[r];
+                if (value.dwordCount != 4u) fail("DescriptorBindingBuilder::Populate guest buffer descriptor has an invalid width");
+                words.insert(words.end(), value.dwords.begin(), value.dwords.begin() + 4);
+            }
             writtenHere += entry.writtenBuffers;
             readOnlyHere += entry.readOnlyBuffers;
             break;
         case DescriptorRole::GuestImages:
-            physical.guestDescriptor.reserve(entry.resources.size() * 8u);
             for (std::size_t element = 0; element < entry.resources.size(); ++element) {
                 const auto& descriptor = snapshot.images.at(entry.resources[element]);
                 if (descriptor.dwordCount != 8u) fail("invalid runtime image descriptor width");
-                const auto offset = physical.guestDescriptor.size();
-                physical.guestDescriptor.insert(physical.guestDescriptor.end(), descriptor.dwords.begin(), descriptor.dwords.begin() + 8);
-                if (entry.identityImageSwizzle[element]) physical.guestDescriptor[offset + 3u] = (physical.guestDescriptor[offset + 3u] & ~0xfffu) | ShaderImageIdentitySwizzle;
+                const auto offset = words.size();
+                words.insert(words.end(), descriptor.dwords.begin(), descriptor.dwords.begin() + 8);
+                if (entry.identityImageSwizzle[element]) words[offset + 3u] = (words[offset + 3u] & ~0xfffu) | ShaderImageIdentitySwizzle;
             }
             break;
-        case DescriptorRole::GuestSamplers:
-            physical.guestDescriptor = GuestSamplersDescriptor(entry.resources, snapshot);
+        case DescriptorRole::GuestSamplers: {
+            std::uint32_t dwordCount = 0;
+            for (std::size_t i = 0; i < entry.resources.size(); i++) {
+                const std::uint32_t r = entry.resources[i];
+                if (r >= snapshot.samplers.size()) fail("DescriptorBindingBuilder::Populate guest sampler index is out of range");
+                const DescriptorValue& value = snapshot.samplers[r];
+                if (value.dwordCount == 0u) fail("DescriptorBindingBuilder::Populate guest sampler descriptor is empty");
+                if (i == 0u) dwordCount = value.dwordCount;
+                else if (value.dwordCount != dwordCount) fail("DescriptorBindingBuilder::Populate guest sampler descriptors have inconsistent widths");
+                words.insert(words.end(), value.dwords.begin(), value.dwords.begin() + value.dwordCount);
+            }
             for (const auto element : entry.samplerFilterElements) {
-                auto& filter = physical.guestDescriptor.at(element * 4u + 2u);
-                filter = PointFilteredSamplerWord(physical.guestDescriptor.at(element * 4u), filter);
+                const auto at = first + static_cast<std::size_t>(element) * 4u;
+                if (at + 2u >= words.size()) fail("DescriptorBindingBuilder::Populate sampler filter element is out of range");
+                words[at + 2u] = PointFilteredSamplerWord(words[at], words[at + 2u]);
             }
             break;
+        }
         case DescriptorRole::FlattenedSrt:
             if (snapshot.flattenedSrt.empty()) {
                 fail("DescriptorBindingBuilder::Populate flattened SRT snapshot is empty");
             }
-            physical.guestDescriptor = snapshot.flattenedSrt;
+            words.insert(words.end(), snapshot.flattenedSrt.begin(), snapshot.flattenedSrt.end());
             break;
         case DescriptorRole::ShaderData:
-            physical.guestDescriptor = std::move(shaderData);
+            if (!shaderDataTaken) words.insert(words.end(), shaderData.begin(), shaderData.end());
+            shaderDataTaken = true;
             break;
         case DescriptorRole::Gds:
         case DescriptorRole::BdaPagetable:
@@ -526,12 +563,12 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
         }
 
         if (physical.role == DescriptorRole::GuestBuffers || physical.role == DescriptorRole::GuestImages || physical.role == DescriptorRole::GuestSamplers) {
-            if (physical.count == 0u || physical.guestDescriptor.size() % physical.count != 0u) {
+            const auto size = words.size() - first;
+            if (physical.count == 0u || size % physical.count != 0u) {
                 fail("DescriptorBindingBuilder::Populate guest descriptor size is not a multiple of the binding count");
             }
         }
-
-        bindings.push_back(std::move(physical));
+        offsets.push_back(static_cast<std::uint32_t>(words.size()));
     }
 
     if (bufferWrittenTraceEnabled()) {
@@ -541,11 +578,10 @@ void DescriptorBindingBuilder::Populate(BindingAllocationResult& allocation, con
         const auto readOnly = bufferWrittenCounts.readOnly.fetch_add(readOnlyHere) + readOnlyHere;
         std::fprintf(stderr, "[bindings] guest buffer elements: %zu written, %zu read-only (total so far: %llu / %llu)\n", writtenHere, readOnlyHere, written, readOnly);
     }
-    allocation.bindings = std::move(bindings);
-    allocation.pushConstants.clear();
-    if (layout.UsesPushData()) {
-        allocation.pushConstants.resize(static_cast<std::size_t>(shaderData.size()) * sizeof(std::uint32_t));
-        std::memcpy(allocation.pushConstants.data(), shaderData.data(), allocation.pushConstants.size());
+    push.clear();
+    if (layout.UsesPushData() && !shaderDataTaken) {
+        push.resize(static_cast<std::size_t>(shaderData.size()) * sizeof(std::uint32_t));
+        std::memcpy(push.data(), shaderData.data(), push.size());
     }
 }
 

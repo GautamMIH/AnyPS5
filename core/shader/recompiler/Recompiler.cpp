@@ -281,7 +281,7 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
 std::atomic<void (*)(std::shared_ptr<const void>)> resultRetire{nullptr};
 
 // Destroys `result` where SetResultRetire says (in place without a retire function).
-void retireResult(std::shared_ptr<const RecompileResult> result) {
+void retireResult(std::shared_ptr<const ShaderDraw> result) {
     if (result == nullptr) return;
     if (const auto retire = resultRetire.load(std::memory_order_acquire)) retire(std::move(result));
 }
@@ -289,7 +289,7 @@ void retireResult(std::shared_ptr<const RecompileResult> result) {
 struct ResultMemoEntry {
     std::uint64_t variantId;
     std::uint64_t hash;
-    std::shared_ptr<const RecompileResult> result;
+    std::shared_ptr<const ShaderDraw> result;
 };
 
 struct EmissionFailure {
@@ -689,17 +689,25 @@ struct SpecializedModuleEntry {
     std::shared_ptr<const SpecializedModule> module;
 };
 
+// The program every draw of a binding plan (or of a module of it) shares (ShaderDraw::program).
+struct SharedProgram {
+    std::once_flag ready;
+    std::shared_ptr<const RecompileResult> program;
+};
+
 struct PreparedModuleEntry {
     std::once_flag ready;
     std::exception_ptr failure;
     std::shared_ptr<const SpecializedModule> module;
     DescriptorBindingPlan bindings;
+    SharedProgram shared;
 };
 
 struct PreparedBindingPlan {
     std::once_flag ready;
     std::exception_ptr failure;
     DescriptorBindingPlan bindings;
+    SharedProgram shared;
     std::shared_mutex mutex;
     std::map<std::vector<std::uint32_t>, std::shared_ptr<PreparedModuleEntry>> modules;
 };
@@ -787,10 +795,12 @@ std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderAr
     return entry->module;
 }
 
-RecompileResult materializeResult(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
-    RecompileResult result;
+// What every draw of `variant` with `bindingPlan` (and `module`, when specialized) shares: the
+// draws' own fields (guest words, vertex attributes, poisoned reads) empty, push data zeroed.
+std::shared_ptr<const RecompileResult> sharedProgram(const CompiledVariant& variant, const DescriptorBindingPlan& bindingPlan, const SpecializedModule* module, std::size_t pushBytes) {
+    auto result = std::make_shared<RecompileResult>();
     const auto& artifact = variant.artifact;
-    static_cast<CompiledShaderArtifact&>(result) = {
+    static_cast<CompiledShaderArtifact&>(*result) = {
         .memoryOffsetDword = artifact.memoryOffsetDword,
         .shaderDataDwords = artifact.shaderDataDwords,
         .imageMetadataDword = artifact.imageMetadataDword,
@@ -811,8 +821,46 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         .barycentricEmulation = artifact.barycentricEmulation,
         .variantId = artifact.variantId
     };
-    result.bdaWrites = variant.info.info.bdaWrites;
-    result.usesBitwiseXor = variant.info.info.hasBitwiseXor;
+    result->bdaWrites = variant.info.info.bdaWrites;
+    result->usesBitwiseXor = variant.info.info.hasBitwiseXor;
+    if (module != nullptr) {
+        result->specializationId = module->specializationId;
+        result->spirv = module->spirv;
+    } else {
+        result->spirv = artifact.spirv;
+    }
+    result->bindings.reserve(bindingPlan.bindings.size());
+    for (const auto& entry : bindingPlan.bindings) {
+        result->bindings.push_back(entry.descriptor);
+        result->bindings.back().guestDescriptor.clear();
+    }
+    result->pushConstants.assign(pushBytes, std::byte{0});
+    result->workgroupMemoryDwords = WorkgroupMemoryStrideDwords(variant.info.info);
+    if (variant.bindings.layout.UsesPushData()) {
+        const auto& registers = variant.bindings.layout.userDataRegisters;
+        result->pushUserData.reserve(registers.size());
+        for (const auto reg : registers) result->pushUserData.push_back(reg - variant.info.userDataBase);
+    }
+    return result;
+}
+
+// RecompileResult with the draw's data in the program's per-draw fields.
+RecompileResult expandDraw(const ShaderDraw& draw) {
+    RecompileResult result = *draw.program;
+    for (std::size_t index = 0; index < result.bindings.size(); ++index) {
+        const auto words = draw.Words(index);
+        result.bindings[index].guestDescriptor.assign(words.begin(), words.end());
+    }
+    result.pushConstants = draw.pushConstants;
+    result.vertexAttributes = draw.vertexAttributes;
+    result.poisonedSrtReads = draw.poisonedSrtReads;
+    result.cacheHit = draw.cacheHit;
+    return result;
+}
+
+std::shared_ptr<ShaderDraw> materializeDraw(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
+    auto draw = std::make_shared<ShaderDraw>();
+    const auto& artifact = variant.artifact;
     const auto plan = preparedBindingPlan(variant, snapshot, request.context.pixel ? std::span<const std::uint8_t>(request.context.pixel->targetExportMapping) : std::span<const std::uint8_t>{});
     const DescriptorBindingPlan* bindingPlan = &plan->bindings;
     std::shared_ptr<PreparedModuleEntry> entry;
@@ -824,21 +872,22 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         for (const auto packing : request.context.pixel->targetExportPacking) moduleKey.push_back(static_cast<std::uint32_t>(packing));
         moduleKey.push_back(request.context.pixel->dualSourceBlend ? 1u : 0u);
     }
-    result.vertexAttributes.reserve(result.vertexInputs.size());
+    const auto& vertexInputs = artifact.vertexInputs;
+    draw->vertexAttributes.reserve(vertexInputs.size());
     std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources> vertexClasses{};
-    for (const auto& input : result.vertexInputs) {
+    for (const auto& input : vertexInputs) {
         if (!request.context.vertex || input.location >= request.context.vertex->resourcesNum || input.location >= request.context.vertex->resources.size()) throw std::runtime_error("Shader cache: invalid vertex attribute metadata");
         const auto& vertex = *request.context.vertex;
         const auto& resource = vertex.resources[input.location];
         const auto fetchIndex = vertex.fetchEmbedded ? vertex.resourcesDst[input.location].fetchIndex : input.fetchIndex;
-        result.vertexAttributes.push_back({input.location, input.components, resource, fetchIndex});
+        draw->vertexAttributes.push_back({input.location, input.components, resource, fetchIndex});
         if (!artifact.vertexInputPatches.empty()) {
             const auto numeric = VertexInputNumericClass(static_cast<IrBufferFormat>((resource.fields[3] >> 12u) & 0x7fu));
             if (numeric == IrTextureNumericClass::Unsupported) throw std::runtime_error("unsupported prepared vertex format");
             const auto kind = numeric == IrTextureNumericClass::Float ? 0u : numeric == IrTextureNumericClass::Sint ? 1u : 2u;
             vertexClasses.at(input.location) = kind;
             std::uint32_t selectors = kind << 12u;
-            auto& formatComponents = result.vertexAttributes.back().formatComponents;
+            auto& formatComponents = draw->vertexAttributes.back().formatComponents;
             formatComponents = 1u;
             for (std::uint32_t component = 0; component < 4u; ++component) {
                 const auto selector = (input.outputMask & (1u << component)) != 0u ? (resource.fields[3] >> (component * 3u)) & 7u : 0u;
@@ -868,7 +917,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
                 constants.push_back({PipelineSpecialization::DualSourceBlend, moduleKey[index++]});
             }
             if (!artifact.vertexInputPatches.empty()) {
-                for (const auto& input : result.vertexInputs) {
+                for (const auto& input : vertexInputs) {
                     const auto selectors = moduleKey[index++];
                     const auto first = PipelineSpecialization::VertexBase + input.location * PipelineSpecialization::VertexWords;
                     for (std::uint32_t component = 0; component < 4u; ++component) constants.push_back({first + component, (selectors >> (component * 3u)) & 7u});
@@ -891,24 +940,20 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
             }
         });
         if (entry->failure) std::rethrow_exception(entry->failure);
-        const auto& module = entry->module;
-        result.specializationId = module->specializationId;
-        result.spirv = module->spirv;
         bindingPlan = &entry->bindings;
-    } else {
-        result.spirv = artifact.spirv;
     }
-    BindingAllocationResult bindings;
-    DescriptorBindingBuilder{}.Populate(bindings, variant.bindings, *bindingPlan, variant.info.userDataBase, snapshot, partialThreads(request), request.target.storageBufferOffsetAlignment);
-    result.workgroupMemoryDwords = WorkgroupMemoryStrideDwords(variant.info.info);
-    result.bindings = std::move(bindings.bindings);
-    result.pushConstants = std::move(bindings.pushConstants);
-    result.poisonedSrtReads = static_cast<std::uint32_t>(snapshot.srtPoison.size()) + snapshot.nullRootReads;
-    if (variant.bindings.layout.UsesPushData()) {
-        const auto& registers = variant.bindings.layout.userDataRegisters;
-        result.pushUserData.reserve(registers.size());
-        for (const auto reg : registers) result.pushUserData.push_back(reg - variant.info.userDataBase);
-    }
+    DescriptorBindingBuilder{}.PopulateWords(draw->words, draw->offsets, draw->pushConstants, variant.bindings, *bindingPlan, variant.info.userDataBase, snapshot, partialThreads(request), request.target.storageBufferOffsetAlignment);
+    auto& shared = entry != nullptr ? entry->shared : plan->shared;
+    std::call_once(shared.ready, [&] { shared.program = sharedProgram(variant, *bindingPlan, entry != nullptr ? entry->module.get() : nullptr, draw->pushConstants.size()); });
+    if (shared.program->pushConstants.size() != draw->pushConstants.size()) throw std::runtime_error("ShaderRecompiler: a draw's push data differs in size from its shared program's");
+    draw->program = shared.program;
+    draw->poisonedSrtReads = static_cast<std::uint32_t>(snapshot.srtPoison.size()) + snapshot.nullRootReads;
+    return draw;
+}
+
+RecompileResult materializeResult(const CompiledVariant& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
+    auto result = expandDraw(*materializeDraw(variant, request, snapshot));
+    result.cacheHit = false;
     return result;
 }
 
@@ -956,16 +1001,20 @@ std::shared_ptr<const CompiledVariant> findOrCompileVariant(SourceEntry& source,
     return variant;
 }
 
-RecompileResult materializeVariant(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
+std::shared_ptr<ShaderDraw> materializeVariantDraw(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
     std::shared_ptr<const CompiledVariant> variant;
     bool cacheHit = false;
     {
         std::lock_guard lock(source.mutex);
         variant = findOrCompileVariant(source, request, cacheHit);
     }
-    auto result = materializeResult(*variant, request, snapshot);
-    result.cacheHit = cacheHit;
-    return result;
+    auto draw = materializeDraw(*variant, request, snapshot);
+    draw->cacheHit = cacheHit;
+    return draw;
+}
+
+RecompileResult materializeVariant(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot) {
+    return expandDraw(*materializeVariantDraw(source, request, snapshot));
 }
 
 RecompileResult RecompileImpl(const RecompileRequest& request) {
@@ -1123,7 +1172,8 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
 // Whether a result reads user data only in its push data (RecompileResult::pushUserData): no
 // shader data binding holds a copy of it. Such a result serves any user data once the caller
 // writes the words into its push data.
-bool userDataInPushOnly(const RecompileResult& result) {
+bool userDataInPushOnly(const ShaderDraw& draw) {
+    const auto& result = *draw.program;
     return std::none_of(result.bindings.begin(), result.bindings.end(), [](const DescriptorBinding& binding) { return binding.role == DescriptorRole::ShaderData; });
 }
 
@@ -1132,13 +1182,13 @@ bool userDataInPushOnly(const RecompileResult& result) {
 // as good). `memoHit` reports the hit. With runtimeUserData the caller supplies the user data
 // (RecompileResult::pushUserData), so results that read it only as push data are memoized without
 // it: their push data holds the user data of the invocation that materialized them.
-std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& source, const std::shared_ptr<const CompiledVariant>& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool cacheHit, bool* memoHit, bool runtimeUserData = false) {
+std::shared_ptr<const ShaderDraw> materializePreparedMemoized(SourceEntry& source, const std::shared_ptr<const CompiledVariant>& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool cacheHit, bool* memoHit, bool runtimeUserData = false) {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     auto& counters = resultMemoCounters();
     const auto variantId = variant->artifact.variantId;
     const auto indexOf = [&](std::uint64_t hash) { return (variantId * 0x9e3779b97f4a7c15ull) ^ hash; };
     // Under the source mutex: the memo'd result for hash, moved to the front.
-    const auto lookup = [&](std::uint64_t hash) -> std::shared_ptr<const RecompileResult> {
+    const auto lookup = [&](std::uint64_t hash) -> std::shared_ptr<const ShaderDraw> {
         const auto found = source.memoIndex.find(indexOf(hash));
         if (found == source.memoIndex.end() || found->second->variantId != variantId || found->second->hash != hash) return nullptr;
         source.memo.splice(source.memo.begin(), source.memo, found->second);
@@ -1153,7 +1203,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
             --source.memoBypass;
             lock.unlock();
             counters.bypassed.fetch_add(1, std::memory_order_relaxed);
-            auto result = std::make_shared<RecompileResult>(materializeResult(*variant, request, snapshot));
+            auto result = materializeDraw(*variant, request, snapshot);
             result->cacheHit = cacheHit;
             return result;
         }
@@ -1181,13 +1231,13 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
         }
     }
     const auto started = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    auto result = std::make_shared<RecompileResult>(materializeResult(*variant, request, snapshot));
+    auto result = materializeDraw(*variant, request, snapshot);
     result->cacheHit = cacheHit;
     if (profile) counters.populateNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
     counters.misses.fetch_add(1, std::memory_order_relaxed);
     const auto hash = runtimeUserData && userDataInPushOnly(*result) ? runtimeHash : fullHash;
     const auto index = indexOf(hash);
-    std::shared_ptr<const RecompileResult> shared = std::move(result);
+    std::shared_ptr<const ShaderDraw> shared = std::move(result);
     {
         std::lock_guard lock(source.mutex);
         const auto found = source.memoIndex.find(index);
@@ -1221,7 +1271,7 @@ std::shared_ptr<const RecompileResult> materializePreparedMemoized(SourceEntry& 
 // snapshot or taking the memo's lock (~25% of Zorro's materializations: unpatched capture hits). ANYPS5_NO_RESULT_CACHE=1
 // skips it; ANYPS5_VERIFY_RESULT_CACHE=1 also hashes the snapshot and reports a cached result whose
 // full hash differs.
-std::shared_ptr<const RecompileResult> materializeCaptured(SourceEntry& source, const std::shared_ptr<const CompiledVariant>& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool cacheHit = true, bool* memoHit = nullptr, bool runtimeUserData = false) {
+std::shared_ptr<const ShaderDraw> materializeCaptured(SourceEntry& source, const std::shared_ptr<const CompiledVariant>& variant, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool cacheHit = true, bool* memoHit = nullptr, bool runtimeUserData = false) {
     static const bool disabled = std::getenv("ANYPS5_NO_RESULT_CACHE") != nullptr;
     if (disabled) return materializePreparedMemoized(source, variant, request, snapshot, cacheHit, memoHit, runtimeUserData);
     static const bool verify = std::getenv("ANYPS5_VERIFY_RESULT_CACHE") != nullptr;
@@ -1230,7 +1280,7 @@ std::shared_ptr<const RecompileResult> materializeCaptured(SourceEntry& source, 
         std::uint64_t variant = 0;
         std::uint64_t request = 0;
         std::uint64_t fullHash = 0;
-        std::shared_ptr<const RecompileResult> result;
+        std::shared_ptr<const ShaderDraw> result;
     };
     thread_local std::array<Cached, 1024> cache;
     const auto variantId = variant->artifact.variantId;
@@ -1252,7 +1302,7 @@ std::shared_ptr<const RecompileResult> materializeCaptured(SourceEntry& source, 
     return result;
 }
 
-std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool* memoHit, bool runtimeUserData) {
+std::shared_ptr<const ShaderDraw> materializeMemoized(SourceEntry& source, const RecompileRequest& request, const ResourceSnapshot& snapshot, bool* memoHit, bool runtimeUserData) {
     std::shared_ptr<const CompiledVariant> variant;
     bool cacheHit = false;
     {
@@ -1264,13 +1314,13 @@ std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, 
 
 // The capture already resolved the source entry (stage input validation included) and materialized
 // the request over exactly the words the driver captured, so neither is repeated here.
-std::shared_ptr<const RecompileResult> RecompileImpl(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit, bool runtimeUserData) {
+std::shared_ptr<const ShaderDraw> RecompileDrawImpl(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit, bool runtimeUserData) {
     if (!request.useCache || capture.source == nullptr) {
         auto program = PrepareResourceProgram(request);
         const auto variant = compileVariant(request, std::move(program));
-        return std::make_shared<const RecompileResult>(materializeResult(variant, request, capture.snapshot));
+        return materializeDraw(variant, request, capture.snapshot);
     }
-    if (!ResultMemo()) return std::make_shared<const RecompileResult>(materializeVariant(*capture.source, request, capture.snapshot));
+    if (!ResultMemo()) return materializeVariantDraw(*capture.source, request, capture.snapshot);
     return materializeMemoized(*capture.source, request, capture.snapshot, memoHit, runtimeUserData);
 }
 
@@ -1429,7 +1479,7 @@ std::shared_ptr<const ResourceCapture> PreparedShaderInvocation::Capture(const S
 
 std::shared_ptr<const RecompileResult> PreparedShaderInvocation::Materialize(const ResourceCapture& capture) const {
     if (capture.source != handle->source || capture.plan != handle->source->plan) throw std::runtime_error("ShaderRecompiler: resource capture belongs to another prepared shader");
-    if (request.useCache && ResultMemo()) return materializeCaptured(*handle->source, handle->artifact, request, capture.snapshot);
+    if (request.useCache && ResultMemo()) return materializeCaptured(*handle->source, handle->artifact, request, capture.snapshot)->Expanded();
     auto result = std::make_shared<RecompileResult>(materializeResult(*handle->artifact, request, capture.snapshot));
     result->cacheHit = true;
     return result;
@@ -1443,7 +1493,7 @@ const CompiledShaderArtifact& GetPreparedArtifact(const SourceHandle& handle) {
 std::shared_ptr<const RecompileResult> MaterializeShader(const RecompileRequest& request, const ResourceCapture& capture, const SourceHandle& handle) {
     if (!MatchesPreparedShader(request, handle)) throw std::runtime_error("ShaderRecompiler: prepared artifact does not match the static ABI");
     if (capture.source != handle.source || capture.plan != handle.source->plan) throw std::runtime_error("ShaderRecompiler: resource capture belongs to another prepared shader");
-    if (request.useCache && ResultMemo()) return materializeCaptured(*handle.source, handle.artifact, request, capture.snapshot);
+    if (request.useCache && ResultMemo()) return materializeCaptured(*handle.source, handle.artifact, request, capture.snapshot)->Expanded();
     auto result = std::make_shared<RecompileResult>(materializeResult(*handle.artifact, request, capture.snapshot));
     result->cacheHit = true;
     return result;
@@ -1468,28 +1518,65 @@ RecompileResult Recompile(const RecompileRequest& request) {
     return recompileReporting(request, [&] { return RecompileImpl(request); });
 }
 
-std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit, bool runtimeUserData) {
+std::shared_ptr<const ShaderDraw> RecompileDraw(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit, bool runtimeUserData) {
     if (memoHit != nullptr) *memoHit = false;
-    return recompileReporting(request, [&] { return RecompileImpl(request, capture, memoHit, runtimeUserData); });
+    return recompileReporting(request, [&] { return RecompileDrawImpl(request, capture, memoHit, runtimeUserData); });
 }
 
-bool ApplyRuntimeUserData(const RecompileResult& result, std::span<const std::uint32_t> userData, std::vector<std::byte>& push) {
-    const auto& slots = result.pushUserData;
-    if (slots.size() * sizeof(std::uint32_t) > result.pushConstants.size()) throw std::runtime_error("ShaderRecompiler: push user data exceeds the push data");
+std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit, bool runtimeUserData) {
+    return RecompileDraw(request, capture, memoHit, runtimeUserData)->Expanded();
+}
+
+const std::shared_ptr<const RecompileResult>& ShaderDraw::Expanded() const {
+    std::call_once(expandedOnce, [this] { expanded = std::make_shared<const RecompileResult>(expandDraw(*this)); });
+    return expanded;
+}
+
+std::shared_ptr<const ShaderDraw> DrawOf(std::shared_ptr<const RecompileResult> result) {
+    auto draw = std::make_shared<ShaderDraw>();
+    draw->offsets.reserve(result->bindings.size() + 1u);
+    draw->offsets.push_back(0u);
+    for (const auto& binding : result->bindings) {
+        draw->words.insert(draw->words.end(), binding.guestDescriptor.begin(), binding.guestDescriptor.end());
+        draw->offsets.push_back(static_cast<std::uint32_t>(draw->words.size()));
+    }
+    draw->pushConstants = result->pushConstants;
+    draw->vertexAttributes = result->vertexAttributes;
+    draw->poisonedSrtReads = result->poisonedSrtReads;
+    draw->cacheHit = result->cacheHit;
+    draw->program = std::move(result);
+    return draw;
+}
+
+namespace {
+
+// ApplyRuntimeUserData over a program's push user data and a draw's push data.
+bool applyRuntimeUserData(std::span<const std::uint32_t> slots, const std::vector<std::byte>& pushConstants, std::span<const std::uint32_t> userData, std::vector<std::byte>& push) {
+    if (slots.size() * sizeof(std::uint32_t) > pushConstants.size()) throw std::runtime_error("ShaderRecompiler: push user data exceeds the push data");
     std::size_t first = 0;
     for (; first < slots.size(); ++first) {
         if (slots[first] >= userData.size()) throw std::runtime_error("ShaderRecompiler: push user data register is out of range");
         std::uint32_t current = 0;
-        std::memcpy(&current, result.pushConstants.data() + first * sizeof(std::uint32_t), sizeof(current));
+        std::memcpy(&current, pushConstants.data() + first * sizeof(std::uint32_t), sizeof(current));
         if (current != userData[slots[first]]) break;
     }
     if (first == slots.size()) return false;
-    push = result.pushConstants;
+    push = pushConstants;
     for (std::size_t i = first; i < slots.size(); ++i) {
         if (slots[i] >= userData.size()) throw std::runtime_error("ShaderRecompiler: push user data register is out of range");
         std::memcpy(push.data() + i * sizeof(std::uint32_t), &userData[slots[i]], sizeof(std::uint32_t));
     }
     return true;
+}
+
+}
+
+bool ApplyRuntimeUserData(const RecompileResult& result, std::span<const std::uint32_t> userData, std::vector<std::byte>& push) {
+    return applyRuntimeUserData(result.pushUserData, result.pushConstants, userData, push);
+}
+
+bool ApplyRuntimeUserData(const ShaderDraw& draw, std::span<const std::uint32_t> userData, std::vector<std::byte>& push) {
+    return applyRuntimeUserData(draw.program->pushUserData, draw.pushConstants, userData, push);
 }
 
 void SetResultRetire(void (*retire)(std::shared_ptr<const void> result)) {
