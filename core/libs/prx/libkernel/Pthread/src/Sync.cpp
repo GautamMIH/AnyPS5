@@ -1,6 +1,10 @@
 #include "../include/PthreadSync.hpp"
 #include "../include/Cancel.hpp"
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <limits>
 #include <mutex>
 #include <new>
 #include <stdexcept>
@@ -66,11 +70,24 @@ PthreadCondPrivate* resolveCond(PthreadCond* cond) {
     return current;
 }
 
+// FreeBSD's THR_RWLOCK_DESTROYED: a destroyed rwlock reports EINVAL instead of initializing again.
+constexpr std::uintptr_t kDestroyedRwlock = 1;
+
+bool isDestroyedRwlock(PthreadRwlockPrivate* value) {
+    return reinterpret_cast<std::uintptr_t>(value) == kDestroyedRwlock;
+}
+
+// Read locks the calling thread holds on any rwlock (libthr's curthread->rdlock_count): such a
+// thread may take another read lock past a waiting writer, which would otherwise deadlock it.
+thread_local int heldReadLocks = 0;
+
 PthreadRwlockPrivate* resolveRwlock(PthreadRwlock* rwlock) {
     if (rwlock == nullptr)
         throw std::runtime_error("pthread rwlock: null pointer");
     std::atomic_ref<PthreadRwlockPrivate*> slot(*rwlock);
     PthreadRwlockPrivate* current = slot.load(std::memory_order_acquire);
+    if (isDestroyedRwlock(current))
+        return nullptr;
     if (current != nullptr)
         return current;
     const std::lock_guard lock(staticInitializationMutex());
@@ -79,20 +96,42 @@ PthreadRwlockPrivate* resolveRwlock(PthreadRwlock* rwlock) {
         current = new PthreadRwlockPrivate();
         slot.store(current, std::memory_order_release);
     }
-    return current;
+    return isDestroyedRwlock(current) ? nullptr : current;
+}
+
+// Deadlines stay within about 136 years of now, so far-off times (INT64_MIN, INT64_MAX seconds)
+// neither overflow the clocks nor wrap around.
+constexpr std::int64_t kDeadlineLimitSeconds = std::int64_t{1} << 32;
+
+std::int64_t clampSeconds(const std::int64_t value) {
+    return std::clamp(value, -kDeadlineLimitSeconds, kDeadlineLimitSeconds);
 }
 
 }
 
 Deadline DeadlineAfterMicroseconds(const std::uint64_t microseconds) {
-    return std::chrono::steady_clock::now() + std::chrono::microseconds(microseconds);
+    const auto bounded = std::min<std::uint64_t>(microseconds, static_cast<std::uint64_t>(kDeadlineLimitSeconds) * 1000000u);
+    return std::chrono::steady_clock::now() + std::chrono::microseconds(static_cast<std::int64_t>(bounded));
 }
 
-Deadline DeadlineAt(const int clockId, const std::int64_t seconds, const std::int64_t nanoseconds) {
-    const auto target = std::chrono::seconds(seconds) + std::chrono::nanoseconds(nanoseconds);
-    if (clockId == kClockMonotonic)
+Deadline DeadlineAt(const int clockId, std::int64_t seconds, const std::int64_t nanoseconds) {
+    // Whole seconds in nanoseconds carry into seconds (C++ xtime is not normalized; POSIX callers
+    // reject an out-of-range tv_nsec before this). Saturate so the sum cannot overflow.
+    const std::int64_t carry = nanoseconds / 1000000000;
+    seconds = carry > 0 && seconds > std::numeric_limits<std::int64_t>::max() - carry ? std::numeric_limits<std::int64_t>::max()
+        : carry < 0 && seconds < std::numeric_limits<std::int64_t>::min() - carry ? std::numeric_limits<std::int64_t>::min()
+        : seconds + carry;
+    const auto nanos = std::chrono::nanoseconds(nanoseconds % 1000000000);
+    if (clockId == kClockMonotonic) {
+        const auto target = std::chrono::seconds(clampSeconds(seconds)) + nanos;
         return std::chrono::steady_clock::time_point(std::chrono::duration_cast<std::chrono::steady_clock::duration>(target));
-    const auto remaining = target - std::chrono::system_clock::now().time_since_epoch();
+    }
+    const auto now = std::chrono::system_clock::now().time_since_epoch();
+    const auto nowSeconds = std::chrono::duration_cast<std::chrono::seconds>(now);
+    const std::int64_t current = nowSeconds.count();
+    // seconds - now without overflow: now is far inside the range, so only the far ends saturate.
+    const std::int64_t deltaSeconds = seconds < -kDeadlineLimitSeconds ? -kDeadlineLimitSeconds : seconds > kDeadlineLimitSeconds + current ? kDeadlineLimitSeconds : seconds - current;
+    const auto remaining = std::chrono::seconds(clampSeconds(deltaSeconds)) + nanos - std::chrono::duration_cast<std::chrono::nanoseconds>(now - nowSeconds);
     return std::chrono::steady_clock::now() + std::chrono::duration_cast<std::chrono::steady_clock::duration>(remaining);
 }
 
@@ -279,69 +318,134 @@ int RwlockCreate(PthreadRwlock* rwlock) {
     return 0;
 }
 
+// Like libthr, destroying a held rwlock succeeds and marks it destroyed. The object is only freed
+// when nothing holds or waits on it; a held one is left allocated, so a late unlock or a waiter
+// never touches freed memory.
 int RwlockDestroy(PthreadRwlock* rwlock) {
     if (rwlock == nullptr)
         throw std::runtime_error("pthread rwlock: null pointer");
-    // A locked rwlock cannot be destroyed (EBUSY, upstream 718eb9cc3).
-    if (auto* current = *rwlock; current != nullptr && (current->writer.load(std::memory_order_acquire) != std::thread::id{} || current->readers.load(std::memory_order_acquire) != 0))
-        return kErrorBusy;
-    delete *rwlock;
-    *rwlock = nullptr;
+    PthreadRwlockPrivate* current = nullptr;
+    {
+        const std::lock_guard lock(staticInitializationMutex());
+        current = *rwlock;
+        if (current == nullptr)
+            return 0;
+        if (isDestroyedRwlock(current))
+            return kErrorInvalid;
+        std::atomic_ref<PthreadRwlockPrivate*>(*rwlock).store(reinterpret_cast<PthreadRwlockPrivate*>(kDestroyedRwlock), std::memory_order_release);
+    }
+    bool idle = false;
+    {
+        const std::lock_guard lock(current->mutex);
+        idle = current->writer == std::thread::id{} && current->readers == 0 && current->waitingReaders == 0 && current->waitingWriters == 0;
+    }
+    if (idle)
+        delete current;
     return 0;
+}
+
+namespace {
+
+template <class TPredicate>
+bool waitRwlock(std::condition_variable& wake, std::unique_lock<std::mutex>& lock, const Deadline& deadline, TPredicate ready) {
+    if (!deadline) {
+        wake.wait(lock, ready);
+        return true;
+    }
+    return wake.wait_until(lock, *deadline, ready);
+}
+
+// A thread that holds no read lock waits behind a writer that is waiting (writer preference).
+bool canRead(const PthreadRwlockPrivate& r) {
+    return r.writer == std::thread::id{} && (r.waitingWriters == 0 || heldReadLocks > 0);
+}
+
+bool canWrite(const PthreadRwlockPrivate& r) {
+    return r.writer == std::thread::id{} && r.readers == 0;
+}
+
+void wakeWaiters(PthreadRwlockPrivate& r) {
+    if (r.writer != std::thread::id{})
+        return;
+    if (r.readers == 0 && r.waitingWriters > 0)
+        r.writersWake.notify_all();
+    if (r.waitingReaders > 0)
+        r.readersWake.notify_all();
+}
+
 }
 
 int RwlockLock(PthreadRwlock* rwlock, const bool exclusive, const Deadline& deadline) {
     auto* r = resolveRwlock(rwlock);
+    if (r == nullptr)
+        return kErrorInvalid;
     const auto self = std::this_thread::get_id();
-    if (r->writer.load(std::memory_order_acquire) == self)
+    std::unique_lock lock(r->mutex);
+    if (r->writer == self)
         return kErrorDeadlock;
     if (exclusive) {
-        if (deadline) {
-            if (!r->lock.try_lock_until(*deadline))
+        if (!canWrite(*r)) {
+            ++r->waitingWriters;
+            const bool acquired = waitRwlock(r->writersWake, lock, deadline, [r] { return canWrite(*r); });
+            --r->waitingWriters;
+            if (!acquired) {
+                // Readers held back by this writer may go now.
+                wakeWaiters(*r);
                 return kErrorTimedOut;
-        } else {
-            r->lock.lock();
+            }
         }
-        r->writer.store(self, std::memory_order_release);
+        r->writer = self;
         return 0;
     }
-    if (deadline) {
-        if (!r->lock.try_lock_shared_until(*deadline))
+    if (!canRead(*r)) {
+        ++r->waitingReaders;
+        const bool acquired = waitRwlock(r->readersWake, lock, deadline, [r] { return canRead(*r); });
+        --r->waitingReaders;
+        if (!acquired)
             return kErrorTimedOut;
-    } else {
-        r->lock.lock_shared();
     }
-    r->readers.fetch_add(1, std::memory_order_release);
+    ++r->readers;
+    ++heldReadLocks;
     return 0;
 }
 
 int RwlockTryLock(PthreadRwlock* rwlock, const bool exclusive) {
     auto* r = resolveRwlock(rwlock);
-    const auto self = std::this_thread::get_id();
-    if (r->writer.load(std::memory_order_acquire) == self)
-        return kErrorBusy;
+    if (r == nullptr)
+        return kErrorInvalid;
+    const std::lock_guard lock(r->mutex);
     if (exclusive) {
-        if (!r->lock.try_lock())
+        if (!canWrite(*r))
             return kErrorBusy;
-        r->writer.store(self, std::memory_order_release);
+        r->writer = std::this_thread::get_id();
         return 0;
     }
-    if (!r->lock.try_lock_shared())
+    if (!canRead(*r))
         return kErrorBusy;
-    r->readers.fetch_add(1, std::memory_order_release);
+    ++r->readers;
+    ++heldReadLocks;
     return 0;
 }
 
+// libthr: the write owner releases its write lock; otherwise a read lock is released, and an
+// rwlock that is unheld, or write-held by another thread, reports EPERM.
 int RwlockUnlock(PthreadRwlock* rwlock) {
     auto* r = resolveRwlock(rwlock);
-    if (r->writer.load(std::memory_order_acquire) == std::this_thread::get_id()) {
-        r->writer.store(std::thread::id{}, std::memory_order_release);
-        r->lock.unlock();
-        return 0;
+    if (r == nullptr)
+        return kErrorInvalid;
+    const std::lock_guard lock(r->mutex);
+    if (r->writer == std::this_thread::get_id()) {
+        r->writer = std::thread::id{};
+    } else if (r->writer != std::thread::id{} || r->readers == 0) {
+        return kErrorPermission;
+    } else {
+        --r->readers;
+        if (heldReadLocks > 0)
+            --heldReadLocks;
     }
-    r->readers.fetch_sub(1, std::memory_order_release);
-    r->lock.unlock_shared();
+    wakeWaiters(*r);
     return 0;
 }
 
 }
+

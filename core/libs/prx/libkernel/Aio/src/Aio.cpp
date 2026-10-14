@@ -9,6 +9,7 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/File/include/FileErrors.hpp"
+#include "prx/libkernel/File/include/SharedMemory.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libc/include/GuestMemoryTracking.hpp"
 
@@ -31,6 +32,10 @@ constexpr std::uint32_t kWaitOr = 2;
 constexpr std::int32_t kMaxRequests = 512;
 constexpr std::int32_t kRequestNumMax = 128;
 constexpr std::int32_t kIdNumMax = 128;
+constexpr std::int32_t kSchedulingWindowMax = 128;
+constexpr std::int32_t kDelayedCountMax = 128;
+constexpr std::uint32_t kSplitSizeMax = 0x1000000;
+constexpr std::uint32_t kSplitChunkSizeMax = 0x1000000;
 
 struct SchedulingParam {
     std::int32_t schedulingWindowSize;
@@ -99,7 +104,11 @@ std::int64_t transfer(const KernelAioRwRequest& request, const bool write) {
         return write ? ::_write(fd, request.buf, count) : ::_read(fd, request.buf, count);
     });
 #else
-    const auto result = write ? ::pwrite(request.fd, request.buf, request.nbyte, static_cast<off_t>(request.offset)) : ::pread(request.fd, request.buf, request.nbyte, static_cast<off_t>(request.offset));
+    // Shared memory objects clamp writes to their size (upstream); -2 means not shared memory.
+    const std::int64_t shared = write ? File::PwriteSharedMemory_nid_no_patch(request.fd, request.buf, request.nbyte, static_cast<std::int64_t>(request.offset)) : -2;
+    const auto result = shared != -2 ? shared
+        : write ? static_cast<std::int64_t>(::pwrite(request.fd, request.buf, request.nbyte, static_cast<off_t>(request.offset)))
+                : static_cast<std::int64_t>(::pread(request.fd, request.buf, request.nbyte, static_cast<off_t>(request.offset)));
 #endif
     return result < 0 ? FileErrors::Sce(errno) : static_cast<std::int64_t>(result);
 }
@@ -176,14 +185,17 @@ int APS5_VABI sceKernelAioInitializeImpl(void* param, int32_t size) {
     return 0;
 }
 
-int APS5_VABI sceKernelAioSetParam(void* param, int32_t window, int32_t delay, int32_t enable_split, int32_t split_size, int32_t split_chunk_size) {
-    if (!param) return SCE_KERNEL_ERROR_EINVAL;
-    auto* value = static_cast<SchedulingParam*>(param);
-    value->schedulingWindowSize = window;
-    value->delay = delay;
-    value->enableSplit = static_cast<std::uint32_t>(enable_split);
-    value->splitSize = static_cast<std::uint32_t>(split_size);
-    value->splitChunkSize = static_cast<std::uint32_t>(split_chunk_size);
+int APS5_VABI sceKernelAioSetParam(KernelAioSchedulingParam* param, int32_t schedulingWindowSize, int32_t delayedCountLimit, uint32_t enableSplit, uint32_t splitSize, uint32_t splitChunkSize) {
+    if (param == nullptr) throw std::invalid_argument("sceKernelAioSetParam: param is null");
+    if (schedulingWindowSize < 0 || schedulingWindowSize > kSchedulingWindowMax) throw std::runtime_error("sceKernelAioSetParam: a scheduling window outside 0..128 is not modelled");
+    if (delayedCountLimit < 0 || delayedCountLimit > kDelayedCountMax) throw std::runtime_error("sceKernelAioSetParam: a delayed count limit outside 0..128 is not modelled");
+    if (enableSplit > 1) throw std::runtime_error("sceKernelAioSetParam: a split flag other than 0 or 1 is not modelled");
+    if (splitSize > kSplitSizeMax || splitChunkSize > kSplitChunkSizeMax) throw std::runtime_error("sceKernelAioSetParam: a split size above 0x1000000 is not modelled");
+    param->schedulingWindowSize = schedulingWindowSize;
+    param->delayedCountLimit = delayedCountLimit;
+    param->enableSplit = enableSplit;
+    param->splitSize = splitSize;
+    param->splitChunkSize = splitChunkSize;
     return 0;
 }
 

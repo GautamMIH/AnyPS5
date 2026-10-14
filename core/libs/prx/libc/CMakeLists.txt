@@ -2,12 +2,15 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/Export.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/General.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/AmprContainer.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/CreationMask.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/gcc/StackGuard.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/windows/CrashReport.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/windows/CallTrace.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/linux/DlIteratePhdr.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/specifics/macos/GuestImages.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Strings.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/AllocatingStrings.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/WideConversion.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Multibyte.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/RuneLocale.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/StringExtensions.cpp
@@ -15,14 +18,17 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Backtrace.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Sse4aEmulation.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Random.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/HostEntropy.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Time.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FileAndHeap.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/FileLock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/StdioExtras.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/StandardStreams.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestAllocations.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestMemoryTracking.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestMemoryBacking.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestHeapStorage.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestStacks.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Interfaces.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestHeap.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/HeapDiagnostics.cpp
@@ -72,9 +78,33 @@ if(BUILD_TESTING)
     target_link_libraries(guest_wide_search_tests PRIVATE libc)
     configure_windows_unwind(guest_wide_search_tests)
     add_test(NAME guest_wide_search COMMAND guest_wide_search_tests)
-    # GuestTimeConversion.cpp is not built: upstream's version expects a 56-byte guest struct tm
-    # (tm_gmtoff, tm_zone), while ours reads and writes only the nine int fields (f00c57c5f: Zorro
-    # crashed on a garbage guest tm_zone).
+    # GuestTimeConversion.cpp and GuestMktime.cpp are not built: upstream's versions expect the guest
+    # struct tm's tm_gmtoff and tm_zone to be read and written, while ours reads and writes only the
+    # nine int fields (f00c57c5f: Zorro crashed on a garbage guest tm_zone).
+    add_test_executable(guest_array_callbacks_tests ${LIBS_INCLUDE_DIR}/tests/GuestArrayCallbacks.cpp)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # The callbacks throw, and the test catches, through the guest runtime (GuestTry.S).
+        enable_language(ASM)
+        target_sources(guest_array_callbacks_tests PRIVATE ${LIBS_INCLUDE_DIR}/tests/GuestTry.S)
+    endif()
+    target_include_directories(guest_array_callbacks_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_array_callbacks_tests PRIVATE libc)
+    configure_windows_unwind(guest_array_callbacks_tests)
+    add_test(NAME guest_array_callbacks COMMAND guest_array_callbacks_tests)
+    set_tests_properties(guest_array_callbacks PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        set_tests_properties(guest_array_callbacks PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_dynamic_cast_tests ${LIBS_INCLUDE_DIR}/tests/GuestDynamicCast.cpp)
+    target_include_directories(guest_dynamic_cast_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_dynamic_cast_tests PRIVATE libc)
+    configure_windows_unwind(guest_dynamic_cast_tests)
+    add_test(NAME guest_dynamic_cast COMMAND guest_dynamic_cast_tests)
+    if(WIN32)
+        set_tests_properties(guest_dynamic_cast PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test_executable(precise_wait_tests ${LIBS_INCLUDE_DIR}/tests/PreciseWait.cpp)
     target_include_directories(precise_wait_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(precise_wait_tests PRIVATE libc)
@@ -190,7 +220,8 @@ if(BUILD_TESTING)
     endif()
     # Upstream's GuestLibcThreads.cpp is not taken: it tests upstream's libc src/Threads.cpp (9277d0670), which
     # is left out here because libkernel's Pthread/src/CxxThreads.cpp exports _Mtx_*/_Cnd_*/_Thrd_*
-    # on top of the guest pthread objects.
+    # on top of the guest pthread objects. GuestLibcStaticImports.cpp is not built for the same reason
+    # (it exercises those _Mtx_*/_Thrd_* exports through upstream's handle layout).
     add_test_executable(guest_fiopen_tests ${LIBS_INCLUDE_DIR}/tests/GuestFiopen.cpp)
     target_include_directories(guest_fiopen_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_fiopen_tests PRIVATE libc)
@@ -257,6 +288,24 @@ if(BUILD_TESTING)
         set_tests_properties(guest_hostname PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    add_test_executable(guest_memrchr_tests ${LIBS_INCLUDE_DIR}/tests/GuestMemrchr.cpp)
+    target_include_directories(guest_memrchr_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_memrchr_tests PRIVATE libc)
+    configure_windows_unwind(guest_memrchr_tests)
+    add_test(NAME guest_memrchr COMMAND guest_memrchr_tests)
+    if(WIN32)
+        set_tests_properties(guest_memrchr PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_daemon_tests ${LIBS_INCLUDE_DIR}/tests/GuestDaemon.cpp)
+    target_include_directories(guest_daemon_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_daemon_tests PRIVATE libc)
+    configure_windows_unwind(guest_daemon_tests)
+    add_test(NAME guest_daemon COMMAND guest_daemon_tests)
+    if(WIN32)
+        set_tests_properties(guest_daemon PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test_executable(guest_lifecycle_tests ${LIBS_INCLUDE_DIR}/tests/GuestLifecycle.cpp)
     target_include_directories(guest_lifecycle_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_lifecycle_tests PRIVATE libc)
@@ -284,6 +333,28 @@ if(BUILD_TESTING)
     if(WIN32)
         target_link_libraries(guest_interface_tests PRIVATE ws2_32 iphlpapi)
         set_tests_properties(guest_interfaces PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_qsort_tests ${LIBS_INCLUDE_DIR}/tests/GuestQsort.cpp)
+    target_include_directories(guest_qsort_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_qsort_tests PRIVATE libc)
+    configure_windows_unwind(guest_qsort_tests)
+    add_test(NAME guest_qsort COMMAND guest_qsort_tests)
+    set_tests_properties(guest_qsort PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_qsort PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    # GuestStrftime.cpp is not built: its %z/%Z/%+ cases format the guest's tm_gmtoff and tm_zone,
+    # while ours formats the host's zone and never reads those fields (f00c57c5f, see Time.cpp).
+    add_test_executable(guest_atoi_tests ${LIBS_INCLUDE_DIR}/tests/GuestAtoi.cpp)
+    target_include_directories(guest_atoi_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_atoi_tests PRIVATE libc)
+    configure_windows_unwind(guest_atoi_tests)
+    add_test(NAME guest_atoi COMMAND guest_atoi_tests)
+    set_tests_properties(guest_atoi PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_atoi PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(guest_reallocalign_tests ${LIBS_INCLUDE_DIR}/tests/GuestReallocalign.cpp)
@@ -323,6 +394,18 @@ if(BUILD_TESTING)
         set_tests_properties(guest_errors PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    if(WIN32)
+        add_test_executable(guest_call_trace_tests ${LIBS_INCLUDE_DIR}/tests/GuestCallTrace.cpp)
+        target_include_directories(guest_call_trace_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_call_trace_tests PRIVATE libc)
+        configure_windows_unwind(guest_call_trace_tests)
+        add_test(NAME guest_call_trace COMMAND guest_call_trace_tests)
+        add_test(NAME guest_call_trace_abort COMMAND guest_call_trace_tests abort)
+        set_tests_properties(guest_call_trace guest_call_trace_abort PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        set_tests_properties(guest_call_trace_abort PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION
+            "last traced system library calls[^~]*#1 thread [0-9]+ libTraced.prx Integers from [^~]*guest_call_trace_tests.exe[^~]*#2 thread [0-9]+ libOther.prx Blocks from[^~]*most called traced imports \\(2 calls in total\\):[^~]* 1 libTraced.prx Integers[^~]* 1 libOther.prx Blocks")
+    endif()
     add_test_executable(guest_syslog_tests ${LIBS_INCLUDE_DIR}/tests/GuestSyslog.cpp)
     target_include_directories(guest_syslog_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_syslog_tests PRIVATE libc)
@@ -354,6 +437,21 @@ if(BUILD_TESTING)
     # std::bad_alloc, while ours (NewDelete.cpp, which already calls the new handler) throws the
     # guest runtime's bad_alloc (_Xbad_alloc) so guest catch handlers see it; on Linux the host and
     # guest C++ runtimes are separate.
+    add_test_executable(guest_generic_category_tests ${LIBS_INCLUDE_DIR}/tests/GuestGenericCategory.cpp)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Catches the guest runtime's exceptions in a guest frame (GuestTry.S).
+        enable_language(ASM)
+        target_sources(guest_generic_category_tests PRIVATE ${LIBS_INCLUDE_DIR}/tests/GuestTry.S)
+    endif()
+    target_include_directories(guest_generic_category_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_generic_category_tests PRIVATE libc)
+    configure_windows_unwind(guest_generic_category_tests)
+    add_test(NAME guest_generic_category COMMAND guest_generic_category_tests)
+    set_tests_properties(guest_generic_category PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        set_tests_properties(guest_generic_category PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test_executable(guest_search_tests ${LIBS_INCLUDE_DIR}/tests/GuestSearch.cpp)
     target_include_directories(guest_search_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_search_tests PRIVATE libc)
@@ -390,6 +488,15 @@ if(BUILD_TESTING)
     add_test(NAME guest_wcsrtombs_s COMMAND guest_wcsrtombs_s_tests)
     if(WIN32)
         set_tests_properties(guest_wcsrtombs_s PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_overflow_error_tests ${LIBS_INCLUDE_DIR}/tests/GuestOverflowError.cpp)
+    target_include_directories(guest_overflow_error_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_overflow_error_tests PRIVATE libc)
+    configure_windows_unwind(guest_overflow_error_tests)
+    add_test(NAME guest_overflow_error COMMAND guest_overflow_error_tests)
+    if(WIN32)
+        set_tests_properties(guest_overflow_error PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     # Catches guest-runtime throws in host frames, which needs libc.prx to replace the host C++
@@ -456,6 +563,8 @@ if(BUILD_TESTING)
         set_tests_properties(application_heap_replacement application_heap_invalid_metadata application_heap_default application_heap_exit_order
             PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+    # GuestAllocatorFailures.cpp is not built: it allocates through upstream's GuestArena, which is
+    # left out here (guest memory is GuestMemoryBacking/GuestHeapStorage).
     # ApplicationHeapStats.cpp is not built: it expects malloc_stats_fast to fail without an
     # application allocator, while ours initializes on first use and the default heap reports
     # statistics (mallinfo2).
@@ -463,6 +572,25 @@ if(BUILD_TESTING)
         add_test_executable(cpu_topology_tests ${LIBS_INCLUDE_DIR}/tests/CpuTopology.cpp)
         target_include_directories(cpu_topology_tests PRIVATE ${LIBS_INCLUDE_DIR})
         add_test(NAME cpu_topology COMMAND cpu_topology_tests)
+    endif()
+    add_test_executable(log_macros_tests ${LIBS_INCLUDE_DIR}/tests/LogMacros.cpp)
+    target_include_directories(log_macros_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(log_macros_tests PRIVATE libc)
+    configure_windows_unwind(log_macros_tests)
+    add_test(NAME log_macros COMMAND log_macros_tests)
+    if(WIN32)
+        set_tests_properties(log_macros PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+
+    add_test_executable(guest_heap_report_for_game_tests ${LIBS_INCLUDE_DIR}/tests/GuestHeapReportForGame.cpp)
+    target_include_directories(guest_heap_report_for_game_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_heap_report_for_game_tests PRIVATE libc)
+    configure_windows_unwind(guest_heap_report_for_game_tests)
+    add_test(NAME guest_heap_report_for_game COMMAND guest_heap_report_for_game_tests)
+    if(WIN32)
+        set_tests_properties(guest_heap_report_for_game PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()
 
@@ -505,6 +633,10 @@ if(BUILD_TESTING)
     endif()
 endif()
 
+# GuestLibcMutexInitWithName.cpp and GuestLibcCndTimedWait.cpp are not built: they test upstream's libc
+# src/Threads.cpp, which is left out here (libkernel's Pthread/src/CxxThreads.cpp exports _Mtx_*,
+# _Cnd_* and _Thrd_* on top of the guest pthread objects).
+
 if(MINGW)
     if(BUILD_TESTING)
         enable_language(ASM)
@@ -542,5 +674,11 @@ if(MINGW)
         set_target_properties(windows_exception_tests PROPERTIES EXCLUDE_FROM_ALL FALSE)
         add_test(NAME windows_exceptions COMMAND windows_exception_tests)
         set_tests_properties(windows_exceptions PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        add_test_executable(windows_backtrace_report_tests ${LIBS_INCLUDE_DIR}/tests/WindowsBacktraceReport.cpp)
+        target_link_libraries(windows_backtrace_report_tests PRIVATE libc)
+        add_test(NAME windows_backtrace_report COMMAND windows_backtrace_report_tests)
+        set_tests_properties(windows_backtrace_report PROPERTIES TIMEOUT 20
+            ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>"
+            PASS_REGULAR_EXPRESSION "aborting[^~]*SIGABRT. on thread[^~]*stack return address candidates:[^~]*rsp[+]0x")
     endif()
 endif()

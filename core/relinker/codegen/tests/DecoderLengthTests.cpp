@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -55,6 +56,31 @@ int main() {
             bytes.insert(bytes.end(), 15, 0x90);
             require(decodedLength(decoder, bytes, name + " followed by NOPs") == testCase.Length, "Wrong length for " + name + " followed by NOPs");
         }
+        for (const auto& testCase : std::vector<std::pair<std::size_t, Bytes>>{
+            {14, {0x90}},
+            {12, {0x68, 0x00, 0x00}},
+            {8, {0x8b, 0x84, 0x25, 0x00, 0x00, 0x00, 0x00}}
+        }) {
+            Bytes longest(testCase.first, 0x66);
+            longest.insert(longest.end(), testCase.second.begin(), testCase.second.end());
+            require(longest.size() == 15, "Maximum-length instruction fixture is not 15 bytes");
+            require(decoder.Decode(longest.data(), longest.size()) == 15, "Valid 15-byte instruction was rejected");
+            require(decoder.DecodeInstruction(longest.data(), longest.size()).Length == 15, "Valid 15-byte instruction metadata was rejected");
+            Bytes withTrailingNops = longest;
+            withTrailingNops.insert(withTrailingNops.end(), 15, 0x90);
+            require(decoder.Decode(withTrailingNops.data(), withTrailingNops.size()) == 15, "Valid maximum-length instruction consumed trailing bytes");
+            longest.insert(longest.begin(), 0x66);
+            require(truncationRejected(decoder, longest, longest.size()), "Instruction longer than 15 bytes was accepted");
+            try {
+                (void)decoder.DecodeInstruction(longest.data(), longest.size());
+                throw std::runtime_error("Instruction metadata accepted a length above 15 bytes");
+            } catch (const Codegen::CodegenException&) {
+            }
+        }
+        const auto threeDNow = parse("0f0f0d11223344a6");
+        const auto threeDNowInfo = decoder.DecodeInstruction(threeDNow.data(), threeDNow.size());
+        require(threeDNowInfo.HasModRm && threeDNowInfo.ModRmByte == 0x0d, "3DNow! ModRM was not reported");
+        require(threeDNowInfo.HasRipRelativeDisp && threeDNowInfo.RipRelativeDispOffset == 3, "3DNow! RIP-relative displacement was not reported");
         std::cout << "Decoder length tests passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

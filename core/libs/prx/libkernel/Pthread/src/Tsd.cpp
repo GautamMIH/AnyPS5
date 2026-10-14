@@ -1,5 +1,6 @@
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
+#include "../include/ThreadLifecycle.hpp"
 #include "../include/WindowsThreadLocal.hpp"
 #include "prx/libc/include/General.hpp"
 #include <array>
@@ -44,8 +45,18 @@ bool slotIndex(const PthreadKey key, std::size_t& index) {
 struct ThreadValues {
     std::array<void*, kMaxKeys> Values{};
     std::array<std::uint64_t, kMaxKeys> Sequences{};
+    bool destroyed = false;
 
     ~ThreadValues() {
+        RunDestructors();
+    }
+
+    // Runs at most once per thread: from the guest thread exit path (ThreadLifecycle::RunKeyDtors)
+    // or, failing that, from thread_local teardown.
+    void RunDestructors() {
+        if (destroyed)
+            return;
+        destroyed = true;
         for (int iteration = 0; iteration < kDestructorIterations; ++iteration) {
             bool called = false;
             for (std::size_t index = 0; index < kMaxKeys; ++index) {
@@ -69,6 +80,8 @@ struct ThreadValues {
             if (!called)
                 return;
         }
+        Values = {};
+        Sequences = {};
     }
 };
 
@@ -140,6 +153,10 @@ int KeySet(const PthreadKey key, void* value) {
     return 0;
 }
 
+}
+
+void ThreadLifecycle::RunKeyDtors() {
+    threadValues().RunDestructors();
 }
 
 extern "C" {

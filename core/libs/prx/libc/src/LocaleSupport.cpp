@@ -1,5 +1,6 @@
 #include <cerrno>
 #include <climits>
+#include <clocale>
 #include <cstddef>
 #include <cstdio>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <ios>
 #include <locale>
 #include <mutex>
+#include <new>
 #include <atomic>
 #include <cstring>
 #include <vector>
@@ -18,6 +20,7 @@
 #include <string>
 
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/SonyCrt.hpp"
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/GuestLocale.hpp"
 #include "SceTypes.hpp"
@@ -80,10 +83,22 @@ GuestLocale::Facet* g_classicFacets[1]{};
 GuestLocale::Implementation g_classicLocale{{&g_localeVtable, 1, 0}, g_classicFacets, 1, 0, false, "C"};
 
 constexpr std::size_t GuestStringInlineCapacity = 15;
+constexpr std::size_t GuestStringCapacityMask = 15;
 constexpr std::size_t GuestStringLargeAllocation = 0x1000;
+constexpr std::size_t GuestLargeAllocationPadding = 0x27;
+constexpr std::uintptr_t GuestLargeAllocationAlignment = 0x20;
 
 void ValidateCharacterRange(const char* first, const char* last, const char* function) {
     if ((first == nullptr) != (last == nullptr) || last < first) throw std::invalid_argument(std::string(function) + ": invalid character range");
+}
+
+void* AllocateStringStorage(std::size_t bytes) {
+    if (bytes < GuestStringLargeAllocation) return _Znwm_nid_postfix(bytes);
+    if (bytes > std::numeric_limits<std::size_t>::max() - GuestLargeAllocationPadding) throw std::bad_alloc();
+    auto* raw = static_cast<unsigned char*>(_Znwm_nid_postfix(bytes + GuestLargeAllocationPadding));
+    const auto aligned = (reinterpret_cast<std::uintptr_t>(raw) + GuestLargeAllocationPadding) & ~(GuestLargeAllocationAlignment - 1);
+    reinterpret_cast<void**>(aligned)[-1] = raw;
+    return reinterpret_cast<void*>(aligned);
 }
 
 void APS5_VABI DestroyCollate(GuestLocale::Facet*) {}
@@ -120,12 +135,11 @@ GuestLocale::String* APS5_VABI CollateTransform(GuestLocale::String* result, con
     ValidateCharacterRange(first, last, "collate::do_transform");
     const auto length = static_cast<std::size_t>(last - first);
     if (length != 0 && std::memchr(first, 0, length) != nullptr) throw std::runtime_error("collate::do_transform: embedded null characters are not supported");
-    if (length + 1 >= GuestStringLargeAllocation) throw std::runtime_error("collate::do_transform: results of 4095 characters or more are not supported");
     char* data = result->buffer;
     std::size_t capacity = GuestStringInlineCapacity;
     if (length > GuestStringInlineCapacity) {
-        capacity = length;
-        data = static_cast<char*>(_Znwm_nid_postfix(capacity + 1));
+        capacity = length | GuestStringCapacityMask;
+        data = static_cast<char*>(AllocateStringStorage(capacity + 1));
     }
     if (length != 0) std::memcpy(data, first, length);
     data[length] = 0;
@@ -385,6 +399,10 @@ void APS5_VABI _init_env_nid_postfix() {
 void APS5_VABI init_env_nid_postfix(const InitEnvParams* params) {
     (void)params;
     _init_env_nid_postfix();
+}
+
+SonyLconv* APS5_VABI localeconv_nid_postfix(void) {
+    return SonyLocaleconv();
 }
 
 }

@@ -1,11 +1,18 @@
 #include "SceTypes.hpp"
 #include <cstdint>
 #include <cstring>
-#include <link.h>
 #include <cstdlib>
-#include <dlfcn.h>
 #include <stdexcept>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#ifdef __linux__
+#include <link.h>
+#endif
+#endif
 
 extern "C" {
 int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg, const char* name);
@@ -51,6 +58,7 @@ void* APS5_VABI Worker(void*) {
     return nullptr;
 }
 
+#ifdef __linux__
 // An address inside libSceLibcInternal's image. Taking the address of one of its functions does
 // not give one in a non-PIE test executable (AnyPS5's test build): the executable's PLT entry is
 // the function's canonical address, so it would resolve to the test's own module.
@@ -68,6 +76,7 @@ void* LibraryImageAddress() {
     Require(found != nullptr);
     return found;
 }
+#endif
 
 KernelModule ModuleOf(const void* address) {
     ModuleInfoEx info{};
@@ -89,7 +98,16 @@ bool ForceThrows(KernelModule handle) {
 
 int main() {
     self = ModuleOf(&dsoHandle);
+#ifdef _WIN32
+    void* otherDso = reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("libSceLibcInternal.prx"), "_sceLibcInternalThreadDtors_nid_postfix"));
+#else
+#ifdef __linux__
     void* otherDso = LibraryImageAddress();
+#else
+    void* otherDso = dlsym(RTLD_NEXT, "_sceLibcInternalThreadDtors_nid_postfix");
+#endif
+#endif
+    Require(otherDso != nullptr);
     const KernelModule other = ModuleOf(otherDso);
     Require(other != self && other != 0);
     int local = 0;

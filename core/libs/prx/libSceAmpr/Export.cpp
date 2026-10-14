@@ -3,10 +3,13 @@
 #include <cstring>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/SonyCrt.hpp"
 #include "prx/libkernel/Ampr/include/AmprPackets.hpp"
 #include <array>
 #include <atomic>
-#include <cstring>
+#include <ctime>
+#include <stdexcept>
+#include <string>
 #include <thread>
 
 namespace {
@@ -36,11 +39,79 @@ void commit(AmprCommandBuffer* cb, std::uint32_t size, std::uint32_t flags) {
 
 }
 
+static constexpr int ThrdSuccess = 0;
+static constexpr int ThrdNomem = 1;
+static constexpr int ThrdTimedout = 2;
+static constexpr int ThrdBusy = 3;
+static constexpr int ThrdError = 4;
+
+static constexpr int CppDeviceOrResourceBusy = 0;
+static constexpr int CppInvalidArgument = 1;
+static constexpr int CppResourceUnavailableTryAgain = 6;
+
+static constexpr int MtxPlain = 0x1;
+
 static std::atomic_flag sharedPtrSpinLock;
 
+struct AmmUsageStatsData {
+    std::uint64_t sizeInBytes;
+    std::uint16_t numPageTablePoolEntries;
+    std::uint16_t allocatedPageTablePoolEntries;
+    std::uint16_t highWatermarkAllocatedEntries;
+    std::uint16_t reserved;
+    std::uint32_t ringIdleFlags;
+};
+static_assert(sizeof(AmmUsageStatsData) == 0x18);
+static constexpr std::uint16_t AmmPageTablePoolEntries = 512;
+static constexpr std::uint32_t AmmRingIdleFlags = 0x7;
+
+struct GuestPad {
+    unsigned (APS5_VABI* const* vtable)(GuestPad*);
+    void* condition;
+    void* mutex;
+    bool started;
+};
+
+static_assert(offsetof(GuestPad, condition) == 0x8 && offsetof(GuestPad, mutex) == 0x10 && offsetof(GuestPad, started) == 0x18 && sizeof(GuestPad) == 0x20);
+
 extern "C" {
+int APS5_VABI pthread_create_nid_postfix(Pthread* thread, const PthreadAttr* attr, PthreadEntry entry, void* arg);
+int APS5_VABI pthread_join_nid_postfix(Pthread thread, void** value);
+int APS5_VABI _Mtx_init_nid_postfix(void** handle, int type);
+void APS5_VABI _Mtx_destroy_nid_postfix(void** handle);
+int APS5_VABI _Mtx_lock_nid_postfix(void** handle);
+int APS5_VABI _Mtx_unlock_nid_postfix(void** handle);
+int APS5_VABI _Cnd_init_nid_postfix(void** handle);
+void APS5_VABI _Cnd_destroy_nid_postfix(void** handle);
+int APS5_VABI _Cnd_wait_nid_postfix(void** condition, void** mutex);
+int APS5_VABI _Cnd_signal_nid_postfix(void** handle);
 int APS5_VABI wcsrtombs_s_nid_postfix(std::size_t* result, char* destination, std::size_t capacity, const std::uint16_t** source, std::size_t limit, void* state);
+int APS5_VABI _Cnd_init_nid_postfix(void** handle);
+int SignalCondition_nid_no_patch(void** handle);
+[[noreturn]] void ThrowCppError_nid_no_patch(int code);
 }
+
+static void RequireThrd(int result, const char* what) {
+    switch (result) {
+    case ThrdSuccess:
+        return;
+    case ThrdNomem:
+    case ThrdTimedout:
+        ThrowCppError_nid_no_patch(CppResourceUnavailableTryAgain);
+    case ThrdBusy:
+        ThrowCppError_nid_no_patch(CppDeviceOrResourceBusy);
+    case ThrdError:
+        ThrowCppError_nid_no_patch(CppInvalidArgument);
+    }
+    throw std::runtime_error(std::string(what) + " failed with " + std::to_string(result));
+}
+
+static void* APS5_VABI PadEntry_nid_no_patch(void* argument) {
+    auto* pad = static_cast<GuestPad*>(argument);
+    const auto go = pad->vtable[0];
+    return reinterpret_cast<void*>(static_cast<std::uintptr_t>(go(pad)));
+}
+
 
 extern "C" {
 
@@ -428,36 +499,49 @@ int APS5_VABI sceAmprMeasureCommandSizeWriteCounter_04_00() {
  return 0;
 }
 
-int APS5_VABI _ZNSt8ios_base7_AddstdEPS__nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI _ZSt16_Throw_Cpp_errori_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+[[noreturn]] void APS5_VABI _ZSt16_Throw_Cpp_errori_nid_postfix(int code) {
+    ThrowCppError_nid_no_patch(code);
 }
 
 
-int APS5_VABI _ZNSt4_Pad8_ReleaseEv_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _ZNSt4_Pad8_ReleaseEv_nid_postfix(GuestPad* pad) {
+    if (!pad) APS5_INVALID_ARG_EX;
+    RequireThrd(_Mtx_lock_nid_postfix(&pad->mutex), "_Pad::_Release: _Mtx_lock");
+    pad->started = true;
+    RequireThrd(_Cnd_signal_nid_postfix(&pad->condition), "_Pad::_Release: _Cnd_signal");
+    RequireThrd(_Mtx_unlock_nid_postfix(&pad->mutex), "_Pad::_Release: _Mtx_unlock");
 }
 
-int APS5_VABI _ZNSt4_PadC2Ev_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _ZNSt4_PadC2Ev_nid_postfix(GuestPad* pad) {
+    if (!pad) APS5_INVALID_ARG_EX;
+    RequireThrd(_Cnd_init_nid_postfix(&pad->condition), "_Pad::_Pad: _Cnd_init");
+    const int created = _Mtx_init_nid_postfix(&pad->mutex, MtxPlain);
+    if (created != ThrdSuccess) {
+        _Cnd_destroy_nid_postfix(&pad->condition);
+        RequireThrd(created, "_Pad::_Pad: _Mtx_init");
+    }
+    pad->started = false;
+    const int locked = _Mtx_lock_nid_postfix(&pad->mutex);
+    if (locked != ThrdSuccess) {
+        _Mtx_destroy_nid_postfix(&pad->mutex);
+        _Cnd_destroy_nid_postfix(&pad->condition);
+        RequireThrd(locked, "_Pad::_Pad: _Mtx_lock");
+    }
 }
 
-int APS5_VABI _ZNSt4_PadD2Ev_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _ZNSt4_PadD2Ev_nid_postfix(GuestPad* pad) {
+    if (!pad) APS5_INVALID_ARG_EX;
+    RequireThrd(_Mtx_unlock_nid_postfix(&pad->mutex), "_Pad::~_Pad: _Mtx_unlock");
+    _Mtx_destroy_nid_postfix(&pad->mutex);
+    _Cnd_destroy_nid_postfix(&pad->condition);
 }
 
 
-int APS5_VABI _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+void APS5_VABI _ZNSt4_Pad7_LaunchEPP7pthread_nid_postfix(GuestPad* pad, Pthread* thread) {
+    if (!pad || !thread) APS5_INVALID_ARG_EX;
+    const int created = pthread_create_nid_postfix(thread, nullptr, PadEntry_nid_no_patch, pad);
+    if (created != 0) ThrowCppError_nid_no_patch(CppResourceUnavailableTryAgain);
+    while (!pad->started) RequireThrd(_Cnd_wait_nid_postfix(&pad->condition, &pad->mutex), "_Pad::_Launch: _Cnd_wait");
 }
 
 int APS5_VABI _ZNSt7num_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE2idE_nid_postfix(void) {
@@ -470,14 +554,8 @@ void APS5_VABI _Unlock_shared_ptr_spin_lock_nid_postfix(void) {
     sharedPtrSpinLock.clear(std::memory_order_release);
 }
 
-int APS5_VABI _Cnd_init_with_name_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI _ZTVN10__cxxabiv120__function_type_infoE_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI _Cnd_init_with_name_nid_postfix(void** handle, const char*) {
+    return _Cnd_init_nid_postfix(handle);
 }
 
 int APS5_VABI _ZTVSt7num_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE_nid_postfix(void) {
@@ -491,11 +569,6 @@ int APS5_VABI _ZNKSt8time_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE3get
 }
 
 int APS5_VABI _ZNSt8time_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE2idE_nid_postfix(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-int APS5_VABI _ZTVN10__cxxabiv119__pointer_type_infoE_nid_postfix(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -516,6 +589,81 @@ int APS5_VABI wcstombs_s_nid_postfix(std::size_t* result, char* destination, std
 }
 
 int APS5_VABI __cxa_call_unexpected_nid_postfix(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+APS5_EXPORT("0hlfW1O4Aa4", sceAmprLocaleconv);
+SonyLconv* APS5_VABI sceAmprLocaleconv(void) {
+    return SonyLocaleconv();
+}
+
+APS5_EXPORT("802pFCwC9w0", sceAmprUdivti3);
+unsigned __int128 APS5_VABI sceAmprUdivti3(unsigned __int128 dividend, unsigned __int128 divisor) {
+    return SonyUdivti3(dividend, divisor);
+}
+
+APS5_EXPORT("MU25eqxSDTw", sceAmprSinh);
+double APS5_VABI sceAmprSinh(double x, double y) {
+    return SonySinh(x, y);
+}
+
+APS5_EXPORT("-vXEQdRADLI", sceAmprStrtokS);
+char* APS5_VABI sceAmprStrtokS(char* str, const char* delim, char** context) {
+    return SonyStrtokS(str, delim, context);
+}
+
+APS5_EXPORT("2UFh+YKfuzk", sceAmprCtimeS);
+int APS5_VABI sceAmprCtimeS(char* buffer, std::size_t size, const std::int64_t* time) {
+    return SonyCtimeS(buffer, size, time);
+}
+
+APS5_EXPORT("6f5f-qx4ucA", sceAmprWcscpyS);
+int APS5_VABI sceAmprWcscpyS(std::uint16_t* dest, std::size_t size, const std::uint16_t* src) {
+    return SonyWcscpyS(dest, size, src);
+}
+
+APS5_EXPORT("ENLfKJEZTjE", sceAmprSetConstraintHandlerS);
+void* APS5_VABI sceAmprSetConstraintHandlerS(void* handler) {
+    return SonySetConstraintHandlerS(handler);
+}
+
+APS5_EXPORT("Jo9ON-AX9eU", sceAmprFltrounds);
+int APS5_VABI sceAmprFltrounds(void) {
+    return SonyFltrounds();
+}
+
+APS5_EXPORT("ODGONXcSmz4", sceAmprIgnoreHandlerS);
+void APS5_VABI sceAmprIgnoreHandlerS(const char* message, void* pointer, int error) {
+    SonyIgnoreHandlerS(message, pointer, error);
+}
+
+APS5_EXPORT("VUzjXknPPBs", sceAmprMbstowcs);
+std::size_t APS5_VABI sceAmprMbstowcs(std::uint16_t* dest, const char* src, std::size_t size) {
+    return SonyMbstowcs(dest, src, size);
+}
+
+APS5_EXPORT("qPe7-h5Jnuc", sceAmprAsctimeS);
+int APS5_VABI sceAmprAsctimeS(char* buffer, std::size_t size, const GuestTm* time) {
+    return SonyAsctimeS(buffer, size, time);
+}
+
+APS5_EXPORT("qlWiRfOJx1A", sceAmprFpclassifyd);
+int APS5_VABI sceAmprFpclassifyd(double value) {
+    return SonyFpclassifyd(value);
+}
+
+int APS5_VABI sceAmprAmmGetUsageStatsData(AmmUsageStatsData* stats) {
+    if (!stats || stats->sizeInBytes > sizeof(AmmUsageStatsData)) return AMPR_ERROR_INVALID;
+    AmmUsageStatsData out{};
+    out.sizeInBytes = stats->sizeInBytes;
+    out.numPageTablePoolEntries = AmmPageTablePoolEntries;
+    out.ringIdleFlags = AmmRingIdleFlags;
+    std::memcpy(stats, &out, static_cast<std::size_t>(stats->sizeInBytes));
+    return 0;
+}
+
+int APS5_VABI sceAmprAmmSetPageTablePoolOccupancyNotificationThreshold(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

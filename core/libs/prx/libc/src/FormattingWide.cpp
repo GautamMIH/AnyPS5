@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <cstdarg>
+#include <cstdlib>
 #include <cstring>
 #include <stdexcept>
 #include <string>
@@ -91,22 +92,38 @@ void AppendPadded(std::u16string& out, const std::u16string& text, bool left, in
 std::u16string FormatWide(const char16_t* format, VaList* source, bool secure = false) {
     if (format == nullptr || source == nullptr) throw std::invalid_argument("Null formatting argument");
     LibcDetail::FormatArguments args(source);
+    const char16_t* const start = format;
+    std::string ascii;
+    for (const char16_t* unit = format; *unit != 0; ++unit) ascii.push_back(*unit < 0x80 ? static_cast<char>(*unit) : '?');
+    args.Number(LibcDetail::NumberedArgumentClasses(ascii.c_str()));
+    const auto position = [&] {
+        const char* cursor = ascii.c_str() + (format - start);
+        const std::size_t found = LibcDetail::ArgumentPosition(cursor);
+        format = start + (cursor - ascii.c_str());
+        return found;
+    };
+    const auto star = [&] {
+        const std::size_t found = position();
+        return found ? args.At<int>(found) : args.Next<int>();
+    };
     std::u16string out;
     while (*format) {
         if (*format != u'%') { out.push_back(*format++); continue; }
         ++format;
         if (*format == u'%') { out.push_back(*format++); continue; }
+        if (const std::size_t found = position()) args.Seek(found);
         std::string spec = "%";
         bool left = false;
         int width = 0;
         int precision = -1;
-        while (In(*format, "-+ #0")) {
+        while (In(*format, "-+ #0'")) {
             if (*format == u'-') left = true;
-            spec += static_cast<char>(*format++);
+            if (*format != u'\'') spec += static_cast<char>(*format);
+            ++format;
         }
         if (*format == u'*') {
             ++format;
-            width = args.Next<int>();
+            width = star();
             if (width < 0) { left = true; spec += '-'; width = -width; }
             spec += std::to_string(width);
         } else {
@@ -117,7 +134,7 @@ std::u16string FormatWide(const char16_t* format, VaList* source, bool secure = 
             precision = 0;
             if (*format == u'*') {
                 ++format;
-                precision = args.Next<int>();
+                precision = star();
                 if (precision >= 0) spec += "." + std::to_string(precision);
             } else {
                 spec += '.';
@@ -159,7 +176,8 @@ std::u16string FormatWide(const char16_t* format, VaList* source, bool secure = 
                 AppendNumber(out, spec + static_cast<char>(conversion), args.Next<double>());
             }
         } else if (conversion == u'p' && length.empty()) {
-            AppendNumber(out, spec + 'p', args.Next<void*>());
+            const std::string text = LibcDetail::FormatPointer(spec, args.Next<void*>());
+            out.append(text.begin(), text.end());
         } else if (conversion == u'c' || conversion == u'C') {
             const int value = args.Next<int>();
             std::u16string text;
@@ -199,7 +217,37 @@ std::u16string FormatWide(const char16_t* format, VaList* source, bool secure = 
 
 extern "C" {
 
-// vswprintf and swprintf are defined with the other wide-string functions (WideStrings.cpp).
+int APS5_VABI vswprintf_nid_postfix(char16_t* buffer, std::size_t size, const char16_t* format, VaList* args) {
+    if (buffer == nullptr || size == 0) { errno = 22; return -1; }
+    int result;
+    try {
+        const std::u16string text = FormatWide(format, args);
+        const std::size_t copied = text.size() < size - 1 ? text.size() : size - 1;
+        std::memcpy(buffer, text.data(), copied * sizeof(char16_t));
+        buffer[copied] = 0;
+        result = copied == text.size() ? static_cast<int>(copied) : -1;
+    } catch (const std::exception&) {
+        buffer[0] = 0;
+        errno = 22;
+        return -1;
+    }
+    // Debug aid: APS5_TRACE_FORMAT=1 echoes every formatted wide string (engines format their log
+    // and fatal-error text this way even when they print nothing).
+    static const bool trace = std::getenv("APS5_TRACE_FORMAT") != nullptr;
+    if (trace && result > 0) {
+        std::string text;
+        for (int index = 0; index < result; ++index) text.push_back(buffer[index] < 0x80 ? static_cast<char>(buffer[index]) : '?');
+        std::fprintf(stderr, "[format] %s\n", text.c_str());
+    }
+    return result;
+}
+
+int APS5_VABI swprintf_nid_postfix(char16_t* buffer, std::size_t size, const char16_t* format, ...) {
+    APS5_VA_BEGIN(format);
+    const int result = vswprintf_nid_postfix(buffer, size, format, reinterpret_cast<VaList*>(args));
+    APS5_VA_END();
+    return result;
+}
 
 int APS5_VABI snwprintf_s_nid_postfix(char16_t* buffer, std::size_t size, const char16_t* format, ...) {
     constexpr std::size_t RsizeMax = SIZE_MAX >> 1;
@@ -221,6 +269,64 @@ int APS5_VABI snwprintf_s_nid_postfix(char16_t* buffer, std::size_t size, const 
     if (result < 0 && buffer != nullptr && size != 0 && size < RsizeMax) buffer[0] = 0;
     return result;
 }
+
+int APS5_VABI vswprintf_s_nid_postfix(char16_t* buffer, std::size_t size, const char16_t* format, VaList* args) {
+    constexpr std::size_t RsizeMax = (SIZE_MAX >> 1) / sizeof(char16_t);
+    int result = -1;
+    if (buffer != nullptr && format != nullptr && args != nullptr && size != 0 && size <= RsizeMax) {
+        try {
+            const std::u16string text = FormatWide(format, args, true);
+            if (text.size() + 1 <= size && text.size() <= static_cast<std::size_t>(INT_MAX)) {
+                std::memcpy(buffer, text.data(), text.size() * sizeof(char16_t));
+                buffer[text.size()] = 0;
+                result = static_cast<int>(text.size());
+            }
+        } catch (const std::invalid_argument&) {
+        }
+    }
+    if (result < 0 && buffer != nullptr && size != 0 && size <= RsizeMax) buffer[0] = 0;
+    return result;
+}
+
+int APS5_VABI swprintf_s_nid_postfix(char16_t* buffer, std::size_t size, const char16_t* format, ...) {
+    constexpr std::size_t RsizeMax = (SIZE_MAX >> 1) / sizeof(char16_t);
+    int result = -1;
+    if (buffer != nullptr && format != nullptr && size != 0 && size <= RsizeMax) {
+        APS5_VA_BEGIN(format);
+        try {
+            const std::u16string text = FormatWide(format, reinterpret_cast<VaList*>(args), true);
+            if (text.size() + 1 <= size && text.size() <= static_cast<std::size_t>(INT_MAX)) {
+                std::memcpy(buffer, text.data(), text.size() * sizeof(char16_t));
+                buffer[text.size()] = 0;
+                result = static_cast<int>(text.size());
+            }
+        } catch (const std::invalid_argument&) {
+        }
+        APS5_VA_END();
+    }
+    if (result < 0 && buffer != nullptr && size != 0 && size <= RsizeMax) buffer[0] = 0;
+    return result;
+}
+
+int APS5_VABI vsnwprintf_s_nid_postfix(char16_t* buffer, std::size_t size, const char16_t* format, VaList* args) {
+    constexpr std::size_t RsizeMax = (SIZE_MAX >> 1) / sizeof(char16_t);
+    int result = -1;
+    if (buffer != nullptr && format != nullptr && args != nullptr && size != 0 && size <= RsizeMax) {
+        try {
+            const std::u16string text = FormatWide(format, args, true);
+            if (text.size() <= static_cast<std::size_t>(INT_MAX)) {
+                const std::size_t copied = text.size() < size - 1 ? text.size() : size - 1;
+                std::memcpy(buffer, text.data(), copied * sizeof(char16_t));
+                buffer[copied] = 0;
+                result = static_cast<int>(text.size());
+            }
+        } catch (const std::invalid_argument&) {
+        }
+    }
+    if (result < 0 && buffer != nullptr && size != 0 && size <= RsizeMax) buffer[0] = 0;
+    return result;
+}
+
 int APS5_VABI wprintf_nid_postfix(const char16_t* format, ...) {
     APS5_VA_BEGIN(format);
     int result = -1;

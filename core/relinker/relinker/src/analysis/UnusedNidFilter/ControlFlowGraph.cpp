@@ -29,16 +29,7 @@ private:
 
 namespace {
 
-void buildGraph(
-    std::span<const std::uint8_t> text,
-    VirtualAddress textVaddr,
-    VirtualAddress entryVaddr,
-    const std::vector<VirtualAddress>& extraEntries,
-    const IRelativeRelocationIndex& relativeRelocations,
-    const std::vector<StrictDataRegion>* data,
-    bool followCodeAddresses,
-    std::unordered_set<VirtualAddress>& reachable
-) {
+void buildGraph(std::span<const std::uint8_t> text, VirtualAddress textVaddr, VirtualAddress entryVaddr, const std::vector<VirtualAddress>& extraEntries, const IRelativeRelocationIndex& relativeRelocations, const std::vector<StrictDataRegion>* data, bool followCodeAddresses, std::unordered_set<VirtualAddress>& reachable, const std::function<void(std::uint64_t)>& progress) {
     const Codegen::X64InstructionDecoder decoder;
     std::unordered_set<VirtualAddress> visited;
     std::queue<VirtualAddress> worklist;
@@ -90,6 +81,7 @@ void buildGraph(
                 info = decoder.DecodeInstruction(text.data() + bufOff, available);
             }
             reachable.insert(va);
+            if (progress && reachable.size() % 4096 == 0) progress(reachable.size());
             visited.erase(va);
 
             VirtualAddress nextVaddr = va + static_cast<VirtualAddress>(info.Length);
@@ -162,16 +154,8 @@ void buildGraph(
 
 }
 
-std::unique_ptr<IControlFlowGraph> BuildControlFlowGraph(
-    std::span<const std::uint8_t> text,
-    VirtualAddress textVaddr,
-    VirtualAddress entryVaddr,
-    const std::vector<VirtualAddress>& extraEntries,
-    const IRelativeRelocationIndex& relativeRelocations,
-    bool followCodeAddresses,
-    std::unordered_set<VirtualAddress>& reachable
-) {
-    buildGraph(text, textVaddr, entryVaddr, extraEntries, relativeRelocations, nullptr, followCodeAddresses, reachable);
+std::unique_ptr<IControlFlowGraph> BuildControlFlowGraph(std::span<const std::uint8_t> text, VirtualAddress textVaddr, VirtualAddress entryVaddr, const std::vector<VirtualAddress>& extraEntries, const IRelativeRelocationIndex& relativeRelocations, bool followCodeAddresses, std::unordered_set<VirtualAddress>& reachable, const std::function<void(std::uint64_t)>& progress) {
+    buildGraph(text, textVaddr, entryVaddr, extraEntries, relativeRelocations, nullptr, followCodeAddresses, reachable, progress);
     return std::make_unique<ControlFlowGraph>(&reachable);
 }
 
@@ -208,7 +192,7 @@ std::unique_ptr<IControlFlowGraph> BuildAddressTakenControlFlowGraph(
     const std::vector<StrictDataRegion>& data
 ) {
     std::unordered_set<VirtualAddress> reachable;
-    buildGraph(std::span<const std::uint8_t>(text.data(), text.size()), textVaddr, entryVaddr, extraEntries, relativeRelocations, &data, false, reachable);
+    buildGraph(std::span<const std::uint8_t>(text.data(), text.size()), textVaddr, entryVaddr, extraEntries, relativeRelocations, &data, false, reachable, {});
     return std::make_unique<ControlFlowGraph>(std::move(reachable));
 }
 

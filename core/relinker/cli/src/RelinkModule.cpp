@@ -1,4 +1,9 @@
 #include <Cli.hpp>
+#include <string_view>
+#include <optional>
+#include <iterator>
+#include <fstream>
+#include <domain/IProgress.hpp>
 #include <domain/Types.hpp>
 #include <io/FileWriter.hpp>
 #include <io/NativePath.hpp>
@@ -71,6 +76,18 @@ void SetNeededLibraries(Domain::SysVDynamicSection& section, const std::vector<s
     }
 }
 
+// The module path's progress: messages go to the console as before; stage counters are not shown.
+class ModuleProgress final : public Domain::IProgress {
+public:
+    void Report(const Domain::ProgressEvent&) override {}
+    void Message(std::string_view message) override { std::cout << message; }
+};
+
+ModuleProgress& moduleProgress() {
+    static ModuleProgress progress;
+    return progress;
+}
+
 PreparedModule PrepareModule(const std::vector<std::uint8_t>& inputBytes, const Args& args) {
     const Relinker::SelfUnwrapper selfUnwrapper;
     if (selfUnwrapper.IsSelf(inputBytes))
@@ -81,16 +98,17 @@ PreparedModule PrepareModule(const std::vector<std::uint8_t>& inputBytes, const 
     auto elfReader = std::make_shared<Relinker::ElfReader>(module.Image);
     const auto pipeline = std::make_shared<Relinker::RelinkerPipeline>(
         elfReader,
-        args.skipSyscallCheck ? Relinker::MakeNullSyscallScanner() : Relinker::MakeSyscallScanner(),
+        args.skipSyscallCheck ? Relinker::MakeNullSyscallScanner() : Relinker::MakeSyscallScanner(moduleProgress()),
         Relinker::MakeCallSiteResolver(),
         std::make_shared<Relinker::ValidationPolicy>(),
         std::make_shared<Relinker::SysVDynamicSectionBuilder>(),
-        args.unusedFilterLevel == 2 ? Relinker::MakeStrictUnusedNidFilter() : Relinker::MakeUnusedNidFilter(),
-        args.unusedFilterLevel
+        args.unusedFilterLevel == 2 ? Relinker::MakeStrictUnusedNidFilter(moduleProgress()) : Relinker::MakeUnusedNidFilter(),
+        args.unusedFilterLevel, moduleProgress()
     );
 
     std::cout << "System: " << (args.toWindows ? "Windows" : args.toMacos ? "macOS" : "Linux") << "; unused-filter=" << args.unusedFilterLevel << "\n";
-    module.Result = pipeline->Relink(module.Image);
+    module.Result = pipeline->Relink();
+    module.Image = elfReader->TakeBytes();
     for (const auto& patch : module.Result.Patches) {
         if (patch.Offset > module.Image.size() || patch.Bytes.size() > module.Image.size() - patch.Offset)
             throw Domain::RelinkerException("Relinker patch exceeds source image", patch.Offset);
@@ -119,7 +137,10 @@ ModuleRelinkOutcome EmitModule(PreparedModule& module, const std::string& absOut
         patcher = std::make_shared<Elfpatcher::MacOs::MacOsMachOPatcher>();
     } else if (args.toWindows) {
         // The game's icon (sce_sys/icon0.png beside the input) becomes the executable's icon (upstream).
-        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui, Io::NativePath(args.inputPath).parent_path() / "sce_sys" / "icon0.png");
+        std::optional<std::vector<std::uint8_t>> icon;
+        const auto iconPath = Io::NativePath(args.inputPath).parent_path() / "sce_sys" / "icon0.png";
+        if (std::ifstream file(iconPath, std::ios::binary); file) icon.emplace(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        patcher = std::make_shared<Elfpatcher::Windows::WindowsPePatcher>(args.windowsGui, std::move(icon), iconPath.filename());
     } else {
         patcher = std::make_shared<Elfpatcher::Linux::LinuxElfPatcher>(
             std::make_shared<Elfpatcher::EntryStubBuilder>(),

@@ -16,9 +16,14 @@
 #include "ModuleTable.hpp"
 #include "prx/libc/include/General.hpp"
 
+extern "C" void* APS5_VABI dlopen_nid_postfix(const char* path, int flags);
+extern "C" KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, size_t args, const void* argp, uint32_t flags, const KernelLoadModuleOpt* opt, int* res);
+
 namespace {
 
+constexpr int SCE_SYSMODULE_ERROR_INVALID_VALUE = static_cast<int>(0x805A1000);
 constexpr int SCE_SYSMODULE_ERROR_UNLOADED = static_cast<int>(0x805A1001);
+constexpr int kRtldNow = 2;
 
 const char* findModuleName(const std::uint32_t id) {
     const auto it = kModuleTable.find(id);
@@ -27,6 +32,23 @@ const char* findModuleName(const std::uint32_t id) {
 
 std::mutex gMutex;
 std::unordered_map<std::uint32_t, std::int32_t> gLoadCount;
+std::unordered_map<std::uint32_t, KernelModule> gHandles;
+
+#if defined(__linux__)
+// On Linux libkernel's module handles index its module registry (sceKernelLoadStartModule), which
+// sceKernelDlsym reads; a dlopen handle is not one, so the module is loaded through the kernel.
+KernelModule openHostModule(const char* name) {
+    const std::string relative = std::string("libs/") + name + ".prx";
+    const KernelModule module = sceKernelLoadStartModule(relative.c_str(), 0, nullptr, 0, nullptr, nullptr);
+    return module < 0 ? -1 : module;
+}
+#else
+KernelModule openHostModule(const char* name) {
+    const std::string relative = std::string("libs/") + name + ".prx";
+    void* module = dlopen_nid_postfix(relative.c_str(), kRtldNow);
+    return module ? static_cast<KernelModule>(reinterpret_cast<std::intptr_t>(module)) : -1;
+}
+#endif
 
 bool fillModuleInfoForUnwind(std::uint64_t addr, ModuleInfoForUnwind* info) {
 #ifdef _WIN32
@@ -75,9 +97,39 @@ int APS5_VABI sceSysmoduleGetModuleInfoForUnwind(std::uint64_t addr, int flags, 
     return 0;
 }
 
+int APS5_VABI sceSysmoduleGetModuleHandleInternal(std::uint32_t id, std::int32_t* handle) {
+    if ((id & 0x7fffffffu) == 0) {
+        throw std::runtime_error("sceSysmoduleGetModuleHandleInternal: invalid id 0");
+    }
+    if (!handle) {
+        throw std::runtime_error("sceSysmoduleGetModuleHandleInternal: null handle");
+    }
+    const char* name = findModuleName(id);
+    if (!name) {
+        throw std::runtime_error(std::string("sceSysmoduleGetModuleHandleInternal: unknown id ") + std::to_string(id));
+    }
+    std::lock_guard<std::mutex> lock(gMutex);
+    const auto loaded = gLoadCount.find(id);
+    if (loaded == gLoadCount.end() || loaded->second < 1) {
+        return SCE_SYSMODULE_ERROR_UNLOADED;
+    }
+    const auto existing = gHandles.find(id);
+    if (existing != gHandles.end()) {
+        *handle = existing->second;
+        return 0;
+    }
+    const KernelModule value = openHostModule(name);
+    if (value < 0) {
+        throw std::runtime_error(std::string("sceSysmoduleGetModuleHandleInternal: failed to open ") + name);
+    }
+    gHandles.emplace(id, value);
+    *handle = value;
+    return 0;
+}
+
 int APS5_VABI sceSysmoduleIsLoaded(std::uint16_t id) {
     if (id == 0) {
-        throw std::runtime_error("sceSysmoduleIsLoaded: invalid id 0");
+        return SCE_SYSMODULE_ERROR_INVALID_VALUE;
     }
     if (!findModuleName(id)) {
         APS5_LOG_OUT("unknown id: %u", static_cast<unsigned>(id));
@@ -94,7 +146,7 @@ int APS5_VABI sceSysmoduleIsLoaded(std::uint16_t id) {
 
 int APS5_VABI sceSysmoduleLoadModule(std::uint16_t id) {
     if (id == 0) {
-        throw std::runtime_error("sceSysmoduleLoadModule: invalid id 0");
+        return SCE_SYSMODULE_ERROR_INVALID_VALUE;
     }
     if (!findModuleName(id)) {
         APS5_LOG_OUT("unknown id: %u", static_cast<unsigned>(id));
@@ -111,7 +163,7 @@ int APS5_VABI sceSysmoduleLoadModuleInternalWithArg(std::uint32_t id, int argc, 
     (void)argv;
     (void)unk;
     if ((id & 0x7fffffffu) == 0) {
-        throw std::runtime_error("sceSysmoduleLoadModuleInternalWithArg: invalid id 0");
+        return SCE_SYSMODULE_ERROR_INVALID_VALUE;
     }
     if (!findModuleName(id)) {
         throw std::runtime_error(std::string("sceSysmoduleLoadModuleInternalWithArg: unknown id ") + std::to_string(id));
@@ -126,7 +178,7 @@ int APS5_VABI sceSysmoduleLoadModuleInternalWithArg(std::uint32_t id, int argc, 
 
 int APS5_VABI sceSysmoduleUnloadModule(std::uint16_t id) {
     if (id == 0) {
-        throw std::runtime_error("sceSysmoduleUnloadModule: invalid id 0");
+        return SCE_SYSMODULE_ERROR_INVALID_VALUE;
     }
     if (!findModuleName(id)) {
         APS5_LOG_OUT("unknown id: %u", static_cast<unsigned>(id));
@@ -143,7 +195,7 @@ int APS5_VABI sceSysmoduleUnloadModule(std::uint16_t id) {
 
 int APS5_VABI sceSysmoduleLoadModuleInternal(std::uint32_t id) {
     if ((id & 0x7fffffffu) == 0) {
-        throw std::runtime_error("sceSysmoduleLoadModuleInternal: invalid id 0");
+        return SCE_SYSMODULE_ERROR_INVALID_VALUE;
     }
     if (!findModuleName(id)) {
         throw std::runtime_error(std::string("sceSysmoduleLoadModuleInternal: unknown id ") + std::to_string(id));
@@ -155,7 +207,7 @@ int APS5_VABI sceSysmoduleLoadModuleInternal(std::uint32_t id) {
 
 int APS5_VABI sceSysmoduleUnloadModuleInternal(std::uint32_t id) {
     if ((id & 0x7fffffffu) == 0) {
-        throw std::runtime_error("sceSysmoduleUnloadModuleInternal: invalid id 0");
+        return SCE_SYSMODULE_ERROR_INVALID_VALUE;
     }
     if (!findModuleName(id)) {
         throw std::runtime_error(std::string("sceSysmoduleUnloadModuleInternal: unknown id ") + std::to_string(id));

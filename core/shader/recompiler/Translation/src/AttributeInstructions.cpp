@@ -78,13 +78,13 @@ void TranslationContext::vInterpP2F32(const RdnaInstruction& inst) {
             return base != ShaderPixelInputInfo::NoPixelInputVgpr && inst.source0.reg == base + 1u;
         };
         const auto bit = 1u << inst.source1.value;
-        if (readsPair(PixelInput::LinearCenter) || readsPair(PixelInput::LinearCentroid)) {
+        if (readsPair(PixelInput::LinearSample) || readsPair(PixelInput::LinearCenter) || readsPair(PixelInput::LinearCentroid)) {
             program.Metadata().pixelLinearInputs |= bit;
-        } else if (readsPair(PixelInput::PerspectiveCenter) || readsPair(PixelInput::PerspectiveCentroid)) {
+        } else if (readsPair(PixelInput::PerspectiveSample) || readsPair(PixelInput::PerspectiveCenter) || readsPair(PixelInput::PerspectiveCentroid)) {
             program.Metadata().pixelPerspectiveInputs |= bit;
         }
     }
-    ir.Emit(IrOpcode::InterpolateHostP2, IrType::Void, {&ir.Constant(inst.source1.value), &ir.Constant(inst.source2.value), readOperand(inst.source0, IrType::F32), readOperand(inst.destination, IrType::F32), &ir.GetExec()});
+    (void)ir.Emit(IrOpcode::InterpolateHostP2, IrType::Void, {&ir.Constant(inst.source1.value), &ir.Constant(inst.source2.value), readOperand(inst.source0, IrType::F32), readOperand(inst.destination, IrType::F32), &ir.GetExec()});
     IrValue& value = ir.Emit(IrOpcode::GetAttribute, IrType::U32, {&ir.Constant(inst.source1.value), &ir.Constant(inst.source2.value)});
     writeOperand(inst.destination, &value);
 }

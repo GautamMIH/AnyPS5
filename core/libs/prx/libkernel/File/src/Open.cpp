@@ -1,28 +1,29 @@
 #include "prx/libkernel/File/include/FileFlags.hpp"
-#include "prx/libkernel/File/include/FileErrors.hpp"
 #include "prx/libkernel/File/include/NativeStat.hpp"
 #include "prx/libc/include/General.hpp"
-#include "prx/libkernel/Socket/include/SocketRuntime.hpp"
+#include "prx/libc/include/FilesystemError.hpp"
+#include "prx/libc/include/GuestMemoryTracking.hpp"
+#include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/File/include/File.hpp"
+#include "prx/libkernel/File/include/SharedMemory.hpp"
 #include "prx/libkernel/File/include/DirectoryDescriptor.hpp"
+#include "prx/libkernel/File/include/DescriptorControl.hpp"
 #include "prx/libkernel/File/include/FileLock.hpp"
+#include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/File/include/RandomDevice.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
+#include "prx/libkernel/Equeue/Equeue.hpp"
 #include "SceTypes.hpp"
 
 #include <cerrno>
-#include <cstring>
-#include <cstdlib>
-#include <cstdio>
-#include <filesystem>
 #include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
-#include <string_view>
-#include <system_error>
 
-#include "prx/libc/include/GuestMemoryTracking.hpp"
 // A system call reading or writing guest memory cannot fault into the page-tracking handler (the
 // kernel returns EFAULT on a protected page), so tracked ranges are resolved first, as a CPU
 // access would resolve them: GPU-resident surfaces are written back (and invalidated on writes).
@@ -31,69 +32,75 @@ static void resolveGuestAccess(const void* buffer, std::size_t bytes, bool writa
 }
 
 #ifdef _WIN32
-#include <windows.h>
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
-#include <sys/utime.h>
-// Guest files never use descriptors 0-2 (see the Linux NativeOpen).
-static int NativeOpen(const std::filesystem::path& p, int nativeFlags, int mode) {
-    int fd = ::_wopen(p.wstring().c_str(), nativeFlags, mode);
-    while (fd >= 0 && fd < 3) {
-        const int moved = ::_dup(fd);
-        const int error = errno;
-        ::_close(fd);
-        errno = error;
-        fd = moved;
+#include <windows.h>
+static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint16_t mode) {
+    const int access = nativeFlags & (_O_RDONLY | _O_WRONLY | _O_RDWR);
+    const DWORD desired = access == _O_RDONLY ? GENERIC_READ : access == _O_WRONLY ? GENERIC_WRITE : GENERIC_READ | GENERIC_WRITE;
+    DWORD disposition = OPEN_EXISTING;
+    if (nativeFlags & _O_CREAT) disposition = (nativeFlags & _O_EXCL) ? CREATE_NEW : (nativeFlags & _O_TRUNC) ? CREATE_ALWAYS : OPEN_ALWAYS;
+    else if (nativeFlags & _O_TRUNC) disposition = TRUNCATE_EXISTING;
+    const DWORD attributes = (nativeFlags & _O_CREAT) && !(mode & _S_IWRITE) ? FILE_ATTRIBUTE_READONLY : FILE_ATTRIBUTE_NORMAL;
+    SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    const auto handle = CreateFileW(p.c_str(), desired, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &security, disposition, attributes, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+        errno = WindowsOpenError_nid_no_patch(GetLastError());
+        return -1;
     }
-    return fd;
+    int descriptor = ::_open_osfhandle(reinterpret_cast<std::intptr_t>(handle), nativeFlags & (_O_APPEND | _O_RDONLY | _O_BINARY));
+    if (descriptor < 0) CloseHandle(handle);
+    // Guest files never use descriptors 0-2 (see the Linux NativeOpen).
+    while (descriptor >= 0 && descriptor < 3) {
+        const int moved = ::_dup(descriptor);
+        const int error = errno;
+        ::_close(descriptor);
+        errno = error;
+        descriptor = moved;
+    }
+    return descriptor;
 }
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
-    return ::_lseeki64(fd, offset, whence);
+    const auto positioned = File::LockPositionedTransfer(fd);
+    const auto result = File::SeekSharedMemory_nid_no_patch(fd, offset, whence);
+    if (result != -2) return result;
+    const auto position = ::_lseeki64(fd, offset, whence);
+    if (position < 0 || GetFileType(reinterpret_cast<HANDLE>(::_get_osfhandle(fd))) != FILE_TYPE_PIPE) return position;
+    errno = ESPIPE;
+    return -1;
 }
-static std::int64_t NativeRead(int fd, void* buf, std::size_t n) {
+static int NativeRead(int fd, void* buf, std::size_t n) {
     if (n > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
-        errno = EINVAL;
-        return -1;
+        throw std::runtime_error("sceKernelRead: nbytes exceeds platform limit");
     }
     resolveGuestAccess(buf, n, true);
-    return ::_read(fd, buf, static_cast<unsigned int>(n));
-}
-static std::int64_t NativeWrite(int fd, const void* buf, std::size_t n) {
-    if (n > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
-        errno = EINVAL;
+    const auto positioned = File::LockPositionedTransfer(fd);
+    const int result = ::_read(fd, buf, static_cast<unsigned int>(n));
+    if (result < 0 && _doserrno == ERROR_NO_DATA) errno = EAGAIN;
+    if (result == 0 && File::DirectoryDescriptorPath(fd)) {
+        errno = EISDIR;
         return -1;
     }
+    return result;
+}
+static int NativeWrite(int fd, const void* buf, std::size_t n) {
+    if (n > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
+        throw std::runtime_error("sceKernelWrite: nbytes exceeds platform limit");
+    }
     resolveGuestAccess(buf, n, false);
-    return ::_write(fd, buf, static_cast<unsigned int>(n));
-}
-static std::int64_t NativePread(int fd, void* buf, std::size_t n, std::int64_t offset) {
-    const auto previous = ::_lseeki64(fd, 0, SEEK_CUR);
-    if (previous < 0 || ::_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
-    const auto result = NativeRead(fd, buf, n);
-    const int error = errno;
-    ::_lseeki64(fd, previous, SEEK_SET);
-    errno = error;
+    const auto positioned = File::LockPositionedTransfer(fd);
+    const auto shared = File::WriteSharedMemory_nid_no_patch(fd, buf, n);
+    if (shared != -2) return static_cast<int>(shared);
+    const int result = ::_write(fd, buf, static_cast<unsigned int>(n));
+    if (result < 0 && errno == ENOSPC && _doserrno == 0 && ::GetFileType(reinterpret_cast<HANDLE>(::_get_osfhandle(fd))) == FILE_TYPE_PIPE) errno = EAGAIN;
     return result;
 }
-static std::int64_t NativePwrite(int fd, const void* buf, std::size_t n, std::int64_t offset) {
-    const auto previous = ::_lseeki64(fd, 0, SEEK_CUR);
-    if (previous < 0 || ::_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
-    const auto result = NativeWrite(fd, buf, n);
-    const int error = errno;
-    ::_lseeki64(fd, previous, SEEK_SET);
-    errno = error;
-    return result;
-}
-// The CRT reports a descriptor that is not open through the invalid parameter handler, which
-// aborts by default; ignore it so _close returns -1 with EBADF.
 extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
 static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
+// Closing 0-2 leaves the host's standard streams open (guest files never use them).
 static int NativeClose(int fd) {
     if (fd >= 0 && fd < 3) return 0;
-    File::ForgetRandomDevice(fd);
-    File::ForgetDirectoryDescriptor(fd);
-    File::ForgetFileLock(fd);
     const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
     const int result = ::_close(fd);
     _set_thread_local_invalid_parameter_handler(previous);
@@ -110,31 +117,13 @@ static int NativeUnlink(const std::filesystem::path& p) {
     errno = error;
     return -1;
 }
-static int NativeMkdir(const std::filesystem::path& p, int) { return ::_wmkdir(p.wstring().c_str()); }
-static int NativeRmdir(const std::filesystem::path& p) { return ::_wrmdir(p.wstring().c_str()); }
-static int NativeRename(const std::filesystem::path& from, const std::filesystem::path& to) { return ::_wrename(from.wstring().c_str(), to.wstring().c_str()); }
-static int NativeChmod(const std::filesystem::path& p, int mode) { return ::_wchmod(p.wstring().c_str(), mode & (_S_IREAD | _S_IWRITE)); }
-static int NativeFchmod(int, int) { return 0; }
-static int NativeFsync(int fd) { return ::_commit(fd); }
-static int NativeFtruncate(int fd, std::int64_t length) { const auto error = ::_chsize_s(fd, length); if (error != 0) { errno = error; return -1; } return 0; }
-static int NativeFlock(int fd, int operation) {
-    if (File::Flock(fd, operation) == 0) return 0;
-    const auto error = ::GetLastError();
-    errno = error == ERROR_LOCK_VIOLATION ? EAGAIN : error == ERROR_INVALID_HANDLE ? EBADF : errno != 0 ? errno : EIO;
-    return -1;
-}
-static int NativeUtimes(const std::filesystem::path& p, const KernelTimeval* times) {
-    if (times == nullptr) return ::_wutime(p.wstring().c_str(), nullptr);
-    struct _utimbuf value{static_cast<time_t>(times[0].tv_sec), static_cast<time_t>(times[1].tv_sec)};
-    return ::_wutime(p.wstring().c_str(), &value);
-}
 static int MapFlags(int sceFlags) {
     int f = 0;
     const int acc = sceFlags & SCE_KERNEL_O_ACCMODE;
     if (acc == SCE_KERNEL_O_RDONLY) f |= _O_RDONLY;
     else if (acc == SCE_KERNEL_O_WRONLY) f |= _O_WRONLY;
     else if (acc == SCE_KERNEL_O_RDWR) f |= _O_RDWR;
-    else return -1;
+    else throw std::invalid_argument("sceKernelOpen: invalid access mode");
     if (sceFlags & SCE_KERNEL_O_APPEND) f |= _O_APPEND;
     if (sceFlags & SCE_KERNEL_O_CREAT) f |= _O_CREAT;
     if (sceFlags & SCE_KERNEL_O_TRUNC) f |= _O_TRUNC;
@@ -144,13 +133,10 @@ static int MapFlags(int sceFlags) {
 }
 #else
 #include <fcntl.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <sys/time.h>
 #include <unistd.h>
 // Guest files never use descriptors 0-2: games treat 0 as "no file" and close it (Unity closes
 // descriptor 0 at start), so the host's standard streams stay open and a file never lands there.
-static int NativeOpen(const std::filesystem::path& p, int nativeFlags, int mode) {
+static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint16_t mode) {
     const int fd = ::open(p.c_str(), nativeFlags, static_cast<mode_t>(mode));
     if (fd < 0 || fd >= 3) return fd;
     const int moved = ::fcntl(fd, (nativeFlags & O_CLOEXEC) != 0 ? F_DUPFD_CLOEXEC : F_DUPFD, 3);
@@ -160,42 +146,22 @@ static int NativeOpen(const std::filesystem::path& p, int nativeFlags, int mode)
     return moved;
 }
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
-    return ::lseek(fd, static_cast<off_t>(offset), whence);
+    const auto result = File::SeekSharedMemory_nid_no_patch(fd, offset, whence);
+    return result == -2 ? ::lseek(fd, static_cast<off_t>(offset), whence) : result;
 }
-static std::int64_t NativeRead(int fd, void* buf, std::size_t n) { resolveGuestAccess(buf, n, true); return ::read(fd, buf, n); }
-static std::int64_t NativeWrite(int fd, const void* buf, std::size_t n) { resolveGuestAccess(buf, n, false); return ::write(fd, buf, n); }
-static std::int64_t NativePread(int fd, void* buf, std::size_t n, std::int64_t offset) { resolveGuestAccess(buf, n, true); return ::pread(fd, buf, n, static_cast<off_t>(offset)); }
-static std::int64_t NativePwrite(int fd, const void* buf, std::size_t n, std::int64_t offset) { resolveGuestAccess(buf, n, false); return ::pwrite(fd, buf, n, static_cast<off_t>(offset)); }
+static std::int64_t NativeRead(int fd, void* buf, std::size_t n) {
+    resolveGuestAccess(buf, n, true);
+    return ::read(fd, buf, n);
+}
+static std::int64_t NativeWrite(int fd, const void* buf, std::size_t n) {
+    resolveGuestAccess(buf, n, false);
+    const auto result = File::WriteSharedMemory_nid_no_patch(fd, buf, n);
+    return result == -2 ? ::write(fd, buf, n) : result;
+}
 // Closing 0-2 leaves the host's standard streams open (guest files never use them).
-static int NativeClose(int fd) {
-    if (fd >= 0 && fd < 3) return 0;
-    File::ForgetRandomDevice(fd);
-    return ::close(fd);
-}
-static int NativeUnlink(const std::filesystem::path& p) { return ::unlink(p.c_str()); }
-static int NativeMkdir(const std::filesystem::path& p, int mode) { return ::mkdir(p.c_str(), static_cast<mode_t>(mode)); }
-static int NativeRmdir(const std::filesystem::path& p) { return ::rmdir(p.c_str()); }
-static int NativeRename(const std::filesystem::path& from, const std::filesystem::path& to) { return ::rename(from.c_str(), to.c_str()); }
-static int NativeChmod(const std::filesystem::path& p, int mode) { return ::chmod(p.c_str(), static_cast<mode_t>(mode)); }
-static int NativeFchmod(int fd, int mode) { return ::fchmod(fd, static_cast<mode_t>(mode)); }
-static int NativeFsync(int fd) { return ::fsync(fd); }
-static int NativeFtruncate(int fd, std::int64_t length) { return ::ftruncate(fd, static_cast<off_t>(length)); }
-static int NativeFlock(int fd, int operation) {
-    constexpr int bsdShared = 1;
-    constexpr int bsdExclusive = 2;
-    constexpr int bsdNonBlocking = 4;
-    constexpr int bsdUnlock = 8;
-    int native = 0;
-    if (operation & bsdShared) native |= LOCK_SH;
-    if (operation & bsdExclusive) native |= LOCK_EX;
-    if (operation & bsdNonBlocking) native |= LOCK_NB;
-    if (operation & bsdUnlock) native |= LOCK_UN;
-    return ::flock(fd, native);
-}
-static int NativeUtimes(const std::filesystem::path& p, const KernelTimeval* times) {
-    if (times == nullptr) return ::utimes(p.c_str(), nullptr);
-    const struct timeval values[2] = {{static_cast<time_t>(times[0].tv_sec), static_cast<suseconds_t>(times[0].tv_usec)}, {static_cast<time_t>(times[1].tv_sec), static_cast<suseconds_t>(times[1].tv_usec)}};
-    return ::utimes(p.c_str(), values);
+static int NativeClose(int fd) { return fd >= 0 && fd < 3 ? 0 : ::close(fd); }
+static int NativeUnlink(const std::filesystem::path& p) {
+    return ::unlink(p.c_str());
 }
 static int MapFlags(int sceFlags) {
     int f = 0;
@@ -203,7 +169,7 @@ static int MapFlags(int sceFlags) {
     if (acc == SCE_KERNEL_O_RDONLY) f |= O_RDONLY;
     else if (acc == SCE_KERNEL_O_WRONLY) f |= O_WRONLY;
     else if (acc == SCE_KERNEL_O_RDWR) f |= O_RDWR;
-    else return -1;
+    else throw std::invalid_argument("sceKernelOpen: invalid access mode");
     if (sceFlags & SCE_KERNEL_O_APPEND) f |= O_APPEND;
     if (sceFlags & SCE_KERNEL_O_CREAT) f |= O_CREAT;
     if (sceFlags & SCE_KERNEL_O_TRUNC) f |= O_TRUNC;
@@ -211,19 +177,25 @@ static int MapFlags(int sceFlags) {
     if (sceFlags & SCE_KERNEL_O_SYNC) f |= O_SYNC;
     if (sceFlags & SCE_KERNEL_O_NONBLOCK) f |= O_NONBLOCK;
     if (sceFlags & SCE_KERNEL_O_DIRECTORY) f |= O_DIRECTORY;
+    // Host-side only: guest descriptors are not inherited by host helper processes (the guest's own
+    // close-on-exec state is tracked by DescriptorControl).
     return f | O_CLOEXEC;
 }
 #endif
 
+extern "C" int* APS5_VABI __error_nid_postfix();
+extern "C" int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...);
+static constexpr int GuestSetFlags = 4;
+
+static int SceErrorFromErrno(int error) {
+    constexpr int GuestEio = 5;
+    const int guest = error > 0 && error <= 34 ? error : GuestEio;
+    return static_cast<int>(0x80020000u | static_cast<unsigned>(guest));
+}
+
 namespace {
 
-constexpr int kErrorInvalid = 22;
-constexpr int kErrorFault = 14;
-// POSIX: an empty path names no file (it would otherwise resolve to the working directory).
-constexpr int kErrorNoEntry = 2;
-constexpr int kErrorPermission = 1;
-
-// ANYPS5_TRACE_FILES=1 logs every guest path lookup with its host path and outcome.
+// ANYPS5_TRACE_FILES=1 logs every guest path open with its host path and outcome.
 bool traceFiles() {
     static const bool enabled = [] {
         const char* value = std::getenv("ANYPS5_TRACE_FILES");
@@ -232,8 +204,8 @@ bool traceFiles() {
     return enabled;
 }
 
-// ANYPS5_TRACE_FILES=2 also logs every descriptor read, seek and close (descriptor, offset, size,
-// result and host thread), to find descriptors whose file position several threads share.
+// ANYPS5_TRACE_FILES=2 also logs every descriptor read, seek and close (descriptor, offset, size and
+// result), to find descriptors whose file position several threads share.
 bool traceDescriptors() {
     static const bool enabled = [] {
         const char* value = std::getenv("ANYPS5_TRACE_FILES");
@@ -245,427 +217,229 @@ bool traceDescriptors() {
 std::int64_t traceDescriptor(const char* operation, int d, std::int64_t offset, std::uint64_t bytes, std::int64_t result) {
     if (traceDescriptors()) {
         const int error = errno;
-        std::fprintf(stderr, "[AnyPS5 fd] %s fd=%d offset=%lld bytes=%llu = %lld thread=%ld\n", operation, d, static_cast<long long>(offset), static_cast<unsigned long long>(bytes), static_cast<long long>(result), static_cast<long>(gettid()));
+        std::fprintf(stderr, "[AnyPS5 fd] %s fd=%d offset=%lld bytes=%llu = %lld\n", operation, d, static_cast<long long>(offset), static_cast<unsigned long long>(bytes), static_cast<long long>(result));
         errno = error;
     }
     return result;
 }
 
-void trace(const char* operation, const char* path, const std::filesystem::path& host, int result) {
-    if (!traceFiles()) return;
-    const int error = errno;
-    std::fprintf(stderr, "[AnyPS5 file] %s %s -> %s = %d%s%s\n", operation, path, host.string().c_str(), result,
-        result < 0 ? " " : "", result < 0 ? std::strerror(error) : "");
-    errno = error;
+int traceOpen(const std::filesystem::path& host, int result) {
+    if (traceFiles()) {
+        const int error = errno;
+        std::fprintf(stderr, "[AnyPS5 file] open %s = %d%s%s\n", host.string().c_str(), result, result < 0 ? " " : "", result < 0 ? std::strerror(error) : "");
+        errno = error;
+    }
+    return result;
 }
 
-int openFile(const char* path, int flags, int mode) {
-    if (path == nullptr) {
-        errno = EFAULT;
-        return -1;
-    }
-    if (*path == '\0') {
-        errno = ENOENT;
-        return -1;
-    }
-    const int nativeFlags = MapFlags(flags);
-    if (nativeFlags < 0) {
-        errno = EINVAL;
-        return -1;
-    }
-    if (File::IsRandomDevicePath(path)) {
-        // Reads come from the host's random source; writing entropy is not supported.
-        if ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY) {
-            errno = EACCES;
-            return -1;
-        }
-        const int result = File::OpenRandomDevice();
-        if (traceFiles()) std::fprintf(stderr, "[AnyPS5 file] open %s (random device) = %d\n", path, result);
-        return result;
-    }
-    const auto host = ResolvePath_nid_no_patch(path);
+}
+
+static int SceIoErrorFromErrno(int error) {
+    int guest = SceErrorFromErrno(error) & 0xffff;
+    if (error == EAGAIN) guest = 35;
+#ifdef EDEADLK
+    else if (error == EDEADLK) guest = 11;
+#endif
+#ifdef EDQUOT
+    else if (error == EDQUOT) guest = 69;
+#endif
+#ifdef EOVERFLOW
+    else if (error == EOVERFLOW) guest = 84;
+#endif
+    return static_cast<int>(0x80020000u | static_cast<unsigned>(guest));
+}
+
+static int OpenNative(const std::filesystem::path& native, int flags, std::uint16_t mode) {
 #ifdef _WIN32
-    // O_DIRECTORY on a file is ENOTDIR (Windows opens the file; upstream ee0b249e4).
     if ((flags & (SCE_KERNEL_O_DIRECTORY | SCE_KERNEL_O_CREAT)) == SCE_KERNEL_O_DIRECTORY) {
         std::error_code error;
-        const auto status = std::filesystem::status(host, error);
-        if (std::filesystem::exists(status) && !std::filesystem::is_directory(status)) {
-            errno = ENOTDIR;
-            trace("open", path, host, -1);
-            return -1;
-        }
+        const auto status = std::filesystem::status(native, error);
+        if (std::filesystem::exists(status) && !std::filesystem::is_directory(status)) return SceErrorFromErrno(ENOTDIR);
     }
 #endif
-    int result = NativeOpen(host, nativeFlags, mode);
-#ifdef _WIN32
-    // Windows cannot open a directory as a file; a descriptor stands in for it (getdents, fstat),
-    // with the errors FreeBSD gives for creating or writing a directory.
-    if (result < 0 && errno != ENOENT) {
+    if ((flags & SCE_KERNEL_O_NOFOLLOW) != 0 && (flags & (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_EXCL)) != (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_EXCL)) {
+        constexpr int GuestEmlink = 31;
         std::error_code error;
-        if (std::filesystem::is_directory(host, error)) {
+        if (std::filesystem::is_symlink(native, error)) return SceErrorFromErrno(GuestEmlink);
+    }
+    int fd = traceOpen(native, NativeOpen(native, MapFlags(flags), mode));
+#ifdef _WIN32
+    if (fd < 0 && (errno != ENOENT || !native.has_filename())) {
+        auto directory = native;
+        while (!directory.has_filename() && directory.has_relative_path()) directory = directory.parent_path();
+        std::error_code error;
+        if (std::filesystem::is_directory(directory, error)) {
             if ((flags & (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_EXCL)) == (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_EXCL)) errno = EEXIST;
             else if ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY || (flags & (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC))) errno = EISDIR;
-            else result = File::OpenDirectoryDescriptor(host);
+            else fd = File::OpenDirectoryDescriptor(directory);
         }
     }
 #endif
-    trace("open", path, host, result);
-    if (result >= 0 && ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY || (flags & (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC))))
-        RecordWrittenPath_nid_no_patch(host);
-    return result;
-}
-
-bool isDirectory(const char* path) {
-    std::error_code error;
-    return std::filesystem::is_directory(std::filesystem::symlink_status(ResolvePath_nid_no_patch(path), error));
-}
-
-// Paths the guest changed are recorded for sceKernelSync (see RecordWrittenPath_nid_no_patch).
-int recordIfDone(const int result, const std::filesystem::path& host) {
-    if (result >= 0) RecordWrittenPath_nid_no_patch(host);
-    return result;
-}
-
-int sceResult(const int result) {
-    return result < 0 ? FileErrors::Sce(errno) : result;
-}
-
-std::int64_t sceResult64(const std::int64_t result) {
-    return result < 0 ? FileErrors::Sce(errno) : result;
-}
-
-int posixResult(const int result) {
-    return result < 0 ? FileErrors::Posix(errno) : result;
-}
-
-std::int64_t posixResult64(const std::int64_t result) {
-    return result < 0 ? FileErrors::Posix(errno) : result;
-}
-
-int statPath(const char* path, FileStat* sb) {
-    if (path == nullptr || sb == nullptr) {
-        errno = EFAULT;
-        return -1;
+    if (fd < 0) {
+        return SceErrorFromErrno(errno);
     }
-    // POSIX: an empty path names no file (it would otherwise resolve to the working directory).
-    if (*path == '\0') {
-        errno = ENOENT;
-        return -1;
-    }
-    // A path the host cannot convert names no file (upstream 7fe298bfa).
-    std::filesystem::path host;
-    try {
-        host = ResolvePath_nid_no_patch(path);
-    } catch (const std::filesystem::filesystem_error&) {
-        errno = ENOENT;
-        return -1;
-    }
-    const std::string_view guestPath(path);
-    std::error_code status;
-    if (guestPath.back() == '/' && std::filesystem::exists(host, status) && !std::filesystem::is_directory(host, status)) {
-        errno = ENOTDIR;
-        trace("stat", path, host, -1);
-        return -1;
-    }
-    const int error = File::FillFileStat(host, sb);
-    if (error != 0) {
-        errno = error;
-        trace("stat", path, host, -1);
-        return -1;
-    }
-    trace("stat", path, host, 0);
-    return 0;
-}
-
-int statDescriptor(int d, FileStat* sb) {
-    if (sb == nullptr) {
-        errno = EFAULT;
-        return -1;
-    }
-    const int error = File::FillFileStatFromDescriptor(d, sb);
-    if (error != 0) {
-        errno = error;
-        return -1;
-    }
-    return 0;
-}
-
-// Reads and writes of guest sockets and random devices; -1 sets errno (a BSD value for sockets).
-bool isSocket(int d) {
-    return d >= GuestSockets::FirstDescriptor;
-}
-
-std::int64_t readDescriptor(int d, void* buf, std::size_t nbytes) {
-    if (isSocket(d)) return GuestSockets::Read(d, buf, nbytes);
-    if (File::IsRandomDevice(d)) {
-        resolveGuestAccess(buf, nbytes, true);
-        return File::ReadRandomDevice(d, buf, nbytes) ? static_cast<std::int64_t>(nbytes) : -1;
-    }
-    return traceDescriptor("read", d, -1, nbytes, NativeRead(d, buf, nbytes));
-}
-
-std::int64_t writeDescriptor(int d, const void* buf, std::size_t nbytes) {
-    if (isSocket(d)) return GuestSockets::Write(d, buf, nbytes);
-    return NativeWrite(d, buf, nbytes);
-}
-
-std::int64_t sceDescriptorResult(int d, std::int64_t result) {
-    if (result >= 0) return result;
-    return isSocket(d) ? FileErrors::SceBsd(errno) : FileErrors::Sce(errno);
-}
-
-std::int64_t posixDescriptorResult(int d, std::int64_t result) {
-    if (result >= 0 || isSocket(d)) return result;
-    return FileErrors::Posix(errno);
-}
-
-int renamePath(const char* from, const char* to) {
-    if (from == nullptr || to == nullptr) {
-        errno = EFAULT;
-        return -1;
-    }
-    if (*from == '\0' || *to == '\0') {
-        errno = ENOENT;
-        return -1;
-    }
-    return NativeRename(ResolvePath_nid_no_patch(from), ResolvePath_nid_no_patch(to));
-}
-extern "C" int* APS5_VABI __error_nid_postfix();
-extern "C" int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...);
-static constexpr int GuestSetFlags = 4;
-
+    if ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY || (flags & (SCE_KERNEL_O_CREAT | SCE_KERNEL_O_TRUNC)))
+        RecordWrittenPath_nid_no_patch(native);
+    File::RememberDescriptor(fd, flags);
+    return fd;
 }
 
 extern "C" {
 
 int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
-    return sceResult(openFile(path, flags, mode));
+    if (path != nullptr && *path == '\0') return SCE_KERNEL_ERROR_ENOENT;
+    APS5_LOG_OUT("path=%s flags=0x%X nativeFlags=0x%X mode=0%o", path, flags, MapFlags(flags), mode);
+    if (path != nullptr && File::IsRandomDevicePath(path)) {
+        if ((flags & SCE_KERNEL_O_ACCMODE) != SCE_KERNEL_O_RDONLY) throw std::runtime_error(std::string(__func__) + ": writing to " + path + " is not implemented");
+        const int fd = File::OpenRandomDevice();
+        if (fd < 0) return SceErrorFromErrno(errno);
+        File::RememberDescriptor(fd, flags);
+        return fd;
+    }
+    std::filesystem::path native;
+    if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
+    if ((flags & (SCE_KERNEL_O_ACCMODE | SCE_KERNEL_O_CREAT)) == SCE_KERNEL_O_RDONLY) native = File::PathOrRelinkedModule(native);
+    return OpenNative(native, flags, mode);
+}
+
+int OpenInDirectory_nid_no_patch(int directory, const char* path, int flags, std::uint16_t mode) {
+    int error = 0;
+    const char* base = GetDirectoryDescriptorPath_nid_no_patch(directory, &error);
+    if (base == nullptr) return SceErrorFromErrno(error);
+    return OpenNative(std::filesystem::path(reinterpret_cast<const char8_t*>(base)) / std::filesystem::path(reinterpret_cast<const char8_t*>(path)), flags, mode);
 }
 
 int APS5_VABI sceKernelClose(int d) {
-    return sceResult(static_cast<int>(traceDescriptor("close", d, -1, 0, NativeClose(d))));
+    if (GuestSockets::IsOpen(d)) return GuestSockets::Close(d) == 0 ? 0 : SceKernelError(*__error_nid_postfix());
+    traceDescriptor("close", d, -1, 0, 0);
+    // Guest files never use 0-2; closing them leaves the host's standard streams open.
+    if (d >= 0 && d < 3) return 0;
+    EqueueDescriptorClosed(d);
+    File::ForgetRandomDevice(d);
+    File::ForgetDescriptor(d);
+    ForgetJitSharedMemory(d);
+#ifdef _WIN32
+    File::ForgetDirectoryDescriptor(d);
+    File::ForgetFileLock(d);
+#endif
+    if (NativeClose(d) != 0) {
+        if (errno == EBADF) return SCE_KERNEL_ERROR_EBADF;
+        throw std::runtime_error(std::string(__func__) + ": close failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
+    }
+    return 0;
 }
 
 std::int64_t APS5_VABI sceKernelRead(int d, void* buf, std::size_t nbytes) {
-    if (buf == nullptr && nbytes != 0) return FileErrors::SceBsd(kErrorFault);
-    return sceDescriptorResult(d, readDescriptor(d, buf, nbytes));
+    if (GuestSockets::IsOpen(d)) {
+        const auto n = GuestSockets::Read(d, buf, nbytes);
+        return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
+    }
+    if (buf == nullptr) {
+        throw std::invalid_argument(std::string(__func__) + ": buf is null");
+    }
+    if (File::IsRandomDevice(d)) {
+        resolveGuestAccess(buf, nbytes, true);
+        if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<std::int64_t>(nbytes);
+    }
+    auto n = traceDescriptor("read", d, -1, nbytes, NativeRead(d, buf, nbytes));
+    if (n < 0) return SceIoErrorFromErrno(errno);
+    return static_cast<std::int64_t>(n);
 }
 
 std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes) {
-    if (buf == nullptr && nbytes != 0) return FileErrors::SceBsd(kErrorFault);
-    return sceDescriptorResult(d, writeDescriptor(d, buf, nbytes));
+    if (GuestSockets::IsOpen(d)) {
+        const auto n = GuestSockets::Write(d, buf, nbytes);
+        return n < 0 ? SceKernelError(*__error_nid_postfix()) : n;
+    }
+    if (buf == nullptr) {
+        throw std::invalid_argument(std::string(__func__) + ": buf is null");
+    }
+    auto n = NativeWrite(d, buf, nbytes);
+    if (n < 0) return SceIoErrorFromErrno(errno);
+    return static_cast<std::int64_t>(n);
 }
 
 std::int64_t APS5_VABI sceKernelLseek(int d, std::int64_t offset, int whence) {
-    if (whence < 0 || whence > 2) return FileErrors::SceBsd(kErrorInvalid);
-    return sceResult64(traceDescriptor(whence == 0 ? "seek-set" : whence == 1 ? "seek-cur" : "seek-end", d, offset, 0, NativeLseek(d, offset, whence)));
-}
-
-std::int64_t APS5_VABI sceKernelPread(int d, void* buf, std::size_t nbytes, std::int64_t offset) {
-    if (buf == nullptr && nbytes != 0) return FileErrors::SceBsd(kErrorFault);
-    if (File::IsRandomDevice(d)) return sceDescriptorResult(d, readDescriptor(d, buf, nbytes));
-    return sceResult64(traceDescriptor("pread", d, offset, nbytes, NativePread(d, buf, nbytes, offset)));
-}
-
-std::int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, std::size_t nbytes, std::int64_t offset) {
-    if (buf == nullptr && nbytes != 0) return FileErrors::SceBsd(kErrorFault);
-    return sceResult64(NativePwrite(d, buf, nbytes, offset));
+    if (GuestSockets::IsOpen(d)) return SCE_KERNEL_ERROR_ESPIPE;
+    if (whence < 0 || whence > 2) {
+        throw std::invalid_argument(std::string(__func__) + ": invalid whence=" + std::to_string(whence));
+    }
+#ifdef _WIN32
+    if (const auto directory = File::SeekDirectoryDescriptor(d, offset, whence)) {
+        if (*directory < 0) return SceIoErrorFromErrno(errno);
+        return *directory;
+    }
+#endif
+    std::int64_t result = traceDescriptor(whence == 0 ? "seek-set" : whence == 1 ? "seek-cur" : "seek-end", d, offset, 0, NativeLseek(d, offset, whence));
+    if (result < 0) return SceIoErrorFromErrno(errno);
+    return result;
 }
 
 int APS5_VABI sceKernelStat(const char* path, FileStat* sb) {
-    return sceResult(statPath(path, sb));
-}
-
-int APS5_VABI sceKernelFstat(int d, FileStat* sb) {
-    return sceResult(statDescriptor(d, sb));
-}
-
-int APS5_VABI sceKernelCheckReachability(const char* path) {
-    FileStat sb{};
-    return sceResult(statPath(path, &sb));
+    if (path == nullptr) {
+        throw std::invalid_argument(std::string(__func__) + ": path is null");
+    }
+    if (*path == '\0') return SceErrorFromErrno(2);
+    std::filesystem::path native;
+    if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
+    native = File::PathOrRelinkedModule(native);
+    std::error_code error;
+    constexpr int GuestEnotdir = 20;
+    constexpr int GuestEfault = 14;
+    const auto status = std::filesystem::status(native, error);
+    if (error == std::errc::not_a_directory) return SceErrorFromErrno(GuestEnotdir);
+    if (!std::filesystem::exists(status)) {
+        return SceErrorFromErrno(2);
+    }
+    const std::string_view guestPath(path);
+    if (!guestPath.empty() && guestPath.back() == '/' && !std::filesystem::is_directory(status)) return SceErrorFromErrno(GuestEnotdir);
+    if (sb == nullptr) return SceErrorFromErrno(GuestEfault);
+    resolveGuestAccess(sb, sizeof(*sb), true);
+    if (const int failure = File::FillFileStat(native, sb)) return SceErrorFromErrno(failure);
+    return 0;
 }
 
 int APS5_VABI sceKernelUnlink(const char* path) {
-    if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    if (isDirectory(path)) return FileErrors::SceBsd(kErrorPermission);
-    return sceResult(recordIfDone(NativeUnlink(ResolvePath_nid_no_patch(path)), ResolvePath_nid_no_patch(path)));
-}
-
-int APS5_VABI sceKernelMkdir(const char* path, uint16_t mode) {
-    if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    if (*path == '\0') return FileErrors::SceBsd(kErrorNoEntry);
-    // "dir/" records the directory itself (upstream 3779ffa37).
-    auto host = ResolvePath_nid_no_patch(path);
-    while (!host.has_filename() && host.has_relative_path()) host = host.parent_path();
-    return sceResult(recordIfDone(NativeMkdir(host, mode), host));
-}
-
-int APS5_VABI sceKernelRmdir(const char* path) {
-    if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    return sceResult(recordIfDone(NativeRmdir(ResolvePath_nid_no_patch(path)), ResolvePath_nid_no_patch(path)));
-}
-
-int APS5_VABI sceKernelRename(const char* from, const char* to) {
-    const int result = renamePath(from, to);
-    if (result >= 0) {
-        RecordWrittenPath_nid_no_patch(ResolvePath_nid_no_patch(from));
-        RecordWrittenPath_nid_no_patch(ResolvePath_nid_no_patch(to));
+    if (path == nullptr) {
+        throw std::invalid_argument(std::string(__func__) + ": path is null");
     }
-    return sceResult(result);
-}
-
-int APS5_VABI sceKernelFsync(int fd) {
-    return sceResult(NativeFsync(fd));
-}
-
-int APS5_VABI sceKernelFtruncate(int fd, std::int64_t length) {
-    return sceResult(NativeFtruncate(fd, length));
-}
-
-int APS5_VABI sceKernelChmod(const char* path, uint16_t mode) {
-    if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    return sceResult(recordIfDone(NativeChmod(ResolvePath_nid_no_patch(path), mode), ResolvePath_nid_no_patch(path)));
-}
-
-int APS5_VABI sceKernelFchmod(int fd, uint16_t mode) {
-    // A socket has no file mode to change; a closed socket descriptor is a bad descriptor.
-    if (fd >= GuestSockets::FirstDescriptor) return FileErrors::SceBsd(GuestSockets::IsOpen(fd) ? kErrorInvalid : 9);
-    return sceResult(NativeFchmod(fd, mode & 07777));
-}
-
-int APS5_VABI sceKernelUtimes(const char* path, const KernelTimeval* times) {
-    if (path == nullptr) return FileErrors::SceBsd(kErrorFault);
-    return sceResult(NativeUtimes(ResolvePath_nid_no_patch(path), times));
-}
-
-int APS5_VABI open_nid_postfix(const char* path, int flags, int mode) {
-    return posixResult(openFile(path, flags, mode));
-}
-
-int APS5_VABI close_nid_postfix(int d) {
-    if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Close(d);
-    return posixResult(static_cast<int>(traceDescriptor("close", d, -1, 0, NativeClose(d))));
-}
-
-int64_t APS5_VABI read_nid_postfix(int d, void* buf, uint64_t nbytes) {
-    return posixDescriptorResult(d, readDescriptor(d, buf, nbytes));
-}
-
-int64_t APS5_VABI write_nid_postfix(int d, const void* buf, uint64_t nbytes) {
-    return posixDescriptorResult(d, writeDescriptor(d, buf, nbytes));
-}
-
-int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t offset) {
-    if (File::IsRandomDevice(d)) return posixDescriptorResult(d, readDescriptor(d, buf, nbytes));
-    return posixResult64(traceDescriptor("pread", d, offset, nbytes, NativePread(d, buf, nbytes, offset)));
-}
-
-int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_t nbytes, int64_t offset) {
-    return posixResult64(NativePwrite(d, buf, nbytes, offset));
-}
-
-int64_t APS5_VABI lseek_nid_postfix(int d, int64_t offset, int whence) {
-    if (whence < 0 || whence > 2) return FileErrors::PosixBsd(kErrorInvalid);
-    return posixResult64(traceDescriptor(whence == 0 ? "seek-set" : whence == 1 ? "seek-cur" : "seek-end", d, offset, 0, NativeLseek(d, offset, whence)));
-}
-
-int APS5_VABI stat_nid_postfix(const char* path, FileStat* sb) {
-    return posixResult(statPath(path, sb));
-}
-
-int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int d, FileStat* sb) {
-    return posixResult(statDescriptor(d, sb));
-}
-
-int APS5_VABI ftruncate_nid_postfix(int d, int64_t length) {
-    return posixResult(NativeFtruncate(d, length));
-}
-
-int APS5_VABI mkdir_nid_postfix(const char* path, uint16_t mode) {
-    if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
-    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
-    return posixResult(NativeMkdir(ResolvePath_nid_no_patch(path), mode));
-}
-
-int APS5_VABI rmdir_nid_postfix(const char* path) {
-    if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
-    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
-    return posixResult(NativeRmdir(ResolvePath_nid_no_patch(path)));
-}
-
-int APS5_VABI unlink_nid_postfix(const char* path) {
-    if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
-    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
-    if (isDirectory(path)) return FileErrors::PosixBsd(kErrorPermission);
-    return posixResult(NativeUnlink(ResolvePath_nid_no_patch(path)));
-}
-
-int APS5_VABI rename_nid_postfix(const char* from, const char* to) {
-    return posixResult(renamePath(from, to));
-}
-
-int APS5_VABI chmod_nid_postfix(const char* path, int mode) {
-    if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
-    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
-    return posixResult(NativeChmod(ResolvePath_nid_no_patch(path), mode));
-}
-
-int APS5_VABI fchmod_nid_postfix(int d, int mode) {
-    if (d >= GuestSockets::FirstDescriptor) return FileErrors::PosixBsd(GuestSockets::IsOpen(d) ? kErrorInvalid : 9);
-    return posixResult(NativeFchmod(d, mode & 07777));
-}
-
-int APS5_VABI flock_nid_postfix(int d, int operation) {
-    const int type = operation & 8 ? 8 : operation & 2 ? 2 : operation & 1 ? 1 : 0;
-    if (type == 0) return FileErrors::PosixBsd(9);
-    return posixResult(NativeFlock(d, type | (operation & 4)));
-}
-
-int APS5_VABI utimes_nid_postfix(const char* path, const KernelTimeval* times) {
-    if (path == nullptr) return FileErrors::PosixBsd(kErrorFault);
-    if (*path == '\0') return FileErrors::PosixBsd(kErrorNoEntry);
-    return posixResult(NativeUtimes(ResolvePath_nid_no_patch(path), times));
-}
-
-int APS5_VABI futimes_nid_postfix(int d, const KernelTimeval* times) {
-    if (d >= GuestSockets::FirstDescriptor) return FileErrors::PosixBsd(GuestSockets::IsOpen(d) ? kErrorInvalid : 9);
-    if (times != nullptr) {
-        for (int i = 0; i < 2; ++i)
-            if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) return FileErrors::PosixBsd(kErrorInvalid);
+    if (*path == '\0') return SceErrorFromErrno(2);
+    std::filesystem::path native;
+    if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
+    constexpr int GuestEperm = 1;
+    std::error_code error;
+    if (std::filesystem::is_directory(std::filesystem::symlink_status(native, error))) return SceErrorFromErrno(GuestEperm);
+    if (NativeUnlink(native) != 0) {
+        return SceErrorFromErrno(errno);
     }
-#ifdef _WIN32
-    (void)d;
-    (void)times;
-    NotImplemented_nid_no_patch(__func__);
+    RecordWrittenPath_nid_no_patch(native);
     return 0;
-#else
-    if (times == nullptr) return posixResult(::futimes(d, nullptr));
-    const struct timeval values[2] = {{static_cast<time_t>(times[0].tv_sec), static_cast<suseconds_t>(times[0].tv_usec)}, {static_cast<time_t>(times[1].tv_sec), static_cast<suseconds_t>(times[1].tv_usec)}};
-    return posixResult(::futimes(d, values));
-#endif
 }
 
 int APS5_VABI sceKernelFcntl(int d, int command, ...) {
-    if (d < GuestSockets::FirstDescriptor) {
-        if (!DescriptorIsOpen_nid_no_patch(d)) return SCE_KERNEL_ERROR_EBADF;
-        throw std::runtime_error(std::string(__func__) + ": file descriptors are not implemented, fd=" + std::to_string(d));
-    }
-    int result;
-    if (command == GuestSetFlags) {
+    const auto type = File::FcntlArgumentOf(command);
+    std::intptr_t argument = 0;
+    if (type != File::FcntlArgument::None) {
 #ifdef _WIN32
         __builtin_sysv_va_list arguments;
         __builtin_sysv_va_start(arguments, command);
-        const int flags = __builtin_va_arg(arguments, int);
+        argument = type == File::FcntlArgument::Int ? __builtin_va_arg(arguments, int)
+                                                    : reinterpret_cast<std::intptr_t>(__builtin_va_arg(arguments, void*));
         __builtin_sysv_va_end(arguments);
 #else
         std::va_list arguments;
         va_start(arguments, command);
-        const int flags = va_arg(arguments, int);
+        argument = type == File::FcntlArgument::Int ? va_arg(arguments, int)
+                                                    : reinterpret_cast<std::intptr_t>(va_arg(arguments, void*));
         va_end(arguments);
 #endif
-        result = fcntl_nid_postfix(d, command, flags);
+    }
+    int result;
+    if (GuestSockets::IsOpen(d)) {
+        if (command == GuestSetFlags) result = fcntl_nid_postfix(d, command, static_cast<int>(argument));
+        else result = fcntl_nid_postfix(d, command);
     } else {
-        result = fcntl_nid_postfix(d, command);
+        result = File::Fcntl(d, command, argument);
     }
     return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
 }

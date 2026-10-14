@@ -97,6 +97,7 @@ void fill(const NativeStat& st, FileStat* sb) {
     sb->st_mode = static_cast<std::uint16_t>(st.st_mode);
     sb->st_size = static_cast<std::int64_t>(st.st_size);
 #ifdef _WIN32
+    if (st.hasIdentity) sb->st_size = static_cast<std::int64_t>((static_cast<std::uint64_t>(st.identity.nFileSizeHigh) << 32u) | st.identity.nFileSizeLow);
     sb->st_dev = static_cast<std::uint32_t>(st.st_dev);
     sb->st_ino = static_cast<std::uint32_t>(st.st_ino);
     sb->st_nlink = static_cast<std::uint16_t>(st.st_nlink);
@@ -151,6 +152,12 @@ void fill(const NativeStat& st, FileStat* sb) {
 #endif
 }
 
+}
+
+std::filesystem::path PathOrRelinkedModule(const std::filesystem::path& nativePath) {
+    std::error_code error;
+    if (std::filesystem::exists(std::filesystem::symlink_status(nativePath, error))) return nativePath;
+    return RelinkedModulePath_nid_no_patch(nativePath);
 }
 
 bool FillLinkStat(const std::filesystem::path& nativePath, FileStat* sb) {

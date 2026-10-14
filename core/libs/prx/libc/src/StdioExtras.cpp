@@ -20,8 +20,6 @@
 #include "prx/libc/include/FileStream.hpp"
 #include "prx/libc/include/General.hpp"
 
-extern "C" int __cxa_thread_atexit_impl(void (*function)(void*), void* object, void* dso);
-
 namespace {
 
 constexpr int kErrorInvalid = 22;
@@ -36,7 +34,6 @@ constexpr int kBsdLcTime = 5;
 constexpr int kBsdLcMessages = 6;
 
 using CompareFunction = int (APS5_VABI *)(const void*, const void*);
-using ExitFunction = void (APS5_VABI *)(void*);
 
 std::FILE* native(FileStream* stream) {
     return GetNativeStream(stream);
@@ -47,10 +44,6 @@ bool isCLocale(const char* name) {
 }
 
 thread_local char* tokenState = nullptr;
-std::mt19937_64& rand48Engine() {
-    static std::mt19937_64 engine(0x1234abcd330eULL);
-    return engine;
-}
 
 }
 
@@ -88,58 +81,20 @@ int APS5_VABI fsetpos_nid_postfix(FileStream* stream, const std::int64_t* positi
     return fseeko(native(stream), static_cast<off_t>(*position), SEEK_SET);
 }
 
-void APS5_VABI _Lockfilelock_nid_postfix(FileStream* stream) {
-    flockfile(native(stream));
-}
-
-void APS5_VABI _Unlockfilelock_nid_postfix(FileStream* stream) {
-    funlockfile(native(stream));
-}
-
-void APS5_VABI flockfile_nid_postfix(FileStream* stream) {
-    _Lockfilelock_nid_postfix(stream);
-}
-
-void APS5_VABI funlockfile_nid_postfix(FileStream* stream) {
-    _Unlockfilelock_nid_postfix(stream);
-}
+// _Lockfilelock, _Unlockfilelock, flockfile, funlockfile and ftrylockfile are in RuntimeSupport.cpp.
 
 FileStream* APS5_VABI fopen_nid_postfix(const char* filename, const char* mode);
 
 int APS5_VABI fopen_s_nid_postfix(FileStream** stream, const char* path, const char* mode) {
-    if (stream == nullptr || path == nullptr || mode == nullptr) return kErrorInvalid;
+    if (stream == nullptr) return kErrorInvalid;
+    *stream = nullptr;
+    if (path == nullptr || mode == nullptr) return kErrorInvalid;
     *stream = fopen_nid_postfix(path, mode);
     return *stream == nullptr ? errno : 0;
 }
 
-// snprintf_s and sprintf_s are in Formatting.cpp (guest wide-string arguments need its formatter).
-
-std::size_t APS5_VABI strspn_nid_postfix(const char* text, const char* accept) { return std::strspn(text, accept); }
-int APS5_VABI bcmp_nid_postfix(const void* left, const void* right, std::size_t count) { return std::memcmp(left, right, count) == 0 ? 0 : 1; }
-
-int APS5_VABI memcpy_s_nid_postfix(void* destination, std::size_t destinationSize, const void* source, std::size_t count) {
-    if (destination == nullptr) return kErrorInvalid;
-    if (source == nullptr || count > destinationSize) {
-        std::memset(destination, 0, destinationSize);
-        return source == nullptr ? kErrorInvalid : kErrorRange;
-    }
-    // C11 Annex K: overlapping ranges are a runtime-constraint violation.
-    const auto destinationAddress = reinterpret_cast<std::uintptr_t>(destination);
-    const auto sourceAddress = reinterpret_cast<std::uintptr_t>(source);
-    const auto distance = destinationAddress < sourceAddress ? sourceAddress - destinationAddress : destinationAddress - sourceAddress;
-    if (count != 0 && distance < count) {
-        std::memset(destination, 0, destinationSize);
-        return kErrorInvalid;
-    }
-    std::memcpy(destination, source, count);
-    return 0;
-}
-
-int APS5_VABI memset_s_nid_postfix(void* destination, std::size_t destinationSize, int value, std::size_t count) {
-    if (destination == nullptr) return kErrorInvalid;
-    std::memset(destination, value, std::min(destinationSize, count));
-    return count > destinationSize ? kErrorRange : 0;
-}
+// snprintf_s and sprintf_s are in Formatting.cpp (guest wide-string arguments need its formatter);
+// strspn, bcmp, memcpy_s and memset_s are in Strings.cpp.
 
 int APS5_VABI strcpy_s_nid_postfix(char* destination, std::size_t destinationSize, const char* source) {
     if (destination == nullptr || destinationSize == 0) return kErrorInvalid;
@@ -172,13 +127,7 @@ int APS5_VABI strncpy_s_nid_postfix(char* destination, std::size_t destinationSi
     return 0;
 }
 
-void APS5_VABI srand48_nid_postfix(long seed) {
-    rand48Engine().seed(static_cast<std::uint64_t>(seed));
-}
-
-long APS5_VABI lrand48_nid_postfix() {
-    return static_cast<long>(rand48Engine()() & 0x7fffffffu);
-}
+// srand48 and lrand48 are in Random.cpp (the 48-bit generator FreeBSD uses).
 
 std::div_t APS5_VABI div_nid_postfix(int numerator, int denominator) {
     return std::div(numerator, denominator);
@@ -202,19 +151,11 @@ char* APS5_VABI setlocale_nid_postfix(int category, const char* locale) {
     return isCLocale(locale) ? cLocale : nullptr;
 }
 
-std::lconv* APS5_VABI localeconv_nid_postfix() {
-    static std::lconv conventions = [] {
-        std::lconv value = *std::localeconv();
-        return value;
-    }();
-    return &conventions;
-}
+// localeconv is in LocaleSupport.cpp (it returns the guest's struct lconv layout).
 
 // quick_exit is defined in Process.cpp (runs guest at_quick_exit callbacks).
 
-int APS5_VABI __cxa_thread_atexit_nid_postfix(ExitFunction function, void* object, void* dso) {
-    return __cxa_thread_atexit_impl(reinterpret_cast<void (*)(void*)>(function), object, dso);
-}
+// __cxa_thread_atexit is in CxxAbiSupport.cpp.
 
 unsigned int APS5_VABI _ZNSt6thread20hardware_concurrencyEv_nid_postfix() {
     return std::thread::hardware_concurrency();

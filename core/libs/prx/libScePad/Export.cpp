@@ -40,6 +40,21 @@ int APS5_VABI scePadClose_nid_postfix(int handle) {
  return PAD_OK;
 }
 
+int APS5_VABI scePadVrControllerSetVibration() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI scePadVrControllerSetVibrationMode() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI scePadVrControllerReadCombinedState() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 int APS5_VABI scePadDeviceClassGetExtendedInformation(int handle, PadDeviceClassExtendedInformation* info) {
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
  if (info == nullptr) return PAD_ERROR_INVALID_ARG;
@@ -82,6 +97,7 @@ int APS5_VABI scePadGetControllerInformation(int handle, PadControllerInformatio
 // As in shadPS4: the handle of a port opened with the same user, type and index.
 int APS5_VABI scePadGetHandle(int user_id, int type, int index) {
  if (!padInitialized) return PAD_ERROR_NOT_INITIALIZED;
+ if (type == PAD_PORT_TYPE_SPECIAL) return PAD_ERROR_NO_HANDLE;
  return openedPorts.contains({user_id, type, index}) ? PAD_HANDLE : PAD_ERROR_NO_HANDLE;
 }
 
@@ -145,6 +161,7 @@ int APS5_VABI scePadOpen_nid_postfix(int userId, int type, int index, const void
  if (!ValidPort(userId, type, index)) {
   return PAD_ERROR_INVALID_ARG;
  }
+ if (type == PAD_PORT_TYPE_SPECIAL) return PAD_ERROR_DEVICE_NOT_CONNECTED;
  openedPorts.insert({userId, type, index});
  return PAD_HANDLE;
 }
@@ -165,15 +182,12 @@ int APS5_VABI scePadSetFeatureReport() { NotImplemented_nid_no_patch(__func__); 
 
 int APS5_VABI scePadOutputReport() { NotImplemented_nid_no_patch(__func__); return 0; }
 
-int APS5_VABI scePadReadState(int handle, PadData* data);
-
-// The pad layer keeps only the current state, so each read returns one sample: the latest.
+// Drains the queued input samples (oldest first); the latest state when none are queued.
 int APS5_VABI scePadRead_nid_postfix(int handle, PadData* data, int num) {
  constexpr int kMaxSamples = 64;
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
  if (data == nullptr || num < 1 || num > kMaxSamples) return PAD_ERROR_INVALID_ARG;
- data[0] = Pad::ReadState();
- return 1;
+ return Pad::Read(data, num);
 }
 
 int APS5_VABI scePadReadState(int handle, PadData* data) {
@@ -200,7 +214,7 @@ int APS5_VABI scePadResetOrientation(int handle) {
 
 int APS5_VABI scePadSetAngularVelocityDeadbandState(int handle, bool enable) {
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
- if (enable) NotImplemented_nid_no_patch(__func__);
+ Pad::SetAngularVelocityDeadband(enable);
  return PAD_OK;
 }
 
@@ -254,7 +268,7 @@ int APS5_VABI scePadSetVibration(int handle, const PadVibrationParam* param) {
 // Selects compatible rumble (0) or advanced haptics (1).
 int APS5_VABI scePadSetVibrationMode(int handle, int mode) {
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
- if (mode < 0 || mode > 2) return PAD_ERROR_INVALID_ARG;
+ if (mode < 0 || mode > 3) return PAD_ERROR_INVALID_ARG;
  Pad::SetVibrationMode(mode);
  return PAD_OK;
 }
@@ -274,6 +288,28 @@ int APS5_VABI scePadVrControllerRead() {
  return 0;
 }
 
+int APS5_VABI scePadVrControllerGetTriggerEffectState() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI scePadVrControllerReadState(int handle, void* state) {
+ (void)handle;
+ (void)state;
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI scePadVrControllerSetTriggerEffect() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
+int APS5_VABI scePadVrControllerSetTriggerEffects() {
+ NotImplemented_nid_no_patch(__func__);
+ return 0;
+}
+
 int APS5_VABI scePadIsRemoteController(int handle, bool* remote) {
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
  if (remote == nullptr) return PAD_ERROR_INVALID_ARG;
@@ -286,6 +322,23 @@ int APS5_VABI scePadSetAngularVelocityBiasCorrectionState(int handle, bool enabl
  if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
  if (enabled) NotImplemented_nid_no_patch(__func__);
  return PAD_OK;
+}
+
+APS5_EXPORT("n3kSX62fgNo", scePadUnknown_n3kSX62fgNo);
+int APS5_VABI scePadUnknown_n3kSX62fgNo() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI scePadVrControllerGetTriggerEffectStates(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+APS5_EXPORT("zBsgF0q8DIM", scePadUnknown_zBsgF0q8DIM);
+int APS5_VABI scePadUnknown_zBsgF0q8DIM() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
 }
 
 }

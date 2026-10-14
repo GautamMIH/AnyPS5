@@ -12,6 +12,9 @@
 #include <type_traits>
 #ifdef _WIN32
 #include <io.h>
+#include "prx/libc/include/FileLock.hpp"
+extern "C" void* HostStandardHandle_nid_no_patch(int descriptor);
+extern "C" void KeepStandardHandle_nid_no_patch(int descriptor, void* handle);
 #endif
 
 struct GuestFilePrefix {
@@ -32,6 +35,10 @@ static_assert(offsetof(GuestFilePrefix, lineBufferSize) == 40);
 
 static constexpr const char* FOPEN_EXT_VERT = ".vert";
 
+#ifndef _WIN32
+extern "C" int KeepHostStandardError_nid_no_patch();
+#endif
+
 class FileStream {
     // Only the macro-accessed FreeBSD prefix is exposed. The remaining guest
     // FILE area is reserved; host state lives beyond it and is never a guest FILE*.
@@ -39,7 +46,7 @@ class FileStream {
     std::byte _reserved[256 - sizeof(GuestFilePrefix)]{};
     std::FILE* _handle;
     bool _dynamic;
-    bool encodingError = false;
+    bool guestError = false;
 
 public:
     explicit FileStream(std::FILE* handle, bool dynamic = false) : _handle(handle), _dynamic(dynamic) {
@@ -69,12 +76,17 @@ public:
     bool Reopen(const std::filesystem::path& filename, const char* mode) {
         auto* previous = GetHandle();
         _guest = {};
-        encodingError = false;
+        guestError = false;
 #ifdef _WIN32
         std::wstring wideMode;
         for (const char character : std::string_view(mode)) wideMode.push_back(static_cast<unsigned char>(character));
+        const int replaced = previous ? _fileno(previous) : -1;
+        auto* const standard = HostStandardHandle_nid_no_patch(replaced);
+        GuestFileLockForget_nid_no_patch(replaced);
         _handle = ::_wfreopen(filename.c_str(), wideMode.c_str(), previous);
+        KeepStandardHandle_nid_no_patch(replaced, standard);
 #else
+        if (::fileno(previous) == 2) KeepHostStandardError_nid_no_patch();
         _handle = std::freopen(filename.c_str(), mode, previous);
 #endif
         if (!_handle) return false;
@@ -91,22 +103,39 @@ public:
         _guest.readRemaining = 0;
         _guest.writeRemaining = 0;
         _guest.flags = static_cast<std::int16_t>((_guest.flags & ~0x60) |
-            (std::feof(GetHandle()) ? 0x20 : 0) | (std::ferror(GetHandle()) || encodingError ? 0x40 : 0));
+            (std::feof(GetHandle()) ? 0x20 : 0) | (std::ferror(GetHandle()) || guestError ? 0x40 : 0));
     }
 
-    void SetEncodingError() {
-        encodingError = true;
+    void SyncUnlockedStatus() {
+        _guest.readRemaining = 0;
+        _guest.writeRemaining = 0;
+#ifdef _WIN32
+        const bool endOfFile = std::feof(GetHandle()) != 0;
+        const bool error = std::ferror(GetHandle()) != 0;
+#else
+        const bool endOfFile = ::feof_unlocked(GetHandle()) != 0;
+        const bool error = ::ferror_unlocked(GetHandle()) != 0;
+#endif
+        _guest.flags = static_cast<std::int16_t>((_guest.flags & ~0x60) |
+            (endOfFile ? 0x20 : 0) | (error || guestError ? 0x40 : 0));
+    }
+
+    void SetError() {
+        guestError = true;
         SyncStatus();
     }
 
     void ClearError() {
         std::clearerr(GetHandle());
-        encodingError = false;
+        guestError = false;
         SyncStatus();
     }
 
     int Close() {
         GetHandle();
+#ifdef _WIN32
+        GuestFileLockForget_nid_no_patch(::_fileno(_handle));
+#endif
         const int result = std::fclose(std::exchange(_handle, nullptr));
         _guest.flags = 0;
         _guest.descriptor = -1;

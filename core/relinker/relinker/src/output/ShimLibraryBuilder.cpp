@@ -106,7 +106,7 @@ SysVDynamicSection ShimLibraryBuilder::_buildSection(const ShimLibraryRequest& r
     std::vector<NidReference> references;
     const bool needsReporter = std::any_of(request.Symbols.begin(), request.Symbols.end(), [](const ShimSymbol& symbol) { return symbol.Kind == ShimSymbolKind::Report; });
     if (needsReporter) {
-        NidReference reporter{request.ReporterName, request.ReporterVersion, kRelocationGlobDat, 0, layout.Got, 0, kGlobalFunction};
+        NidReference reporter{request.ReporterName, request.ReporterVersion, kRelocationGlobDat, 0, layout.Got, 0, false, true, kGlobalFunction};
         reporter.LibraryFile = request.ReporterFile;
         references.push_back(std::move(reporter));
     }

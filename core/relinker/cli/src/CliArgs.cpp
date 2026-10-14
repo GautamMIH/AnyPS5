@@ -1,16 +1,32 @@
 #include <Cli.hpp>
 #include <io/NativePath.hpp>
+#include <charconv>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
+#include <system_error>
 
 namespace Cli {
 
 const char* Usage() {
-    return "Usage: relinker [--help] [--windows | --macos] [--windows-diagnostics] [--windows-gui] [--skip-syscall-check] [--skip-sce-module | --sce-module-path <path>] [--exclude-sce-module <file>]... [--to-intel] [--to-rosetta] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf|input.self> <output.elf>\n"
+    return "Usage: relinker [--help] [--windows | --macos] [--windows-diagnostics] [--windows-gui] [--trace-imports] [--windows-fixed-base <address>] [--linux-fixed-base <address>] [--skip-syscall-check | --trap-sdk-syscall-stubs] [--skip-sce-module | --sce-module-path <path>] [--exclude-sce-module <file>]... [--module-dir <dir>]... [--executable <path>]... [--to-intel] [--to-rosetta] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf|input.self> <output.elf>\n"
            "       relinker --game [--libs <anyps5-prx-dir>] [--skip-syscall-check] [unused-filter=0|1|2] [--lazy-binding] <game-dump-dir> <output-dir>\n"
            "Example: relinker eboot.bin game.elf";
+}
+
+static std::uint64_t ParseLinuxFixedBase(std::string_view value) {
+    constexpr std::uint64_t lowest = 0x10000;
+    constexpr std::uint64_t highest = 0x7fffffff0000;
+    constexpr std::uint64_t alignment = 0x10000;
+    const bool hexadecimal = value.starts_with("0x") || value.starts_with("0X");
+    if (hexadecimal) value.remove_prefix(2);
+    std::uint64_t address = 0;
+    const auto parsed = std::from_chars(value.data(), value.data() + value.size(), address, hexadecimal ? 16 : 10);
+    if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || address < lowest || address > highest || address % alignment != 0)
+        throw std::runtime_error("--linux-fixed-base requires a 64 KiB-aligned address from 0x10000 through 0x7fffffff0000");
+    return address;
 }
 
 Args ParseArgs(int argc, char* argv[]) {
@@ -22,8 +38,27 @@ Args ParseArgs(int argc, char* argv[]) {
         const std::string arg = argv[i];
         if (arg == "--help") {
             args.showHelp = true;
+        } else if (arg == "--windows-fixed-base") {
+            if (args.windowsFixedBase) throw std::runtime_error("--windows-fixed-base cannot be repeated");
+            if (i + 1 >= argc || std::string(argv[i + 1]).empty() || std::string(argv[i + 1]).starts_with("--"))
+                throw std::runtime_error("--windows-fixed-base requires an address");
+            std::string_view value(argv[++i]);
+            const bool hexadecimal = value.starts_with("0x") || value.starts_with("0X");
+            if (hexadecimal) value.remove_prefix(2);
+            std::uint64_t address = 0;
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), address, hexadecimal ? 16 : 10);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || address < 0x20000 || address > 0x7fffffff0000 || (address & 0xffff) != 0)
+                throw std::runtime_error("--windows-fixed-base requires a 64 KiB-aligned address from 0x20000 through 0x7fffffff0000");
+            args.windowsFixedBase = address;
+        } else if (arg == "--linux-fixed-base") {
+            if (args.linuxFixedBase) throw std::runtime_error("--linux-fixed-base cannot be repeated");
+            if (i + 1 >= argc || std::string_view(argv[i + 1]).empty() || std::string_view(argv[i + 1]).starts_with("--"))
+                throw std::runtime_error("--linux-fixed-base requires an address");
+            args.linuxFixedBase = ParseLinuxFixedBase(argv[++i]);
         } else if (arg == "--skip-syscall-check") {
             args.skipSyscallCheck = true;
+        } else if (arg == "--trap-sdk-syscall-stubs") {
+            args.trapSdkSyscallStubs = true;
         } else if (arg == "--skip-sce-module") {
             args.skipSceModule = true;
         } else if (arg == "--sce-module-path") {
@@ -35,6 +70,13 @@ Args ParseArgs(int argc, char* argv[]) {
             if (i + 1 >= argc)
                 throw std::runtime_error("--exclude-sce-module requires a file name");
             args.excludedSceModules.insert(argv[++i]);
+        } else if (arg == "--module-dir") {
+            if (i + 1 >= argc)
+                throw std::runtime_error("--module-dir requires a directory");
+            args.moduleDirectories.push_back(argv[++i]);
+        } else if (arg == "--executable") {
+            if (i + 1 >= argc || std::string(argv[i + 1]).empty() || std::string(argv[i + 1]).starts_with("--")) throw std::runtime_error("--executable requires a nonempty path");
+            args.executables.push_back(argv[++i]);
         } else if (arg == "--to-intel") {
             args.toIntel = true;
         } else if (arg == "--to-rosetta") {
@@ -71,6 +113,8 @@ Args ParseArgs(int argc, char* argv[]) {
             args.windowsDiagnostics = true;
         } else if (arg == "--windows-gui") {
             args.windowsGui = true;
+        } else if (arg == "--trace-imports") {
+            args.traceImports = true;
         } else if (arg.rfind("--", 0) == 0 || arg == "unused-filter") {
             throw std::runtime_error("unknown option: " + arg);
         } else if (arg.empty()) {
@@ -86,8 +130,16 @@ Args ParseArgs(int argc, char* argv[]) {
 
     if (args.skipSceModule && sceModulePathSpecified) throw std::runtime_error("--sce-module-path conflicts with --skip-sce-module");
 
+    if (args.skipSyscallCheck && args.trapSdkSyscallStubs) throw std::runtime_error("--skip-syscall-check conflicts with --trap-sdk-syscall-stubs");
+
     if (args.skipSceModule && !args.excludedSceModules.empty())
         throw std::runtime_error("--exclude-sce-module conflicts with --skip-sce-module");
+
+    if (args.skipSceModule && !args.moduleDirectories.empty())
+        throw std::runtime_error("--module-dir conflicts with --skip-sce-module");
+
+    if (args.skipSceModule && !args.executables.empty())
+        throw std::runtime_error("--executable conflicts with --skip-sce-module");
 
     if (args.toWindows && args.toMacos)
         throw std::runtime_error("--windows conflicts with --macos");
@@ -99,8 +151,21 @@ Args ParseArgs(int argc, char* argv[]) {
     if (args.windowsGui && !args.toWindows)
         throw std::runtime_error("--windows-gui requires --windows");
 
+    if (args.windowsFixedBase && !args.toWindows)
+        throw std::runtime_error("--windows-fixed-base requires --windows");
+    if (args.traceImports && !args.toWindows)
+        throw std::runtime_error("--trace-imports requires --windows");
+    if (args.traceImports && args.lazyBinding)
+        throw std::runtime_error("--trace-imports conflicts with --lazy-binding");
+    if (args.linuxFixedBase && (args.toWindows || args.toMacos))
+        throw std::runtime_error("--linux-fixed-base cannot be used with --windows or --macos");
+    if (args.linuxFixedBase && args.lazyBinding)
+        throw std::runtime_error("--linux-fixed-base conflicts with --lazy-binding");
+
     if (args.gameMode && (args.toIntel || args.autorun || args.runPathSpecified || args.toMacos))
         throw std::runtime_error("--game cannot be combined with --to-intel, --autorun, --rpath or --macos");
+    if (args.gameMode && (args.windowsFixedBase || args.linuxFixedBase || args.traceImports || !args.moduleDirectories.empty() || !args.executables.empty()))
+        throw std::runtime_error("--game cannot be combined with --windows-fixed-base, --linux-fixed-base, --trace-imports, --module-dir or --executable");
     if (!args.gameMode && !args.libsPath.empty())
         throw std::runtime_error("--libs requires --game");
 

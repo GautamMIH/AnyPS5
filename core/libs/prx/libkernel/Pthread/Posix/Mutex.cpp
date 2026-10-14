@@ -34,6 +34,11 @@ int APS5_VABI pthread_mutex_lock_nid_postfix(PthreadMutex* mutex) {
 
 int APS5_VABI pthread_mutex_timedlock_nid_postfix(PthreadMutex* mutex, const KernelTimespec* abstime) {
     if (!abstime) return PthreadSync::kErrorInvalid;
+    // Like FreeBSD, the deadline is only checked when the lock would block: a free mutex is taken
+    // whatever the deadline, a held one with a malformed deadline fails with EINVAL.
+    if (abstime->tv_nsec < 0 || abstime->tv_nsec >= 1000000000) {
+        return PthreadSync::MutexTryLock(mutex) == 0 ? 0 : PthreadSync::kErrorInvalid;
+    }
     return PthreadSync::MutexLock(mutex, PthreadSync::DeadlineAt(PthreadSync::kClockRealtime, abstime->tv_sec, abstime->tv_nsec));
 }
 
@@ -92,6 +97,13 @@ int APS5_VABI pthread_mutexattr_settype_nid_postfix(PthreadMutexattr* attr, int 
     case 4: (*attr)->type = MutexType::Adaptive; break;
     default: return PthreadSync::kErrorInvalid;
     }
+    return 0;
+}
+
+int APS5_VABI pthread_mutexattr_gettype_nid_postfix(const PthreadMutexattr* attr, int* type) {
+    if (!attr || !*attr) return PthreadSync::kErrorInvalid;
+    if (!type) throw std::runtime_error("pthread_mutexattr_gettype: null type");
+    *type = static_cast<int>((*attr)->type);
     return 0;
 }
 

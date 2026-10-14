@@ -38,7 +38,7 @@ std::string MachODependency(const std::string& name, const std::string& origin) 
     return "@rpath/" + name;
 }
 
-std::vector<std::uint8_t> MacOsMachOPatcher::Patch(const std::vector<std::uint8_t>& sourceElf, const std::vector<Domain::ProgramHeader>& originalHeaders, const Domain::SysVDynamicSection& dynamicSection, const std::uint64_t originalPltGotVaddr, const std::string& runPath, const bool lazyBinding, const bool dependencyDiagnostics, const std::vector<Codegen::TrampolineSite>& trampolines, const Domain::ModuleLinkInfo& linkInfo) {
+std::vector<std::uint8_t> MacOsMachOPatcher::Patch(std::vector<std::uint8_t> sourceElf, const std::vector<Domain::ProgramHeader>& originalHeaders, const Domain::SysVDynamicSection& dynamicSection, const std::uint64_t originalPltGotVaddr, const std::string& runPath, const bool lazyBinding, const bool dependencyDiagnostics, const std::vector<Codegen::TrampolineSite>& trampolines, const Domain::ModuleLinkInfo& linkInfo) {
     if (linkInfo.Kind == Domain::ModuleKind::Library)
         throw Domain::RelinkerException("Converting SCE library modules to macOS dylibs is not implemented");
     if (dependencyDiagnostics)
@@ -48,7 +48,7 @@ std::vector<std::uint8_t> MacOsMachOPatcher::Patch(const std::vector<std::uint8_
     Windows::WindowsLoadImage image(sourceElf, originalHeaders);
     if (originalPltGotVaddr != 0)
         image.GetRva(originalPltGotVaddr, 8);
-    const auto relocations = Windows::WindowsRelocationBuilder().Apply(image, dynamicSection);
+    const auto relocations = Windows::WindowsRelocationBuilder().Apply(image, dynamicSection, originalHeaders);
 
     MacOsImageInput input;
     input.Executable = true;

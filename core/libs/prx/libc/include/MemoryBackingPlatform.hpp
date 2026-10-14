@@ -18,6 +18,15 @@ struct Segment {
 // Zero-filled shared memory, readable and writable through alias.
 Segment CreateSegment(std::size_t bytes);
 void DestroySegment(const Segment& segment);
+// Returns segment bytes [offset, offset + bytes) to zero, giving their host memory back where the
+// host can (released physical memory reads as zero when it is allocated again).
+void DiscardSegment(const Segment& segment, std::uint64_t offset, std::size_t bytes);
+// A segment over the first bytes of a host memory object (Linux: a file descriptor; Windows: a file
+// mapping handle), holding a duplicate of the handle; DestroySegment releases it.
+Segment AdoptSegment(std::uintptr_t object, std::size_t bytes);
+// MapView for adopted segments: shared, or (Linux) a private copy-on-write view. Their writes are
+// not watched (the write watch covers anonymous and shared memory segments only).
+void MapObjectView(std::uint64_t address, std::size_t bytes, const Segment& segment, std::uint64_t offset, int protection, bool privateCopy);
 
 // Claims [address, address + bytes) when fixed, otherwise the first free aligned range at or after
 // address (anywhere when address is 0). Returns 0 when the range (or no range) is available.

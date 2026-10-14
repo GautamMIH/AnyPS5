@@ -1,16 +1,44 @@
 #include "prx/libc/include/exceptions/Runtime.hpp"
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <exception>
+#include <cstring>
 #include <limits>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <cerrno>
+#include <unistd.h>
 #endif
 
 namespace LibcException {
 
 // Writes straight to the stderr handle: terminate paths must not wait on the CRT stream lock,
 // which another (possibly suspended) thread may hold.
+static void RawWrite(const char* data, std::size_t size) {
+#ifdef _WIN32
+    const HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
+    while (size != 0) {
+        DWORD written = 0;
+        const auto chunk = static_cast<DWORD>(std::min<std::size_t>(size, std::numeric_limits<DWORD>::max()));
+        if (!WriteFile(handle, data, chunk, &written, nullptr) || written == 0) return;
+        data += written;
+        size -= written;
+    }
+#else
+    const int kept = HostStandardError_nid_no_patch();
+    const int descriptor = kept >= 0 ? kept : STDERR_FILENO;
+    while (size != 0) {
+        const auto written = ::write(descriptor, data, size);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return;
+        data += written;
+        size -= static_cast<std::size_t>(written);
+    }
+#endif
+}
+
 static void RawLog(const char* format, ...) {
     char buffer[1024];
     va_list args;
@@ -19,12 +47,7 @@ static void RawLog(const char* format, ...) {
     va_end(args);
     if (length <= 0) return;
     if (length > static_cast<int>(sizeof(buffer)) - 1) length = sizeof(buffer) - 1;
-#ifdef _WIN32
-    DWORD written = 0;
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), buffer, static_cast<DWORD>(length), &written, nullptr);
-#else
-    std::fwrite(buffer, 1, length, stderr);
-#endif
+    RawWrite(buffer, static_cast<std::size_t>(length));
 }
 
 [[noreturn]] static void DefaultTerminate() {
@@ -49,9 +72,11 @@ static void RawLog(const char* format, ...) {
         int status = 0;
         char* demangled = abi::__cxa_demangle(typeName, nullptr, nullptr, &status);
         const char* displayName = (status == 0 && demangled) ? demangled : typeName;
-        if (what)
-            RawLog("terminate called after throwing an instance of '%s'\n  what():  %s\n", displayName, what);
-        else
+        if (what) {
+            RawLog("terminate called after throwing an instance of '%s'\n  what():  ", displayName);
+            RawWrite(what, std::strlen(what));
+            RawWrite("\n", 1);
+        } else
             RawLog("terminate called after throwing an instance of '%s'\n", displayName);
         std::free(demangled);
     } else {
@@ -231,7 +256,7 @@ void APS5_VABI __cxa_free_exception_nid_postfix(void* object) {
     std::free(allocation);
 }
 
-[[noreturn]] void APS5_VABI __cxa_throw_nid_postfix(void* object, std::type_info* type, void (*destructor)(void*)) {
+[[noreturn]] static void ThrowFromSite(void* object, std::type_info* type, void (*destructor)(void*), void* throwSite) {
     using namespace LibcException;
     auto* header = FromObject(object);
     header->type = type;
@@ -242,12 +267,16 @@ void APS5_VABI __cxa_free_exception_nid_postfix(void* object) {
     header->unwind.exception_cleanup = Cleanup;
     ++globals.uncaught;
     _Unwind_RaiseException_nid_postfix(&header->unwind);
-    RawLog("[libc] unhandled exception '%s' thrown from %p\n", type ? type->name() : "?", __builtin_return_address(0));
+    RawLog("[libc] unhandled exception '%s' thrown from %p\n", type ? type->name() : "?", throwSite);
     __cxa_begin_catch_nid_postfix(&header->unwind);
     InvokeTerminate(header->terminate);
 }
 
-LibcException::Header* __cxa_init_primary_exception_nid_postfix(void* object, std::type_info* type, void (*destructor)(void*)) {
+[[noreturn]] void APS5_VABI __cxa_throw_nid_postfix(void* object, std::type_info* type, void (*destructor)(void*)) {
+    ThrowFromSite(object, type, destructor, __builtin_return_address(0));
+}
+
+LibcException::Header* APS5_VABI __cxa_init_primary_exception_nid_postfix(void* object, std::type_info* type, void (*destructor)(void*)) {
     using namespace LibcException;
     auto* header = FromObject(object);
     AllocationOf(header)->references.store(0, std::memory_order_relaxed);
@@ -369,8 +398,8 @@ void APS5_VABI __cxa_rethrow_primary_exception_nid_postfix(void* object) {
     InvokeTerminate(header->terminate);
 }
 
-void* __dynamic_cast_nid_postfix(const void* source, const __cxxabiv1::__class_type_info* sourceType,
-                               const __cxxabiv1::__class_type_info* destinationType, std::ptrdiff_t) {
+void* APS5_VABI __dynamic_cast_nid_postfix(const void* source, const __cxxabiv1::__class_type_info* sourceType,
+                                         const __cxxabiv1::__class_type_info* destinationType, std::ptrdiff_t) {
     using namespace LibcException;
     if (!source) return nullptr;
     auto* vtable = *static_cast<const std::uintptr_t* const*>(source);

@@ -3,20 +3,26 @@ import json
 import os
 import re
 import subprocess
-from itertools import chain, combinations
+from itertools import combinations
 from pathlib import Path
 from urllib.parse import urlencode
 
 PARENT = 'if .parent then "\\(.parent.owner.login)/\\(.parent.name)" else .nameWithOwner end'
 EXPORT = re.compile(r"^\+.*\bAPS5_VABI\s+(\w+)\s*\(")
-DEPENDS = re.compile(r'Depends on:([^\r\n]*(?:\r?\n[ \t]*[-*][ \t]*#\d+[^\r\n]*)*)')
+DEPENDS = re.compile(r'Depends on:[ \t]*((?:#\d+\b(?:(?:[ \t]*,[ \t]*(?:and[ \t]+)?|[ \t]+and[ \t]+)#\d+\b)*|none\b)?(?:\r?\n[ \t]*[-*][ \t]*#\d+\b[^\r\n]*)*)')
 PLAIN_DEPENDS = re.compile(r'Depends on[ \t]+(#\d+\b(?:(?:[ \t]*,[ \t]*(?:and[ \t]+)?|[ \t]+and[ \t]+)#\d+\b)*)')
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))?", re.M)
 MARKER = "<!-- pr-overlap -->"
+FETCH_REFS = 100
 
 
 def git(*args):
-    return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8", check=True).stdout
+    return subprocess.run(["git", *args], capture_output=True, text=True, encoding="utf-8", errors="replace", check=True).stdout
+
+
+def own(prs, sha):
+    return {n: pr for n, pr in prs.items()
+            if pr["sha"] != sha and subprocess.run(["git", "merge-base", "--is-ancestor", pr["sha"], sha], capture_output=True).returncode != 0}
 
 
 def gh(*args):
@@ -27,29 +33,54 @@ def upstream():
     return os.environ.get("GITHUB_REPOSITORY") or gh("repo", "view", "--json", "nameWithOwner,parent", "--jq", PARENT).strip()
 
 
+def depends_on(body):
+    body = re.sub(r"<!--.*?-->", "", body or "", flags=re.S)
+    match = DEPENDS.search(body)
+    if not match or not match.group(1).strip():
+        match = PLAIN_DEPENDS.search(body)
+    return {int(n) for n in re.findall(r"#(\d+)", match.group(1))} if match else set()
+
+
 def open_prs(base):
     query = urlencode({"state": "open", "base": base, "per_page": 100})
-    out = gh("api", "--paginate", "--slurp", f"repos/{REPO}/pulls?{query}")
+    out = gh("api", "--paginate", f"repos/{REPO}/pulls?{query}")
     prs = {}
-    for pr in chain.from_iterable(json.loads(out)):
-        depends = DEPENDS.search(pr["body"] or "") or PLAIN_DEPENDS.search(pr["body"] or "")
+    decoder = json.JSONDecoder()
+    offset = 0
+    page_count = 0
+    pull_requests = []
+    while offset < len(out):
+        while offset < len(out) and out[offset].isspace():
+            offset += 1
+        if offset == len(out):
+            break
+        page, offset = decoder.raw_decode(out, offset)
+        if not isinstance(page, list):
+            raise ValueError("gh api --paginate returned a non-array page")
+        page_count += 1
+        pull_requests.extend(page)
+    if page_count == 0:
+        raise ValueError("gh api --paginate returned no JSON pages")
+
+    for pr in pull_requests:
         prs[pr["number"]] = {
             "ref": f"refs/pr/{pr['number']}",
             "sha": pr["head"]["sha"],
             "author": pr["user"]["login"],
-            "depends": {int(n) for n in re.findall(r"#(\d+)", depends.group(1))} if depends else set(),
+            "depends": depends_on(pr["body"]),
         }
     return prs
 
 
 def fetch(base, prs):
-    refspecs = [f"+refs/heads/{base}:refs/pr/base"] + [f"+refs/pull/{n}/head:{pr['ref']}" for n, pr in prs.items()]
-    git("fetch", "--no-tags", "-q", f"https://github.com/{REPO}.git", *refspecs)
+    refspecs = [f"+refs/heads/{base}:refs/pr/base"] + [f"+{pr['sha']}:{pr['ref']}" for pr in prs.values()]
+    for start in range(0, len(refspecs), FETCH_REFS):
+        git("fetch", "--no-tags", "-q", f"https://github.com/{REPO}.git", *refspecs[start:start + FETCH_REFS])
 
 
 def merge(*args):
     result = subprocess.run(["git", "merge-tree", "--write-tree", "--name-only", "--no-messages", *args],
-                            capture_output=True, text=True, encoding="utf-8")
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
     lines = result.stdout.splitlines()
     if result.returncode not in (0, 1) or not lines:
         raise RuntimeError(f"git merge-tree {' '.join(args)} failed: {result.stderr.strip()}")
@@ -63,9 +94,18 @@ def commit(tree):
 
 def exports(diff):
     found = set()
-    for line in diff.splitlines():
+    lines = diff.splitlines()
+    for i, line in enumerate(lines):
         m = EXPORT.match(line)
-        if m and not m.group(1).endswith("_nid_no_patch") and not line.rstrip().endswith(";"):
+        if not m or m.group(1).endswith(("_nid_no_patch", "_nid_no_patch_cut")):
+            continue
+        text = line[1:]
+        for nxt in lines[i + 1:]:
+            if ";" in text or "{" in text or not nxt.startswith("+") or nxt.startswith("+++"):
+                break
+            text += nxt[1:]
+        semi, brace = text.find(";"), text.find("{")
+        if semi < 0 or 0 <= brace < semi:
             found.add(m.group(1))
     return found
 
@@ -104,18 +144,30 @@ def clashes(a, b, path):
 def conflicts(a, b):
     if not (a["tree"] and b["tree"] and a["files"] & b["files"]):
         return {}
-    files = merge("--merge-base=refs/pr/base", a["tree"], b["tree"])[1]
+    files = merge(a["tree"], b["tree"])[1]
     return {path: [] if path in a["added"] else clashes(a, b, path) for path in files}
+
+
+def dependencies(prs, number):
+    found, pending = set(), [number]
+    while pending:
+        for n in prs[pending.pop()]["depends"]:
+            if n in prs and n not in found:
+                found.add(n)
+                pending.append(n)
+    return found
 
 
 def overlaps(prs, a, b):
     pa, pb = prs[a], prs[b]
-    if b in pa["depends"] or a in pb["depends"]:
+    da, db = dependencies(prs, a), dependencies(prs, b)
+    if b in da or a in db:
         return None
-    found = {"added": pa["added"] & pb["added"]}
+    shared = [prs[n] for n in da & db]
+    found = {"added": (pa["added"] & pb["added"]).difference(*(pr["added"] for pr in shared))}
     if pa["author"] != pb["author"]:
         found["conflicts"] = conflicts(pa, pb)
-        found["exports"] = pa["exports"] & pb["exports"]
+        found["exports"] = (pa["exports"] & pb["exports"]).difference(*(pr["exports"] for pr in shared))
     return found if any(found.values()) else None
 
 
@@ -162,7 +214,7 @@ if __name__ == "__main__":
     fetch(args.base, prs)
     if args.branch:
         sha = git("rev-parse", args.branch).strip()
-        prs = {n: pr for n, pr in prs.items() if pr["sha"] != sha}
+        prs = own(prs, sha)
         prs[0] = {"ref": sha, "author": None, "depends": set()}
     for pr in prs.values():
         scan(pr)

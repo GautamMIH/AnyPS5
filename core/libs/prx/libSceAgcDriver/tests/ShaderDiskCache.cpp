@@ -54,7 +54,7 @@ bool sameBindings(const std::vector<DescriptorBinding>& left, const std::vector<
 
 void requireSameArtifact(const CompiledShaderArtifact& left, const CompiledShaderArtifact& right, const char* what) {
     const std::string prefix = std::string(what) + ": ";
-    require(left.spirv.Words() == right.spirv.Words(), prefix + "SPIR-V differs");
+    require(std::ranges::equal(left.spirv.Words(), right.spirv.Words()), prefix + "SPIR-V differs");
     require(left.bdaAbiVersion == right.bdaAbiVersion, prefix + "BDA ABI version differs");
     require(left.runtimeAbiVersion == right.runtimeAbiVersion, prefix + "runtime ABI version differs");
     require(left.memoryOffsetDword == right.memoryOffsetDword, prefix + "memory offset differs");
@@ -862,7 +862,7 @@ void verifyVertexTypeSpecialization() {
                 }
             }
             require(checked == 4u, "vertex specialization lost attribute loads");
-            require(artifact.spirv.Words() == original, "vertex specialization mutated the shared template");
+            require(std::ranges::equal(artifact.spirv.Words(), original), "vertex specialization mutated the shared template");
         }
     }
     auto invalid = artifact;

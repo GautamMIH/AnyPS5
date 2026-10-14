@@ -1,11 +1,13 @@
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <mutex>
 #include <regex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <system_error>
 #include "SceTypes.hpp"
@@ -41,14 +43,55 @@ int checkHandle(int handle) {
     return PLAYGO_OK;
 }
 
-// The package's chunk table is not part of the dump, so the chunk set comes from the title's
-// playgo-chunkdefs.xml: every listed chunk plus chunks 0 through the default chunk. A title without
-// it has only chunk 0. Games probe chunk IDs and size arrays from the result, so unknown IDs are rejected.
-const std::set<uint16_t>& validChunks() {
-    static const std::set<uint16_t> chunks = [] {
-        std::set<uint16_t> result{0};
+struct ChunkTable {
+    std::set<uint16_t> ids{0};
+    bool defined = false;
+    bool scenario = false;
+};
+
+// The package's chunk table (sce_sys/playgo-chunk.dat): a plgx header whose chunk count gives ids
+// 0 through count - 1.
+bool readPackageChunks(ChunkTable& table) {
+    constexpr std::size_t CountOffset = 0x0A;
+    std::ifstream file(ResolvePath_nid_no_patch("/app0/sce_sys/playgo-chunk.dat"), std::ios::binary);
+    char header[CountOffset + sizeof(uint16_t)]{};
+    if (!file) return false;
+    const auto unreadable = [] { return std::runtime_error("scePlayGo: sce_sys/playgo-chunk.dat is not a chunk table this library reads (expected a plgx header with a nonzero chunk count)"); };
+    if (!file.read(header, sizeof(header)) || std::memcmp(header, "plgx", 4) != 0) throw unreadable();
+    uint16_t count = 0;
+    std::memcpy(&count, header + CountOffset, sizeof(count));
+    if (count == 0) throw unreadable();
+    for (uint32_t id = 0; id < count; ++id) table.ids.insert(static_cast<uint16_t>(id));
+    table.defined = true;
+    return true;
+}
+
+void rejectUnreadablePlayGoFiles() {
+    std::error_code error;
+    const std::filesystem::path directory = ResolvePath_nid_no_patch("/app0/sce_sys");
+    for (const auto& entry : std::filesystem::directory_iterator(directory, error)) {
+        const auto name = entry.path().filename().string();
+        if (name.rfind("playgo-", 0) == 0)
+            throw std::runtime_error("scePlayGo: sce_sys/" + name + " is present but no chunk table (playgo-chunk.dat) or scenario file (playgo-scenario.json) is, so the chunk ids are unknown");
+    }
+}
+
+// The chunk set comes from the title's playgo-chunkdefs.xml (every listed chunk plus chunks 0
+// through the default chunk), else from the package's chunk table. A title with only a scenario file
+// accepts any chunk id; one with neither has only chunk 0. Games probe chunk IDs and size arrays from
+// the result, so unknown IDs are rejected.
+const ChunkTable& chunkTable() {
+    static const ChunkTable chunks = [] {
+        ChunkTable table;
         std::ifstream file(ResolvePath_nid_no_patch("/app0/playgo-chunkdefs.xml"));
-        if (!file) return result;
+        if (!file) {
+            if (readPackageChunks(table)) return table;
+            table.scenario = std::ifstream(ResolvePath_nid_no_patch("/app0/sce_sys/playgo-scenario.json")).good();
+            if (!table.scenario) rejectUnreadablePlayGoFiles();
+            return table;
+        }
+        table.defined = true;
+        auto& result = table.ids;
         const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
         static const std::regex chunk(R"re(<chunk\s+id="(\d+)")re");
         for (auto it = std::sregex_iterator(text.begin(), text.end(), chunk); it != std::sregex_iterator(); ++it)
@@ -59,13 +102,14 @@ const std::set<uint16_t>& validChunks() {
             const auto last = std::stoul(match[1].str());
             for (unsigned long id = 0; id <= last && id <= 0xFFFF; ++id) result.insert(static_cast<uint16_t>(id));
         }
-        return result;
+        return table;
     }();
     return chunks;
 }
 
 bool isValidChunk(uint16_t chunkId) {
-    return validChunks().contains(chunkId);
+    const auto& chunks = chunkTable();
+    return chunks.defined ? chunks.ids.contains(chunkId) : chunks.scenario || chunkId == 0;
 }
 
 int checkChunks(const uint16_t* chunkIds, uint32_t count) {
@@ -134,7 +178,7 @@ int APS5_VABI scePlayGoGetChunkId(int handle, uint16_t* out_chunk_id_list, uint3
     std::lock_guard lock(stateMutex);
     if (const int error = checkHandle(handle)) return error;
     if (out_entries == nullptr) return PLAYGO_ERROR_BAD_POINTER;
-    const auto& chunks = validChunks();
+    const auto& chunks = chunkTable().ids;
     if (out_chunk_id_list == nullptr) {
         *out_entries = static_cast<uint32_t>(chunks.size());
         return PLAYGO_OK;

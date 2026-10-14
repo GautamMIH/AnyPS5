@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cstring>
 #include <cstdio>
 #include <bit>
 #include <chrono>
@@ -10,7 +11,9 @@
 #include "SDL_vulkan.h"
 #include "prx/libSceVideoOut/include/PadInput.hpp"
 #include "prx/libSceVideoOut/include/MouseInput.hpp"
+#include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
 #include "prx/libSceVideoOut/include/KeyboardInput.hpp"
+#include "prx/libSceVideoOut/include/ImeTextInput.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
@@ -21,6 +24,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
 #include "prx/libc/include/Shutdown.hpp"
@@ -31,6 +35,9 @@ extern "C" void __gcov_dump(void);
 #endif
 
 namespace {
+
+constexpr std::uint64_t FLIP_ROOM_WAIT_MICROS = 60000000;
+constexpr std::uint64_t PRESENT_POLL_MICROS = 10000;
 
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("VideoOut: ") + reason);
@@ -122,7 +129,7 @@ public:
 
     void WaitForFlipRoom() override {
         std::unique_lock queueLock(queue->mutex);
-        const bool room = queue->changed.wait_for(queueLock, std::chrono::seconds(60), [&] {
+        const bool room = queue->changed.WaitUntil(queueLock, TimedWait::DeadlineNanos(FLIP_ROOM_WAIT_MICROS), [&] {
             return queue->failure || queue->stopping || cfg->shutdownToken.stop_requested() || queue->reservations.load() < VIDEO_OUT_FLIP_QUEUE_CAPACITY;
         });
         if (queue->failure) std::rethrow_exception(queue->failure);
@@ -151,7 +158,9 @@ public:
         require(queue->reservations.load() < VIDEO_OUT_FLIP_QUEUE_CAPACITY, "flip queue full");
         request->generation = cfg->generation;
         request->flipRate = cfg->flipRate;
-        if (info.index >= 0) request->reuseTicket = cfg->bufferReuse[info.index].Reserve();
+        if (info.index >= 0) {
+            request->reuseTicket = cfg->bufferReuse[info.index].Reserve();
+        }
         ++queue->reservations;
         ++cfg->flipStatus.flipPendingNum;
         if (info.index >= 0) ++cfg->bufferPending[info.index];
@@ -174,7 +183,7 @@ public:
             if (!cfg->failure) cfg->failure = error;
             cfg->vblankCond.notify_all();
         }
-        queue->changed.notify_all();
+        queue->changed.NotifyAll();
     }
 
 private:
@@ -207,7 +216,7 @@ void FlipRequest::Cancel() noexcept {
         std::lock_guard lock(cfg->mutex);
         ReleaseLocked();
     }
-    queue->changed.notify_all();
+    queue->changed.NotifyAll();
 }
 
 void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameTiming) {
@@ -232,7 +241,7 @@ void FlipRequest::GpuReady(const std::shared_ptr<AgcDriver::FrameTiming>& frameT
         queue->requests.push_back(shared_from_this());
         ready = true;
     }
-    queue->changed.notify_all();
+    queue->changed.NotifyAll();
     // The worker is done once the request is queued: hardware does not stall the command processor
     // on a flip, and the title observes completion through flipPendingNum, which processFlip drops
     // once the frame's GPU work and its presentation have completed (see Driver::Present). A
@@ -251,7 +260,7 @@ void FlipRequest::Fail(std::exception_ptr error) noexcept {
     std::lock_guard lock(cfg->mutex);
     if (!cfg->failure) cfg->failure = error;
     ReleaseLocked();
-    queue->changed.notify_all();
+    queue->changed.NotifyAll();
 }
 
 VideoOutDriver& VideoOutDriver::Get() {
@@ -261,6 +270,14 @@ VideoOutDriver& VideoOutDriver::Get() {
 
 VideoOutDriver::VideoOutDriver() {
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
+#ifdef _WIN32
+    SDL_SetHintWithPriority(SDL_HINT_DIRECTINPUT_ENABLED, "0", SDL_HINT_DEFAULT);
+#endif
+#ifdef __linux__
+    // ANYPS5_BACKGROUND_WINDOW runs keep SDL's default driver: their hidden-window presentation
+    // pacing was measured there (a never-mapped Wayland surface may not present at all).
+    if (std::getenv("ANYPS5_BACKGROUND_WINDOW") == nullptr) SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
+#endif
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
         throw std::runtime_error(std::string("SDL_InitSubSystem(VIDEO | GAMECONTROLLER) failed: ") + SDL_GetError());
     }
@@ -277,12 +294,12 @@ VideoOutDriver::VideoOutDriver() {
     } catch (...) {
         if (vblankThread.joinable()) {
             vblankThread.request_stop();
-            flipQueue->changed.notify_all();
+            flipQueue->changed.NotifyAll();
             vblankThread.join();
         }
         if (presentThread.joinable()) {
             presentThread.request_stop();
-            flipQueue->changed.notify_all();
+            flipQueue->changed.NotifyAll();
             presentThread.join();
         }
         SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER);
@@ -310,7 +327,7 @@ void VideoOutDriver::Shutdown() {
     }
     presentThread.request_stop();
     vblankThread.request_stop();
-    flipQueue->changed.notify_all();
+    flipQueue->changed.NotifyAll();
     presentThread.join();
     vblankThread.join();
     if (window.Handle() != nullptr) {
@@ -336,7 +353,7 @@ int VideoOutDriver::Open(int busType) {
     uint64_t generation = 1;
     if (previous) {
         std::lock_guard cfgLock(previous->mutex);
-        require(!previous->opened, "port already open");
+        if (previous->opened) return -1;
         require(previous->generation != std::numeric_limits<uint64_t>::max(), "port generation overflow");
         generation = previous->generation + 1;
     }
@@ -383,7 +400,7 @@ bool VideoOutDriver::close(int handle) {
     cfg->outputModeEvents.clear();
     cfg->vrrStatusEvents.clear();
     cfg->vblankCond.notify_all();
-    flipQueue->changed.notify_all();
+    flipQueue->changed.NotifyAll();
     return true;
 }
 
@@ -426,6 +443,24 @@ int VideoOutDriver::SubmitFlip(int handle, int index, int flipMode, int64_t flip
     return 0;
 }
 
+int VideoOutDriver::SubmitEopFlip(int handle, int index, int flipMode, int64_t flipArg, std::uint32_t* token) {
+    std::lock_guard lock(mutex);
+    if (handle <= 0 || handle >= VIDEO_OUT_NUM_MAX || !outputs[handle]) return VIDEO_OUT_ERROR_INVALID_HANDLE;
+    if (flipMode < VIDEO_OUT_FLIP_MODE_VSYNC || flipMode > 6) return VIDEO_OUT_ERROR_INVALID_VALUE;
+    if (index < VIDEO_OUT_BUFFER_INDEX_BLACK || index >= VIDEO_OUT_BUFFER_NUM_MAX) return VIDEO_OUT_ERROR_INVALID_INDEX;
+    const auto cfg = contexts[handle];
+    {
+        std::lock_guard cfgLock(cfg->mutex);
+        checkConfig(*cfg);
+        if (index >= 0 && !cfg->buffers[index].Occupied()) return VIDEO_OUT_ERROR_INVALID_INDEX;
+    }
+    // Upstream reserves the flip in its driver (AgcDriverReserveEopFlip) and the GPU's end-of-pipe
+    // event flips it; the AnyPS5 driver has no EOP flip reservation, so this fails loudly.
+    (void)flipArg;
+    (void)token;
+    throw std::runtime_error("sceVideoOutSubmitEopFlip: EOP flips are not implemented by this driver");
+}
+
 void VideoOutDriver::triggerEvents(VideoOutConfig& cfg, int eventKind, void* triggerData) {
     std::vector<EventRegistration>* events = nullptr;
     if (eventKind == VIDEO_OUT_EVENT_FLIP) events = &cfg.flipEvents;
@@ -444,12 +479,29 @@ void VideoOutDriver::triggerEvents(VideoOutConfig& cfg, int eventKind, void* tri
     }
 }
 
-void VideoOutDriver::vblankEnd() {
+bool VideoOutDriver::SupportsHighFrameRate() {
+    return GetDisplayRefreshRate() >= 120;
+}
+
+int VideoOutDriver::GetDisplayRefreshRate() {
+    return displayRefreshRate.load();
+}
+
+void VideoOutDriver::updateDisplayRefreshRate() {
+    const int display = SDL_GetWindowDisplayIndex(window.Handle());
+    if (display < 0) throw std::runtime_error(std::string("SDL_GetWindowDisplayIndex failed: ") + SDL_GetError());
+    SDL_DisplayMode mode{};
+    if (SDL_GetCurrentDisplayMode(display, &mode) != 0) throw std::runtime_error(std::string("SDL_GetCurrentDisplayMode failed: ") + SDL_GetError());
+    displayRefreshRate.store(mode.refresh_rate);
+}
+
+void VideoOutDriver::vblankEnd(std::uint64_t tick) {
     std::lock_guard lock(mutex);
     for (const auto& cfg : contexts) {
         if (!cfg) continue;
         std::lock_guard cfgLock(cfg->mutex);
         if (!cfg->opened || cfg->failure) continue;
+        if (cfg->outputMode != VIDEO_OUT_OUTPUT_MODE_119_88HZ && tick % 2 != 0) continue;
         require(cfg->vblankStatus.count != std::numeric_limits<uint64_t>::max(), "vblank counter overflow");
         ++cfg->preVblankStatus.count;
         cfg->preVblankStatus.processTime = sceKernelGetProcessTime();
@@ -474,6 +526,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
             req.ReleaseLocked();
             return;
         }
+        require(req.cfg->outputMode != VIDEO_OUT_OUTPUT_MODE_119_88HZ || SupportsHighFrameRate(), "display no longer supports 119.88 Hz output");
         require(req.ready && !req.terminal && req.generation == req.cfg->generation, "stale or incomplete flip request");
         const auto interval = static_cast<uint64_t>(req.flipRate + 1);
         require(req.cfg->lastFlipVblank <= std::numeric_limits<uint64_t>::max() - interval, "flip interval overflow");
@@ -535,6 +588,10 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     req.cfg->flipStatus.processTime = sceKernelGetProcessTime();
     req.cfg->flipStatus.processTimeCounter = sceKernelGetProcessTimeCounter();
     req.cfg->flipStatus.flipArg = req.flipArg;
+    // The replaced buffer's label drops to 0 (released). Upstream stores it through its driver's
+    // AgcDriverStoreGuestLabel, which the AnyPS5 driver does not have: a plain atomic store.
+    const auto previous = req.cfg->flipStatus.currentBuffer;
+    if (previous >= 0) std::atomic_ref(req.cfg->bufferLabels[previous]).store(0, std::memory_order_release);
     req.cfg->flipStatus.currentBuffer = req.index;
     req.cfg->width = req.width;
     req.cfg->height = req.height;
@@ -554,6 +611,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
     // and presentation share one device; a failure here is thrown from that call.
     try {
         window.Ensure(VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT);
+        updateDisplayRefreshRate();
         const auto extensions = windowExtensions(window.Handle());
         AgcDriverAttachWindow_nid_postfix({window.Handle(), extensions, &createWindowSurface, &windowDrawableSize, VIDEO_OUT_DEFAULT_WIDTH, VIDEO_OUT_DEFAULT_HEIGHT, nullptr});
     } catch (...) {
@@ -569,6 +627,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
     PadInput padInput;
     MouseInput mouseInput;
     KeyboardInput keyboardInput;
+    ImeTextInput imeTextInput;
     try {
 #if APS5_ENABLE_TIMING_LOG
         timingLog = std::make_unique<FrameTimingLog>();
@@ -593,12 +652,15 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 if (window.Handle() != nullptr) {
                     mouseInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
                     keyboardInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
+                    imeTextInput.HandleEvent(event, SDL_GetWindowID(window.Handle()));
                 }
             }
             padInput.Update();
+            updateDisplayRefreshRate();
+            mouseInput.UpdateCapture(!padInput.MouseModeEnabled());
             {
                 std::unique_lock lock(flipQueue->mutex);
-                flipQueue->changed.wait_for(lock, std::chrono::milliseconds(10), [&] { return token.stop_requested() || flipQueue->failure || !flipQueue->requests.empty(); });
+                flipQueue->changed.WaitUntil(lock, TimedWait::DeadlineNanos(PRESENT_POLL_MICROS), [&] { return token.stop_requested() || flipQueue->failure || !flipQueue->requests.empty(); });
                 if (flipQueue->failure) std::rethrow_exception(flipQueue->failure);
                 if (token.stop_requested()) break;
                 if (!flipQueue->requests.empty()) {
@@ -611,6 +673,13 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 const auto dequeued = AgcDriver::FrameTiming::Clock::now();
                 current->timing->Add(current->timing->Get("VideoOut", "queue"), dequeued - current->queuedAt);
                 processFlip(*current);
+                int windowWidth = 0;
+                int windowHeight = 0;
+                if (window.Handle() != nullptr) SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight);
+                if (windowWidth > 0 && windowHeight > 0) {
+                    const auto presented = AgcDriver::ComputeContainSize_nid_postfix(current->width, current->height, static_cast<std::uint32_t>(windowWidth), static_cast<std::uint32_t>(windowHeight), true);
+                    mouseInput.SetPresentation(current->width, current->height, presented.width, presented.height);
+                }
                 const auto finished = AgcDriver::FrameTiming::Clock::now();
                 AgcDriver::FrameTiming::Clock::duration interval{};
                 {
@@ -627,7 +696,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
             }
             if (current) {
                 current.reset();
-                flipQueue->changed.notify_all();
+                flipQueue->changed.NotifyAll();
             }
         }
 #if APS5_ENABLE_TIMING_LOG
@@ -663,13 +732,13 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 cfg->vblankCond.notify_all();
             }
         }
-        flipQueue->changed.notify_all();
+        flipQueue->changed.NotifyAll();
         AgcDriverReportFailure_nid_postfix(error);
     }
 }
 
 void VideoOutDriver::vblankLoop(std::stop_token token) {
-    using Frame = std::chrono::duration<int64_t, std::ratio<1001, 60000>>;
+    using Frame = std::chrono::duration<int64_t, std::ratio<1001, 120000>>;
     const auto start = std::chrono::steady_clock::now();
     try {
         for (int64_t frame = 1; !token.stop_requested(); ++frame) {
@@ -680,7 +749,7 @@ void VideoOutDriver::vblankLoop(std::stop_token token) {
                 std::lock_guard lock(flipQueue->mutex);
                 if (token.stop_requested() || flipQueue->failure) return;
             }
-            vblankEnd();
+            vblankEnd(static_cast<std::uint64_t>(frame));
         }
     } catch (...) {
         AgcDriverReportFailure_nid_postfix(std::current_exception());

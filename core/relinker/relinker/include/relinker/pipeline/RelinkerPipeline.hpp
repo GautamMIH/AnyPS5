@@ -9,29 +9,28 @@
 #include <relinker/domain/ISysVDynamicSectionBuilder.hpp>
 #include <relinker/domain/IUnusedNidFilter.hpp>
 #include <memory>
+#include <domain/IProgress.hpp>
 
 namespace Relinker {
 
 class RelinkerPipeline : public IRelinkerPipeline {
 public:
-    RelinkerPipeline(std::shared_ptr<IElfReader> elfReader, std::shared_ptr<ISyscallScanner> syscallScanner, std::shared_ptr<ICallSiteResolver> callSiteResolver, std::shared_ptr<IValidationPolicy> validationPolicy, std::shared_ptr<ISysVDynamicSectionBuilder> dynamicSectionBuilder, std::shared_ptr<IUnusedNidFilter> unusedNidFilter, std::uint32_t unusedFilterLevel);
+    RelinkerPipeline(std::shared_ptr<IElfReader> elfReader, std::shared_ptr<ISyscallScanner> syscallScanner, std::shared_ptr<ICallSiteResolver> callSiteResolver, std::shared_ptr<IValidationPolicy> validationPolicy, std::shared_ptr<ISysVDynamicSectionBuilder> dynamicSectionBuilder, std::shared_ptr<IUnusedNidFilter> unusedNidFilter, std::uint32_t unusedFilterLevel, Domain::IProgress& progress);
 
-    RelinkResult Relink(const std::vector<std::uint8_t>& sourceElf) override;
+    RelinkResult Relink() override;
 
 private:
-    std::shared_ptr<IElfReader> _elfReader;
-    std::shared_ptr<ISyscallScanner> _syscallScanner;
-    std::shared_ptr<ICallSiteResolver> _callSiteResolver;
-    std::shared_ptr<IValidationPolicy> _validationPolicy;
-    std::shared_ptr<ISysVDynamicSectionBuilder> _dynamicSectionBuilder;
-    std::shared_ptr<IUnusedNidFilter> _unusedNidFilter;
+    std::shared_ptr<IElfReader> elfReader;
+    std::shared_ptr<ISyscallScanner> syscallScanner;
+    std::shared_ptr<ICallSiteResolver> callSiteResolver;
+    std::shared_ptr<IValidationPolicy> validationPolicy;
+    std::shared_ptr<ISysVDynamicSectionBuilder> dynamicSectionBuilder;
+    std::shared_ptr<IUnusedNidFilter> unusedNidFilter;
     std::uint32_t unusedFilterLevel;
+    Domain::IProgress& progress;
 
     // Standard ELF constants come from elfpatcher/general/ElfConstants.hpp.
     static constexpr std::uint16_t ET_SCE_DYNAMIC = 0xfe18;
-    static constexpr std::uint32_t R_X86_64_DTPMOD64 = 0x10;
-    static constexpr std::uint32_t R_X86_64_DTPOFF64 = 0x11;
-    static constexpr std::uint32_t R_X86_64_TPOFF64 = 0x12;
     static constexpr std::uint8_t STB_LOCAL = 0;
 
     static constexpr std::int64_t DT_SCE_NEEDED_MODULE_PS4 = 0x6100000f;
@@ -44,10 +43,9 @@ private:
     static constexpr std::uint64_t kSceTableNameMask = 0xffffffff;
     static constexpr char kDefaultBaseVersionName[] = "module";
 
-    static bool _isTlsRelocation(std::uint32_t type);
-    static bool _decodeSceIndex(const std::string& text, std::uint64_t& value);
+    static bool decodeSceIndex(const std::string& text, std::uint64_t& value);
 
-    static std::string _relocationTypeName(std::uint32_t type);
+    static std::string relocationTypeName(std::uint32_t type);
 };
 
 }

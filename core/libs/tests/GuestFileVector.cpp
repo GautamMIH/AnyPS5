@@ -16,6 +16,7 @@
 static int MakePipe(int* ends) { return ::_pipe(ends, 64, _O_BINARY); }
 static int ClosePipe(int end) { return ::_close(end); }
 #else
+#include <fcntl.h>
 #include <unistd.h>
 static int MakePipe(int* ends) { return ::pipe(ends); }
 static int ClosePipe(int end) { return ::close(end); }
@@ -33,6 +34,9 @@ std::int64_t APS5_VABI sceKernelRead(int, void*, std::size_t);
 std::int64_t APS5_VABI sceKernelPread(int, void*, std::size_t, std::int64_t);
 int APS5_VABI sceKernelLseek(int, std::int64_t, int);
 std::int64_t APS5_VABI sceKernelReadv(int, const GuestIovec*, int);
+std::int64_t APS5_VABI readv_nid_postfix(int, const GuestIovec*, int);
+std::int64_t APS5_VABI writev_nid_postfix(int, const GuestIovec*, int);
+int* APS5_VABI __error_nid_postfix();
 std::int64_t APS5_VABI sceKernelWritev(int, const GuestIovec*, int);
 std::int64_t APS5_VABI sceKernelPreadv(int, const GuestIovec*, int, std::int64_t);
 std::int64_t APS5_VABI sceKernelPwritev(int, const GuestIovec*, int, std::int64_t);
@@ -41,6 +45,8 @@ std::int64_t APS5_VABI pwritev_nid_postfix(int, const GuestIovec*, int, std::int
 int* APS5_VABI __error_nid_postfix();
 std::int64_t APS5_VABI sceKernelPread(int, void*, std::size_t, std::int64_t);
 std::int64_t APS5_VABI sceKernelPwrite(int, const void*, std::size_t, std::int64_t);
+std::int64_t APS5_VABI pread_nid_postfix(int, void*, std::size_t, std::int64_t);
+std::int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int, const void*, std::size_t, std::int64_t);
 int APS5_VABI sceKernelFtruncate(int, std::int64_t);
 }
 
@@ -56,6 +62,7 @@ static constexpr std::int64_t ErrorEbadf = static_cast<int>(0x80020009u);
 static constexpr std::int64_t ErrorEfault = static_cast<int>(0x8002000Eu);
 static constexpr std::int64_t ErrorEinval = static_cast<int>(0x80020016u);
 static constexpr std::int64_t ErrorEspipe = static_cast<int>(0x8002001Du);
+static constexpr std::int64_t ErrorEagain = static_cast<int>(0x80020023u);
 
 static std::string Contents(const std::filesystem::path& path) {
     std::ifstream stream(path, std::ios::binary);
@@ -81,6 +88,14 @@ int main() {
     Require(sceKernelReadv(file, reads, 2) == 3);
     Require(std::memcmp(first, "789", 3) == 0);
     Require(sceKernelReadv(file, reads, 2) == 0);
+    Require(sceKernelLseek(file, 0, 0) == 0);
+    Require(readv_nid_postfix(file, reads, 2) == 7);
+    Require(std::memcmp(first, "012", 3) == 0 && std::memcmp(second, "3456", 4) == 0);
+    Require(sceKernelLseek(file, 0, 1) == 7);
+    Require(readv_nid_postfix(file, reads, 2) == 3);
+    Require(readv_nid_postfix(file, reads, 2) == 0);
+    Require(readv_nid_postfix(file, reads, -1) == -1 && *__error_nid_postfix() == 22);
+    Require(writev_nid_postfix(file, nullptr, 1) == -1 && *__error_nid_postfix() == 14);
 
     Require(sceKernelPreadv(file, reads, 2, 1) == 7);
     Require(std::memcmp(first, "123", 3) == 0 && std::memcmp(second, "4567", 4) == 0);
@@ -97,6 +112,11 @@ int main() {
     Require(sceKernelLseek(file, 8, 0) == 8);
     Require(sceKernelWritev(file, writes, 2) == 5);
     Require(sceKernelLseek(file, 0, 1) == 13);
+    Require(Contents(path) == "01ABCDE7ABCDE");
+    GuestIovec swapped[2] = {{cde, 3}, {ab, 2}};
+    Require(sceKernelLseek(file, 8, 0) == 8 && writev_nid_postfix(file, swapped, 2) == 5);
+    Require(sceKernelLseek(file, 0, 1) == 13 && Contents(path) == "01ABCDE7CDEAB");
+    Require(sceKernelLseek(file, 8, 0) == 8 && writev_nid_postfix(file, writes, 2) == 5);
     Require(Contents(path) == "01ABCDE7ABCDE");
 
     GuestIovec gapped[3] = {{first, 2}, {nullptr, 0}, {second, 3}};
@@ -158,6 +178,14 @@ int main() {
     Require(sceKernelPwrite(file, nullptr, 1, 0) == ErrorEfault);
     Require(sceKernelPread(file, &byte, 1, -1) == ErrorEinval);
     Require(sceKernelPwrite(file, &byte, 1, -1) == ErrorEinval);
+    Require(pread_nid_postfix(file, &byte, 1, 3) == 1 && byte == 'B');
+    Require(pread_nid_postfix(file, nullptr, 0, 0) == 0);
+    Require(pread_nid_postfix(file, nullptr, 1, 0) == -1 && *__error_nid_postfix() == 14);
+    Require(pwrite_nid_disambig1_nid_postfix(file, nullptr, 1, 0) == -1 && *__error_nid_postfix() == 14);
+    Require(pread_nid_postfix(file, &byte, 1, -1) == -1 && *__error_nid_postfix() == 22);
+    Require(pwrite_nid_disambig1_nid_postfix(file, &byte, 1, -1) == -1 && *__error_nid_postfix() == 22);
+    Require(pread_nid_postfix(9999, &byte, 1, 0) == -1 && *__error_nid_postfix() == 9);
+    Require(pwrite_nid_disambig1_nid_postfix(9999, &byte, 1, 0) == -1 && *__error_nid_postfix() == 9);
     Require(sceKernelFtruncate(file, -1) == ErrorEinval);
     const int readOnly = sceKernelOpen(path.string().c_str(), SCE_KERNEL_O_RDONLY, 0);
     Require(readOnly >= 0);
@@ -167,6 +195,7 @@ int main() {
     const int writeOnly = sceKernelOpen(path.string().c_str(), SCE_KERNEL_O_WRONLY, 0);
     Require(writeOnly >= 0);
     Require(sceKernelPread(writeOnly, &byte, 1, 0) == ErrorEbadf);
+    Require(pread_nid_postfix(writeOnly, &byte, 1, 0) == -1 && *__error_nid_postfix() == 9);
     Require(sceKernelClose(writeOnly) == 0);
     Require(Contents(path) == "01ABCDE7ABCDE");
     Require(sceKernelFtruncate(file, 5) == 0);
@@ -188,8 +217,22 @@ int main() {
     Require(sceKernelWritev(ends[1], message, 1) == 3);
     Require(sceKernelReadv(ends[0], reads, 2) == 3);
     Require(std::memcmp(first, "xyz", 3) == 0);
+    char stuvw[] = "stuvw";
+    GuestIovec longer[1] = {{stuvw, 5}};
+    Require(sceKernelWritev(ends[1], longer, 1) == 5);
+    Require(sceKernelReadv(ends[0], reads, 2) == 5);
+    Require(std::memcmp(first, "stu", 3) == 0 && std::memcmp(second, "vw", 2) == 0);
+    Require(sceKernelWritev(ends[1], longer, 1) == 5 && sceKernelWritev(ends[1], longer, 1) == 5);
+    Require(readv_nid_postfix(ends[0], reads, 2) == 7);
+    Require(std::memcmp(first, "stu", 3) == 0 && std::memcmp(second, "vwst", 4) == 0);
+    Require(sceKernelReadv(ends[0], reads, 2) == 3 && std::memcmp(first, "uvw", 3) == 0);
     Require(sceKernelPreadv(ends[0], reads, 2, 0) == ErrorEspipe);
     Require(sceKernelPwritev(ends[1], message, 1, 0) == ErrorEspipe);
+#ifndef _WIN32
+    Require(::fcntl(ends[0], F_SETFL, ::fcntl(ends[0], F_GETFL) | O_NONBLOCK) == 0);
+    Require(sceKernelReadv(ends[0], reads, 2) == ErrorEagain);
+    Require(readv_nid_postfix(ends[0], reads, 2) == -1 && *__error_nid_postfix() == 35);
+#endif
     Require(ClosePipe(ends[0]) == 0 && ClosePipe(ends[1]) == 0);
 
     const int random = sceKernelOpen("/dev/urandom", 0, 0);

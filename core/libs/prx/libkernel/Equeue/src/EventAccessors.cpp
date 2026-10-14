@@ -4,11 +4,9 @@
 #include <string>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include "prx/libkernel/Equeue/Equeue.hpp"
 
 namespace {
-
-// kqueue reports a per-event failure by setting EV_ERROR and storing the errno in data.
-constexpr std::uint16_t kEventError = 0x4000;
 
 const KernelEvent& require(const KernelEvent* ev, const char* function) {
     if (ev == nullptr) throw std::runtime_error(std::string(function) + ": null event");
@@ -24,8 +22,9 @@ intptr_t APS5_VABI sceKernelGetEventData(const KernelEvent* ev) {
 }
 
 int APS5_VABI sceKernelGetEventError(const KernelEvent* ev) {
-    const auto& event = require(ev, __func__);
-    return (event.flags & kEventError) != 0 ? static_cast<int>(event.data) : 0;
+    // kqueue reports a per-event failure by setting EV_ERROR and storing the errno in data.
+    const KernelEvent& event = require(ev, __func__);
+    return (event.flags & EV_ERROR) != 0 ? static_cast<int>(event.data) : 0;
 }
 
 intptr_t APS5_VABI sceKernelGetEventFflags(const KernelEvent* ev) {

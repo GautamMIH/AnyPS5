@@ -45,7 +45,12 @@ struct PthreadCondattrPrivate {
     int _clockid;
 };
 
+// _tag tells a condition from other objects behind a Dinkumware _Cnd_t handle (the C++ runtime
+// rejects a mutex or a destroyed handle passed as a condition).
+inline constexpr std::uint32_t kPthreadCondTag = 0x434e4454u;
+
 struct PthreadCondPrivate {
+    std::uint32_t _tag = kPthreadCondTag;
     std::condition_variable_any _cv;
     int _clockid = 0;
 };
@@ -54,17 +59,17 @@ struct PthreadRwlockattrPrivate {
     int type = 0;
 };
 
+// A FreeBSD (libthr) rwlock: one writer or many readers; a waiting writer holds back new readers
+// unless the reader already holds a read lock (PthreadSync, Sync.cpp). Every field is guarded by
+// `mutex`. The host shared_timed_mutex preferred readers, so a writer could starve.
 struct PthreadRwlockPrivate {
-    // winpthreads initializes a static rwlock on first use and fails a concurrent first lock with
-    // EINVAL, which shared_timed_mutex ignores; it is initialized here (upstream 69063dc1e).
-    PthreadRwlockPrivate() {
-        lock.lock();
-        lock.unlock();
-    }
-    std::shared_timed_mutex lock;
-    std::atomic<std::thread::id> writer;
-    // Read locks held, so a held rwlock is not destroyed (upstream 718eb9cc3).
-    std::atomic<int> readers{0};
+    std::mutex mutex;
+    std::condition_variable readersWake;
+    std::condition_variable writersWake;
+    std::thread::id writer;
+    int readers = 0;
+    int waitingReaders = 0;
+    int waitingWriters = 0;
 };
 
 inline constexpr KernelCpumask kDefaultThreadAffinity = 0x3fff;
@@ -81,6 +86,10 @@ struct PthreadSemPrivate {
 inline constexpr std::uint32_t CPU_CLOCK_BIT = 0x80000000u;
 inline constexpr std::uint32_t CPU_CLOCK_PROCESS_BIT = 0x40000000u;
 inline constexpr std::uint32_t CPU_CLOCK_ID_MASK = ~(CPU_CLOCK_BIT | CPU_CLOCK_PROCESS_BIT);
+inline constexpr int GUEST_EXPLICIT_SCHED = 0;
+inline constexpr int GUEST_INHERIT_SCHED = 4;
+inline constexpr int GUEST_SCOPE_PROCESS = 0;
+inline constexpr int GUEST_SCOPE_SYSTEM = 2;
 
 // The guest CPU a host CPU stands for: the host CPU's position among the thread's affinity CPUs.
 inline int GuestCpuFromHost(unsigned hostCpu, KernelCpumask threadAffinity) {
@@ -98,8 +107,12 @@ struct PthreadAttrPrivate {
     int _schedpolicy;
     int _inheritsched;
     KernelCpumask affinity = kDefaultThreadAffinity;
+    // Set by scePthreadAttrSetaffinity/scePthreadAttrGet; otherwise a new thread inherits its
+    // creator's affinity.
+    bool affinityExplicit = false;
     std::size_t guardSize = 0x1000;
     int solosched = 0;
+    int scope = GUEST_SCOPE_SYSTEM;
 };
 
 inline std::atomic<std::int64_t> nextThreadId{100000};
@@ -123,11 +136,17 @@ struct PthreadPrivate {
     std::atomic<int> waitCount{0};
     std::atomic<KernelCpumask> affinity{kDefaultThreadAffinity};
     std::atomic<int> priority{kDefaultThreadPriority};
-    int policy = 1;
+    // Scheduling policy (SCHED_FIFO 1, SCHED_RR 3), inherited from the creator unless explicit.
+    std::atomic<int> policy{1};
+    int scope = GUEST_SCOPE_SYSTEM;
     int cpuClockThread = 0;
 #ifndef _WIN32
     clockid_t hostCpuClock{};
     bool hostCpuClockBound = false;
+    // Guest-arena mapping holding the host thread's stack (Linux), and the host thread id.
+    void* guestStack = nullptr;
+    std::size_t guestStackBytes = 0;
+    int hostTid = 0;
 #endif
     std::mutex nameLock;
     std::string name;
@@ -144,14 +163,20 @@ struct PthreadPrivate {
     // Our pthread condition variables (PthreadSync::CondWait) wait on a condition_variable_any.
     std::condition_variable_any* cancelWaitAny = nullptr;
 
-    PthreadPrivate();
+    explicit PthreadPrivate(const PthreadAttrPrivate* attr = nullptr);
     ~PthreadPrivate();
     PthreadPrivate(const PthreadPrivate&) = delete;
     PthreadPrivate& operator=(const PthreadPrivate&) = delete;
 };
 
 bool GuestThreadStack(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end);
+bool GuestThreadStackHostRangeOverlaps(std::uintptr_t start, std::uintptr_t end);
+void NoteGuestStackProtection(std::uintptr_t start, std::size_t bytes, bool readWrite);
 int GuestThreadCpuClockId(const PthreadPrivate* thread);
 bool GuestThreadCpuNanos(int cpuClockThread, std::uint64_t* nanos);
+void SetLiveGuestThreadsAffinity(KernelCpumask mask);
+KernelCpumask LiveGuestThreadsAffinity();
+bool GuestThreadIsLive(const PthreadPrivate* thread);
+bool LiveGuestThreadExists(std::int64_t tid);
 
 #endif

@@ -145,6 +145,8 @@ void ValidateValueReferences(const IrProgram& program, ShaderStageInputInfo inpu
                         }
                         case StageInputKind::Layer:
                         case StageInputKind::SampleId:
+                        case StageInputKind::RasterPrimitive:
+                        case StageInputKind::LayerExported:
                             if (program.Resources().stage != IrShaderStage::Pixel || component != 0u) {
                                 return Fail("typed pixel scalar input is invalid");
                             }
@@ -236,7 +238,7 @@ bool IsPixelParameterFlat(const ShaderPixelInputInfo& pixel, std::uint32_t input
 }
 
 void CollectPixelInputs(const IrProgram& program, const ShaderPixelInputInfo* pixel, ShaderInfo& info) {
-    if (pixel->HasPositionInput()) {
+    if (pixel->HasPositionInput() || pixel->psDitheredAlphaToCoverage) {
         AddInput(info, StageInputKind::FragCoord, 0, 4, "gl_FragCoord");
     }
     if (pixel->psFrontFace) {
@@ -259,7 +261,7 @@ void CollectPixelInputs(const IrProgram& program, const ShaderPixelInputInfo* pi
                 const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
                 const auto mode = inst->Argument(2)->Resolve()->ImmediateU32();
                 read[input] = true;
-                perVertex[input] = perVertex[input] || mode < 2u || !IsPixelParameterFlat(*pixel, input);
+                perVertex[input] = perVertex[input] || mode == 1u || !IsPixelParameterFlat(*pixel, input);
             } else if (inst->Opcode() == IrOpcode::GetInterpolationParameterF16) {
                 const auto input = inst->Argument(0)->Resolve()->ImmediateU32();
                 const bool high = inst->Argument(3)->Resolve()->ImmediateU32() != 0u;
@@ -388,6 +390,12 @@ void CollectBuiltinInputs(const IrProgram& program, ShaderInfo& info) {
                 case StageInputKind::DispatchThreadLimit:
                     info.dispatchThreadLimit = true;
                     break;
+                case StageInputKind::RasterPrimitive:
+                    info.rasterPrimitive = true;
+                    break;
+                case StageInputKind::LayerExported:
+                    info.layerExported = true;
+                    break;
                 case StageInputKind::PackedAncillary:
                 case StageInputKind::Parameter:
                     break;
@@ -462,7 +470,7 @@ void CollectOutputs(const IrProgram& program, ShaderStageInputInfo inputInfo, Sh
     }
 }
 
-std::uint8_t SamplerUseOf(IrOpcode opcode, std::uint32_t flags, IrShaderStage stage) {
+std::uint16_t SamplerUseOf(IrOpcode opcode, std::uint32_t flags, IrShaderStage stage) {
     if (opcode == IrOpcode::ImageGatherRaw) {
         return SamplerUseGather;
     }
@@ -470,6 +478,9 @@ std::uint8_t SamplerUseOf(IrOpcode opcode, std::uint32_t flags, IrShaderStage st
         return SamplerUseQueryLod;
     }
     std::uint32_t use = (flags & RdnaImageSampleFlagDerivative) != 0u ? SamplerUseGradient : ImageSampleExplicitLod(flags, stage) ? SamplerUseExplicitLod : SamplerUseImplicitLod;
+    if (use == SamplerUseExplicitLod && (flags & RdnaImageSampleFlagLevelZero) == 0u) {
+        use |= SamplerUseNonZeroLod;
+    }
     if ((flags & RdnaImageSampleFlagOffset) != 0u) {
         use |= SamplerUseOffset;
     }
@@ -479,7 +490,7 @@ std::uint8_t SamplerUseOf(IrOpcode opcode, std::uint32_t flags, IrShaderStage st
     if ((flags & RdnaImageSampleFlagAdjust) != 0u) {
         use |= SamplerUseAdjust;
     }
-    return static_cast<std::uint8_t>(use);
+    return static_cast<std::uint16_t>(use);
 }
 
 void CollectSamplerUses(const IrProgram& program, ShaderInfo& info) {
@@ -501,7 +512,7 @@ void CollectSamplerUses(const IrProgram& program, ShaderInfo& info) {
                 return Fail("image instruction references an unknown sampler");
             }
             auto& sampler = info.samplers[memory.sampler];
-            sampler.uses = static_cast<std::uint8_t>(sampler.uses | SamplerUseOf(inst->Opcode(), memory.imageSampleFlags, program.Resources().stage));
+            sampler.uses = static_cast<std::uint16_t>(sampler.uses | SamplerUseOf(inst->Opcode(), memory.imageSampleFlags, program.Resources().stage));
         }
     }
 }

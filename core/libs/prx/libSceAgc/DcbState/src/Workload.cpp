@@ -39,7 +39,7 @@ uint32_t* APS5_VABI sceAgcDcbSetWorkloadComplete(CommandBuffer* buf, uint32_t st
 }
 
 uint32_t* APS5_VABI sceAgcDcbSetWorkloadsActive(CommandBuffer* buf, uint32_t stream_id, const uint32_t* workload_ids, uint32_t workload_count) {
- if (buf == nullptr || workload_ids == nullptr || workload_count == 0 || workload_count > MaxActiveCount) return nullptr;
+ if (buf == nullptr || workload_ids == nullptr || workload_count == 0 || workload_count > MaxActiveCount || !AgcDriverWorkloadStreamRegistered_nid_postfix(stream_id)) return nullptr;
  std::uint64_t mask = 0;
  for (std::uint32_t index = 0; index < workload_count; ++index) {
   const auto id = workload_ids[index];
@@ -48,12 +48,17 @@ uint32_t* APS5_VABI sceAgcDcbSetWorkloadsActive(CommandBuffer* buf, uint32_t str
   if ((mask & bit) != 0) return nullptr;
   mask |= bit;
  }
- if (!AgcDriverWorkloadStreamRegistered_nid_postfix(stream_id)) return nullptr;
  auto* packet = NewPacket(buf, ActivePacketWords, __func__);
  packet[1] = stream_id;
  packet[2] = static_cast<std::uint32_t>(mask);
  packet[3] = static_cast<std::uint32_t>(mask >> 32);
  return packet;
+}
+
+uint32_t* APS5_VABI sceAgcDcbSetWorkloadStreamInactive(CommandBuffer* buf, uint32_t streamId) {
+ if (buf == nullptr || !AgcDriverWorkloadStreamRegistered_nid_postfix(streamId)) return nullptr;
+ NotImplemented_nid_no_patch(__func__);
+ return nullptr;
 }
 
 }

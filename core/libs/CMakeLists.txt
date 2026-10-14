@@ -9,6 +9,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
+if(APPLE)
+    set(ANYPS5_PRX_RPATH "@loader_path")
+else()
+    set(ANYPS5_PRX_RPATH "$ORIGIN")
+endif()
+
 add_executable(nid_patcher
         ${CMAKE_CURRENT_SOURCE_DIR}/nid/src/Sha1.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/nid/src/NidCompute.cpp
@@ -25,7 +31,14 @@ target_include_directories(nid_patcher PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nid/i
 target_compile_features(nid_patcher PRIVATE cxx_std_20)
 
 if(MINGW)
-    target_link_options(nid_patcher PRIVATE -static -static-libgcc -static-libstdc++)
+    target_link_options(nid_patcher PRIVATE -municode -static -static-libgcc -static-libstdc++)
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS -fno-asynchronous-unwind-tables)
+    check_cxx_source_compiles("#ifdef __USING_SJLJ_EXCEPTIONS__\n#error\n#endif\nint main() { return 0; }" ANYPS5_MINGW_DWARF_EXCEPTIONS)
+    unset(CMAKE_REQUIRED_FLAGS)
+    if(NOT ANYPS5_MINGW_DWARF_EXCEPTIONS)
+        message(FATAL_ERROR "${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION} selects SjLj exceptions with -fno-asynchronous-unwind-tables; the libraries need DWARF unwinding. Use the MinGW-w64 toolchain listed in docs/dev/BUILD.md.")
+    endif()
     add_compile_options(-fno-asynchronous-unwind-tables)
 endif()
 
@@ -53,6 +66,10 @@ set(LIBS_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 add_subdirectory(${LIBC_DIR} ${CMAKE_CURRENT_BINARY_DIR}/prx/libc)
 target_include_directories(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 configure_windows_unwind(libc)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(libc PRIVATE LINKER:-z,now)
+    target_link_options(libc INTERFACE LINKER:--no-as-needed)
+endif()
 
 set(UNPATCHED_DIR ${CMAKE_CURRENT_BINARY_DIR}/libs/unpatched)
 set(PATCHED_DIR ${CMAKE_CURRENT_BINARY_DIR}/libs)
@@ -67,7 +84,7 @@ set_target_properties(libc PROPERTIES
         LIBRARY_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
         ARCHIVE_OUTPUT_DIRECTORY ${IMPLIB_DIR}
         BUILD_WITH_INSTALL_RPATH ON
-        INSTALL_RPATH "$ORIGIN"
+        INSTALL_RPATH "${ANYPS5_PRX_RPATH}"
 )
 
 set(LIBC_UNPATCHED ${UNPATCHED_DIR}/libc.prx)
@@ -100,9 +117,12 @@ foreach(LIB_DIR ${LIBS_DIRS})
         endif()
 
         if(LIB_NAME STREQUAL "libkernel")
-            target_link_libraries(${LIB_NAME} PRIVATE libc)
+            target_link_libraries(${LIB_NAME} PUBLIC libc)
         else()
-            target_link_libraries(${LIB_NAME} PRIVATE libkernel libc)
+            target_link_libraries(${LIB_NAME} PRIVATE libkernel PUBLIC libc)
+        endif()
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            target_link_options(${LIB_NAME} PRIVATE LINKER:-z,now)
         endif()
         if(WIN32 AND LIB_NAME STREQUAL "libSceNet")
             target_link_libraries(${LIB_NAME} PRIVATE ws2_32)
@@ -123,7 +143,7 @@ foreach(LIB_DIR ${LIBS_DIRS})
                 LIBRARY_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
                 ARCHIVE_OUTPUT_DIRECTORY ${IMPLIB_DIR}
                 BUILD_WITH_INSTALL_RPATH ON
-                INSTALL_RPATH "$ORIGIN"
+                INSTALL_RPATH "${ANYPS5_PRX_RPATH}"
         )
 
         set(UNPATCHED_FILE ${UNPATCHED_DIR}/${LIB_NAME}.prx)
@@ -175,41 +195,176 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND PATCHED_OUTPUTS ${MIMALLOC_PATCHED})
 endif()
 
+if(APS5_ENABLE_TRACY)
+    set_target_properties(TracyClient PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
+            LIBRARY_OUTPUT_DIRECTORY ${UNPATCHED_DIR}
+            ARCHIVE_OUTPUT_DIRECTORY ${IMPLIB_DIR}
+    )
+    set(TRACY_CLIENT_COPIED ${CMAKE_CURRENT_BINARY_DIR}/TracyClient.copied)
+    add_custom_command(
+            OUTPUT ${TRACY_CLIENT_COPIED}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${PATCHED_DIR}
+            COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:TracyClient> ${PATCHED_DIR}
+            COMMAND ${CMAKE_COMMAND} -E touch ${TRACY_CLIENT_COPIED}
+            DEPENDS TracyClient
+            COMMENT "Copying the Tracy client next to the patched libraries"
+    )
+    list(APPEND PATCHED_OUTPUTS ${TRACY_CLIENT_COPIED})
+endif()
+
 add_custom_target(libs DEPENDS ${PATCHED_OUTPUTS})
 
 if(BUILD_TESTING)
+    add_test_executable(guest_posix_scalar_io_tests tests/GuestPosixScalarIo.cpp)
+    target_include_directories(guest_posix_scalar_io_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_posix_scalar_io_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_posix_scalar_io_tests)
+    add_test(NAME guest_posix_scalar_io COMMAND guest_posix_scalar_io_tests)
+    if(WIN32)
+        set_tests_properties(guest_posix_scalar_io PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(nid_buffer_validation_tests nid/tests/BufferValidation.cpp)
+    target_include_directories(nid_buffer_validation_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nid/include)
+    target_compile_features(nid_buffer_validation_tests PRIVATE cxx_std_20)
+    if(MINGW)
+        target_compile_options(nid_buffer_validation_tests PRIVATE -fasynchronous-unwind-tables)
+    endif()
+    add_test(NAME nid_buffer_validation COMMAND nid_buffer_validation_tests)
+    set_tests_properties(nid_buffer_validation PROPERTIES TIMEOUT 10)
+
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
+        add_test(NAME nid_gnu_hash COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/nid/tests/test_gnu_hash.py $<TARGET_FILE:nid_patcher>)
         add_test(NAME nid_patcher_macho COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/nid/tests/test_macho_nids.py $<TARGET_FILE:nid_patcher>)
+        add_test(NAME nid_patcher_native_paths COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/nid/tests/test_native_paths.py $<TARGET_FILE:nid_patcher>)
+        set_tests_properties(nid_patcher_native_paths PROPERTIES TIMEOUT 20)
     endif()
     add_test_executable(patched_libraries_tests tests/PatchedLibraries.cpp)
     add_dependencies(patched_libraries_tests libs)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME nid_pe_references COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/nid/tests/test_pe_references.py $<TARGET_FILE:nid_patcher>)
+    endif()
     if(MINGW)
         target_compile_options(patched_libraries_tests PRIVATE -fasynchronous-unwind-tables)
         target_link_options(patched_libraries_tests PRIVATE -static -static-libgcc -static-libstdc++)
     endif()
     add_test(NAME patched_libraries COMMAND patched_libraries_tests ${PATCHED_DIR})
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME nid_elf_layout COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/nid/tests/test_elf_layout.py $<TARGET_FILE:nid_patcher>)
+    endif()
     add_test_executable(guest_kernel_sys_tests tests/GuestKernelSys.cpp)
     target_include_directories(guest_kernel_sys_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_kernel_sys_tests PRIVATE libkernel_sys libkernel libc)
     configure_windows_unwind(guest_kernel_sys_tests)
     add_test(NAME guest_kernel_sys COMMAND guest_kernel_sys_tests)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME nid_verneed COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/nid/tests/test_verneed.py $<TARGET_FILE:nid_patcher>)
+    endif()
     if(WIN32)
         set_tests_properties(guest_kernel_sys PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel_sys>")
     endif()
     # Upstream's tests/write_watch (macOS GuestWriteWatch backend) is not built: GuestWriteWatch is
-    # replaced by GuestMemoryTracking here.
+    # replaced by GuestMemoryTracking here. Upstream's windows_write_watch (tests/WindowsWriteWatch.cpp)
+    # is not built either: it tests prx/libc/include/WindowsMappings.hpp, which our memory model drops.
+    if(WIN32)
+        add_test_executable(undeliverable_host_exception_tests tests/UndeliverableHostException.cpp)
+        add_dependencies(undeliverable_host_exception_tests libc)
+        add_test(NAME undeliverable_host_exception COMMAND undeliverable_host_exception_tests $<TARGET_FILE:libc>)
+        set_tests_properties(undeliverable_host_exception PROPERTIES
+            PASS_REGULAR_EXPRESSION "C\\+\\+ exception St9bad_alloc raised on thread [0-9]+ cannot be delivered: 0x[0-9a-f]+ undeliverable_host_exception_tests\\.exe\\+0x[0-9a-f]+ has no unwind data")
+    endif()
 
     add_test_executable(guest_offline_imports_tests tests/GuestOfflineImports.cpp)
     target_include_directories(guest_offline_imports_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_offline_imports_tests PRIVATE libSceHttp libSceNpEntitlementAccess libSceRudp libc)
     configure_windows_unwind(guest_offline_imports_tests)
     add_test(NAME guest_offline_imports COMMAND guest_offline_imports_tests)
+    if(Python3_Interpreter_FOUND)
+        add_test(NAME nid_shared_strings COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/nid/tests/test_shared_strings.py $<TARGET_FILE:nid_patcher>)
+    endif()
     if(WIN32)
         set_tests_properties(guest_offline_imports PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceHttp>")
+    endif()
+
+    add_test_executable(guest_signin_dialog_tests tests/GuestSigninDialog.cpp)
+    target_include_directories(guest_signin_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_signin_dialog_tests PRIVATE libSceSigninDialog libc)
+    configure_windows_unwind(guest_signin_dialog_tests)
+    add_test(NAME guest_signin_dialog COMMAND guest_signin_dialog_tests)
+    if(WIN32)
+        set_tests_properties(guest_signin_dialog PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSigninDialog>")
+    endif()
+
+    add_test_executable(guest_netctl_ap_dialog_tests tests/GuestNetCtlApDialog.cpp)
+    target_include_directories(guest_netctl_ap_dialog_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_netctl_ap_dialog_tests PRIVATE libSceNetCtlApDialog libc)
+    configure_windows_unwind(guest_netctl_ap_dialog_tests)
+    add_test(NAME guest_netctl_ap_dialog COMMAND guest_netctl_ap_dialog_tests)
+    if(WIN32)
+        set_tests_properties(guest_netctl_ap_dialog PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNetCtlApDialog>")
+    endif()
+
+    add_test_executable(guest_np_auth_tests tests/GuestNpAuth.cpp)
+    target_include_directories(guest_np_auth_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_np_auth_tests PRIVATE libSceNpAuth libc)
+    configure_windows_unwind(guest_np_auth_tests)
+    add_test(NAME guest_np_auth COMMAND guest_np_auth_tests)
+    if(WIN32)
+        set_tests_properties(guest_np_auth PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceNpAuth>")
+    endif()
+
+    add_test_executable(guest_rudp_status_tests tests/GuestRudpStatus.cpp)
+    target_include_directories(guest_rudp_status_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_rudp_status_tests PRIVATE libSceRudp libc)
+    configure_windows_unwind(guest_rudp_status_tests)
+    add_test(NAME guest_rudp_status COMMAND guest_rudp_status_tests)
+    if(WIN32)
+        set_tests_properties(guest_rudp_status PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
+    endif()
+
+    add_test_executable(guest_rudp_context_queries_tests tests/GuestRudpContextQueries.cpp)
+    target_include_directories(guest_rudp_context_queries_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_rudp_context_queries_tests PRIVATE libSceRudp libc)
+    configure_windows_unwind(guest_rudp_context_queries_tests)
+    add_test(NAME guest_rudp_context_queries COMMAND guest_rudp_context_queries_tests)
+    if(WIN32)
+        set_tests_properties(guest_rudp_context_queries PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
+    endif()
+
+    add_test_executable(guest_rudp_pump_tests tests/GuestRudpPump.cpp)
+    target_include_directories(guest_rudp_pump_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_rudp_pump_tests PRIVATE libSceRudp libc)
+    configure_windows_unwind(guest_rudp_pump_tests)
+    add_test(NAME guest_rudp_pump COMMAND guest_rudp_pump_tests)
+    if(WIN32)
+        set_tests_properties(guest_rudp_pump PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
+    endif()
+
+    add_test_executable(guest_memory_pool_stats_tests tests/GuestMemoryPoolStats.cpp)
+    target_include_directories(guest_memory_pool_stats_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_memory_pool_stats_tests PRIVATE libSceSsl libSceHttp2 libSceNet libkernel libc)
+    configure_windows_unwind(guest_memory_pool_stats_tests)
+    add_test(NAME guest_memory_pool_stats COMMAND guest_memory_pool_stats_tests)
+    if(WIN32)
+        set_tests_properties(guest_memory_pool_stats PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSsl>")
     endif()
 
     add_test_executable(guest_system_gesture_tests tests/GuestSystemGesture.cpp)
@@ -279,7 +434,7 @@ if(BUILD_TESTING)
             else()
                 add_test_executable(${driverTest}_tests tests/GuestRenderingWait.cpp)
             endif()
-            target_include_directories(${driverTest}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+            target_include_directories(${driverTest}_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
             target_link_libraries(${driverTest}_tests PRIVATE libSceAgcDriver libc)
             configure_windows_unwind(${driverTest}_tests)
             add_test(NAME ${driverTest} COMMAND ${driverTest}_tests)
@@ -316,6 +471,11 @@ if(BUILD_TESTING)
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
         endif()
     endif()
+    if(MINGW)
+        add_test(NAME prx_thread_local_destructors COMMAND ${CMAKE_COMMAND} -DNM=${CMAKE_NM} -DOBJDUMP=${CMAKE_OBJDUMP}
+            -DMODULES=$<TARGET_FILE_DIR:libc> -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/ThreadLocalDestructors.cmake)
+        set_tests_properties(prx_thread_local_destructors PROPERTIES TIMEOUT 300)
+    endif()
 
     add_test_executable(savedata_core_write_replacement_tests tests/SaveDataWriteReplacement.cpp)
     target_include_directories(savedata_core_write_replacement_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -335,6 +495,16 @@ if(BUILD_TESTING)
     configure_windows_unwind(savedata_replace_file_failure_tests)
     add_test(NAME savedata_replace_file_failure COMMAND savedata_replace_file_failure_tests)
 
+    add_test_executable(guest_crt_tests tests/GuestCrt.cpp)
+    target_include_directories(guest_crt_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_crt_tests PRIVATE libSceAmpr libc)
+    configure_windows_unwind(guest_crt_tests)
+    add_test(NAME guest_crt COMMAND guest_crt_tests)
+    if(WIN32)
+        set_tests_properties(guest_crt PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAmpr>")
+    endif()
+
     if(MINGW)
         target_compile_options(savedata_core_write_replacement_tests PRIVATE -fasynchronous-unwind-tables)
         target_compile_options(savedata_native_write_replacement_tests PRIVATE -fasynchronous-unwind-tables)
@@ -347,6 +517,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSaveData.native>")
     endif()
 
+    add_test_executable(guest_ppsa01530_exports_tests tests/GuestPPSA01530Exports.cpp)
+    target_include_directories(guest_ppsa01530_exports_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_ppsa01530_exports_tests PRIVATE libkernel libSceJson2 libSceNet libScePad libc)
+    configure_windows_unwind(guest_ppsa01530_exports_tests)
+    add_test(NAME guest_ppsa01530_exports COMMAND guest_ppsa01530_exports_tests)
+    if(WIN32)
+        set_tests_properties(guest_ppsa01530_exports PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+
     add_test_executable(guest_posix_random_tests tests/GuestPosixRandom.cpp)
     target_include_directories(guest_posix_random_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(guest_posix_random_tests PRIVATE libScePosixForWebKit)
@@ -355,6 +535,26 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(guest_posix_random PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libScePosixForWebKit>")
+    endif()
+
+    add_test_executable(MemoryPoolTest
+        tests/MemoryPoolTest.cpp
+        prx/libkernel/DirectMemory/MemoryPool.cpp
+    )
+    target_include_directories(MemoryPoolTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    if(MINGW)
+        target_compile_options(MemoryPoolTest PRIVATE -fasynchronous-unwind-tables)
+    endif()
+    add_test(NAME MemoryPoolTest COMMAND MemoryPoolTest)
+
+    add_test_executable(guest_acm_tests tests/GuestAcm.cpp)
+    target_include_directories(guest_acm_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_acm_tests PRIVATE libSceAcm libc)
+    configure_windows_unwind(guest_acm_tests)
+    add_test(NAME guest_acm COMMAND guest_acm_tests)
+    if(WIN32)
+        set_tests_properties(guest_acm PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAcm>")
     endif()
 endif()
 

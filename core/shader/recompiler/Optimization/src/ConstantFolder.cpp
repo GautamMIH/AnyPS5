@@ -321,9 +321,25 @@ std::optional<std::size_t> packedField(std::uint32_t offset, std::uint32_t count
     return static_cast<std::size_t>(field - packedFields.begin());
 }
 
+bool isPackedAncillary(const IrValue& builtin) {
+    auto& kind = resolveArg(builtin, 0);
+    return isImmediate(kind, IrType::U32) && static_cast<StageInputKind>(kind.ImmediateU32()) == StageInputKind::PackedAncillary;
+}
+
+IrValue& insertBefore(IrProgram& program, IrValue& next, IrOpcode opcode, IrValue& lhs, IrValue& rhs) {
+    IrValue& created = program.CreateValue(opcode, IrType::U32);
+    created.AddArgument(&lhs);
+    created.AddArgument(&rhs);
+    next.Parent()->InsertInstructionBefore(&next, &created);
+    return created;
+}
+
+IrValue& insertBuiltin(IrProgram& program, IrBuilder& builder, IrValue& next, StageInputKind kind) {
+    return insertBefore(program, next, IrOpcode::GetBuiltin, builder.Constant(static_cast<std::uint32_t>(kind)), builder.Constant(0u));
+}
+
 void lowerPackedAncillary(IrProgram& program, IrBuilder& builder, IrValue& ancillary) {
-    auto& kind = resolveArg(ancillary, 0);
-    if (!isImmediate(kind, IrType::U32) || static_cast<StageInputKind>(kind.ImmediateU32()) != StageInputKind::PackedAncillary) {
+    if (!isPackedAncillary(ancillary)) {
         return;
     }
     const std::vector<IrUse> uses = ancillary.OperandUses();
@@ -368,22 +384,14 @@ void lowerPackedAncillary(IrProgram& program, IrBuilder& builder, IrValue& ancil
     }
     std::array<IrValue*, 2> fields {};
     const auto field = [&](std::size_t index) -> IrValue& {
+        if (fields[index] == nullptr && index == 1u) fields[index] = &insertBefore(program, ancillary, IrOpcode::IMul32, insertBuiltin(program, builder, ancillary, StageInputKind::Layer), insertBuiltin(program, builder, ancillary, StageInputKind::LayerExported));
         if (fields[index] == nullptr) {
-            const auto builtin = index == 0u ? StageInputKind::SampleId : StageInputKind::Layer;
-            IrValue& created = program.CreateValue(IrOpcode::GetBuiltin, IrType::U32);
-            created.AddArgument(&builder.Constant(static_cast<std::uint32_t>(builtin)));
-            created.AddArgument(&builder.Constant(0u));
-            ancillary.Parent()->InsertInstructionBefore(&ancillary, &created);
-            fields[index] = &created;
+            fields[index] = &insertBuiltin(program, builder, ancillary, StageInputKind::SampleId);
         }
         return *fields[index];
     };
     const auto emit = [&](IrOpcode opcode, IrValue& lhs, IrValue& rhs) -> IrValue& {
-        IrValue& created = program.CreateValue(opcode, IrType::U32);
-        created.AddArgument(&lhs);
-        created.AddArgument(&rhs);
-        ancillary.Parent()->InsertInstructionBefore(&ancillary, &created);
-        return created;
+        return insertBefore(program, ancillary, opcode, lhs, rhs);
     };
     if (!forwarded.empty()) {
         IrValue& sample = emit(IrOpcode::ShiftLeftLogical32, field(0u), builder.Constant(8u));
@@ -475,10 +483,6 @@ bool ConstantFolder::tryFoldValue(IrProgram& program, IrValue& value) const {
                 replaceWith(value, builder.Constant(static_cast<std::uint32_t>(operand.ImmediateU16())));
                 return true;
             }
-            if (operand.Opcode() == IrOpcode::ConvertU16U32) {
-                replaceWith(value, *operand.Argument(0));
-                return true;
-            }
             return false;
         }
         case IrOpcode::ConvertU8U32: {
@@ -493,10 +497,6 @@ bool ConstantFolder::tryFoldValue(IrProgram& program, IrValue& value) const {
             auto& operand = resolveArg(value, 0);
             if (isImmediate(operand, IrType::U8)) {
                 replaceWith(value, builder.Constant(static_cast<std::uint32_t>(operand.ImmediateU8())));
-                return true;
-            }
-            if (operand.Opcode() == IrOpcode::ConvertU8U32) {
-                replaceWith(value, *operand.Argument(0));
                 return true;
             }
             return false;
@@ -701,6 +701,19 @@ bool ConstantFolder::tryFoldValue(IrProgram& program, IrValue& value) const {
             replaceWith(value, builder.Constant(static_cast<std::uint32_t>(std::popcount(operand.ImmediateU64()))));
             return true;
         }
+        case IrOpcode::BitReverse32: {
+            auto& operand = resolveArg(value, 0);
+            if (!isImmediate(operand, IrType::U32)) {
+                return false;
+            }
+            const std::uint32_t word = operand.ImmediateU32();
+            std::uint32_t reversed = 0;
+            for (std::uint32_t bit = 0; bit < 32; ++bit) {
+                reversed |= ((word >> bit) & 1u) << (31u - bit);
+            }
+            replaceWith(value, builder.Constant(reversed));
+            return true;
+        }
         case IrOpcode::SMin32:
         case IrOpcode::SMax32: {
             const auto opcode = value.Opcode();
@@ -831,6 +844,27 @@ void ConstantFolder::Fold(IrProgram& program, std::span<IrBlock* const> blocks) 
 
 void ConstantFolder::Fold(IrProgram& program) const {
     Fold(program, program.BlockOrder());
+}
+
+bool ConstantFolder::ComposePackedAncillary(IrProgram& program) const {
+    std::vector<IrValue*> words;
+    for (IrBlock* block : program.BlockOrder()) {
+        for (IrValue* inst : block->Instructions()) {
+            if (inst->Opcode() == IrOpcode::GetBuiltin && inst->HasUses() && isPackedAncillary(*inst)) {
+                words.push_back(inst);
+            }
+        }
+    }
+    IrBuilder builder(program);
+    for (IrValue* word : words) {
+        IrValue& primitive = insertBuiltin(program, builder, *word, StageInputKind::RasterPrimitive);
+        IrValue& sample = insertBefore(program, *word, IrOpcode::ShiftLeftLogical32, insertBuiltin(program, builder, *word, StageInputKind::SampleId), builder.Constant(8u));
+        IrValue& exportedLayer = insertBefore(program, *word, IrOpcode::IMul32, insertBuiltin(program, builder, *word, StageInputKind::Layer), insertBuiltin(program, builder, *word, StageInputKind::LayerExported));
+        IrValue& layer = insertBefore(program, *word, IrOpcode::ShiftLeftLogical32, exportedLayer, builder.Constant(16u));
+        IrValue& fields = insertBefore(program, *word, IrOpcode::BitwiseOr32, sample, layer);
+        word->ReplaceAllUsesWith(&insertBefore(program, *word, IrOpcode::BitwiseOr32, primitive, fields));
+    }
+    return !words.empty();
 }
 
 }

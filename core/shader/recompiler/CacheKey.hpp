@@ -50,6 +50,8 @@ public:
         appendMesh(key, request);
         appendTessellation(key, request);
         append(key, DebugProbeActive());
+        append(key, RayTracingStrict());
+        append(key, RayTracingMiss());
     }
 
     // A hash over every field Build appends except the code, the target and the probe flag: the
@@ -127,6 +129,10 @@ private:
         append(key, tessellation != nullptr);
         if (tessellation == nullptr) return;
         for (const auto value : {tessellation->inputControlPoints, tessellation->outputControlPoints, tessellation->domain, tessellation->partitioning, tessellation->outputTopology}) append(key, value);
+        if (request.shader.stage == ShaderStage::Local) return;
+        append(key, tessellation->patchesPerGroup);
+        append(key, tessellation->primitiveGroupSize);
+        append(key, tessellation->breakAtInstance);
     }
 
     template<typename TValue>
@@ -197,7 +203,9 @@ private:
         append(key, value.executeOnNoop);
         append(key, value.conservativeZExport);
         append(key, value.orderedPixelShader);
+        append(key, value.alphaToCoverage);
         append(key, value.stencilRefExportEnable);
+        append(key, value.ditheredAlphaToCoverage);
         append(key, value.targetOutputMode);
     }
 
@@ -263,6 +271,11 @@ private:
         append(key, value.narrowSubgroupClock);
         append(key, value.hostFloatSemantics);
         append(key, value.storageBufferOffsetAlignment);
+        append(key, value.float64DenormPreserve);
+        append(key, value.registrationModules);
+        append(key, value.registrationWordLimit);
+        append(key, value.vertexSubgroups);
+        append(key, value.float16DenormPreserve);
     }
 };
 

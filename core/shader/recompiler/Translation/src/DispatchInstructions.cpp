@@ -27,6 +27,7 @@ void TranslationContext::TranslateInstruction(const RdnaInstruction& decoded) {
     if (instruction.op == RdnaOpcode::Unsupported) {
         throw std::runtime_error(instruction.unsupportedReason.empty() ? "unsupported decoded instruction at pc " + std::to_string(instruction.programCounter) : std::string(instruction.unsupportedReason));
     }
+    checkRoundingUse(instruction);
     // With host float semantics the device's own denormal handling stands in for the flush.
     f32DenormalFlush = hostFloatSemantics ? 0u : f32DenormalFlushFor(instruction);
     bool translated = false;

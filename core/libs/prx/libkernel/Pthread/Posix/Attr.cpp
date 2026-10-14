@@ -4,6 +4,8 @@
 #include "prx/libc/include/General.hpp"
 #include "../include/Pthread.hpp"
 #include "../include/PthreadSync.hpp"
+#include <stdexcept>
+#include <string>
 
 namespace {
 
@@ -62,6 +64,25 @@ int APS5_VABI pthread_attr_getschedpolicy_nid_postfix(const PthreadAttr* attr, i
     return 0;
 }
 
+int APS5_VABI pthread_attr_getinheritsched_nid_postfix(const PthreadAttr* attr, int* inherit_sched) {
+    if (!attr || !*attr) return PthreadSync::kErrorInvalid;
+    if (!inherit_sched) throw std::runtime_error(std::string(__func__) + ": null output");
+    *inherit_sched = (*attr)->_inheritsched;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_getscope_nid_postfix(const PthreadAttr* attr, int* scope) {
+    if (!attr || !*attr || !scope) return PthreadSync::kErrorInvalid;
+    *scope = (*attr)->scope;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_getstackaddr_nid_postfix(const PthreadAttr* __restrict attr, void** __restrict stack_addr) {
+    if (!attr || !*attr || !stack_addr) return PthreadSync::kErrorInvalid;
+    *stack_addr = (*attr)->stackAddress;
+    return 0;
+}
+
 int APS5_VABI pthread_attr_getstack_nid_postfix(const PthreadAttr* __restrict attr, void** __restrict stack_addr, size_t* __restrict stack_size) {
     return posixFromSce(scePthreadAttrGetstack(attr, stack_addr, stack_size));
 }
@@ -83,12 +104,24 @@ int APS5_VABI pthread_attr_setinheritsched_nid_postfix(PthreadAttr* attr, int in
     return posixFromSce(scePthreadAttrSetinheritsched(attr, inherit_sched));
 }
 
+// The POSIX setters keep their own checks: scePthreadAttrSetschedparam/Setschedpolicy reject
+// priorities and policies (EOPNOTSUPP) that the POSIX entry points accept.
 int APS5_VABI pthread_attr_setschedparam_nid_postfix(PthreadAttr* attr, const KernelSchedParam* param) {
-    return posixFromSce(scePthreadAttrSetschedparam(attr, param));
+    if (!attr || !*attr || !param) return PthreadSync::kErrorInvalid;
+    (*attr)->_schedpriority = param->sched_priority;
+    return 0;
 }
 
 int APS5_VABI pthread_attr_setschedpolicy_nid_postfix(PthreadAttr* attr, int policy) {
-    return posixFromSce(scePthreadAttrSetschedpolicy(attr, policy));
+    if (!attr || !*attr) return PthreadSync::kErrorInvalid;
+    (*attr)->_schedpolicy = policy;
+    return 0;
+}
+
+int APS5_VABI pthread_attr_setscope_nid_postfix(PthreadAttr* attr, int scope) {
+    if (!attr || !*attr || (scope != GUEST_SCOPE_PROCESS && scope != GUEST_SCOPE_SYSTEM)) return PthreadSync::kErrorInvalid;
+    (*attr)->scope = scope;
+    return 0;
 }
 
 int APS5_VABI pthread_attr_setstacksize_nid_postfix(PthreadAttr* attr, size_t stack_size) {

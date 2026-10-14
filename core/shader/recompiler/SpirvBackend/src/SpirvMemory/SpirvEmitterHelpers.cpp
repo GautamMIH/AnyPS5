@@ -294,6 +294,8 @@ void DefineInputs(SpirvEmitterState& state) {
     }
 }
 
+constexpr std::uint32_t MaxClipDistances = 8u;
+
 void DefineOutputs(SpirvEmitterState& state) {
     state.outputs.reserve(state.program.Info().outputs.size());
     std::uint32_t clipDistanceCount = 0u;
@@ -309,6 +311,18 @@ void DefineOutputs(SpirvEmitterState& state) {
     if (state.program.Resources().stage == IrShaderStage::Mesh) {
         DefineMeshOutputs(state);
         return;
+    }
+    const auto stage = state.program.Resources().stage;
+    const bool exportsPosition = std::ranges::any_of(state.outputs, [](const SpirvOutputBinding& output) { return output.kind == StageOutputKind::Position; });
+    if (exportsPosition && (stage == IrShaderStage::Vertex || stage == IrShaderStage::TessellationEvaluation)) {
+        if (std::ranges::find(state.supportedCapabilities, spv::CapabilityClipDistance) == state.supportedCapabilities.end()) {
+            FailEmit("clipping a primitive with an all-zero clip position needs shaderClipDistance on the target device");
+        }
+        state.zeroPositionClipIndex = clipDistanceCount;
+        clipDistanceCount += 1u;
+        if (clipDistanceCount > MaxClipDistances) {
+            FailEmit("guest clip distances plus the all-zero clip position distance exceed " + std::to_string(MaxClipDistances) + " clip distances");
+        }
     }
     const auto BuiltIn = [&](std::uint32_t& variable, std::uint32_t type, const char* name, std::uint32_t builtin) {
         if (variable == 0u) {
@@ -361,6 +375,13 @@ void DefineOutputs(SpirvEmitterState& state) {
         }
         }
     }
+    if (state.zeroPositionClipIndex) {
+        BuiltIn(state.clipDistanceVariable, F32ArrayType(state, clipDistanceCount), "gl_ClipDistance", spv::BuiltInClipDistance);
+    }
+    if (state.program.Resources().stage == IrShaderStage::Pixel && state.inputInfo.pixel != nullptr && state.inputInfo.pixel->psAlphaToCoverage) {
+        if (state.inputInfo.pixel->psSampleMaskExportEnable) throw std::runtime_error("alpha-to-coverage with a sample-mask export is unsupported");
+        BuiltIn(state.sampleMaskVariable, SampleMaskArrayType(state), "gl_SampleMask", spv::BuiltInSampleMask);
+    }
 }
 
 void DefineDescriptors(SpirvEmitterState& state) {
@@ -368,7 +389,7 @@ void DefineDescriptors(SpirvEmitterState& state) {
     const IrShaderStage stage = state.program.Resources().stage;
     // A mesh program reads its draw parameters (MeshDrawParameter) from the push block even when
     // its own data does not fit there.
-    if (layout.UsesPushData() || stage == IrShaderStage::Mesh) {
+    if (layout.UsesPushData() || stage == IrShaderStage::Mesh || stage == IrShaderStage::TessellationControl) {
         const auto type = PushConstantBlockType(state);
         state.pushConstantVariable = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassPushConstant, type), spv::StorageClassPushConstant);
         state.module.AddName(type, "BufferResource");
@@ -378,14 +399,14 @@ void DefineDescriptors(SpirvEmitterState& state) {
         const auto Define = [&](std::uint32_t type, const char* name, std::uint32_t storage = spv::StorageClassStorageBuffer) {
             const auto variable = state.module.DefineGlobalVariable(TypePointer(state, storage, type), storage);
             state.module.AddName(variable, name);
-            state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationDescriptorSet, 0u);
+            state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationDescriptorSet, state.fragmentDescriptorSet && stage == IrShaderStage::Pixel ? RuntimeAbi::FragmentDescriptorSet : RuntimeAbi::DescriptorSet);
             state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBinding, NativeBinding(stage, binding.kind));
             return variable;
         };
         const auto ArrayType = [&](std::uint32_t type) {
             const bool heap = binding.kind == DescriptorBindingKind::Samplers || ImageBindingResourceClass(binding.kind) != ImageResourceClass::None;
             const auto count = static_cast<std::uint32_t>(binding.resources.size());
-            const auto length = heap ? state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::HeapCountBase + static_cast<std::uint32_t>(binding.kind), count) : ConstantU32(state, count);
+            const auto length = heap && !state.registrationModules ? state.module.SpecializationConstant(TypeU32(state), PipelineSpecialization::HeapCountBase + static_cast<std::uint32_t>(binding.kind), count) : ConstantU32(state, count);
             return state.module.Type(spv::OpTypeArray, type, length);
         };
         switch (binding.kind) {
@@ -423,6 +444,7 @@ void DefineDescriptors(SpirvEmitterState& state) {
             break;
         case DescriptorBindingKind::Gds:
             state.gdsVariable = Define(StorageBufferBlockType(state), "gds");
+            state.module.AddAnnotation(spv::OpDecorate, state.gdsVariable, spv::DecorationCoherent);
             break;
         default: {
             if (ImageBindingResourceClass(binding.kind) == ImageResourceClass::None) {

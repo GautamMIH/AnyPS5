@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <cstring>
 #include "prx/libc/include/MemoryBackingPlatform.hpp"
 #include <cerrno>
 #include <cstdio>
@@ -8,7 +9,9 @@
 #include <mutex>
 #include <stdexcept>
 #include <system_error>
+#include <algorithm>
 #include <array>
+#include <vector>
 #include <fcntl.h>
 #include <linux/fs.h>
 #include <linux/userfaultfd.h>
@@ -385,6 +388,52 @@ void MapView(std::uint64_t address, std::size_t bytes, const Segment& segment, s
 
 void UnmapView(std::uint64_t address, std::size_t bytes) {
     reserve(address, bytes);
+}
+
+Segment AdoptSegment(std::uintptr_t object, std::size_t bytes) {
+    if (bytes == 0 || bytes > static_cast<std::size_t>(std::numeric_limits<off_t>::max())) throw std::overflow_error("guest object segment size");
+    const int descriptor = fcntl(static_cast<int>(object), F_DUPFD_CLOEXEC, 0);
+    check(descriptor >= 0, "duplicate guest object descriptor");
+    // The alias may reach past the object's end (it is only touched where the object has bytes).
+    // An object opened read-only gets a read-only alias.
+    const int access = fcntl(descriptor, F_GETFL);
+    const int aliasProtection = access >= 0 && (access & O_ACCMODE) == O_RDWR ? PROT_READ | PROT_WRITE : PROT_READ;
+    void* alias = mmap(nullptr, bytes, aliasProtection, MAP_SHARED | MAP_NORESERVE, descriptor, 0);
+    if (alias == MAP_FAILED) {
+        const auto error = errno;
+        close(descriptor);
+        errno = error;
+        check(false, "mmap guest object alias");
+    }
+    return {static_cast<std::uintptr_t>(descriptor), alias, bytes};
+}
+
+void MapObjectView(std::uint64_t address, std::size_t bytes, const Segment& segment, std::uint64_t offset, int protection, bool privateCopy) {
+    if (offset > segment.bytes || bytes > segment.bytes - offset) throw std::out_of_range("guest view exceeds its segment");
+    checkMapping(mmap(reinterpret_cast<void*>(address), bytes, protection, (privateCopy ? MAP_PRIVATE : MAP_SHARED) | MAP_FIXED, static_cast<int>(segment.handle), static_cast<off_t>(offset)), "mmap guest object view", address, bytes);
+}
+
+void DiscardSegment(const Segment& segment, std::uint64_t offset, std::size_t bytes) {
+    if (bytes == 0) return;
+    if (offset > segment.bytes || bytes > segment.bytes - offset) throw std::out_of_range("guest segment discard exceeds its segment");
+    // Zeroed in place, never by punching a hole: the GPU imports guest memory with its pages pinned,
+    // and a punched hole gives the CPU fresh pages the GPU never sees (Hellboy then waited forever
+    // on a label and showed black frames). Pages never touched read as zero already and are left
+    // alone, so a large release does not allocate them.
+    auto* base = static_cast<unsigned char*>(segment.alias) + offset;
+    const auto pageBytes = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+    constexpr std::size_t kChunkPages = 4096;
+    std::vector<unsigned char> resident(kChunkPages);
+    for (std::size_t chunk = 0; chunk < bytes; chunk += kChunkPages * pageBytes) {
+        const auto chunkBytes = std::min(bytes - chunk, kChunkPages * pageBytes);
+        if (mincore(base + chunk, chunkBytes, resident.data()) != 0) {
+            std::memset(base + chunk, 0, chunkBytes);
+            continue;
+        }
+        for (std::size_t page = 0; page * pageBytes < chunkBytes; ++page) {
+            if ((resident[page] & 1u) != 0) std::memset(base + chunk + page * pageBytes, 0, std::min(pageBytes, chunkBytes - page * pageBytes));
+        }
+    }
 }
 
 void Protect(std::uint64_t address, std::size_t bytes, int protection) {

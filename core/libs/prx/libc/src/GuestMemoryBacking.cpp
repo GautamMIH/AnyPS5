@@ -33,6 +33,9 @@ struct SegmentHolder {
     Platform::Segment segment;
     std::uint64_t id;
     explicit SegmentHolder(std::size_t bytes) : segment(Platform::CreateSegment(bytes)), id(nextSegmentId++) { liveSegments().insert(id); }
+    // A host memory object (shared memory, a file, JIT memory) the area maps; the segment owns a
+    // duplicate of its handle.
+    explicit SegmentHolder(const Platform::Segment& adopted) : segment(adopted), id(nextSegmentId++) { liveSegments().insert(id); }
     ~SegmentHolder() {
         liveSegments().erase(id);
         Platform::DestroySegment(segment);
@@ -50,6 +53,11 @@ struct Record {
     bool noCoalesce;
     std::shared_ptr<SegmentHolder> segment;
     std::uint64_t offset;
+    // Host object views (Kind::Shared): a private copy-on-write view no longer shows its segment
+    // once written; maxProtection (-1 = any) bounds later protection changes (a shared view of an
+    // object opened read-only cannot become writable).
+    bool privateCopy = false;
+    int maxProtection = -1;
 };
 
 std::map<std::uint64_t, Record>& areas() {
@@ -240,7 +248,7 @@ const std::unordered_map<const SegmentHolder*, std::vector<SegmentPiece>>& segme
     if (built != areaChanges) {
         pieces->clear();
         for (const auto& [begin, record] : areas()) {
-            if (!committed(record.kind) || record.segment == nullptr) continue;
+            if (!committed(record.kind) || record.segment == nullptr || record.privateCopy) continue;
             (*pieces)[record.segment.get()].push_back({record.offset, record.offset + (record.end - begin), begin});
         }
         for (auto& [segment, list] : *pieces) std::sort(list.begin(), list.end(), [](const SegmentPiece& left, const SegmentPiece& right) { return left.first < right.first; });
@@ -321,11 +329,15 @@ void forEachPiece(std::uint64_t address, std::size_t bytes, TVisit&& visit) {
     }
 }
 
-}
+// The host memory object a Kind::Shared area shows.
+struct ObjectView {
+    std::uintptr_t object;
+    std::uint64_t offset;
+    bool privateCopy;
+    int maxProtection;
+};
 
-extern "C" {
-
-Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_t alignment, Kind kind, int protection, int flags, std::int64_t physical) {
+Status mapArea(void** address, std::size_t bytes, std::size_t alignment, Kind kind, int protection, int flags, std::int64_t physical, const ObjectView* object) {
     constexpr int kKnownFlags = kMapFixed | kMapNoOverwrite | kMapNoCoalesce | 0x400 | 0x1000 | 0x2000 | 0x8000 | 0x20000 | static_cast<int>(0xff000000u);
     if (address == nullptr || bytes == 0 || bytes % kPageBytes != 0 || (flags & ~kKnownFlags) != 0 || (protection & ~0x3f7) != 0) return Status::Invalid;
     // Bits 24-31 of the flags may request an alignment of 1 << n (KytyPS5).
@@ -370,10 +382,16 @@ Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_
         if (kind == Kind::Direct) {
             record.segment = physicalSegment();
             record.offset = static_cast<std::uint64_t>(physical);
+        } else if (object != nullptr) {
+            record.segment = std::make_shared<SegmentHolder>(Platform::AdoptSegment(object->object, object->offset + bytes));
+            record.offset = object->offset;
+            record.privateCopy = object->privateCopy;
+            record.maxProtection = object->maxProtection;
         } else if (committed(kind)) {
             record.segment = std::make_shared<SegmentHolder>(bytes);
         }
-        if (committed(kind)) Platform::MapView(target, bytes, record.segment->segment, record.offset, hostProtection(protection));
+        if (object != nullptr) Platform::MapObjectView(target, bytes, record.segment->segment, record.offset, hostProtection(protection), object->privateCopy);
+        else if (committed(kind)) Platform::MapView(target, bytes, record.segment->segment, record.offset, hostProtection(protection));
         ++areaChanges;
         areas().emplace(target, record);
         registerCommitted(target, target + bytes, record);
@@ -385,6 +403,22 @@ Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_
     }
     *address = reinterpret_cast<void*>(target);
     return Status::Ok;
+}
+
+}
+
+extern "C" {
+
+Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_t alignment, Kind kind, int protection, int flags, std::int64_t physical) {
+    if (kind == Kind::Shared) return Status::Invalid;
+    return mapArea(address, bytes, alignment, kind, protection, flags, physical, nullptr);
+}
+
+Status GuestVirtualMapObject_nid_postfix(void** address, std::size_t bytes, std::size_t alignment, int protection, int flags, std::uintptr_t object, std::uint64_t offset, bool privateCopy, int maxProtection) {
+    if (offset % kPageBytes != 0 || bytes > std::numeric_limits<std::uint64_t>::max() - offset) return Status::Invalid;
+    if (maxProtection >= 0 && !privateCopy && hostWritable(protection) && !hostWritable(maxProtection)) return Status::Access;
+    const ObjectView view{object, offset, privateCopy, maxProtection};
+    return mapArea(address, bytes, alignment, Kind::Shared, protection, flags, -1, &view);
 }
 
 Status GuestVirtualUnmap_nid_postfix(void* address, std::size_t bytes) {
@@ -400,6 +434,13 @@ Status GuestVirtualProtect_nid_postfix(const void* pointer, std::size_t bytes, i
     const AreaWrite areaWrite;
     const auto last = address + bytes;
     if (!anyOverlap(address, last)) return Status::Invalid;
+    // A shared view of a host object opened without write access cannot become writable (EACCES).
+    if (hostWritable(protection)) {
+        for (const auto begin : overlapping(address, last)) {
+            const auto& record = areas().at(begin);
+            if (record.maxProtection >= 0 && !record.privateCopy && !hostWritable(record.maxProtection)) return Status::Access;
+        }
+    }
     GuestAllocations::GuestAllocationsRequireUnpinned_nid_postfix(nullptr, pointer, bytes);
     mappingGeneration.fetch_add(1, std::memory_order_acq_rel);
     split(address);
@@ -436,6 +477,9 @@ Status GuestVirtualReleasePhysical_nid_postfix(std::int64_t physical, std::size_
         const auto status = unmapRange(begin, static_cast<std::size_t>(end - begin), false);
         if (status != Status::Ok) return status;
     }
+    // Released physical memory comes back zeroed when it is allocated again, as a fresh physical
+    // backing did upstream; the host gets the pages back meanwhile.
+    Platform::DiscardSegment(physicalSegment()->segment, first, static_cast<std::size_t>(std::min(last, kPhysicalBytes) - first));
     return Status::Ok;
 }
 
@@ -452,7 +496,9 @@ bool GuestVirtualQuery_nid_postfix(const void* pointer, bool findNext, Area* are
     // memory, and neither mapped with NO_COALESCE.
     const auto mergeable = [](std::uint64_t leftBegin, const Record& left, std::uint64_t rightBegin, const Record& right) {
         if (left.end != rightBegin || left.kind != right.kind || left.protection != right.protection || left.noCoalesce || right.noCoalesce) return false;
-        return left.kind != Kind::Direct || left.offset + (left.end - leftBegin) == right.offset;
+        // Views of host objects merge only while they continue the same object.
+        if (left.kind == Kind::Shared && (left.segment != right.segment || left.privateCopy != right.privateCopy)) return false;
+        return (left.kind != Kind::Direct && left.kind != Kind::Shared) || left.offset + (left.end - leftBegin) == right.offset;
     };
     auto first = it;
     while (first != map.begin() && mergeable(std::prev(first)->first, std::prev(first)->second, first->first, first->second)) --first;
@@ -566,7 +612,7 @@ bool GuestVirtualTranslate_nid_postfix(std::uint64_t address, std::uint64_t byte
     auto it = map.upper_bound(address);
     if (it == map.begin()) return false;
     --it;
-    if (it->second.end <= address || !committed(it->second.kind)) return false;
+    if (it->second.end <= address || !committed(it->second.kind) || it->second.privateCopy) return false;
     const auto& first = it->second;
     const auto offset = first.offset + (address - it->first);
     // Adjacent views of the next segment bytes extend the translation; the run is followed to its end.

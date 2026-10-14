@@ -1,9 +1,12 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
 extern "C" {
 int APS5_VABI socket_nid_postfix(int, int, int);
@@ -17,6 +20,7 @@ std::int64_t APS5_VABI recv_nid_postfix(int, void*, std::uint64_t, int);
 int APS5_VABI getpeername_nid_postfix(int, void*, std::uint32_t*);
 int APS5_VABI shutdown_nid_postfix(int, int);
 std::int64_t APS5_VABI recvfrom_nid_postfix(int, void*, std::uint64_t, int, void*, std::uint32_t*);
+int APS5_VABI fcntl_nid_postfix(int, int, ...);
 int APS5_VABI close_nid_postfix(int);
 int* APS5_VABI __error_nid_postfix();
 }
@@ -48,8 +52,96 @@ static void StreamReceiveReportsNoSender() {
     for (const int descriptor : {client, accepted, listener}) Require(close_nid_postfix(descriptor) == 0);
 }
 
+static void ListenersShareAPortAcrossFamilies() {
+    const int inet = socket_nid_postfix(2, 1, 0);
+    Require(inet >= 0);
+    std::array<std::uint8_t, 16> any{16, 2};
+    Require(bind_nid_postfix(inet, any.data(), any.size()) == 0 && listen_nid_postfix(inet, 4) == 0);
+    std::uint32_t size = any.size();
+    Require(getsockname_nid_postfix(inet, any.data(), &size) == 0 && size == any.size());
+    const int inet6 = socket_nid_postfix(28, 1, 0);
+    if (inet6 < 0) {
+        Require(*__error_nid_postfix() == 47);
+        Require(close_nid_postfix(inet) == 0);
+        return;
+    }
+    std::array<std::uint8_t, 28> any6{28, 28, any[2], any[3]};
+    if (bind_nid_postfix(inet6, any6.data(), any6.size()) != 0) {
+        if (*__error_nid_postfix() != 49) {
+            std::fprintf(stderr, "bind of [::]:%d failed with errno %d while an IPv4 listener holds 0.0.0.0:%d\n",
+                (any[2] << 8) | any[3], *__error_nid_postfix(), (any[2] << 8) | any[3]);
+            std::abort();
+        }
+    } else {
+        Require(listen_nid_postfix(inet6, 4) == 0);
+    }
+    Require(close_nid_postfix(inet6) == 0);
+    Require(close_nid_postfix(inet) == 0);
+}
+
+constexpr int GetFlags = 3;
+constexpr int SetFlags = 4;
+constexpr int NonBlockingFlag = 4;
+
+static int AcceptWithin(int listener) {
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        const int accepted = accept_nid_postfix(listener, nullptr, nullptr);
+        if (accepted >= 0) return accepted;
+        Require(*__error_nid_postfix() == 35);
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return -1;
+}
+
+static void AcceptedSocketsFollowListenerBlocking() {
+    const int listener = socket_nid_postfix(2, 1, 0);
+    Require(listener >= 0);
+    std::array<std::uint8_t, 16> address{16, 2, 0, 0, 127, 0, 0, 1};
+    Require(bind_nid_postfix(listener, address.data(), address.size()) == 0 && listen_nid_postfix(listener, 4) == 0);
+    std::uint32_t size = address.size();
+    Require(getsockname_nid_postfix(listener, address.data(), &size) == 0);
+
+    const int firstClient = socket_nid_postfix(2, 1, 0);
+    Require(connect_nid_postfix(firstClient, address.data(), address.size()) == 0);
+    const int blocking = accept_nid_postfix(listener, nullptr, nullptr);
+    Require(blocking >= 0 && (fcntl_nid_postfix(blocking, GetFlags) & NonBlockingFlag) == 0);
+
+    Require(fcntl_nid_postfix(listener, SetFlags, NonBlockingFlag) == 0);
+    const int secondClient = socket_nid_postfix(2, 1, 0);
+    Require(connect_nid_postfix(secondClient, address.data(), address.size()) == 0);
+    const int inherited = AcceptWithin(listener);
+    Require(inherited >= 0 && (fcntl_nid_postfix(inherited, GetFlags) & NonBlockingFlag) != 0);
+    char byte;
+    Require(recv_nid_postfix(inherited, &byte, 1, 0) == -1 && *__error_nid_postfix() == 35);
+    Require(fcntl_nid_postfix(inherited, SetFlags, 0) == 0 && (fcntl_nid_postfix(inherited, GetFlags) & NonBlockingFlag) == 0);
+    Require((fcntl_nid_postfix(listener, GetFlags) & NonBlockingFlag) != 0);
+
+    for (const int descriptor : {firstClient, secondClient, blocking, inherited, listener}) Require(close_nid_postfix(descriptor) == 0);
+}
+
+static void UnboundSocketNameIsZero() {
+    for (const int family : {2, 28}) {
+        for (const int type : {1, 2}) {
+            const int descriptor = socket_nid_postfix(family, type, 0);
+            Require(descriptor >= 0);
+            const std::uint32_t expected = family == 2 ? 16 : 28;
+            std::array<std::uint8_t, 32> name;
+            name.fill(0xaa);
+            std::uint32_t size = name.size();
+            Require(getsockname_nid_postfix(descriptor, name.data(), &size) == 0);
+            Require(size == expected && name[0] == expected && name[1] == family);
+            for (std::uint32_t index = 2; index < expected; ++index) Require(name[index] == 0);
+            Require(name[expected] == 0xaa);
+            Require(close_nid_postfix(descriptor) == 0);
+        }
+    }
+}
+
 int main() {
     StreamReceiveReportsNoSender();
+    ListenersShareAPortAcrossFamilies();
+    AcceptedSocketsFollowListenerBlocking();
+    UnboundSocketNameIsZero();
     const int listener = socket_nid_postfix(2, 1, 6);
     Require(listener >= 0);
     std::array<std::uint8_t, 16> address{16, 2, 0, 0, 127, 0, 0, 1};

@@ -160,12 +160,22 @@ IrF32 TranslationContext::flushTinyProduct(IrValue* lhs, IrValue* rhs, IrValue* 
     if ((f32DenormalFlush & 2u) == 0u || keepsProductOutOfTinyRange(*lhs) || keepsProductOutOfTinyRange(*rhs)) return IrF32(*product);
     IrValue& lhsBits = ir.BitCastU32(*lhs);
     IrValue& rhsBits = ir.BitCastU32(*rhs);
+    const std::uint32_t roundMode = floatMode.has_value() ? floatMode->floatMode & 3u : 0u;
+    const auto zeroAddend = [&](IrValue* tiny) -> IrValue* {
+        if (addend == nullptr) return tiny;
+        return &ir.LogicalAnd(*tiny, ir.IEqual(ir.BitwiseAnd(ir.BitCastU32(*addend), ir.Constant(0x7fffffffu)), ir.Constant(0u)));
+    };
+    if (afterRounding && roundMode == 0u) {
+        IrValue& scaled = ir.BitwiseAnd(ir.BitCastU32(ir.Emit(IrOpcode::FPMul32, IrType::F32, {&ir.Emit(IrOpcode::FPMul32, IrType::F32, {lhs, &ir.ConstantF32(0x1p64f)}), rhs})), ir.Constant(0x7fffffffu));
+        IrValue* tiny = zeroAddend(&ir.ULessThan(ir.ISub(scaled, ir.Constant(1u)), ir.Constant(0x207fffffu)));
+        IrValue& sign = ir.BitwiseAnd(ir.BitwiseXor(lhsBits, rhsBits), ir.Constant(0x80000000u));
+        return IrF32(ir.Emit(IrOpcode::SelectF32, IrType::F32, {tiny, &ir.BitCastF32(sign), product}));
+    }
     const auto exponent = [&](IrValue& bits) -> IrValue& { return ir.Emit(IrOpcode::BitFieldUExtract, IrType::U32, {&bits, &ir.Constant(23u), &ir.Constant(8u)}); };
     const auto significand = [&](IrValue& bits) -> IrValue& { return ir.BitwiseOr(ir.BitwiseAnd(bits, ir.Constant(0x007fffffu)), ir.Constant(0x00800000u)); };
     IrValue& lhsExponent = exponent(lhsBits);
     IrValue& rhsExponent = exponent(rhsBits);
     const auto finiteNonZero = [&](IrValue& value) -> IrValue& { return ir.LogicalAnd(ir.INotEqual(value, ir.Constant(0u)), ir.INotEqual(value, ir.Constant(0xffu))); };
-    const std::uint32_t roundMode = floatMode.has_value() ? floatMode->floatMode & 3u : 0u;
     IrValue* carry = &ir.Constant(0u);
     IrValue* roundsUp = nullptr;
     if (!hasUnitSignificand(*lhs) && !hasUnitSignificand(*rhs)) {
@@ -173,16 +183,15 @@ IrF32 TranslationContext::flushTinyProduct(IrValue* lhs, IrValue* rhs, IrValue* 
         IrValue& rhsSignificand = significand(rhsBits);
         IrValue& high = ir.Emit(IrOpcode::UMulHi, IrType::U32, {&lhsSignificand, &rhsSignificand});
         carry = &ir.Select(ir.UGreaterThan(high, ir.Constant(0x7fffu)), ir.Constant(1u), ir.Constant(0u));
-        if (afterRounding && roundMode != 3u) roundsUp = &ir.LogicalAnd(ir.IEqual(high, ir.Constant(0x7fffu)), ir.UGreaterThan(ir.IMul(lhsSignificand, rhsSignificand), ir.Constant(roundMode == 0u ? 0xffbfffffu : 0xff800000u)));
+        if (afterRounding && roundMode != 3u) roundsUp = &ir.LogicalAnd(ir.IEqual(high, ir.Constant(0x7fffu)), ir.UGreaterThan(ir.IMul(lhsSignificand, rhsSignificand), ir.Constant(0xff800000u)));
     }
     IrValue& exponentSum = ir.IAdd(ir.IAdd(lhsExponent, rhsExponent), *carry);
-    IrValue* tiny = &ir.LogicalAnd(ir.LogicalAnd(finiteNonZero(lhsExponent), finiteNonZero(rhsExponent)), ir.ULessThan(exponentSum, ir.Constant(128u)));
-    if (addend != nullptr) tiny = &ir.LogicalAnd(*tiny, ir.IEqual(ir.BitwiseAnd(ir.BitCastU32(*addend), ir.Constant(0x7fffffffu)), ir.Constant(0u)));
+    IrValue* tiny = zeroAddend(&ir.LogicalAnd(ir.LogicalAnd(finiteNonZero(lhsExponent), finiteNonZero(rhsExponent)), ir.ULessThan(exponentSum, ir.Constant(128u))));
     IrValue& sign = ir.BitwiseAnd(ir.BitwiseXor(lhsBits, rhsBits), ir.Constant(0x80000000u));
     IrValue* rounded = &sign;
     if (roundsUp != nullptr) {
         roundsUp = &ir.LogicalAnd(ir.IEqual(exponentSum, ir.Constant(127u)), *roundsUp);
-        if (roundMode != 0u) roundsUp = &ir.LogicalAnd(*roundsUp, ir.IEqual(sign, ir.Constant(roundMode == 1u ? 0u : 0x80000000u)));
+        roundsUp = &ir.LogicalAnd(*roundsUp, ir.IEqual(sign, ir.Constant(roundMode == 1u ? 0u : 0x80000000u)));
         rounded = &ir.Select(*roundsUp, ir.BitwiseOr(sign, ir.Constant(0x00800000u)), sign);
     }
     return IrF32(ir.Emit(IrOpcode::SelectF32, IrType::F32, {tiny, &ir.BitCastF32(*rounded), product}));
@@ -442,8 +451,7 @@ IrU32 TranslationContext::readScalarCode(std::uint32_t code) {
         case 235u:
         case 236u:
         case 237u:
-        case 238u:
-            throw std::runtime_error("TranslationContext::readScalarCode: the scalar aperture source " + RdnaOperandToString(DecodeRdnaScalarSource(code, 0u)) + " is not modelled");
+        case 238u: return readRawU32(DecodeRdnaScalarSource(code, 0u));
         default: return IrU32(ir.Constant(0u));
     }
 }
@@ -476,8 +484,7 @@ IrU32 TranslationContext::readRawU32(const RdnaOperand& operand) {
         case RdnaOperandKind::SrcSharedBase:
         case RdnaOperandKind::SrcSharedLimit:
         case RdnaOperandKind::SrcPrivateBase:
-        case RdnaOperandKind::SrcPrivateLimit:
-            throw std::runtime_error("TranslationContext::readRawU32: the scalar aperture source " + RdnaOperandToString(operand) + " is not modelled");
+        case RdnaOperandKind::SrcPrivateLimit: return IrU32(ir.Constant(static_cast<std::uint32_t>(RdnaApertureSourceValue(operand))));
         default: throw std::runtime_error("TranslationContext::readRawU32 invalid decoded operand used as a raw U32 source");
     }
 }

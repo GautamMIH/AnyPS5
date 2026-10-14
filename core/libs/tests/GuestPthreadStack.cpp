@@ -1,4 +1,13 @@
 #include "SceTypes.hpp"
+#ifdef __linux__
+#include <atomic>
+#include <cstdio>
+#include <chrono>
+#include <thread>
+#include <string>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -12,6 +21,9 @@ int APS5_VABI scePthreadAttrGet(Pthread thread, PthreadAttr* attr);
 int APS5_VABI scePthreadAttrSetstacksize(PthreadAttr* attr, std::size_t stackSize);
 int APS5_VABI scePthreadAttrGetstack(const PthreadAttr* attr, void** stackAddress, std::size_t* stackSize);
 Pthread APS5_VABI scePthreadSelf();
+#ifdef __linux__
+int APS5_VABI scePthreadDetach(Pthread thread);
+#endif
 }
 
 static constexpr int SCE_OK = 0;
@@ -64,6 +76,45 @@ static void* APS5_VABI Worker(void* arg) {
     return arg;
 }
 
+#ifdef __linux__
+bool GuestThreadStackHostRangeOverlaps(std::uintptr_t start, std::uintptr_t end);
+static std::atomic<std::uintptr_t> retiredStackWord{0};
+static std::atomic<bool> detachedDone{false};
+static int detachedTid = 0;
+
+static void* APS5_VABI DetachedWorker(void*) {
+    int local = 0;
+    detachedTid = static_cast<int>(syscall(SYS_gettid));
+    retiredStackWord.store(reinterpret_cast<std::uintptr_t>(&local), std::memory_order_relaxed);
+    detachedDone.store(true, std::memory_order_release);
+    return nullptr;
+}
+
+static void* APS5_VABI ReaperWorker(void*) {
+    return nullptr;
+}
+
+// Upstream watched the release through its GuestArena unmap observer; this branch's guest memory
+// (GuestMemoryBacking) releases a stack by carving its area, which leaves the pages inaccessible
+// (a reserved placeholder) or unmapped, so the test reads the host mapping instead.
+static bool HostPageWritable(std::uintptr_t address) {
+    std::FILE* maps = std::fopen("/proc/self/maps", "r");
+    Require(maps != nullptr);
+    bool writable = false;
+    char line[512];
+    while (std::fgets(line, sizeof(line), maps) != nullptr) {
+        unsigned long long low = 0;
+        unsigned long long high = 0;
+        char permissions[5] = {};
+        if (std::sscanf(line, "%llx-%llx %4s", &low, &high, permissions) != 3 || address < low || address >= high) continue;
+        writable = permissions[1] == 'w';
+        break;
+    }
+    std::fclose(maps);
+    return writable;
+}
+#endif
+
 int main() {
     for (auto stackSize : STACK_SIZES) {
         PthreadAttr attr = nullptr;
@@ -76,4 +127,27 @@ int main() {
         Require(scePthreadJoin(thread, &result) == SCE_OK);
         Require(result == &stackSize);
     }
+#ifdef __linux__
+    Pthread detached = nullptr;
+    Require(scePthreadCreate(&detached, nullptr, DetachedWorker, nullptr, nullptr) == SCE_OK);
+    Require(scePthreadDetach(detached) == SCE_OK);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!detachedDone.load(std::memory_order_acquire)) {
+        Require(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto task = "/proc/self/task/" + std::to_string(detachedTid);
+    while (access(task.c_str(), F_OK) == 0) {
+        Require(std::chrono::steady_clock::now() < deadline);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    Pthread reaper = nullptr;
+    Require(scePthreadCreate(&reaper, nullptr, ReaperWorker, nullptr, nullptr) == SCE_OK);
+    Require(scePthreadJoin(reaper, nullptr) == SCE_OK);
+    // Creating the reaper released the exited detached thread's stack, host-only pages included.
+    const auto retired = retiredStackWord.load(std::memory_order_relaxed);
+    const auto retiredPage = retired & ~std::uintptr_t{0x3fff};
+    Require(!HostPageWritable(retired));
+    Require(!GuestThreadStackHostRangeOverlaps(retiredPage - 0x4000, retiredPage + 0x4000));
+#endif
 }

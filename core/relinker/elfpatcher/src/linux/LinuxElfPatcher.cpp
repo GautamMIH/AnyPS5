@@ -6,23 +6,129 @@
 #include <cstring>
 #include <codegen/x86/Amd64OnlySubstitutionTable.hpp>
 #include <codegen/x86/StubBodyBuilder.hpp>
+#include <io/BufferUtils.hpp>
 #include <algorithm>
 #include <limits>
 #include <span>
+#include <sstream>
 #include <string>
+#include <utility>
 
 namespace Elfpatcher::Linux {
+
+namespace {
+
+constexpr std::uint64_t kLinuxUserAddressEnd = 0x800000000000;
+
+std::string Hex(const std::uint64_t value) {
+    std::ostringstream text;
+    text << "0x" << std::hex << value;
+    return text.str();
+}
+
+std::uint64_t Rebased(const std::uint64_t base, const std::uint64_t address, const std::string& what) {
+    if (base > kLinuxUserAddressEnd || address > kLinuxUserAddressEnd - base)
+        throw Domain::RelinkerException(what + " " + Hex(address) + " lies outside the Linux user address space at fixed base " + Hex(base));
+    return base + address;
+}
+
+void RequireWholeEntries(const std::vector<std::uint8_t>& table, const std::uint64_t entrySize, const std::string& what) {
+    if (table.size() % entrySize != 0)
+        throw Domain::RelinkerException(what + " is not a whole number of entries");
+}
+
+void RequireOnlyDependencies(const std::vector<std::uint8_t>& entries) {
+    RequireWholeEntries(entries, kDynEntrySize, "Executable dependency table");
+    for (std::size_t entry = 0; entry < entries.size(); entry += kDynEntrySize) {
+        const auto tag = static_cast<std::int64_t>(Io::ReadU64(entries, entry));
+        if (tag != DT_NEEDED)
+            throw Domain::RelinkerException("Dynamic tag " + Hex(static_cast<std::uint64_t>(tag)) + " cannot be placed at a fixed Linux base");
+    }
+}
+
+std::vector<std::uint8_t> RebasedSymbols(const std::vector<std::uint8_t>& table, const std::uint64_t base) {
+    RequireWholeEntries(table, kSymEntrySize, "Dynamic symbol table");
+    auto rebased = table;
+    for (std::size_t entry = 0; entry < rebased.size(); entry += kSymEntrySize) {
+        const auto section = Io::ReadU16(rebased, entry + 6);
+        if (section == SHN_UNDEF || section == SHN_ABS || (rebased[entry + 4] & 0xf) == STT_TLS)
+            continue;
+        if (section >= SHN_LORESERVE)
+            throw Domain::RelinkerException("Symbol section index " + Hex(section) + " cannot be placed at a fixed Linux base");
+        Io::WriteU64(rebased, entry + 8, Rebased(base, Io::ReadU64(rebased, entry + 8), "Symbol"));
+    }
+    return rebased;
+}
+
+std::vector<std::uint8_t> RebasedRelocations(const std::vector<std::uint8_t>& table, const std::uint64_t base) {
+    RequireWholeEntries(table, kRelaEntrySize, "Relocation table");
+    auto rebased = table;
+    for (std::size_t entry = 0; entry < rebased.size(); entry += kRelaEntrySize) {
+        const auto type = static_cast<std::uint32_t>(Io::ReadU64(rebased, entry + 8));
+        switch (type) {
+        case R_X86_64_NONE:
+            continue;
+        case R_X86_64_RELATIVE:
+        case R_X86_64_IRELATIVE: {
+            const auto addend = static_cast<std::int64_t>(Io::ReadU64(rebased, entry + 16));
+            if (addend < 0)
+                throw Domain::RelinkerException("Relocation target " + std::to_string(addend) + " lies below the image at a fixed Linux base");
+            Io::WriteU64(rebased, entry + 16, Rebased(base, static_cast<std::uint64_t>(addend), "Relocation target"));
+            break;
+        }
+        case R_X86_64_64:
+        case R_X86_64_PC32:
+        case R_X86_64_COPY:
+        case R_X86_64_GLOB_DAT:
+        case R_X86_64_JUMP_SLOT:
+        case R_X86_64_32:
+        case R_X86_64_32S:
+        case R_X86_64_DTPMOD64:
+        case R_X86_64_DTPOFF64:
+        case R_X86_64_TPOFF64:
+            break;
+        default:
+            throw Domain::RelinkerException("Relocation type " + std::to_string(type) + " cannot be placed at a fixed Linux base");
+        }
+        Io::WriteU64(rebased, entry, Rebased(base, Io::ReadU64(rebased, entry), "Relocation offset"));
+    }
+    return rebased;
+}
+
+void RebaseProgramHeaders(std::vector<std::uint8_t>& buf, const std::uint64_t tableOffset, const std::uint16_t entrySize, const std::uint16_t count, const std::uint64_t base) {
+    for (std::uint16_t index = 0; index < count; ++index) {
+        const auto header = static_cast<std::size_t>(tableOffset + static_cast<std::uint64_t>(index) * entrySize);
+        const auto type = Io::ReadU32(buf, header + kPhdrTypeOffset);
+        if (type == PT_NULL || type == PT_GNU_STACK)
+            continue;
+        const auto address = Rebased(base, Io::ReadU64(buf, header + kPhdrVaddrOffset), "Program header address");
+        const auto physical = Rebased(base, Io::ReadU64(buf, header + kPhdrPaddrOffset), "Program header physical address");
+        if (type == PT_LOAD) {
+            const auto alignment = Io::ReadU64(buf, header + kPhdrAlignOffset);
+            if (alignment > 1 && base % alignment != 0)
+                throw Domain::RelinkerException("Fixed Linux base " + Hex(base) + " is not a multiple of the PT_LOAD alignment " + Hex(alignment));
+            if (Io::ReadU64(buf, header + kPhdrMemSizeOffset) > kLinuxUserAddressEnd - address)
+                throw Domain::RelinkerException("PT_LOAD at " + Hex(address) + " ends outside the Linux user address space");
+        }
+        Io::WriteU64(buf, header + kPhdrVaddrOffset, address);
+        Io::WriteU64(buf, header + kPhdrPaddrOffset, physical);
+    }
+}
+
+}
 
 LinuxElfPatcher::LinuxElfPatcher(
     std::shared_ptr<IEntryStubBuilder> entryStubBuilder,
     std::shared_ptr<IProgramHeaderLayoutBuilder> programHeaderLayoutBuilder,
     std::shared_ptr<ISectionHeaderTableBuilder> sectionHeaderTableBuilder,
-    std::shared_ptr<Io::IByteWriter> byteWriter
+    std::shared_ptr<Io::IByteWriter> byteWriter,
+    std::optional<std::uint64_t> fixedBase
 )
     : _entryStubBuilder(std::move(entryStubBuilder))
     , _programHeaderLayoutBuilder(std::move(programHeaderLayoutBuilder))
     , _sectionHeaderTableBuilder(std::move(sectionHeaderTableBuilder))
     , _byteWriter(std::move(byteWriter))
+    , _fixedBase(fixedBase)
 {
 }
 
@@ -68,7 +174,7 @@ void LinuxElfPatcher::_appendTrampoline(
 }
 
 std::vector<std::uint8_t> LinuxElfPatcher::Patch(
-    const std::vector<std::uint8_t>& sourceElf,
+    std::vector<std::uint8_t> sourceElf,
     const std::vector<Domain::ProgramHeader>& originalHeaders,
     const Domain::SysVDynamicSection& dynSection,
     const std::uint64_t originalPltGotVaddr,
@@ -84,13 +190,28 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
 
     if (dependencyDiagnostics)
         throw Domain::RelinkerException("Linux target does not support --windows-diagnostics");
+    if (_fixedBase && lazyBinding)
+        throw Domain::RelinkerException("A fixed Linux base requires eager binding; --lazy-binding is incompatible");
+    if (_fixedBase && isLibrary)
+        throw Domain::RelinkerException("Library modules cannot be placed at a fixed Linux base");
+    if (_fixedBase)
+        RequireOnlyDependencies(dynSection.DynamicSegmentData);
+    const std::uint64_t base = _fixedBase.value_or(0);
+    const auto address = [this, base](const std::uint64_t vaddr) {
+        return _fixedBase ? Rebased(base, vaddr, "Address") : vaddr;
+    };
+    const auto table = [this, base](const std::vector<std::uint8_t>& data, const bool relocations) {
+        if (!_fixedBase) return data;
+        return relocations ? RebasedRelocations(data, base) : RebasedSymbols(data, base);
+    };
 
-    std::vector<std::uint8_t> buf = sourceElf;
+    std::vector<std::uint8_t> buf = std::move(sourceElf);
 
+    const std::uint32_t type = _fixedBase ? ET_EXEC : ET_DYN;
     buf[kEhdrOsAbiOffset] = 0;
     buf[kEhdrAbiVersionOffset] = 0;
-    buf[kEhdrTypeOffset] = static_cast<std::uint8_t>(ET_DYN & 0xFF);
-    buf[kEhdrTypeOffset + 1] = static_cast<std::uint8_t>((ET_DYN >> 8) & 0xFF);
+    buf[kEhdrTypeOffset] = static_cast<std::uint8_t>(type & 0xFF);
+    buf[kEhdrTypeOffset + 1] = static_cast<std::uint8_t>((type >> 8) & 0xFF);
     _byteWriter->WriteU64(buf, kEhdrShOffOffset, 0);
     _byteWriter->WriteU16(buf, kEhdrShNumOffset, 0);
     _byteWriter->WriteU16(buf, kEhdrShStrNdxOffset, 0);
@@ -143,7 +264,8 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     alignBuf(buf, kDynStrAlignment);
 
     const auto dynSymOff = static_cast<std::uint64_t>(buf.size());
-    for (std::uint8_t b : dynSection.DynSymData)
+    const auto symbols = table(dynSection.DynSymData, false);
+    for (std::uint8_t b : symbols)
         buf.push_back(b);
     const std::uint64_t hookSymbolIndex = dynSection.DynSymData.size() / kSymEntrySize;
     if (hasInitHook) {
@@ -157,7 +279,8 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     alignBuf(buf, kDynSymAlignment);
 
     const auto relaOff = static_cast<std::uint64_t>(buf.size());
-    for (std::uint8_t b : dynSection.RelaData)
+    const auto relocations = table(dynSection.RelaData, true);
+    for (std::uint8_t b : relocations)
         buf.push_back(b);
     if (hasInitHook) {
         _byteWriter->AppendU64(buf, hookSlotVaddr);
@@ -168,17 +291,26 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     alignBuf(buf, kRelaAlignment);
 
     const auto relaPltOff = static_cast<std::uint64_t>(buf.size());
-    for (std::uint8_t b : dynSection.RelaPltData)
+    const auto pltRelocations = table(dynSection.RelaPltData, true);
+    for (std::uint8_t b : pltRelocations)
         buf.push_back(b);
     alignBuf(buf, kRelaPltAlignment);
 
-    if (dynSection.HashData.empty())
-        throw Domain::RelinkerException("Dynamic symbol hash table was not built");
     alignBuf(buf, kHashAlignment);
     const auto hashOff = static_cast<std::uint64_t>(buf.size());
-    for (std::uint8_t b : dynSection.HashData)
-        buf.push_back(b);
-    if (hasInitHook) {
+    if (dynSection.HashData.empty()) {
+        // No hash table was built: one bucket chaining every symbol keeps them all resolvable.
+        const auto symbolCount = static_cast<std::uint32_t>(dynSection.DynSymData.size() / kSymEntrySize + (hasInitHook ? 1 : 0));
+        Io::AppendU32(buf, 1);
+        Io::AppendU32(buf, symbolCount);
+        Io::AppendU32(buf, symbolCount > 1 ? 1 : 0);
+        for (std::uint32_t index = 0; index < symbolCount; ++index)
+            Io::AppendU32(buf, index != 0 && index + 1 < symbolCount ? index + 1 : 0);
+    } else {
+        for (std::uint8_t b : dynSection.HashData)
+            buf.push_back(b);
+    }
+    if (hasInitHook && !dynSection.HashData.empty()) {
         // The undefined hook symbol joins no bucket; it only extends the chain array.
         std::uint32_t chainCount = 0;
         std::memcpy(&chainCount, buf.data() + hashOff + 4, sizeof(chainCount));
@@ -202,8 +334,6 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     const std::uint64_t versymOff = versymData.empty() ? 0 : appendVersionTable(versymData);
     const std::uint64_t verdefOff = dynSection.VerdefData.empty() ? 0 : appendVersionTable(dynSection.VerdefData);
     const std::uint64_t verneedOff = dynSection.VerneedData.empty() ? 0 : appendVersionTable(dynSection.VerneedData);
-
-
 
     std::uint64_t initStubVaddr = 0;
     std::uint64_t finiStubVaddr = 0;
@@ -235,38 +365,38 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
         dynSegBuf.push_back(b);
     if (isLibrary)
         _appendDynEntry(dynSegBuf, DT_SONAME, soNameStrOff);
-    else
-        _appendDynEntry(dynSegBuf, DT_DEBUG, 0);
-    _appendDynEntry(dynSegBuf, DT_HASH, vaddrOfExtraBlockOffset(hashOff));
-    _appendDynEntry(dynSegBuf, DT_STRTAB, vaddrOfExtraBlockOffset(dynStrOff));
+    _appendDynEntry(dynSegBuf, DT_STRTAB, address(vaddrOfExtraBlockOffset(dynStrOff)));
     _appendDynEntry(dynSegBuf, DT_STRSZ, dynStrSize);
-    _appendDynEntry(dynSegBuf, DT_SYMTAB, vaddrOfExtraBlockOffset(dynSymOff));
+    _appendDynEntry(dynSegBuf, DT_SYMTAB, address(vaddrOfExtraBlockOffset(dynSymOff)));
     _appendDynEntry(dynSegBuf, DT_SYMENT, kSymEntrySize);
+    _appendDynEntry(dynSegBuf, DT_HASH, address(vaddrOfExtraBlockOffset(hashOff)));
+    if (!isLibrary)
+        _appendDynEntry(dynSegBuf, DT_DEBUG, 0);
     if (!versymData.empty())
-        _appendDynEntry(dynSegBuf, DT_VERSYM, vaddrOfExtraBlockOffset(versymOff));
+        _appendDynEntry(dynSegBuf, DT_VERSYM, address(vaddrOfExtraBlockOffset(versymOff)));
     if (!dynSection.VerdefData.empty()) {
-        _appendDynEntry(dynSegBuf, DT_VERDEF, vaddrOfExtraBlockOffset(verdefOff));
+        _appendDynEntry(dynSegBuf, DT_VERDEF, address(vaddrOfExtraBlockOffset(verdefOff)));
         _appendDynEntry(dynSegBuf, DT_VERDEFNUM, dynSection.VerdefCount);
     }
     if (!dynSection.VerneedData.empty()) {
-        _appendDynEntry(dynSegBuf, DT_VERNEED, vaddrOfExtraBlockOffset(verneedOff));
+        _appendDynEntry(dynSegBuf, DT_VERNEED, address(vaddrOfExtraBlockOffset(verneedOff)));
         _appendDynEntry(dynSegBuf, DT_VERNEEDNUM, dynSection.VerneedCount);
     }
     if (relaSize != 0) {
-        _appendDynEntry(dynSegBuf, DT_RELA, vaddrOfExtraBlockOffset(relaOff));
+        _appendDynEntry(dynSegBuf, DT_RELA, address(vaddrOfExtraBlockOffset(relaOff)));
         _appendDynEntry(dynSegBuf, DT_RELASZ, relaSize);
         _appendDynEntry(dynSegBuf, DT_RELAENT, kRelaEntrySize);
     }
     if (!dynSection.RelaPltData.empty()) {
-        _appendDynEntry(dynSegBuf, DT_JMPREL, vaddrOfExtraBlockOffset(relaPltOff));
+        _appendDynEntry(dynSegBuf, DT_JMPREL, address(vaddrOfExtraBlockOffset(relaPltOff)));
         _appendDynEntry(dynSegBuf, DT_PLTRELSZ, dynSection.RelaPltData.size());
         _appendDynEntry(dynSegBuf, DT_PLTREL, static_cast<std::uint64_t>(DT_RELA));
-        _appendDynEntry(dynSegBuf, DT_PLTGOT, originalPltGotVaddr);
+        _appendDynEntry(dynSegBuf, DT_PLTGOT, address(originalPltGotVaddr));
     }
     if (initStubVaddr != 0)
-        _appendDynEntry(dynSegBuf, DT_INIT, initStubVaddr);
+        _appendDynEntry(dynSegBuf, DT_INIT, address(initStubVaddr));
     if (finiStubVaddr != 0)
-        _appendDynEntry(dynSegBuf, DT_FINI, finiStubVaddr);
+        _appendDynEntry(dynSegBuf, DT_FINI, address(finiStubVaddr));
     const std::uint64_t dynFlags = (lazyBinding ? 0 : DF_BIND_NOW) | (isLibrary ? DF_SYMBOLIC : 0);
     if (dynFlags != 0)
         _appendDynEntry(dynSegBuf, DT_FLAGS, dynFlags);
@@ -287,12 +417,17 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
         const std::uint64_t realEntryVaddr = *reinterpret_cast<const std::uint64_t*>(buf.data() + kEhdrEntryOffset);
         stubOff = static_cast<std::uint64_t>(buf.size());
         const auto stubVaddr = vaddrOfExtraBlockOffset(stubOff);
-        const auto stubBytes = _entryStubBuilder->BuildEntryStub(stubVaddr, realEntryVaddr);
+        const auto stubBytes = _entryStubBuilder->BuildEntryStub(address(stubVaddr), address(realEntryVaddr));
         for (std::uint8_t b : stubBytes)
             buf.push_back(b);
         stubSize = stubBytes.size();
-        _byteWriter->WriteU64(buf, kEhdrEntryOffset, stubVaddr);
+        _byteWriter->WriteU64(buf, kEhdrEntryOffset, address(stubVaddr));
+    }
 
+    for (const auto& site : trampolines)
+        _appendTrampoline(buf, site, extraBlockOff, vaddrOfExtraBlockOffset);
+
+    if (!isLibrary) {
         static constexpr char kInterp[] = "/lib64/ld-linux-x86-64.so.2";
         interpOff = static_cast<std::uint64_t>(buf.size());
         interpSize = sizeof(kInterp);
@@ -300,8 +435,15 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
             buf.push_back(static_cast<std::uint8_t>(i));
     }
 
-    for (const auto& site : trampolines)
-        _appendTrampoline(buf, site, extraBlockOff, vaddrOfExtraBlockOffset);
+    std::uint64_t tableOff = phOff;
+    std::uint16_t tableSlots = phNum;
+    if (const auto required = _programHeaderLayoutBuilder->RequiredProgramHeaderCount(originalHeaders); required > phNum && required <= std::numeric_limits<std::uint16_t>::max()) {
+        alignBuf(buf, kPhdrHeaderAlignment);
+        tableOff = static_cast<std::uint64_t>(buf.size());
+        tableSlots = static_cast<std::uint16_t>(required);
+        buf.resize(buf.size() + required * phEntSize);
+        _byteWriter->WriteU64(buf, kEhdrPhOffOffset, tableOff);
+    }
 
     const std::uint64_t extraBlockSize = static_cast<std::uint64_t>(buf.size()) - extraBlockOff;
 
@@ -311,9 +453,9 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
     SeparateSharedPages(buf, loadHeaders);
 
     ProgramHeaderLayoutRequest layoutRequest{};
-    layoutRequest.PhOff = phOff;
+    layoutRequest.PhOff = tableOff;
     layoutRequest.PhEntSize = phEntSize;
-    layoutRequest.PhNum = phNum;
+    layoutRequest.PhNum = tableSlots;
     layoutRequest.OriginalHeaders = loadHeaders;
     layoutRequest.ExtraBlockOffset = extraBlockOff;
     layoutRequest.ExtraBlockVaddr = extraBlockVaddr;
@@ -326,6 +468,8 @@ std::vector<std::uint8_t> LinuxElfPatcher::Patch(
 
     const std::uint16_t writtenPh = _programHeaderLayoutBuilder->WriteLayout(buf, layoutRequest);
     _byteWriter->WriteU16(buf, kEhdrPhNumOffset, writtenPh);
+    if (_fixedBase)
+        RebaseProgramHeaders(buf, tableOff, phEntSize, writtenPh, base);
 
     SectionHeaderTableRequest sectionRequest{};
     sectionRequest.DynStrOffset = dynStrOff;

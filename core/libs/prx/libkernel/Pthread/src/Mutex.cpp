@@ -18,14 +18,14 @@ int APS5_VABI scePthreadMutexattrInit(PthreadMutexattr* attr) {
 }
 
 int APS5_VABI scePthreadMutexattrDestroy(PthreadMutexattr* attr) {
-    if (!attr || !*attr) throw std::runtime_error("scePthreadMutexattrDestroy: null attr");
+    if (!attr || !*attr) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
     delete *attr;
     *attr = nullptr;
     return SCE_OK;
 }
 
 int APS5_VABI scePthreadMutexattrSettype(PthreadMutexattr* attr, int type) {
-    if (!attr || !*attr) throw std::runtime_error("scePthreadMutexattrSettype: null attr");
+    if (!attr || !*attr) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
     switch (type) {
     case 1: (*attr)->type = MutexType::ErrorCheck; break;
     case 2: (*attr)->type = MutexType::Recursive; break;
@@ -38,7 +38,7 @@ int APS5_VABI scePthreadMutexattrSettype(PthreadMutexattr* attr, int type) {
 }
 
 int APS5_VABI scePthreadMutexattrSetprotocol(PthreadMutexattr* attr, int protocol) {
-    if (!attr || !*attr) throw std::runtime_error("scePthreadMutexattrSetprotocol: null attr");
+    if (!attr || !*attr) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
     if (protocol < 0 || protocol > 2) return PthreadSync::SceError(PthreadSync::kErrorInvalid);
     (*attr)->protocol = protocol;
     return SCE_OK;

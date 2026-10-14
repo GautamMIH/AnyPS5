@@ -1,9 +1,11 @@
 #include "prx/libkernel/AppMetadata/include/ParamJsonParser.hpp"
+#include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 
 #include <cstdint>
 #include <charconv>
 #include <filesystem>
 #include <fstream>
+#include <locale>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -95,6 +97,27 @@ std::uint32_t parseHex4(const std::string& text, std::size_t& position) {
     return value;
 }
 
+void appendRawUtf8(const std::string& text, std::size_t& position, unsigned char first, std::string& result) {
+    unsigned count;
+    std::uint32_t codepoint;
+    std::uint32_t minimum;
+    if (first >= 0xC2 && first <= 0xDF) { count = 1; codepoint = first & 0x1F; minimum = 0x80; }
+    else if (first >= 0xE0 && first <= 0xEF) { count = 2; codepoint = first & 0x0F; minimum = 0x800; }
+    else if (first >= 0xF0 && first <= 0xF4) { count = 3; codepoint = first & 0x07; minimum = 0x10000; }
+    else throw std::runtime_error("invalid UTF-8 in param.json");
+    if (count > text.size() - position) throw std::runtime_error("truncated UTF-8 in param.json");
+    for (unsigned index = 0; index < count; ++index) {
+        const auto byte = static_cast<unsigned char>(text[position + index]);
+        if ((byte & 0xC0) != 0x80) throw std::runtime_error("invalid UTF-8 continuation in param.json");
+        codepoint = (codepoint << 6) | (byte & 0x3F);
+    }
+    if (codepoint < minimum || codepoint > 0x10FFFF || (codepoint >= 0xD800 && codepoint <= 0xDFFF))
+        throw std::runtime_error("invalid UTF-8 codepoint in param.json");
+    result.push_back(static_cast<char>(first));
+    result.append(text, position, count);
+    position += count;
+}
+
 std::string parseJsonString(const std::string& text, std::size_t& position) {
     expectChar(text, position, '"');
     std::string result;
@@ -103,7 +126,11 @@ std::string parseJsonString(const std::string& text, std::size_t& position) {
         const char c = text[position++];
         if (c == '"') break;
         if (static_cast<unsigned char>(c) < 0x20) throw std::runtime_error("control character in param.json string");
-        if (c != '\\') { result.push_back(c); continue; }
+        if (c != '\\') {
+            if (static_cast<unsigned char>(c) < 0x80) result.push_back(c);
+            else appendRawUtf8(text, position, static_cast<unsigned char>(c), result);
+            continue;
+        }
         if (position >= text.size()) throw std::runtime_error("unterminated escape in param.json");
         const char escape = text[position++];
         switch (escape) {
@@ -181,6 +208,21 @@ JsonValue parseJsonArray(const std::string& text, std::size_t& position, std::si
     return value;
 }
 
+double parseJsonNumberValue(const std::string& number) {
+    double value = 0.0;
+#ifdef __cpp_lib_to_chars
+    const auto converted = std::from_chars(number.data(), number.data() + number.size(), value);
+    const bool parsed = converted.ec == std::errc{} && converted.ptr == number.data() + number.size();
+#else
+    std::istringstream stream(number);
+    stream.imbue(std::locale::classic());
+    stream >> value;
+    const bool parsed = !stream.fail() && stream.eof();
+#endif
+    if (!parsed) throw std::runtime_error("number outside supported range in param.json");
+    return value;
+}
+
 JsonValue parseJsonNumber(const std::string& text, std::size_t& position) {
     const std::size_t start = position;
     if (peekChar(text, position) == '-') ++position;
@@ -205,7 +247,7 @@ JsonValue parseJsonNumber(const std::string& text, std::size_t& position) {
     JsonValue value;
     value.type = JsonType::Number;
     value.numberText = text.substr(start, position - start);
-    value.numberValue = std::stod(value.numberText);
+    value.numberValue = parseJsonNumberValue(value.numberText);
     return value;
 }
 
@@ -280,6 +322,26 @@ ParsedParamJson parseParamJson(const std::filesystem::path& paramJsonPath) {
     ParsedParamJson result;
     result.title = title;
     result.titleId = titleId;
+    if (const JsonValue* attribute = findObjectMember(root, "attribute3")) {
+        const auto& number = attribute->numberText;
+        if (attribute->type != JsonType::Number || number.find_first_of("-.eE") != std::string::npos) throw std::runtime_error("param.json attribute3 is not an unsigned integer");
+        const auto parsed = std::from_chars(number.data(), number.data() + number.size(), result.attribute3);
+        if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size()) throw std::runtime_error("param.json attribute3 exceeds uint32 range");
+    }
+    if (const JsonValue* kernel = findObjectMember(root, "kernel")) {
+        if (const JsonValue* flexible = findObjectMember(*kernel, "flexibleMemorySize")) {
+            const auto& number = flexible->numberText;
+            if (flexible->type != JsonType::Number || number.find_first_of("-.eE") != std::string::npos)
+                throw std::runtime_error("param.json kernel.flexibleMemorySize is not an unsigned integer");
+            std::uint64_t bytes = 0;
+            const auto parsed = std::from_chars(number.data(), number.data() + number.size(), bytes);
+            if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size())
+                throw std::runtime_error("param.json kernel.flexibleMemorySize exceeds uint64 range");
+            if (bytes == 0 || (bytes & (PS5_PAGE_SIZE - 1)) != 0)
+                throw std::runtime_error("param.json kernel.flexibleMemorySize must be a positive multiple of 16 KiB");
+            result.flexibleMemorySizeBytes = bytes;
+        }
+    }
     if (const JsonValue* downloadData = findObjectMember(root, "downloadDataSize")) {
         if (downloadData->type != JsonType::Number || downloadData->numberValue < 0) throw std::runtime_error("param.json downloadDataSize is not a size");
         if (downloadData->numberText.find_first_of("-.eE") == std::string::npos) {

@@ -43,6 +43,7 @@ bool Simple(IrOpcode opcode, Op& op, std::uint8_t& arguments) {
         case IrOpcode::IMul32: op = Op::IMul32; arguments = 2; return true;
         case IrOpcode::IMul64: op = Op::IMul64; arguments = 2; return true;
         case IrOpcode::UMin32: op = Op::UMin32; arguments = 2; return true;
+        case IrOpcode::SMin32: op = Op::SMin32; arguments = 2; return true;
         case IrOpcode::CompositeConstructU64: op = Op::ConstructU64; arguments = 2; return true;
         case IrOpcode::ConvertF32U32: op = Op::ConvertF32U32; arguments = 1; return true;
         case IrOpcode::ConvertU32F32: op = Op::ConvertU32F32; arguments = 1; return true;
@@ -353,7 +354,11 @@ bool CompiledEvaluator::rawRead(const Node& node, std::uint64_t& result) {
         const auto aligned = byteOffset & ~std::uint64_t {3};
         const auto stride = (static_cast<std::uint32_t>(high) >> 16u) & 0x3fffu;
         const auto size = stride == 0u ? static_cast<std::uint64_t>(static_cast<std::uint32_t>(records)) : static_cast<std::uint64_t>(stride) * static_cast<std::uint32_t>(records);
-        if (aligned > size || size - aligned < sizeof(std::uint32_t)) return false;
+        // s_buffer_load reads zero outside the V#'s range (upstream 5a9d73154, as Evaluator).
+        if (aligned > size || size - aligned < sizeof(std::uint32_t)) {
+            result = 0;
+            return true;
+        }
         address = ((base & ~std::uint64_t {3}) + byteOffset) & ~std::uint64_t {3};
     } else {
         const auto relative = (immediate & ~std::int64_t {3}) + static_cast<std::int64_t>(static_cast<std::uint32_t>(offset) & ~3u);
@@ -434,6 +439,7 @@ bool CompiledEvaluator::instruction(const Node& node, std::uint64_t& result) {
         case Op::IMul32: if (!binary()) return false; result = static_cast<std::uint32_t>(a * b); return true;
         case Op::IMul64: if (!binary()) return false; result = a * b; return true;
         case Op::UMin32: if (!binary()) return false; result = std::min(static_cast<std::uint32_t>(a), static_cast<std::uint32_t>(b)); return true;
+        case Op::SMin32: if (!binary()) return false; result = static_cast<std::uint32_t>(std::min(static_cast<std::int32_t>(a), static_cast<std::int32_t>(b))); return true;
         case Op::ConvertF32U32: if (!unary()) return false; result = Float32Bits(static_cast<float>(static_cast<std::uint32_t>(a))); return true;
         case Op::ConvertU32F32: {
             if (!unary()) return false;

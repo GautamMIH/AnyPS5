@@ -9,13 +9,17 @@
 #include <mutex>
 #include <vector>
 #include <utility>
-#include <random>
 #include <string>
 #include <cinttypes>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/SonyCrt.hpp"
 #include "prx/libc/include/specifics/gcc/AtomicOps.hpp"
 #include "prx/libc/include/FileStream.hpp"
+#include "prx/libc/include/HostEntropy.hpp"
 
 namespace {
 
@@ -30,6 +34,20 @@ struct ExitDestructor {
 std::mutex g_exitMutex;
 std::vector<ExitDestructor> g_exitDestructors;
 bool g_exitRunnerRegistered = false;
+
+#ifdef _WIN32
+struct UcrtStream {
+    char* pointer;
+    char* base;
+    int count;
+    long flags;
+    long file;
+    int charBuffer;
+    int bufferSize;
+    char* temporaryName;
+    CRITICAL_SECTION lock;
+};
+#endif
 
 }
 
@@ -104,14 +122,48 @@ std::uintmax_t APS5_VABI strtoumax_nid_postfix(const char* str, char** endptr, i
 }
 
 unsigned int APS5_VABI _ZSt14_Random_devicev_nid_postfix() {
-    static std::random_device device;
-    static std::mutex mutex;
-    std::lock_guard lock(mutex);
-    return device();
+    unsigned int value = 0;
+    HostEntropy_nid_no_patch(&value, sizeof(value));
+    return value;
 }
 
 [[noreturn]] void APS5_VABI _ZSt14_Throw_C_errori_nid_postfix(int code) {
     throw std::runtime_error("_Throw_C_error: C11 thread error " + std::to_string(code));
+}
+
+void APS5_VABI _Lockfilelock_nid_postfix(FileStream* stream) {
+    if (stream == nullptr) throw std::invalid_argument("_Lockfilelock: null stream");
+#ifdef _WIN32
+    _lock_file(GetNativeStream(stream));
+#else
+    flockfile(GetNativeStream(stream));
+#endif
+}
+
+void APS5_VABI _Unlockfilelock_nid_postfix(FileStream* stream) {
+    if (stream == nullptr) throw std::invalid_argument("_Unlockfilelock: null stream");
+#ifdef _WIN32
+    _unlock_file(GetNativeStream(stream));
+#else
+    funlockfile(GetNativeStream(stream));
+#endif
+}
+
+void APS5_VABI flockfile_nid_postfix(FileStream* stream) {
+    _Lockfilelock_nid_postfix(stream);
+}
+
+void APS5_VABI funlockfile_nid_postfix(FileStream* stream) {
+    _Unlockfilelock_nid_postfix(stream);
+}
+
+int APS5_VABI ftrylockfile_nid_postfix(FileStream* stream) {
+    if (stream == nullptr) throw std::invalid_argument("ftrylockfile: null stream");
+#ifdef _WIN32
+    return TryEnterCriticalSection(&reinterpret_cast<UcrtStream*>(GetNativeStream(stream))->lock) ? 0 : -1;
+#else
+    return ftrylockfile(GetNativeStream(stream)) == 0 ? 0 : -1;
+#endif
 }
 
 std::uint64_t APS5_VABI _Stoul_nid_postfix(const char* str, char** endptr, int base) {
@@ -125,6 +177,22 @@ void APS5_VABI _Locksyslock_nid_postfix() {
 
 void APS5_VABI _Unlocksyslock_nid_postfix() {
     g_sysLock.unlock();
+}
+
+__int128 APS5_VABI __divti3_nid_postfix(__int128 dividend, __int128 divisor) {
+    return SonyDivti3(dividend, divisor);
+}
+
+unsigned __int128 APS5_VABI __udivti3_nid_postfix(unsigned __int128 dividend, unsigned __int128 divisor) {
+    return SonyUdivti3(dividend, divisor);
+}
+
+unsigned __int128 APS5_VABI __umodti3_nid_postfix(unsigned __int128 dividend, unsigned __int128 divisor) {
+    return SonyUmodti3(dividend, divisor);
+}
+
+void APS5_VABI _ZNSt8ios_base7_AddstdEPS__nid_postfix(void*) {
+    NotImplemented_nid_no_patch(__func__);
 }
 
 }

@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <memory>
 #include <stdexcept>
 #include <domain/GuestRuntime.hpp>
@@ -62,6 +63,8 @@ struct NidReference {
     FileByteOffset RelocationTableOffset;
     VirtualAddress RelocationAddress;
     std::int64_t Addend;
+    bool Weak = false;
+    bool Function = false;
     std::uint8_t SymbolInfo = kGlobalFunctionSymbolInfo;
     std::string LibraryFile;
 };
@@ -132,6 +135,8 @@ struct SysVDynamicSection {
     std::uint64_t VerneedCount = 0;
     std::vector<GuestRuntime> GuestModules;
     std::map<VirtualAddress, std::string> ImportModules;
+    std::set<VirtualAddress> FunctionImports;
+    std::set<std::string> UnmatchedImportModules;
 };
 
 struct CallRegistryEntry {

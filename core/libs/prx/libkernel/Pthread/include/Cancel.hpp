@@ -13,6 +13,13 @@ inline constexpr int GUEST_CANCEL_DEFERRED = 0;
 inline constexpr int GUEST_CANCEL_ASYNCHRONOUS = 2;
 inline void* const GUEST_CANCELED = reinterpret_cast<void*>(std::uintptr_t{1});
 
+struct CleanupHandler {
+    CleanupHandler* previous;
+    void (APS5_VABI* routine)(void*);
+    void* argument;
+    int onHeap;
+};
+
 extern "C" {
 void APS5_VABI __pthread_cleanup_push_imp_nid_postfix(void (APS5_VABI* routine)(void*), void* argument, void* info);
 void APS5_VABI __pthread_cleanup_pop_imp_nid_postfix(int execute);
@@ -22,6 +29,8 @@ namespace ThreadCancel {
 
 bool Requested();
 void Check();
+void* CleanupMark();
+void CleanupRestore(void* mark);
 void BeginWait(TimedWait::Condition* condition);
 void BeginWait(std::condition_variable_any* condition);
 void EndWait();

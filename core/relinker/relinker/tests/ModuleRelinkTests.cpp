@@ -140,8 +140,8 @@ void exportsAreHashedAndImportsKeepBinding() {
     Relinker::SysVDynamicSectionBuilder builder;
     constexpr std::uint8_t kWeakFunction = 0x22;
     const std::vector<Domain::NidReference> references = {
-        {"aaaaaaaaaaa#A#A", {}, 7, 0x100, 0x2000, 0, kWeakFunction},
-        {"bbbbbbbbbbb#B#B", {}, 6, 0x200, 0x2008, 0, 0x11},
+        {"aaaaaaaaaaa#A#A", {}, 7, 0x100, 0x2000, 0, true, true, kWeakFunction},
+        {"bbbbbbbbbbb#B#B", {}, 6, 0x200, 0x2008, 0, false, false, 0x11},
     };
     auto section = builder.BuildDynamicSection(references, {"libkernel.prx"}, 0x100, 1);
     builder.AppendExportsAndHash(section, {{"ccccccccccc", 0x12, 0x4000, 16}, {"ddddddddddd", 0x11, 0x5000, 8}});

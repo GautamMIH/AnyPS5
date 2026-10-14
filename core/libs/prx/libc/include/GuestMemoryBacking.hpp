@@ -9,7 +9,8 @@
 // Every change updates areas, host mappings and the GPU allocation registry together.
 namespace GuestMemoryBacking {
 
-enum class Kind : int { Reserved = 0, Direct = 1, Flexible = 2, Heap = 3 };
+// Shared areas show a host memory object (a shm_open object, a file, JIT shared memory).
+enum class Kind : int { Reserved = 0, Direct = 1, Flexible = 2, Heap = 3, Shared = 4 };
 
 enum class Status : int { Ok = 0, Invalid = 1, NoMemory = 2, Access = 3 };
 
@@ -52,6 +53,11 @@ struct Area {
 extern "C" {
 // Maps (or reserves) guest memory. *address is the fixed address or a search hint (0 = anywhere).
 Status GuestVirtualMap_nid_postfix(void** address, std::size_t bytes, std::size_t alignment, Kind kind, int protection, int flags, std::int64_t physical);
+// Maps bytes [offset, offset + bytes) of a host memory object (Linux: a file descriptor; Windows: a
+// file mapping handle) as a Kind::Shared area: shared with the object, or a private copy-on-write
+// view (Linux only). The area keeps a duplicate of the handle, so it outlives the caller's.
+// maxProtection (-1 = any) is the most a shared view may later be given; asking for more is Access.
+Status GuestVirtualMapObject_nid_postfix(void** address, std::size_t bytes, std::size_t alignment, int protection, int flags, std::uintptr_t object, std::uint64_t offset, bool privateCopy, int maxProtection);
 // Unmaps every area part in the range; free parts are skipped, reserved parts become free.
 Status GuestVirtualUnmap_nid_postfix(void* address, std::size_t bytes);
 // Changes protection of the areas in the range (reserved areas only record it). Returns Invalid

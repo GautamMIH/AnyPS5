@@ -35,6 +35,22 @@ private:
     void* handle;
 };
 
+// A host write into guest memory (a socket or file read into a guest buffer): the range's tracking is
+// resolved writable first, so watches see it as written. Open() is false for a null pointer with a
+// non-zero size (the caller fails with EFAULT). Matches upstream's GuestArena::HostWrite interface.
+class HostWrite {
+public:
+    HostWrite(void* pointer, std::size_t bytes) : open(bytes == 0 || pointer != nullptr) {
+        if (open && bytes != 0) GuestMemoryTrackingResolve_nid_postfix(reinterpret_cast<std::uint64_t>(pointer), bytes, true);
+    }
+    HostWrite(const HostWrite&) = delete;
+    HostWrite& operator=(const HostWrite&) = delete;
+    bool Open() const { return open; }
+
+private:
+    bool open;
+};
+
 }
 
 #endif

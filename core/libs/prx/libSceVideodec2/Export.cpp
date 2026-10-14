@@ -1,14 +1,17 @@
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <span>
 #include <stdexcept>
+#include <vector>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include "src/VideoDecoder.hpp"
@@ -273,10 +276,191 @@ struct HevcPictureInfo {
 };
 static_assert(sizeof(HevcPictureInfo) == 0xB8);
 
+struct Vp9PictureInfo {
+    std::uint64_t thisSize;
+    bool isValid;
+    std::uint64_t ptsData;
+    std::uint64_t dtsData;
+    std::uint64_t attachedData;
+    std::uint32_t profile;
+    std::uint32_t level;
+    std::uint32_t keyFrameFlag;
+    std::uint32_t intraOnly;
+    std::uint8_t bitDepth;
+    std::uint8_t colorRange;
+    std::uint32_t colorSpace;
+    std::uint32_t numFrames;
+    std::uint32_t frameWidth;
+    std::uint32_t frameHeight;
+    std::uint32_t renderWidth;
+    std::uint32_t renderHeight;
+};
+
+static_assert(sizeof(Vp9PictureInfo) == 88);
+static_assert(offsetof(Vp9PictureInfo, colorSpace) == 60);
+
+class Vp9Bits {
+public:
+    explicit Vp9Bits(std::span<const std::uint8_t> bytes) : bytes(bytes) {}
+    std::uint32_t Read(unsigned count) {
+        std::uint32_t result = 0;
+        while (count-- != 0) {
+            if (position / 8 >= bytes.size()) throw std::runtime_error("Videodec2: truncated VP9 header");
+            result = (result << 1u) | ((bytes[position / 8] >> (7u - position % 8)) & 1u);
+            ++position;
+        }
+        return result;
+    }
+private:
+    std::span<const std::uint8_t> bytes;
+    std::size_t position = 0;
+};
+
+struct Vp9Unit {
+    std::span<const std::uint8_t> bytes;
+    Vp9PictureInfo info{};
+    bool shown = false;
+};
+
+Vp9Unit ParseVp9Unit(std::span<const std::uint8_t> bytes, std::array<Vp9PictureInfo, 8>& references, Vp9PictureInfo& colors, std::uint32_t count) {
+    Vp9Bits bits(bytes);
+    if (bits.Read(2) != 2) throw std::runtime_error("Videodec2: invalid VP9 frame marker");
+    const auto low = bits.Read(1);
+    const auto profile = low | (bits.Read(1) << 1u);
+    if (profile == 3 && bits.Read(1) != 0) throw std::runtime_error("Videodec2: invalid VP9 reserved bit");
+    Vp9Unit unit{bytes};
+    auto& info = unit.info;
+    if (bits.Read(1) != 0) {
+        info = references[bits.Read(3)];
+        if (!info.isValid) throw std::runtime_error("Videodec2: missing VP9 display reference");
+        info.keyFrameFlag = 0;
+        info.intraOnly = 0;
+        info.profile = profile;
+        info.numFrames = count;
+        unit.shown = true;
+        return unit;
+    }
+    const bool key = bits.Read(1) == 0;
+    unit.shown = bits.Read(1) != 0;
+    const bool resilient = bits.Read(1) != 0;
+    const bool intra = !key && !unit.shown && bits.Read(1) != 0;
+    if (!key && !resilient) bits.Read(2);
+    const auto dimensions = [&] {
+        info.frameWidth = bits.Read(16) + 1;
+        info.frameHeight = bits.Read(16) + 1;
+    };
+    const auto render = [&] {
+        const bool different = bits.Read(1) != 0;
+        info.renderWidth = different ? bits.Read(16) + 1 : info.frameWidth;
+        info.renderHeight = different ? bits.Read(16) + 1 : info.frameHeight;
+    };
+    std::uint32_t refresh = 0;
+    if (key || intra) {
+        if (bits.Read(24) != 0x498342) throw std::runtime_error("Videodec2: invalid VP9 sync code");
+        info.bitDepth = 8;
+        info.colorSpace = 1;
+        if (key || profile != 0) {
+            if (profile >= 2) info.bitDepth = bits.Read(1) != 0 ? 12 : 10;
+            info.colorSpace = bits.Read(3);
+            if (info.colorSpace != 7) {
+                info.colorRange = static_cast<std::uint8_t>(bits.Read(1));
+                if (profile == 1 || profile == 3) {
+                    bits.Read(2);
+                    if (bits.Read(1) != 0) throw std::runtime_error("Videodec2: invalid VP9 color reserved bit");
+                }
+            } else {
+                info.colorRange = 1;
+                if (profile == 1 || profile == 3) {
+                    if (bits.Read(1) != 0) throw std::runtime_error("Videodec2: invalid VP9 RGB reserved bit");
+                } else throw std::runtime_error("Videodec2: invalid VP9 RGB profile");
+            }
+        }
+        refresh = key ? 255 : bits.Read(8);
+        dimensions();
+    } else {
+        refresh = bits.Read(8);
+        std::array<unsigned, 3> indexes{};
+        for (auto& index : indexes) { index = bits.Read(3); bits.Read(1); }
+        info = colors;
+        if (!info.isValid) throw std::runtime_error("Videodec2: missing VP9 color configuration");
+        bool inherited = false;
+        for (const auto index : indexes) {
+            if (bits.Read(1) != 0) {
+                if (!references[index].isValid) throw std::runtime_error("Videodec2: missing VP9 size reference");
+                info.frameWidth = references[index].frameWidth;
+                info.frameHeight = references[index].frameHeight;
+                inherited = true;
+                break;
+            }
+        }
+        if (!inherited) dimensions();
+    }
+    render();
+    info.isValid = true;
+    info.profile = profile;
+    info.keyFrameFlag = key ? 1 : 0;
+    info.intraOnly = intra ? 1 : 0;
+    info.numFrames = count;
+    if (key || intra) colors = info;
+    for (unsigned index = 0; index < references.size(); ++index)
+        if ((refresh & (1u << index)) != 0) references[index] = info;
+    return unit;
+}
+
+std::vector<Vp9Unit> ParseVp9Packet(std::span<const std::uint8_t> bytes, std::array<Vp9PictureInfo, 8>& references, Vp9PictureInfo& colors) {
+    std::vector<std::span<const std::uint8_t>> frames;
+    const auto marker = bytes.back();
+    const unsigned count = (marker & 7u) + 1;
+    const unsigned magnitude = ((marker >> 3u) & 3u) + 1;
+    const std::size_t indexSize = 2 + count * magnitude;
+    if ((marker & 0xe0u) == 0xc0u && bytes.size() >= indexSize && bytes[bytes.size() - indexSize] == marker) {
+        const auto end = bytes.size() - indexSize;
+        std::size_t offset = 0;
+        for (unsigned frame = 0; frame < count; ++frame) {
+            std::size_t size = 0;
+            for (unsigned byte = 0; byte < magnitude; ++byte)
+                size |= static_cast<std::size_t>(bytes[end + 1 + frame * magnitude + byte]) << (8u * byte);
+            if (size == 0 || size > end - offset) throw std::runtime_error("Videodec2: invalid VP9 superframe size");
+            frames.push_back(bytes.subspan(offset, size));
+            offset += size;
+        }
+        if (offset != end) throw std::runtime_error("Videodec2: VP9 superframe contains unindexed bytes");
+    } else frames.push_back(bytes);
+    std::vector<Vp9Unit> result;
+    for (const auto frame : frames) result.push_back(ParseVp9Unit(frame, references, colors, static_cast<std::uint32_t>(frames.size())));
+    return result;
+}
+
 struct Decoder {
     std::uint32_t codec;
     std::unique_ptr<Videodec2::VideoDecoder> video;
+    // VP9: the reference and color state of the parsed frame headers, and the information of each
+    // shown frame by its pts until its picture is published.
+    std::array<Vp9PictureInfo, 8> vp9References{};
+    Vp9PictureInfo vp9Colors{};
+    std::map<std::uint64_t, Vp9PictureInfo> vp9Shown;
 };
+
+// Parses the VP9 frame headers of an access unit (superframes included) and keeps the shown
+// frame's information for its picture.
+void parseVp9(Decoder& decoder, const InputData& input) {
+    auto references = decoder.vp9References;
+    auto colors = decoder.vp9Colors;
+    const auto units = ParseVp9Packet({static_cast<const std::uint8_t*>(input.auData), static_cast<std::size_t>(input.auSize)}, references, colors);
+    for (const auto& unit : units) {
+        if (!unit.shown) continue;
+        auto info = unit.info;
+        info.thisSize = sizeof(Vp9PictureInfo);
+        info.ptsData = input.ptsData;
+        info.dtsData = input.dtsData;
+        info.attachedData = input.attachedData;
+        decoder.vp9Shown[input.ptsData] = info;
+    }
+    decoder.vp9References = references;
+    decoder.vp9Colors = colors;
+    constexpr std::size_t kMaxPending = 64;
+    while (decoder.vp9Shown.size() > kMaxPending) decoder.vp9Shown.erase(decoder.vp9Shown.begin());
+}
 
 std::mutex& decodersMutex() {
     static std::mutex value;
@@ -305,9 +489,8 @@ Videodec2::Codec hostCodec(std::uint32_t codec) {
     return codec == kCodecAvc ? Videodec2::Codec::Avc : codec == kCodecHevc ? Videodec2::Codec::Hevc : Videodec2::Codec::Vp9;
 }
 
-// No VP9 picture information is stored yet.
 std::uint64_t pictureInfoBytes(std::uint32_t codec) {
-    return codec == kCodecAvc ? sizeof(AvcPictureInfo) : codec == kCodecHevc ? sizeof(HevcPictureInfo) : 0;
+    return codec == kCodecAvc ? sizeof(AvcPictureInfo) : codec == kCodecHevc ? sizeof(HevcPictureInfo) : codec == kCodecVp9 ? sizeof(Vp9PictureInfo) : 0;
 }
 
 bool tracing() {
@@ -317,7 +500,7 @@ bool tracing() {
 
 // Describes the picture in output and stores its information after the frame, where
 // sceVideodec2GetPictureInfo reads it.
-void publish(const Decoder& decoder, const Videodec2::Picture& picture, FrameBuffer& frameBuffer, OutputInfo& output) {
+void publish(Decoder& decoder, const Videodec2::Picture& picture, FrameBuffer& frameBuffer, OutputInfo& output) {
     frameBuffer.isAccepted = true;
     output.isValid = true;
     output.isErrorFrame = false;
@@ -362,6 +545,25 @@ void publish(const Decoder& decoder, const Videodec2::Picture& picture, FrameBuf
         hevc.frame_cropping_flag = cropRight != 0 || cropBottom != 0;
         hevc.frame_crop_right_offset = cropRight;
         hevc.frame_crop_bottom_offset = cropBottom;
+    } else if (decoder.codec == kCodecVp9) {
+        auto& vp9 = *reinterpret_cast<Vp9PictureInfo*>(info);
+        const auto found = decoder.vp9Shown.find(picture.pts);
+        if (found != decoder.vp9Shown.end()) {
+            vp9 = found->second;
+            decoder.vp9Shown.erase(found);
+        } else {
+            vp9 = {};
+            vp9.thisSize = sizeof(Vp9PictureInfo);
+            vp9.isValid = true;
+            vp9.ptsData = picture.pts;
+            vp9.dtsData = picture.dts;
+            vp9.attachedData = picture.attachedData;
+            vp9.keyFrameFlag = picture.keyFrame ? 1 : 0;
+            vp9.frameWidth = picture.width;
+            vp9.frameHeight = picture.height;
+            vp9.renderWidth = picture.width;
+            vp9.renderHeight = picture.height;
+        }
     }
     if (tracing()) std::fprintf(stderr, "[videodec2] picture %ux%u pitch %u pts %llu\n", picture.width, picture.height, picture.pitch, static_cast<unsigned long long>(picture.pts));
 }
@@ -483,6 +685,14 @@ int32_t APS5_VABI sceVideodec2Decode(Decoder* decoder, const InputData* input, F
     if (input->auSize == 0) return kErrorAccessUnitSize;
     if (frameBuffer->frameBuffer == nullptr) return kErrorFrameBufferPointer;
     return run(*decoder, *frameBuffer, *output, [&] {
+        if (decoder->codec == kCodecVp9) {
+            // The header parse only fills picture information; FFmpeg decides whether the frame decodes.
+            try {
+                parseVp9(*decoder, *input);
+            } catch (const std::runtime_error& error) {
+                if (tracing()) std::fprintf(stderr, "[videodec2] VP9 picture information: %s\n", error.what());
+            }
+        }
         return decoder->video->Decode({static_cast<const std::byte*>(input->auData), static_cast<std::size_t>(input->auSize)}, input->ptsData, input->dtsData, input->attachedData, frameSpace(*decoder, *frameBuffer));
     });
 }
@@ -498,6 +708,9 @@ int32_t APS5_VABI sceVideodec2Flush(Decoder* decoder, FrameBuffer* frameBuffer, 
 int32_t APS5_VABI sceVideodec2Reset(Decoder* decoder) {
     if (!known(decoder)) return kErrorDecoderInstance;
     decoder->video->Reset();
+    decoder->vp9References = {};
+    decoder->vp9Colors = {};
+    decoder->vp9Shown.clear();
     return 0;
 }
 
@@ -508,10 +721,7 @@ int32_t APS5_VABI sceVideodec2GetPictureInfo(const OutputInfo* output, void* fir
     if (!outputInfoSize(*output)) return kErrorStructSize;
     if (output->pictureCount == 0 || firstPicture == nullptr) return 0;
     const auto available = pictureInfoBytes(output->codecType);
-    if (available == 0) {
-        NotImplemented_nid_no_patch("sceVideodec2GetPictureInfo (VP9 picture information)");
-        return kErrorApiFail;
-    }
+    if (available == 0) return kErrorApiFail;
     const auto requested = *static_cast<const std::uint64_t*>(firstPicture);
     const auto bytes = std::min<std::uint64_t>(requested, available);
     if (bytes <= sizeof(std::uint64_t)) return kErrorStructSize;
@@ -525,6 +735,10 @@ int32_t APS5_VABI sceVideodec2GetAvcPictureInfo(const OutputInfo* output, void* 
 }
 
 int32_t APS5_VABI sceVideodec2GetHevcPictureInfo(const OutputInfo* output, void* picture) {
+    return sceVideodec2GetPictureInfo(output, picture, nullptr);
+}
+
+int32_t APS5_VABI sceVideodec2GetVp9PictureInfo(const OutputInfo* output, void* picture) {
     return sceVideodec2GetPictureInfo(output, picture, nullptr);
 }
 

@@ -262,6 +262,9 @@ int main() {
         {"Thu, 01 Mar 2024 12:34:56 ", 0, march, 0},
         {"Thu, 01 Mar 2024 12:34:567 EST", 0, march, 0},
         {"Thu, 01 Mar 2024 12:34 EST", 0, at(2024, 3, 1, 12, 34, 0), 0},
+        {"Thu, 29 Feb 2024 12:34", badParse, untouched, 0},
+        {"Thu, 01 Mar 2024 12:34", badParse, untouched, 0},
+        {"Thu, 29 Feb 2024 12:34 ", 0, at(2024, 2, 29, 12, 34, 0), 0},
         {"Thu, 01 Mar 2024 12:34EST", badParse, untouched, 0},
         {"Thu, 01 Mar 2024 1:2:3 EST", 0, at(2024, 3, 1, 1, 2, 3), -300},
         {"Thu, 01 Mar 2024 26:00:00 GMT", badParse, untouched, 0},
@@ -456,4 +459,26 @@ int main() {
         Require(sceRtcConvertLocalTimeToUtc(&result, &result) == 0 && result.tick == source.tick);
     }
     SetTimeZone("UTC0");
+
+#ifndef _WIN32
+    SetTimeZone("STD0DST,J1/0,J2/0");
+    const std::time_t beforeTransition = -1;
+    const std::time_t atTransition = 0;
+    std::tm beforeState{}, afterState{};
+    Require(localtime_r(&beforeTransition, &beforeState) != nullptr && beforeState.tm_isdst == 0);
+    Require(localtime_r(&atTransition, &afterState) != nullptr && afterState.tm_isdst == 1);
+    for (const std::uint64_t distance : {1000000ull, 500000ull, 1ull}) {
+        source.tick = unixEpochTick - distance;
+        Require(sceRtcConvertUtcToLocalTime(&source, &result) == 0 && result.tick == source.tick);
+        Require(sceRtcConvertUtcToLocalTime(&source, &source) == 0 && source.tick == unixEpochTick - distance);
+    }
+    for (const std::uint64_t distance : {0ull, 500000ull}) {
+        source.tick = unixEpochTick + distance;
+        Require(sceRtcConvertUtcToLocalTime(&source, &result) == 0 && result.tick == source.tick + 3600000000ull);
+    }
+    tick.tick = unixEpochTick - 500000ull;
+    Require(sceRtcFormatRFC3339LocalTime(text, &tick) == 0 && std::strcmp(text, "1969-12-31T23:59:59.50Z") == 0);
+    Require(sceRtcFormatRFC2822LocalTime(rfc2822, &tick) == 0 && std::strcmp(rfc2822, "Wed, 31 Dec 1969 23:59:59 +0000") == 0);
+    SetTimeZone("UTC0");
+#endif
 }

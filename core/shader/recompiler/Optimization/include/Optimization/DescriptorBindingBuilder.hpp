@@ -14,6 +14,7 @@ struct PreparedDescriptorBinding {
     std::vector<std::uint32_t> resources;
     std::vector<bool> identityImageSwizzle;
     std::vector<std::uint32_t> samplerFilterElements;
+    std::vector<bool> inactive;
     std::size_t writtenBuffers = 0;
     std::size_t readOnlyBuffers = 0;
 };
@@ -28,12 +29,13 @@ struct DescriptorBindingPlan {
     std::vector<PreparedDescriptorBinding> bindings;
     std::vector<PreparedImageMetadata> imageMetadata;
     std::vector<PipelineSpecializationConstant> specialization;
+    std::vector<std::uint32_t> runtimeState;
     bool storageData = false;
 };
 
 class DescriptorBindingBuilder {
 public:
-    DescriptorBindingPlan Prepare(const IrBindingLayout& layout, const ShaderInfo& info, IrShaderStage stage, const ResourceSnapshot& snapshot, std::span<const std::uint8_t> exportMappings = {}) const;
+    DescriptorBindingPlan Prepare(const IrBindingLayout& layout, const ShaderInfo& info, IrShaderStage stage, const ResourceSnapshot& snapshot, std::span<const std::uint8_t> exportMappings = {}, bool registrationModules = false, bool fragmentDescriptorSet = false) const;
     DescriptorBindingPlan Select(const DescriptorBindingPlan& plan, std::span<const std::uint32_t> bindings) const;
     // bufferOffsetAlignment: the device's storage buffer offset alignment; each guest buffer's
     // BufferViewMisalignment is written to its byte of the shader data's buffer offsets (0: none).

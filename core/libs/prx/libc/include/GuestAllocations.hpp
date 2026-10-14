@@ -21,7 +21,33 @@ struct Range {
     bool gpu = false;
 };
 
-using Lease = std::vector<std::shared_ptr<const Range>>;
+class Lease {
+public:
+    using Ranges = std::vector<std::shared_ptr<const Range>>;
+    using value_type = Ranges::value_type;
+    using const_iterator = Ranges::const_iterator;
+    using iterator = const_iterator;
+
+    Lease() = default;
+    explicit Lease(std::shared_ptr<const Ranges> ranges) : ranges(std::move(ranges)) {}
+
+    const_iterator begin() const { return held().begin(); }
+    const_iterator end() const { return held().end(); }
+    std::size_t size() const { return held().size(); }
+    bool empty() const { return held().empty(); }
+    const value_type& operator[](std::size_t index) const { return held()[index]; }
+    const value_type& front() const { return held().front(); }
+    const value_type& back() const { return held().back(); }
+    void clear() { ranges.reset(); }
+
+private:
+    const Ranges& held() const {
+        static const Ranges none;
+        return ranges != nullptr ? *ranges : none;
+    }
+
+    std::shared_ptr<const Ranges> ranges;
+};
 using Mapped = std::vector<std::weak_ptr<const Range>>;
 
 extern "C" {
@@ -45,6 +71,7 @@ bool GuestAllocationsQuery_nid_postfix(void* mutation, const void* pointer, bool
 void GuestAllocationsCarve_nid_postfix(void* mutation, const void* pointer, std::size_t bytes, const std::function<void()>& apply);
 Lease GuestAllocationsAcquire_nid_postfix();
 Lease GuestAllocationsAcquireAll_nid_postfix();
+std::shared_ptr<const Range> GuestAllocationsLookup_nid_postfix(std::uintptr_t address, bool next);
 // Changes whenever a mutation ends, so callers can cache facts about guest mappings between changes.
 std::uint64_t GuestAllocationsGeneration_nid_postfix();
 // Precise invalidation for such caches: the callback runs, after the generation changed, for every
@@ -58,6 +85,7 @@ void GuestAllocationsInvalidate_nid_postfix(std::uintptr_t address, std::size_t 
 // until the lease is dropped by another thread.
 void GuestAllocationsSetPinWaiter_nid_postfix(bool (*callback)(std::uintptr_t address, std::size_t bytes));
 void GuestAllocationsSetGpuMapObserver_nid_postfix(void (*callback)(const Mapped& ranges, std::uint64_t generation));
+void GuestAllocationsSetUnmapObserver_nid_postfix(void (*callback)(std::uintptr_t address, std::size_t bytes));
 void GuestAllocationsNoteGpuMapping_nid_postfix(void* mutation, const void* pointer, std::size_t bytes);
 }
 

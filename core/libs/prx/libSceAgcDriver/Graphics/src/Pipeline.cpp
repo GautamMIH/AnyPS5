@@ -189,7 +189,7 @@ bool CoarseShadingAllowed(std::span<const std::uint32_t> spirv) {
 bool CoarseShading(const Context& context, const State& state, std::span<const CompiledShader> shaders) {
     if (context.coarseShading.width <= 1 || state.renderExtent.width <= context.coarseMinExtent.width || state.renderExtent.height <= context.coarseMinExtent.height) return false;
     for (const auto& shader : shaders)
-        if (shader.stage == ShaderRecompiler::ShaderStage::Fragment) return CoarseShadingAllowed(static_cast<const std::vector<std::uint32_t>&>(shader.program->spirv));
+        if (shader.stage == ShaderRecompiler::ShaderStage::Fragment) return CoarseShadingAllowed(shader.program->spirv.Words());
     return false;
 }
 

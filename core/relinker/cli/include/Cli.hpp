@@ -3,16 +3,18 @@
 
 #include <set>
 #include <string>
-#include <cstdint>
 #include <vector>
+#include <cstdint>
 #include <codegen/CodegenTypes.hpp>
 #include <relinker/domain/RelinkResult.hpp>
+#include <optional>
 
 namespace Cli {
 
 struct Args {
     bool showHelp = false;
     bool skipSyscallCheck = false;
+    bool trapSdkSyscallStubs = false;
     bool skipSceModule = false;
     bool toIntel = false;
     bool toRosetta = false;
@@ -25,6 +27,9 @@ struct Args {
     bool gameMode = false;
     bool runPathSpecified = false;
     bool windowsGui = false;
+    std::optional<std::uint64_t> windowsFixedBase;
+    bool traceImports = false;
+    std::optional<std::uint64_t> linuxFixedBase;
     std::uint32_t unusedFilterLevel = 0;
     std::string inputPath;
     std::string outputPath;
@@ -32,6 +37,8 @@ struct Args {
     std::string runPath = "$ORIGIN/libs";
     std::string libsPath;
     std::set<std::string> excludedSceModules;
+    std::vector<std::string> moduleDirectories;
+    std::vector<std::string> executables;
 };
 
 struct PreparedModule {

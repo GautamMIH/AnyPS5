@@ -90,6 +90,17 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
         return value.substr(0, hashPos);
     };
 
+    auto symbolInfo = [](const NidReference& ref) -> std::uint8_t {
+        if (ref.Nid.empty()) return static_cast<std::uint8_t>((STB_WEAK << 4) | STT_NOTYPE);
+        const bool tls = ref.RelocationTypeValue == R_X86_64_DTPMOD64 || ref.RelocationTypeValue == R_X86_64_DTPOFF64
+            || ref.RelocationTypeValue == R_X86_64_TPOFF64;
+        // The source symbol's binding and type are kept (SymbolInfo); a weak flag or a TLS
+        // relocation takes precedence for references built without them.
+        const std::uint8_t binding = ref.Weak ? static_cast<std::uint8_t>(STB_WEAK) : static_cast<std::uint8_t>(ref.SymbolInfo >> 4);
+        const std::uint8_t type = tls ? static_cast<std::uint8_t>(STT_TLS) : static_cast<std::uint8_t>(ref.SymbolInfo & 0xf);
+        return static_cast<std::uint8_t>((binding << 4) | type);
+    };
+
     static constexpr std::size_t kRelaEntSize = 24;
 
     std::vector<const NidReference*> pltSlots(originalJmprelCount, nullptr);
@@ -99,6 +110,7 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
         // Library is the SCE import library (the symbol version); LibraryFile is the module file it
         // comes from, which Windows import binding needs.
         if (!ref.LibraryFile.empty()) result.ImportModules.emplace(ref.RelocationAddress, ref.LibraryFile);
+        if (ref.Function) result.FunctionImports.insert(ref.RelocationAddress);
         std::uint32_t relType = ref.RelocationTypeValue;
         if (relType == 0) relType = R_X86_64_JUMP_SLOT;
 
@@ -142,7 +154,7 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
 
         const NidReference& ref = *slot;
         const std::uint32_t nameOff = _appendStr(result.DynStrData, stripHashSuffix(ref.Nid));
-        _appendElfSym(result.DynSymData, nameOff, ref.SymbolInfo, STV_DEFAULT, 0, 0, 0);
+        _appendElfSym(result.DynSymData, nameOff, symbolInfo(ref), STV_DEFAULT, 0, 0, 0);
         result.SymbolVersions.push_back(importVersion(ref));
 
         const std::uint64_t relaInfo = (static_cast<std::uint64_t>(symIdx) << 32) | R_X86_64_JUMP_SLOT;
@@ -153,7 +165,7 @@ SysVDynamicSection SysVDynamicSectionBuilder::BuildDynamicSection(
     for (const NidReference* slotPtr : nonPltRefs) {
         const NidReference& ref = *slotPtr;
         const std::uint32_t nameOff = _appendStr(result.DynStrData, stripHashSuffix(ref.Nid));
-        _appendElfSym(result.DynSymData, nameOff, ref.SymbolInfo, STV_DEFAULT, 0, 0, 0);
+        _appendElfSym(result.DynSymData, nameOff, symbolInfo(ref), STV_DEFAULT, 0, 0, 0);
         result.SymbolVersions.push_back(importVersion(ref));
 
         const std::uint64_t relaInfo = (static_cast<std::uint64_t>(symIdx) << 32) | ref.RelocationTypeValue;

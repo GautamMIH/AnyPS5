@@ -30,7 +30,6 @@ constexpr std::uintptr_t ArenaHeaderBytes = 64;
 struct Chunk {
     std::uintptr_t end;
     bool used;
-    std::size_t requested;
 };
 
 // Chunks are kept ordered by address for coalescing; free chunks are also indexed by size for
@@ -65,7 +64,7 @@ Arena* Find(void* handle) {
 }
 
 void AddFree(Arena& arena, std::uintptr_t start, std::uintptr_t end) {
-    arena.chunks[start] = {end, false, 0};
+    arena.chunks[start] = {end, false};
     arena.free.emplace(end - start, start);
 }
 
@@ -119,7 +118,7 @@ void* Allocate(Arena* arena, std::size_t size, std::size_t alignment) {
         if (aligned > start) AddFree(*arena, start, aligned);
         const auto finish = aligned + needed;
         if (finish < end) AddFree(*arena, finish, end);
-        arena->chunks[aligned] = {finish, true, size};
+        arena->chunks[aligned] = {finish, true};
         arena->inUse += needed;
         arena->peakInUse = std::max(arena->peakInUse, arena->inUse);
         if (trace && scanned > 1000) report("slow scan");
@@ -169,13 +168,14 @@ bool InsideAllocation(const Arena& arena, std::uintptr_t start, std::size_t size
     return found->second.used && size <= found->second.end - start && start - found->first <= found->second.end - found->first - size;
 }
 
-// Moves an allocation to a new chunk, keeping the contents that fit.
+// Moves an allocation to a new chunk, keeping the contents that fit. The whole old block is usable
+// (sceLibcMspaceMallocUsableSize reports it), so its usable bytes are kept, not only the requested ones.
 void* Move(Arena* arena, ChunkIterator chunk, std::size_t size, std::size_t alignment) {
     const auto start = chunk->first;
-    const auto previousSize = chunk->second.requested;
+    const auto capacity = static_cast<std::size_t>(chunk->second.end - start);
     void* result = Allocate(arena, size, alignment);
     if (result) {
-        std::memcpy(result, reinterpret_cast<void*>(start), std::min(previousSize, size));
+        std::memcpy(result, reinterpret_cast<void*>(start), std::min(capacity, size));
         Release(*arena, arena->chunks.find(start));
     }
     return result;
@@ -195,10 +195,7 @@ void* Reallocate(Arena* arena, void* pointer, std::size_t size, std::size_t alig
     const auto start = chunk->first;
     if ((start & (alignment - 1)) != 0) return Move(arena, chunk, size, alignment);
     const auto capacity = chunk->second.end - start;
-    if (needed <= capacity) {
-        chunk->second.requested = size;
-        return pointer;
-    }
+    if (needed <= capacity) return pointer;
     // Grow in place into the adjacent free chunk when it is large enough.
     const auto next = std::next(chunk);
     if (next != arena->chunks.end() && !next->second.used && next->first == chunk->second.end && next->second.end - start >= needed) {
@@ -209,7 +206,7 @@ void* Reallocate(Arena* arena, void* pointer, std::size_t size, std::size_t alig
         if (finish < nextEnd) AddFree(*arena, finish, nextEnd);
         arena->inUse += needed - capacity;
         arena->peakInUse = std::max(arena->peakInUse, arena->inUse);
-        arena->chunks[start] = {finish, true, size};
+        arena->chunks[start] = {finish, true};
         return pointer;
     }
     return Move(arena, chunk, size, alignment);
@@ -332,6 +329,10 @@ void* APS5_VABI sceLibcMspaceMemalign_nid_postfix(void* handle, std::size_t alig
     }
     std::lock_guard lock(arenaMutex);
     return Allocate(Find(handle), size, alignment);
+}
+
+void* APS5_VABI sceLibcMspaceAlignedAlloc_nid_postfix(void* handle, std::size_t alignment, std::size_t size) {
+    return sceLibcMspaceMemalign_nid_postfix(handle, alignment, size);
 }
 
 int APS5_VABI sceLibcMspacePosixMemalign_nid_postfix(void* handle, void** result,

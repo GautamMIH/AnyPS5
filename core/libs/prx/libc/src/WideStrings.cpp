@@ -1,3 +1,4 @@
+#include <bit>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
@@ -45,6 +46,41 @@ TValue parseNumber(const GuestWchar* text, GuestWchar** end, TParse parse) {
     return value;
 }
 
+// FreeBSD's libc ignores a NaN's n-char-sequence: every parsed NaN is the default quiet NaN carrying
+// the subject's sign (glibc would move the payload into the significand). Same rule as Strings.cpp.
+bool isNanSubject(const char* text) {
+    while (*text == ' ' || (*text >= '\t' && *text <= '\r')) ++text;
+    if (*text == '+' || *text == '-') ++text;
+    return *text == 'n' || *text == 'N';
+}
+
+double quietNan(double value, const char* text) {
+    const auto bits = std::bit_cast<std::uint64_t>(value);
+    if ((bits & 0x7ff0000000000000u) != 0x7ff0000000000000u || !isNanSubject(text)) return value;
+    return std::bit_cast<double>((bits & 0x8000000000000000u) | 0x7ff8000000000000u);
+}
+
+float quietNan(float value, const char* text) {
+    const auto bits = std::bit_cast<std::uint32_t>(value);
+    if ((bits & 0x7f800000u) != 0x7f800000u || !isNanSubject(text)) return value;
+    return std::bit_cast<float>((bits & 0x80000000u) | 0x7fc00000u);
+}
+
+long double quietNan(long double value, const char* text) {
+    std::uint16_t exponent;
+    std::memcpy(&exponent, reinterpret_cast<const unsigned char*>(&value) + sizeof(std::uint64_t), sizeof(exponent));
+    if ((exponent & 0x7fffu) != 0x7fffu || !isNanSubject(text)) return value;
+    const std::uint64_t significand = 0xc000000000000000u;
+    std::memcpy(&value, &significand, sizeof(significand));
+    return value;
+}
+
+template<typename TFloat>
+TFloat parseFloat(const char* text, char** end, TFloat (*parse)(const char*, char**)) {
+    const TFloat value = parse(text, end);
+    return *end == text ? TFloat{0} : quietNan(value, text);
+}
+
 std::size_t encodeUtf8(char32_t codePoint, char* output) {
     if (codePoint < 0x80) {
         output[0] = static_cast<char>(codePoint);
@@ -80,23 +116,6 @@ bool decodeUtf16(const GuestWchar*& cursor, char32_t& codePoint) {
     return true;
 }
 
-bool decodeUtf8(const char*& cursor, char32_t& codePoint) {
-    const auto lead = static_cast<unsigned char>(*cursor++);
-    int extra = 0;
-    if (lead < 0x80) { codePoint = lead; return true; }
-    if ((lead & 0xe0) == 0xc0) { codePoint = lead & 0x1f; extra = 1; }
-    else if ((lead & 0xf0) == 0xe0) { codePoint = lead & 0x0f; extra = 2; }
-    else if ((lead & 0xf8) == 0xf0) { codePoint = lead & 0x07; extra = 3; }
-    else return false;
-    for (int index = 0; index < extra; ++index) {
-        const auto next = static_cast<unsigned char>(*cursor);
-        if ((next & 0xc0) != 0x80) return false;
-        codePoint = (codePoint << 6) | (next & 0x3f);
-        ++cursor;
-    }
-    return true;
-}
-
 std::size_t toUtf8(char* destination, const GuestWchar** source, std::size_t limit) {
     std::size_t written = 0;
     const GuestWchar* cursor = *source;
@@ -123,229 +142,6 @@ std::size_t toUtf8(char* destination, const GuestWchar** source, std::size_t lim
         if (destination != nullptr)
             std::memcpy(destination + written, buffer, size);
         written += size;
-    }
-}
-
-std::string utf8FromGuest(const GuestWchar* text, std::size_t limit) {
-    std::string result;
-    char buffer[4];
-    const GuestWchar* cursor = text;
-    const GuestWchar* end = text;
-    while (static_cast<std::size_t>(end - text) < limit && *end != 0)
-        ++end;
-    while (cursor < end) {
-        char32_t codePoint = 0;
-        if (!decodeUtf16(cursor, codePoint))
-            codePoint = 0xfffd;
-        result.append(buffer, encodeUtf8(codePoint, buffer));
-    }
-    return result;
-}
-
-void appendFormatted(std::string& output, const std::string& specification, auto value) {
-    const int length = std::snprintf(nullptr, 0, specification.c_str(), value);
-    if (length < 0)
-        throw std::runtime_error("vswprintf: invalid conversion " + specification);
-    std::string buffer(static_cast<std::size_t>(length) + 1, '\0');
-    std::snprintf(buffer.data(), buffer.size(), specification.c_str(), value);
-    output.append(buffer.data(), static_cast<std::size_t>(length));
-}
-
-// The longest prefix of UTF-8 text that writes at most `limit` UTF-16 units (a character above
-// U+FFFF takes two), and the units it writes.
-std::pair<std::string, std::size_t> utf8PrefixByUnits(const char* text, std::size_t limit) {
-    std::size_t units = 0;
-    std::size_t index = 0;
-    while (text[index] != '\0') {
-        const auto lead = static_cast<unsigned char>(text[index]);
-        const std::size_t length = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
-        std::size_t available = 1;
-        while (available < length && text[index + available] != '\0') ++available;
-        const std::size_t needed = length == 4 && available == 4 ? 2 : 1;
-        if (limit - units < needed) break;
-        units += needed;
-        index += available;
-    }
-    return {std::string(text, index), units};
-}
-
-int formatWideUnchecked(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list arguments) {
-    if (destination == nullptr || format == nullptr || count == 0) {
-        errno = kErrorInvalid;
-        return -1;
-    }
-    std::string output;
-    const GuestWchar* cursor = format;
-    while (*cursor != 0) {
-        if (*cursor != u'%') {
-            char32_t codePoint = 0;
-            if (!decodeUtf16(cursor, codePoint))
-                codePoint = 0xfffd;
-            char buffer[4];
-            output.append(buffer, encodeUtf8(codePoint, buffer));
-            continue;
-        }
-        ++cursor;
-        if (*cursor == u'%') {
-            output.push_back('%');
-            ++cursor;
-            continue;
-        }
-        std::string flags;
-        while (*cursor == u'-' || *cursor == u'+' || *cursor == u' ' || *cursor == u'#' || *cursor == u'0')
-            flags.push_back(static_cast<char>(*cursor++));
-        std::string width;
-        if (*cursor == u'*') {
-            width = std::to_string(va_arg(arguments, int));
-            ++cursor;
-        } else {
-            while (*cursor >= u'0' && *cursor <= u'9') width.push_back(static_cast<char>(*cursor++));
-        }
-        std::string precision;
-        bool hasPrecision = false;
-        if (*cursor == u'.') {
-            hasPrecision = true;
-            ++cursor;
-            if (*cursor == u'*') {
-                precision = std::to_string(va_arg(arguments, int));
-                ++cursor;
-            } else {
-                while (*cursor >= u'0' && *cursor <= u'9') precision.push_back(static_cast<char>(*cursor++));
-            }
-        }
-        std::string length;
-        while (*cursor == u'h' || *cursor == u'l' || *cursor == u'j' || *cursor == u'z' || *cursor == u't' || *cursor == u'L' || *cursor == u'q')
-            length.push_back(static_cast<char>(*cursor++));
-        const GuestWchar conversion = *cursor++;
-        const std::string prefix = "%" + flags + width + (hasPrecision ? "." + precision : "");
-        switch (conversion) {
-        case u'd': case u'i':
-            if (length == "hh") appendFormatted(output, prefix + "hhd", static_cast<signed char>(va_arg(arguments, int)));
-            else if (length == "h") appendFormatted(output, prefix + "hd", static_cast<short>(va_arg(arguments, int)));
-            else if (length == "l") appendFormatted(output, prefix + "ld", va_arg(arguments, long));
-            else if (length == "ll" || length == "q" || length == "j") appendFormatted(output, prefix + "lld", va_arg(arguments, long long));
-            else if (length == "z" || length == "t") appendFormatted(output, prefix + "ld", va_arg(arguments, long));
-            else appendFormatted(output, prefix + "d", va_arg(arguments, int));
-            break;
-        case u'u': case u'o': case u'x': case u'X': {
-            const std::string kind(1, static_cast<char>(conversion));
-            if (length == "hh") appendFormatted(output, prefix + "hh" + kind, static_cast<unsigned char>(va_arg(arguments, unsigned int)));
-            else if (length == "h") appendFormatted(output, prefix + "h" + kind, static_cast<unsigned short>(va_arg(arguments, unsigned int)));
-            else if (length == "l" || length == "z" || length == "t") appendFormatted(output, prefix + "l" + kind, va_arg(arguments, unsigned long));
-            else if (length == "ll" || length == "q" || length == "j") appendFormatted(output, prefix + "ll" + kind, va_arg(arguments, unsigned long long));
-            else appendFormatted(output, prefix + kind, va_arg(arguments, unsigned int));
-            break;
-        }
-        case u'f': case u'F': case u'e': case u'E': case u'g': case u'G': case u'a': case u'A': {
-            const std::string kind(1, static_cast<char>(conversion));
-            if (length == "L") appendFormatted(output, prefix + "L" + kind, va_arg(arguments, long double));
-            else appendFormatted(output, prefix + kind, va_arg(arguments, double));
-            break;
-        }
-        case u'c':
-            if (length == "l") {
-                const GuestWchar unit[2] = {static_cast<GuestWchar>(va_arg(arguments, int)), 0};
-                appendFormatted(output, "%" + flags + width + "s", utf8FromGuest(unit, 1).c_str());
-            } else {
-                appendFormatted(output, prefix + "c", va_arg(arguments, int));
-            }
-            break;
-        case u'C': {
-            const GuestWchar unit[2] = {static_cast<GuestWchar>(va_arg(arguments, int)), 0};
-            appendFormatted(output, "%" + flags + width + "s", utf8FromGuest(unit, 1).c_str());
-            break;
-        }
-        case u's':
-            if (length == "l") {
-                const auto* text = va_arg(arguments, const GuestWchar*);
-                const std::string converted = text == nullptr ? std::string("(null)") : utf8FromGuest(text, hasPrecision ? static_cast<std::size_t>(std::stoul(precision.empty() ? "0" : precision)) : SIZE_MAX);
-                appendFormatted(output, "%" + flags + width + "s", converted.c_str());
-            } else {
-                // A narrow string's precision and width count the UTF-16 units written, not its bytes
-                // (upstream 7b64e262): the text is cut at whole characters and padded here.
-                const char* text = va_arg(arguments, const char*);
-                const long precisionValue = hasPrecision && !precision.empty() ? std::stol(precision) : hasPrecision ? 0 : -1;
-                const auto [kept, units] = utf8PrefixByUnits(text == nullptr ? "(null)" : text, precisionValue < 0 ? SIZE_MAX : static_cast<std::size_t>(precisionValue));
-                long widthValue = width.empty() ? 0 : std::stol(width);
-                bool left = flags.find('-') != std::string::npos;
-                if (widthValue < 0) {
-                    left = true;
-                    widthValue = -widthValue;
-                }
-                const std::string padding(static_cast<std::size_t>(widthValue) > units ? static_cast<std::size_t>(widthValue) - units : 0, ' ');
-                const std::string padded = left ? kept + padding : padding + kept;
-                appendFormatted(output, "%s", padded.c_str());
-            }
-            break;
-        case u'S': {
-            const auto* text = va_arg(arguments, const GuestWchar*);
-            const std::string converted = text == nullptr ? std::string("(null)") : utf8FromGuest(text, hasPrecision ? static_cast<std::size_t>(std::stoul(precision.empty() ? "0" : precision)) : SIZE_MAX);
-            appendFormatted(output, "%" + flags + width + "s", converted.c_str());
-            break;
-        }
-        case u'p':
-            appendFormatted(output, prefix + "p", va_arg(arguments, void*));
-            break;
-        case u'n': {
-            // %n stores the UTF-16 units written so far; a flag, width, precision or an unknown
-            // length modifier makes the conversion invalid, as does a null pointer (upstream 99260427).
-            const bool integerLength = length.empty() || length == "hh" || length == "h" || length == "l" || length == "ll" ||
-                                       length == "q" || length == "j" || length == "z" || length == "t";
-            if (!integerLength || prefix != "%") {
-                errno = kErrorInvalid;
-                return -1;
-            }
-            void* pointer = va_arg(arguments, void*);
-            if (pointer == nullptr) {
-                errno = kErrorInvalid;
-                return -1;
-            }
-            const auto [kept, units] = utf8PrefixByUnits(output.c_str(), SIZE_MAX);
-            const int written = static_cast<int>(units);
-            if (length == "hh") *static_cast<signed char*>(pointer) = static_cast<signed char>(written);
-            else if (length == "h") *static_cast<short*>(pointer) = static_cast<short>(written);
-            else if (length.empty()) *static_cast<int*>(pointer) = written;
-            else *static_cast<long long*>(pointer) = written;
-            break;
-        }
-        default:
-            throw std::runtime_error("vswprintf: unsupported conversion");
-        }
-    }
-    std::size_t written = 0;
-    const char* source = output.c_str();
-    while (*source != '\0') {
-        char32_t codePoint = 0;
-        if (!decodeUtf8(source, codePoint))
-            codePoint = 0xfffd;
-        const std::size_t units = codePoint >= 0x10000 ? 2 : 1;
-        if (written + units >= count) {
-            destination[written] = 0;
-            errno = kErrorRange;
-            return -1;
-        }
-        if (units == 2) {
-            destination[written] = static_cast<GuestWchar>(0xd800 + ((codePoint - 0x10000) >> 10));
-            destination[written + 1] = static_cast<GuestWchar>(0xdc00 + ((codePoint - 0x10000) & 0x3ff));
-        } else {
-            destination[written] = static_cast<GuestWchar>(codePoint);
-        }
-        written += units;
-    }
-    destination[written] = 0;
-    return static_cast<int>(written);
-}
-
-// An unsupported or invalid conversion fails the call with an empty result and EINVAL, as
-// upstream's vswprintf does, instead of escaping into guest code as a host exception.
-int formatWide(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list arguments) {
-    try {
-        return formatWideUnchecked(destination, count, format, arguments);
-    } catch (const std::exception&) {
-        if (destination != nullptr && count != 0)
-            destination[0] = 0;
-        errno = kErrorInvalid;
-        return -1;
     }
 }
 
@@ -453,13 +249,13 @@ unsigned long long APS5_VABI wcstoull_nid_postfix(const GuestWchar* text, GuestW
 }
 
 double APS5_VABI wcstod_nid_postfix(const GuestWchar* text, GuestWchar** end) {
-    return parseNumber<double>(text, end, [](const char* narrow, char** narrowEnd) { return std::strtod(narrow, narrowEnd); });
+    return parseNumber<double>(text, end, [](const char* narrow, char** narrowEnd) { return parseFloat<double>(narrow, narrowEnd, std::strtod); });
 }
 
 long double APS5_VABI wcstold_nid_postfix(const GuestWchar* text, GuestWchar** end) {
     // The guest's long double is the x87 80-bit format, as the host's.
     static_assert(sizeof(long double) == 16 && std::numeric_limits<long double>::digits == 64);
-    return parseNumber<long double>(text, end, [](const char* narrow, char** narrowEnd) { return std::strtold(narrow, narrowEnd); });
+    return parseNumber<long double>(text, end, [](const char* narrow, char** narrowEnd) { return parseFloat<long double>(narrow, narrowEnd, std::strtold); });
 }
 
 unsigned long long APS5_VABI wcstoul_nid_postfix(const GuestWchar* text, GuestWchar** end, int base) {
@@ -508,40 +304,17 @@ int APS5_VABI wcscoll_nid_postfix(const GuestWchar* first, const GuestWchar* sec
 std::size_t APS5_VABI wcsxfrm_nid_postfix(GuestWchar* destination, const GuestWchar* source, std::size_t count) {
     std::size_t length = 0;
     while (source[length] != 0) ++length;
-    if (length < count) {
-        for (std::size_t index = 0; index <= length; ++index) destination[index] = source[index];
+    // A short buffer receives the truncated transformation: count - 1 units and a terminator.
+    if (count != 0) {
+        const std::size_t copied = length < count ? length : count - 1;
+        for (std::size_t index = 0; index < copied; ++index) destination[index] = source[index];
+        destination[copied] = 0;
     }
     return length;
 }
 
 float APS5_VABI wcstof_nid_postfix(const GuestWchar* text, GuestWchar** end) {
-    return parseNumber<float>(text, end, [](const char* narrow, char** narrowEnd) { return std::strtof(narrow, narrowEnd); });
-}
-
-std::size_t APS5_VABI mbstowcs_nid_postfix(GuestWchar* destination, const char* source, std::size_t count) {
-    std::size_t written = 0;
-    const char* cursor = source;
-    while (*cursor != '\0') {
-        char32_t codePoint = 0;
-        if (!decodeUtf8(cursor, codePoint)) {
-            errno = kErrorInvalid;
-            return static_cast<std::size_t>(-1);
-        }
-        const std::size_t units = codePoint >= 0x10000 ? 2 : 1;
-        if (destination != nullptr) {
-            if (written + units > count) return written;
-            if (units == 2) {
-                destination[written] = static_cast<GuestWchar>(0xd800 + ((codePoint - 0x10000) >> 10));
-                destination[written + 1] = static_cast<GuestWchar>(0xdc00 + ((codePoint - 0x10000) & 0x3ff));
-            } else {
-                destination[written] = static_cast<GuestWchar>(codePoint);
-            }
-        }
-        written += units;
-    }
-    if (destination != nullptr && written < count)
-        destination[written] = 0;
-    return written;
+    return parseNumber<float>(text, end, [](const char* narrow, char** narrowEnd) { return parseFloat<float>(narrow, narrowEnd, std::strtof); });
 }
 
 std::size_t APS5_VABI wcstombs_nid_postfix(char* destination, const GuestWchar* source, std::size_t count) {
@@ -559,27 +332,6 @@ std::size_t APS5_VABI wcsrtombs_nid_postfix(char* destination, const GuestWchar*
         return toUtf8(nullptr, &cursor, 0);
     }
     return toUtf8(destination, source, count);
-}
-
-int APS5_VABI vswprintf_nid_postfix(GuestWchar* destination, std::size_t count, const GuestWchar* format, std::va_list* arguments) {
-    const int result = formatWide(destination, count, format, *arguments);
-    // Debug aid: APS5_TRACE_FORMAT=1 echoes every formatted wide string (engines format their log
-    // and fatal-error text this way even when they print nothing).
-    static const bool trace = std::getenv("APS5_TRACE_FORMAT") != nullptr;
-    if (trace && destination != nullptr && result > 0) {
-        std::string text;
-        for (std::size_t i = 0; i < count && destination[i] != 0; ++i) text.push_back(destination[i] < 0x80 ? static_cast<char>(destination[i]) : '?');
-        std::fprintf(stderr, "[format] %s\n", text.c_str());
-    }
-    return result;
-}
-
-int APS5_VABI swprintf_nid_postfix(GuestWchar* destination, std::size_t count, const GuestWchar* format, ...) {
-    std::va_list arguments;
-    va_start(arguments, format);
-    const int result = formatWide(destination, count, format, arguments);
-    va_end(arguments);
-    return result;
 }
 
 // wctype and iswctype use the rune locale's masks (RuneLocale.cpp).

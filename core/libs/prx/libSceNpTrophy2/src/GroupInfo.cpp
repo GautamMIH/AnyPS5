@@ -10,7 +10,7 @@
 extern "C" {
 
 int APS5_VABI sceNpTrophy2GetGroupInfo(int context, int handle, int group_id, NpTrophy2GroupDetails* details, NpTrophy2GroupData* data) {
-    if (details == nullptr || data == nullptr) {
+    if (details == nullptr && data == nullptr) {
         return SCE_NP_TROPHY2_ERROR_INVALID_ARGUMENT;
     }
     (void)context;

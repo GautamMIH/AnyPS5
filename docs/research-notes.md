@@ -379,6 +379,48 @@ Issues that needed research, with a short answer. Check here before researching;
   - 22d662eda: DB_SHADER_CONTROL bit 1 becomes FragStencilRefEXT. Our `stencilState` then only allows "replace with the test value", the recompile request serializer moves to version 17 (ours, not upstream's numbering), and the upstream execution test is excluded with the others written for upstream's device draw API.
   - Zorro afterwards: median 22.1 / 22.4 ms, unchanged.
 
+## Upstream merge (2026-10-14, upstream eb59c7642, 3267 commits)
+
+- **Kept ours:**
+  - Our driver (libSceAgcDriver Execution/Graphics). Upstream's driver changes still need porting selectively.
+  - Our memory model, GuestMemoryBacking/GuestMemoryTracking: upstream's GuestArena and GuestWriteWatch are deleted. Host writes go through `GuestMemoryTracking::HostWrite`.
+  - Our Ampr (libkernel/Ampr) and Videodec2.
+  - libkernel CxxThreads instead of libc Threads.cpp.
+  - Our recompiler perf layer (ShaderDraw, compiled SRT walker), on top of upstream's recompiler.
+- **Taken from upstream:**
+  - Sony-semantics `mbstowcs`, and the wide formatter (`vswprintf`: positional arguments; unknown conversions now fail with EINVAL).
+  - libSceAcm.
+  - Guest-arena thread stacks with guard pages.
+  - signal-30 `sceKernelRaiseException`.
+  - the flexible-memory budget (ENOMEM past param.json, 448 MiB by default).
+  - UserService age level 0xFFFFFFFF.
+  - Our Time.cpp `tm_gmtoff`/`tm_zone` fix (Zorro) is kept.
+- **A merge-introduced regression:**
+  - What happened: zeroing released direct memory by punching a hole in the memfd made Hellboy show only black frames, then die on "GPU memory wait never satisfied".
+  - Why: the Vulkan host-memory import pins the old pages. After the hole the CPU faults in fresh pages, and the GPU never sees what the CPU writes.
+  - Fix: `DiscardSegment` now memsets resident pages through the alias instead. Never free or replace pages of the imported segment.
+  - How it was found: a bisect (pre-merge recompiler in the merged tree, still black, so the runtime was at fault), then the label-wait error.
+- **Our compiled SRT walker duplicates the interpreter (SrtEvaluator).** It missed two upstream fixes the merge brought into the interpreter:
+  - 5a9d73154: an out-of-range `s_buffer_load` reads zero.
+  - 0a229a43d: SMin32.
+  - Port evaluator fixes to `SrtCompiled.cpp` as well.
+- **ShaderMemory `accessible`** now also refuses mapped but unreadable ranges, via `CheckRange`. Before, a nested read into a guard or reservation failed the capture instead of being poisoned.
+- **Kernel/runtime fixes made while reconciling upstream's tests with our code:**
+  - **Memory:**
+    - VirtualQuery splits a direct mapping at memory-type changes.
+    - PoolCommit over already-direct memory retypes it in place.
+    - mprotect: refuses to touch thread-stack guard pages; on Linux only loaded images may be reprotected.
+    - shm/file mmap through new `Kind::Shared` areas.
+  - **Threads:**
+    - Dinkumware `_Cnd_*` validate the handle (`invalid_argument`).
+    - xtime nanoseconds carry into seconds.
+    - The rwlock is now FreeBSD's: writer preference; destroying a held lock succeeds.
+  - **Relinker:** skips symbol indices of R_X86_64_NONE relocations.
+- **Results:**
+  - Tests: 850/850.
+  - Hellboy replay: merged 57.6 and 57.9 ms, base 57.8 and 57.5 ms (alternating runs), unchanged. GPU busy fell from 46 to 43 ms, while submit-to-execute rose from 37 to 43 ms.
+  - Spirit and Zorro reach their menus and render correctly.
+
 ## Link-time and profile-guided optimization (2026-10-12)
 
 - **PGO** (`tools/pgo.sh generate`, then a 150 s Zorro gameplay run relinked with `build-pgo`'s relinker and a warm cache, then `tools/pgo.sh use`). Zorro A/B, 2 rounds of 90 s:

@@ -9,49 +9,52 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceUserService/UserService.hpp"
 
+static int ReportAccessibilitySetting(int user_id, int32_t* setting, int32_t value) {
+ if (user_id != USER_SERVICE_INITIAL_USER_ID) {
+  return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+ }
+ if (setting == nullptr) {
+  return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ }
+ *setting = value;
+ return USER_SERVICE_OK;
+}
+
 extern "C" {
 
 int APS5_VABI sceUserServiceGetAccessibilityChatTranscription(int user_id, int32_t* chat_transcription) {
- if (user_id != USER_SERVICE_INITIAL_USER_ID || !chat_transcription) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- *chat_transcription = 0;
- return USER_SERVICE_OK;
+ return ReportAccessibilitySetting(user_id, chat_transcription, 0);
 }
 
 int APS5_VABI sceUserServiceGetAccessibilityPressAndHoldDelay(int user_id, int32_t* press_and_hold_delay) {
- if (user_id != USER_SERVICE_INITIAL_USER_ID || !press_and_hold_delay) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- *press_and_hold_delay = 0;
- return USER_SERVICE_OK;
+ return ReportAccessibilitySetting(user_id, press_and_hold_delay, 0);
 }
 
 int APS5_VABI sceUserServiceGetAccessibilityTriggerEffect(int user_id, int32_t* trigger_effect) {
- if (user_id != USER_SERVICE_INITIAL_USER_ID || !trigger_effect) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- *trigger_effect = 0;
- return USER_SERVICE_OK;
+ return ReportAccessibilitySetting(user_id, trigger_effect, 1);
 }
 
 int APS5_VABI sceUserServiceGetAccessibilityVibration(int user_id, int32_t* vibration) {
- if (user_id != USER_SERVICE_INITIAL_USER_ID || !vibration) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- *vibration = 1;
- return USER_SERVICE_OK;
+ return ReportAccessibilitySetting(user_id, vibration, 1);
 }
 
 int APS5_VABI sceUserServiceGetAccessibilityZoomEnabled(int user_id, int32_t* zoom_enabled) {
- if (user_id != USER_SERVICE_INITIAL_USER_ID || !zoom_enabled) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- *zoom_enabled = 0;
- return USER_SERVICE_OK;
+ return ReportAccessibilitySetting(user_id, zoom_enabled, 0);
 }
 
 int APS5_VABI sceUserServiceGetAccessibilityZoomFollowFocus(int user_id, int32_t* zoom_follow_focus) {
- if (zoom_follow_focus == nullptr || user_id != USER_SERVICE_INITIAL_USER_ID) {
-  return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- }
- *zoom_follow_focus = 0;
- return USER_SERVICE_OK;
+ return ReportAccessibilitySetting(user_id, zoom_follow_focus, 1);
 }
 
 int APS5_VABI sceUserServiceGetAgeLevel(int user_id, uint32_t* age_level) {
- if (user_id != USER_SERVICE_INITIAL_USER_ID || !age_level) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- *age_level = USER_SERVICE_ADULT_AGE_LEVEL;
+ if (user_id != USER_SERVICE_INITIAL_USER_ID) {
+  return USER_SERVICE_ERROR_NOT_LOGGED_IN;
+ }
+ if (age_level == nullptr) {
+  return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ }
+ constexpr std::uint32_t Unrestricted = 0xFFFFFFFFu;
+ *age_level = Unrestricted;
  return USER_SERVICE_OK;
 }
 
@@ -95,13 +98,23 @@ int APS5_VABI sceUserServiceGetLoginUserIdList(UserServiceLoginUserIdList* user_
 
 // The buffer must hold the longest possible user name and its terminator.
 int APS5_VABI sceUserServiceGetUserName(int user_id, char* name, size_t size) {
- if (user_id != USER_SERVICE_INITIAL_USER_ID || !name) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- if (size < USER_SERVICE_MAX_USER_NAME_LENGTH + 1) return USER_SERVICE_ERROR_BUFFER_TOO_SHORT;
+ if (name == nullptr) {
+  return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ }
+ if (user_id != USER_SERVICE_INITIAL_USER_ID) {
+  return USER_SERVICE_ERROR_UNKNOWN_USER;
+ }
+ if (size < USER_SERVICE_MAX_USER_NAME_LENGTH + 1) {
+  std::memset(name, 0, size);
+  return USER_SERVICE_ERROR_BUFFER_TOO_SHORT;
+ }
+ // The host user's name (truncated to the console's limit), else a default; the rest of the
+ // buffer is zeroed as strncpy does.
  const char* host = std::getenv(USER_SERVICE_NAME_VARIABLE);
  const std::string userName = host != nullptr && host[0] != '\0' ? host : USER_SERVICE_DEFAULT_NAME;
  const std::size_t count = std::min(USER_SERVICE_MAX_USER_NAME_LENGTH, userName.size());
+ std::memset(name, 0, size);
  std::memcpy(name, userName.data(), count);
- name[count] = '\0';
  return USER_SERVICE_OK;
 }
 

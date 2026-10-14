@@ -20,6 +20,7 @@
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libSceVideoOut/include/BufferReuseTracker.hpp"
 #include "prx/libc/include/Shutdown.hpp"
+#include "prx/libkernel/Time/include/TimedWait.hpp"
 
 #include "SDL.h"
 #include "SceTypes.hpp"
@@ -139,6 +140,7 @@ struct VideoOutConfig {
     VideoOutVblankStatus preVblankStatus{};
 
     std::array<VideoOutBuffer, VIDEO_OUT_BUFFER_NUM_MAX> buffers{};
+    alignas(std::atomic_ref<std::uint64_t>::required_alignment) std::array<std::uint64_t, VIDEO_OUT_BUFFER_NUM_MAX> bufferLabels{};
     std::array<uint32_t, VIDEO_OUT_BUFFER_NUM_MAX> bufferPending{};
     std::array<BufferReuseTracker, VIDEO_OUT_BUFFER_NUM_MAX> bufferReuse;
     std::array<BufferAttributeGroup, VIDEO_OUT_BUFFER_ATTRIBUTE_NUM_MAX> groups{};
@@ -191,7 +193,7 @@ struct FlipRequest final : AgcDriver::IFlipRequest, std::enable_shared_from_this
 
 struct FlipQueue {
     std::mutex mutex;
-    std::condition_variable changed;
+    TimedWait::Condition changed;
     std::list<std::shared_ptr<FlipRequest>> requests;
     std::atomic<std::size_t> reservations = 0;
     std::exception_ptr failure;
@@ -214,15 +216,19 @@ public:
     std::shared_ptr<VideoOutConfig> GetConfig(int handle);
     bool IsOpen(int handle);
     bool HasConfig(int handle);
+    bool SupportsHighFrameRate();
+    int GetDisplayRefreshRate();
 
     // 0, or VIDEO_OUT_ERROR_FLIP_QUEUE_FULL when the title has VIDEO_OUT_FLIP_QUEUE_CAPACITY flips pending.
     int SubmitFlip(int handle, int index, int flipMode, int64_t flipArg);
+    int SubmitEopFlip(int handle, int index, int flipMode, int64_t flipArg, std::uint32_t* token);
 
 private:
     bool close(int handle);
     void presentLoop(std::stop_token token, std::promise<void>& started);
     void vblankLoop(std::stop_token token);
-    void vblankEnd();
+    void vblankEnd(std::uint64_t tick);
+    void updateDisplayRefreshRate();
     void processFlip(FlipRequest& req);
     void triggerEvents(VideoOutConfig& cfg, int eventKind, void* triggerData);
 
@@ -234,6 +240,7 @@ private:
     std::shared_ptr<FlipQueue> flipQueue = std::make_shared<FlipQueue>();
 
     DisplayWindow window;
+    std::atomic<int> displayRefreshRate{0};
 
     std::jthread presentThread;
     std::jthread vblankThread;

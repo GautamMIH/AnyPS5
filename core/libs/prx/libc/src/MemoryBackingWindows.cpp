@@ -87,6 +87,41 @@ void UnmapView(std::uint64_t address, std::size_t bytes) {
     check(UnmapViewOfFile2(GetCurrentProcess(), reinterpret_cast<void*>(address), MEM_PRESERVE_PLACEHOLDER) != FALSE, "UnmapViewOfFile2 guest view");
 }
 
+Segment AdoptSegment(std::uintptr_t object, std::size_t bytes) {
+    HANDLE duplicate = nullptr;
+    check(DuplicateHandle(GetCurrentProcess(), reinterpret_cast<HANDLE>(object), GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS) != FALSE, "DuplicateHandle guest object");
+    void* alias = MapViewOfFile(duplicate, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, bytes);
+    if (alias == nullptr) alias = MapViewOfFile(duplicate, FILE_MAP_READ, 0, 0, bytes);
+    if (alias == nullptr) {
+        const DWORD error = GetLastError();
+        CloseHandle(duplicate);
+        SetLastError(error);
+        check(false, "MapViewOfFile guest object alias");
+    }
+    return {reinterpret_cast<std::uintptr_t>(duplicate), alias, bytes};
+}
+
+void MapObjectView(std::uint64_t address, std::size_t bytes, const Segment& segment, std::uint64_t offset, int protection, bool privateCopy) {
+    if (privateCopy) throw std::system_error(ERROR_NOT_SUPPORTED, std::system_category(), "private guest object views are not supported on Windows");
+    MapView(address, bytes, segment, offset, protection);
+}
+
+// A SEC_RESERVE section cannot give pages back while it exists: the committed pages are zeroed
+// through the alias (uncommitted ones already read as zero once committed).
+void DiscardSegment(const Segment& segment, std::uint64_t offset, std::size_t bytes) {
+    if (bytes == 0) return;
+    if (offset > segment.bytes || bytes > segment.bytes - offset) throw std::out_of_range("guest segment discard exceeds its segment");
+    auto* cursor = static_cast<unsigned char*>(segment.alias) + offset;
+    auto* const end = cursor + bytes;
+    while (cursor < end) {
+        MEMORY_BASIC_INFORMATION memory{};
+        check(VirtualQuery(cursor, &memory, sizeof(memory)) == sizeof(memory), "VirtualQuery guest segment alias");
+        auto* const regionEnd = std::min(end, static_cast<unsigned char*>(memory.BaseAddress) + memory.RegionSize);
+        if (memory.State == MEM_COMMIT) std::fill(cursor, regionEnd, static_cast<unsigned char>(0));
+        cursor = regionEnd;
+    }
+}
+
 bool WriteWatchAvailable() {
     return false;
 }

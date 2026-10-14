@@ -96,7 +96,8 @@ std::uint64_t currentTick() {
 }
 
 std::int64_t localOffsetSeconds(std::uint64_t utcTick) {
-    const auto seconds = static_cast<std::time_t>((static_cast<std::int64_t>(utcTick) - static_cast<std::int64_t>(UNIX_EPOCH_TICK)) / TICKS_PER_SECOND);
+    const auto elapsed = std::chrono::microseconds{static_cast<std::int64_t>(utcTick) - static_cast<std::int64_t>(UNIX_EPOCH_TICK)};
+    const auto seconds = static_cast<std::time_t>(std::chrono::floor<std::chrono::seconds>(elapsed).count());
     std::tm local{};
 #ifdef _WIN32
     if (localtime_s(&local, &seconds) != 0) return 0;
@@ -285,7 +286,7 @@ bool parseRfc2822DateTime(const char* cursor, RtcDateTime& time, std::int64_t& o
         ++cursor;
         if (readDigits(cursor, 2, second) == 0) return false;
         if (*cursor == ' ' && !parseZone(cursor + 1, offsetMinutes)) return false;
-    } else if (*cursor != 0 && *cursor != ' ') {
+    } else if (*cursor != ' ') {
         return false;
     }
     time = makeDateTime(year, month, day, hour, minute, second, 0);

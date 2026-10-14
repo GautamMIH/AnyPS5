@@ -30,7 +30,7 @@ struct CompiledSrt {
         ConstructU64,
         ReadConst,
         RawRead,
-        IAdd32, IAdd64, ISub32, ISub64, IMul32, IMul64, UMin32,
+        IAdd32, IAdd64, ISub32, ISub64, IMul32, IMul64, UMin32, SMin32,
         ConvertF32U32, ConvertU32F32, FPMul32, FPTrunc32, FPIsNan32, FPOrdLessThanEqual32, FPOrdGreaterThanEqual32,
         BitwiseAnd32, BitwiseAnd64, BitwiseOr32, BitwiseXor32, BitwiseNot32,
         ShiftLeftLogical32, ShiftLeftLogical64, ShiftRightLogical32, ShiftRightLogical64, ShiftRightArithmetic32, ShiftRightArithmetic64,

@@ -2,16 +2,28 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include "prx/libkernel/Socket/include/SocketPoll.hpp"
+
+struct FileStat;
 namespace GuestSockets {
-constexpr int FirstDescriptor = 0x10000000;
+struct Iovec {
+    void* base;
+    std::size_t length;
+};
 int Duplicate(int descriptor);
 int DuplicateTo(int descriptor, int target);
 int Close(int descriptor);
+void Forget(int descriptor);
 bool IsOpen(int descriptor);
 int Family(int descriptor);
 std::int64_t Read(int descriptor, void* buffer, std::size_t length);
 std::int64_t Write(int descriptor, const void* buffer, std::size_t length);
+int Stat(int descriptor, FileStat* status);
 bool Ready(int descriptor, bool write, std::int64_t* data, bool* eof);
+int Poll(KernelSocketPoll::Entry* entries, int count, int timeoutMilliseconds);
+#ifdef _WIN32
+bool PipeReady(int descriptor, short events, short& revents);
+#endif
 struct Interest {
     int descriptor;
     bool write;
@@ -19,6 +31,8 @@ struct Interest {
 std::uintptr_t CurrentWaker();
 void Wake(std::uintptr_t waker);
 bool WaitAny(const std::vector<Interest>& interests, std::uint64_t deadlineNanos);
+std::int64_t Readv(int descriptor, const Iovec* iov, int iovcnt);
+std::int64_t Writev(int descriptor, const Iovec* iov, int iovcnt);
 }
 
 extern "C" bool GuestSocketIsOpen_nid_no_patch(int descriptor);
