@@ -9,6 +9,8 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <mutex>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -85,7 +87,27 @@ void GuestBufferMemory::AddSnapshot(const GuestMemorySnapshot& snapshot) {
         if (region.begin <= snapshot.address && snapshot.address + snapshot.bytes.size() <= region.end) {
             const auto offset = static_cast<std::size_t>(snapshot.address - region.begin);
             const auto* source = region.writable ? reinterpret_cast<const std::byte*>(snapshot.address) : region.snapshot.data() + offset;
-            Require(std::memcmp(source, snapshot.bytes.data(), snapshot.bytes.size()) == 0, "guest snapshot differs from registered memory");
+            if (std::memcmp(source, snapshot.bytes.data(), snapshot.bytes.size()) != 0) {
+                std::size_t first = 0;
+                while (first < snapshot.bytes.size() && source[first] == snapshot.bytes[first]) ++first;
+                char text[224];
+                std::snprintf(text, sizeof(text), "guest snapshot differs from registered memory: snapshot 0x%llx+0x%zx (%s region 0x%llx+0x%llx) differs first at +0x%zx", static_cast<unsigned long long>(snapshot.address), snapshot.bytes.size(), region.writable ? "live" : "snapshot-backed", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(region.end - region.begin), first);
+                // A live (writable) region is read at upload, so the GPU sees the bytes as they are
+                // then, as the hardware would: the capture only raced a guest write (upstream
+                // 67973cd8). Reported at most every 10 s; APS5_SNAPSHOT_CHECK_FATAL=1 throws.
+                static const bool fatal = std::getenv("APS5_SNAPSHOT_CHECK_FATAL") != nullptr;
+                if (!region.writable || fatal) throw std::runtime_error(text);
+                static std::mutex reportMutex;
+                static std::uint64_t mismatches = 0;
+                static auto lastReport = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+                std::lock_guard lock(reportMutex);
+                ++mismatches;
+                const auto now = std::chrono::steady_clock::now();
+                if (now - lastReport >= std::chrono::seconds(10)) {
+                    lastReport = now;
+                    std::fprintf(stderr, "[gpu] %s; the live region serves the GPU (%llu mismatches so far; APS5_SNAPSHOT_CHECK_FATAL=1 fails the work instead)\n", text, static_cast<unsigned long long>(mismatches));
+                }
+            }
             return;
         }
     }
