@@ -38,6 +38,8 @@ configure_windows_unwind(video_out_mouse_tests)
 if(BUILD_TESTING)
     set_target_properties(video_out_mouse_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     add_test(NAME video_out_mouse COMMAND video_out_mouse_tests)
+    # The guest mouse capture these tests check is opt-in (MouseInput::CaptureWanted).
+    set_tests_properties(video_out_mouse PROPERTIES ENVIRONMENT "ANYPS5_GUEST_MOUSE_CAPTURE=1")
     if(WIN32)
         set_tests_properties(video_out_mouse PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceVideoOut>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceMouse>;PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")

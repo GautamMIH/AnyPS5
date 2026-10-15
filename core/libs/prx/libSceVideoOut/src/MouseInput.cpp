@@ -1,4 +1,5 @@
 #include "prx/libSceVideoOut/include/MouseInput.hpp"
+#include <cstdlib>
 #include "prx/libSceMouse/include/MouseState.hpp"
 
 #include "SDL_mouse.h"
@@ -77,8 +78,13 @@ std::int32_t MouseInput::scaled(std::int32_t delta, double scale, double& remain
     return static_cast<std::int32_t>(whole);
 }
 
+// Capturing the pointer whenever the title opens a PS5 mouse took the desktop's mouse away from the
+// player in games that open one without needing it (Zorro opens it at start and reads the pad), so
+// it is opt-in: ANYPS5_GUEST_MOUSE_CAPTURE=1. Middle-click mouse-look (the pad's right stick) is
+// separate and unchanged.
 bool MouseInput::CaptureWanted(bool allowed) const {
-    return allowed && focused && MouseIsOpen_nid_no_patch();
+    static const bool enabled = std::getenv("ANYPS5_GUEST_MOUSE_CAPTURE") != nullptr;
+    return enabled && allowed && focused && MouseIsOpen_nid_no_patch();
 }
 
 void MouseInput::UpdateCapture(bool allowed) {
