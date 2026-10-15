@@ -73,6 +73,13 @@ void BdaResources::CheckFault() const {
         }
         throw std::runtime_error(message.str());
     }
+    if (report.reason == ShaderRecompiler::BdaAbi::FaultReason::UnlinkedCall) {
+        // A computed call (s_swappc_b64 to a target loaded at run time) whose target no linked callee
+        // matches: report.address is the target, report.instruction the call (upstream 9c8fb780).
+        std::ostringstream message;
+        message << "shader stage " << report.stage << " called address 0x" << std::hex << report.address << " at program counter 0x" << report.instruction << ", which no linked callee of that call matches";
+        throw std::runtime_error(message.str());
+    }
     std::ostringstream message;
     message << "BDA access failed: address=0x" << std::hex << report.address << " instruction=0x" << report.instruction << std::dec << " bytes=" << report.bytes << " stage=" << report.stage << " reason=" << static_cast<std::uint32_t>(report.reason);
     // Name the host mapping holding the address, to tell unregistered guest memory from garbage.
