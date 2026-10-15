@@ -1598,14 +1598,31 @@ private:
             PerformanceTimer shaderTiming("Driver.GraphicsShader");
             // Spliced geometry code belongs to no single registered shader.
             const bool spliced = roles[i] == Role::Main && !splicedGeometry.empty();
-            const auto capture = spliced ? shaderMemory.Capture(request) : captureMemo.Capture(program.owner, request, shaderMemory);
+            // A stage that fails to capture or compile names its shader (upstream 9960503f): the PM4
+            // context the worker adds does not say which stage of the draw failed.
+            const auto named = [&](const std::exception& error) {
+                char where[96];
+                std::snprintf(where, sizeof(where), "shader 0x%llx stage %u: ", static_cast<unsigned long long>(program.binary.codeAddress), static_cast<unsigned>(program.binary.stage));
+                return std::runtime_error(where + std::string(error.what()));
+            };
+            const auto capture = [&] {
+                try {
+                    return spliced ? shaderMemory.Capture(request) : captureMemo.Capture(program.owner, request, shaderMemory);
+                } catch (const std::exception& error) {
+                    throw named(error);
+                }
+            }();
             if (prepared) PreparedTrace::Add(spliced ? PreparedTrace::StageFallbackSpliced : PreparedTrace::StagePrepared);
             shaderTiming.Mark("memory_capture");
             memory = shaderMemory.Regions();
             request.context.memory = memory;
             shaderTiming.Mark("request_memory");
             bool memoHit = false;
-            results.push_back(ShaderRecompiler::RecompileDraw(request, *capture, &memoHit, prepared));
+            try {
+                results.push_back(ShaderRecompiler::RecompileDraw(request, *capture, &memoHit, prepared));
+            } catch (const std::exception& error) {
+                throw named(error);
+            }
             PreparedTrace::Add(memoHit ? PreparedTrace::MemoHit : PreparedTrace::MemoMiss);
             shaderTiming.Mark(results.back()->cacheHit ? "cache_hit" : "compile");
             const auto& draw = *results.back();
