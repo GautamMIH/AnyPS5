@@ -253,7 +253,8 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version &&
                     (capability == spv::CapabilityInt64 ||
                      capability == spv::CapabilityPhysicalStorageBufferAddresses ||
-                     capability == spv::CapabilityStorageBuffer8BitAccess);
+                     capability == spv::CapabilityStorageBuffer8BitAccess) ||
+                    (mesh && (capability == spv::CapabilityInt64 || capability == spv::CapabilityPhysicalStorageBufferAddresses));
 
                 const bool isTessellationCapability =
                     (control || evaluation) &&
@@ -314,7 +315,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     Require(fragment && fragmentShaderBarycentric, "SPV_KHR_fragment_shader_barycentric requires enabled fragmentShaderBarycentric in a fragment shader");
                     break;
                 }
-                Require(extension == "SPV_KHR_float_controls" || ((features.descriptorIndexing || features.runtimeDescriptorArray) && extension == "SPV_EXT_descriptor_indexing") || (features.imageInt64Atomics && extension == "SPV_EXT_shader_image_int64") || (mesh && extension == "SPV_EXT_mesh_shader") || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (extension == "SPV_KHR_physical_storage_buffer" || extension == "SPV_KHR_8bit_storage")), "unsupported SPIR-V extension");
+                Require(extension == "SPV_KHR_float_controls" || ((features.descriptorIndexing || features.runtimeDescriptorArray) && extension == "SPV_EXT_descriptor_indexing") || (features.imageInt64Atomics && extension == "SPV_EXT_shader_image_int64") || (mesh && (extension == "SPV_EXT_mesh_shader" || extension == "SPV_KHR_physical_storage_buffer")) || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (extension == "SPV_KHR_physical_storage_buffer" || extension == "SPV_KHR_8bit_storage")), "unsupported SPIR-V extension");
                 break;
             }
             case spv::OpDecorateId:
@@ -327,7 +328,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             case spv::OpSpecConstantOp:
                 throw std::runtime_error("AGC graphics: unsupported SPIR-V extension, grouped decoration or specialization constant");
             case spv::OpMemoryModel: {
-                const auto addressingModel = shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && !rectListControl
+                const auto addressingModel = (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version || mesh) && !rectListControl
                     ? spv::AddressingModelPhysicalStorageBuffer64
                     : spv::AddressingModelLogical;
                 // A program with the fault buffer but no BDA table (image tables report their faults
