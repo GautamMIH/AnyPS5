@@ -460,6 +460,21 @@ Issues that needed research, with a short answer. Check here before researching;
   - mprotect starting in an unmapped page is EINVAL.
   - A mapping hint with no room above falls back lower.
   - UserService lifecycle.
+- **Upstream driver commits of the range (73), triaged against our driver:**
+  - Ported, each its own `fix(agc)` commit naming the upstream sha:
+    - COPY_DATA from shader/context/user-config registers (5409226dd).
+    - Ordered-append dispatch initiators (46a1cc0fc).
+    - Type-0 T# as null (c280018b0).
+    - SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS (8dbf06798).
+    - Unused pixel stages with a retained Z export format (843f7e963).
+    - Fractional-even tessellation (f8e8aca5c).
+    - VGT_SHADER_STAGES_EN 0x02002008 (632331d1a).
+    - Pipeline cache file merge (8c8cd86cf): two VulkanDevices, the replaced headless one is kept, each overwrote the file.
+    - Shader named in draw-stage failures (9960503f6) and UnlinkedCall fault text (from 9c8fb780e).
+    - Live-region snapshot mismatch reported, not thrown (67973cd89; only our no-import fallback compares).
+  - Already here: worker failures printed when stored (ea13f6a4b, 6e3152f0e); image tables (d9e47d1e9, 34525fdf7, ported in the merge); a DMA_DATA fill of any size is already a GPU fill here (f37b02efc).
+  - Not applicable (upstream-only code): MSAA targets and FMASK/DCC, layered depth and DepthSurface plane copies, per-slice HTILE, StorageTexture write-back, stencil replay, Recorder/DrawCache/snapshot caches, call-table linking, background registration preparation, compute pipelines outside the GPU lock, stream-copy HLE, vertex layout cache, trace buffers, HDR10 present.
+  - Instanced hull patch numbering (30e85a3a2) needs GE_CNTL's PRIM_GRP_SIZE in the request, which our driver does not decode, so the recompiler refuses relative patch indices used as data either way.
 
 ## Link-time and profile-guided optimization (2026-10-12)
 
