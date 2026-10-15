@@ -761,6 +761,13 @@ if(BUILD_TESTING)
         set_tests_properties(guest_exception_handler PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test_executable(guest_user_context_suspend_tests ${LIBS_INCLUDE_DIR}/tests/GuestUserContextSuspend.cpp)
+    target_include_directories(guest_user_context_suspend_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_user_context_suspend_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_user_context_suspend_tests)
+    add_test(NAME guest_user_context_suspend COMMAND guest_user_context_suspend_tests)
+    set_tests_properties(guest_user_context_suspend PROPERTIES TIMEOUT 30)
+
     add_test_executable(guest_raise_exception_tests ${LIBS_INCLUDE_DIR}/tests/GuestRaiseException.cpp)
     target_include_directories(guest_raise_exception_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_raise_exception_tests PRIVATE libkernel libc)

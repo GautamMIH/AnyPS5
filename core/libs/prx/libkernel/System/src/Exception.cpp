@@ -18,7 +18,9 @@
 #include <csignal>
 #include <cstdlib>
 #include <system_error>
+#include <linux/futex.h>
 #include <pthread.h>
+#include <sys/syscall.h>
 #include <ucontext.h>
 #include <unistd.h>
 #endif
@@ -487,7 +489,254 @@ asm(".text\n"
     "    jmp *%r8\n");
 #endif
 
+// pthread_suspend_user_context_np and its companions: Mono's (Unity's) way of stopping a thread for its
+// garbage collector, the set shadPS4 provides in core/libraries/kernel/threads/pthread.cpp. Suspending
+// another thread returns once it is stopped; its registers are then readable and writable as a guest
+// ucontext until the matching resume. Suspensions nest; a thread cannot suspend itself (EDEADLK, as
+// libthr's pthread_suspend_np).
+namespace {
+
+constexpr int GuestEsrch = 3;
+constexpr int GuestEdeadlk = 11;
+constexpr int GuestEinval = 22;
+
+struct UserSuspend {
+    std::mutex lock;  // serialises suspend and resume on the thread
+    int count = 0;    // under lock
+    GuestUcontext context{};
+    bool contextChanged = false;  // set by set_user_context, applied on resume
+#ifdef _WIN32
+    CONTEXT native{};
+#else
+    std::atomic<std::uint32_t> parked{0};   // 1 while the thread waits in its signal handler
+    std::atomic<std::uint32_t> release{0};  // bumped by resume; the parked handler waits for a change
+#endif
+};
+
+UserSuspend& SuspendState(Pthread thread) {
+    if (auto* state = static_cast<UserSuspend*>(thread->userSuspend.load(std::memory_order_acquire))) return *state;
+    auto* created = new UserSuspend;
+    void* expected = nullptr;
+    if (thread->userSuspend.compare_exchange_strong(expected, created, std::memory_order_acq_rel)) return *created;
+    delete created;
+    return *static_cast<UserSuspend*>(expected);
+}
+
+bool Alive(Pthread thread) {
+    return thread != nullptr && !thread->_finished.load(std::memory_order_acquire);
+}
+
+#ifdef _WIN32
+void FromNative(const CONTEXT& context, GuestMcontext& m) {
+    m.rdi = context.Rdi;
+    m.rsi = context.Rsi;
+    m.rdx = context.Rdx;
+    m.rcx = context.Rcx;
+    m.r8 = context.R8;
+    m.r9 = context.R9;
+    m.rax = context.Rax;
+    m.rbx = context.Rbx;
+    m.rbp = context.Rbp;
+    m.r10 = context.R10;
+    m.r11 = context.R11;
+    m.r12 = context.R12;
+    m.r13 = context.R13;
+    m.r14 = context.R14;
+    m.r15 = context.R15;
+    m.rip = context.Rip;
+    m.rsp = context.Rsp;
+    m.rflags = context.EFlags;
+    m.cs = context.SegCs;
+    m.ss = context.SegSs;
+    m.len = sizeof(GuestMcontext);
+    std::memcpy(m.fpstate, &context.FltSave, sizeof(context.FltSave));
+}
+
+void ToNative(const GuestMcontext& m, CONTEXT& context) {
+    context.Rdi = m.rdi;
+    context.Rsi = m.rsi;
+    context.Rdx = m.rdx;
+    context.Rcx = m.rcx;
+    context.R8 = m.r8;
+    context.R9 = m.r9;
+    context.Rax = m.rax;
+    context.Rbx = m.rbx;
+    context.Rbp = m.rbp;
+    context.R10 = m.r10;
+    context.R11 = m.r11;
+    context.R12 = m.r12;
+    context.R13 = m.r13;
+    context.R14 = m.r14;
+    context.R15 = m.r15;
+    context.Rip = m.rip;
+    context.Rsp = m.rsp;
+    context.EFlags = static_cast<DWORD>(m.rflags);
+    std::memcpy(&context.FltSave, m.fpstate, sizeof(context.FltSave));
+    context.MxCsr = context.FltSave.MxCsr;
+}
+
+int Stop(Pthread thread, UserSuspend& state) {
+    auto* native = static_cast<HANDLE>(thread->nativeHandle);
+    if (native == nullptr || SuspendThread(native) == static_cast<DWORD>(-1)) return GuestEsrch;
+    state.native = {};
+    state.native.ContextFlags = CONTEXT_FULL | CONTEXT_FLOATING_POINT;
+    if (!GetThreadContext(native, &state.native)) {
+        ResumeThread(native);
+        return GuestEsrch;
+    }
+    state.context = {};
+    FromNative(state.native, state.context.mcontext);
+    return 0;
+}
+
+void Start(Pthread thread, UserSuspend& state) {
+    auto* native = static_cast<HANDLE>(thread->nativeHandle);
+    if (state.contextChanged) {
+        ToNative(state.context.mcontext, state.native);
+        SetThreadContext(native, &state.native);
+    }
+    ResumeThread(native);
+}
+#else
+constexpr int SuspendSignal = SIGUSR2;
+
+long Futex(std::atomic<std::uint32_t>& word, int operation, std::uint32_t value, const timespec* timeout = nullptr) {
+    return syscall(SYS_futex, reinterpret_cast<std::uint32_t*>(&word), operation, value, timeout, nullptr, 0);
+}
+
+// Runs on the suspended thread: saves its registers, reports it stopped, and waits for the resume.
+// Only async-signal-safe work: atomics and futex calls.
+void Park(int, siginfo_t*, void* context) {
+    const int savedErrno = errno;
+    auto* state = static_cast<UserSuspend*>(scePthreadSelf()->userSuspend.load(std::memory_order_acquire));
+    if (state != nullptr) {
+        auto& host = static_cast<ucontext_t*>(context)->uc_mcontext;
+        state->context = {};
+        FromHost(host, state->context.mcontext);
+        const auto ticket = state->release.load(std::memory_order_acquire);
+        state->parked.store(1, std::memory_order_release);
+        Futex(state->parked, FUTEX_WAKE_PRIVATE, INT32_MAX);
+        while (state->release.load(std::memory_order_acquire) == ticket) Futex(state->release, FUTEX_WAIT_PRIVATE, ticket);
+        if (state->contextChanged) ToHost(state->context.mcontext, host);
+        state->parked.store(0, std::memory_order_release);
+        Futex(state->parked, FUTEX_WAKE_PRIVATE, INT32_MAX);
+    }
+    errno = savedErrno;
+}
+
+void InstallPark() {
+    static const bool installed = [] {
+        struct sigaction action{};
+        action.sa_sigaction = Park;
+        action.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&action.sa_mask);
+        // An exception raised at a parked thread is delivered once it resumes.
+        sigaddset(&action.sa_mask, HostSignal);
+        if (sigaction(SuspendSignal, &action, nullptr) != 0)
+            throw std::system_error(errno, std::generic_category(), "pthread_suspend_user_context_np: cannot install the host signal handler");
+        return true;
+    }();
+    (void)installed;
+}
+
+// Waits until parked holds the value, giving up if the thread finishes.
+bool WaitParked(Pthread thread, UserSuspend& state, std::uint32_t value) {
+    const timespec slice{0, 10'000'000};
+    while (state.parked.load(std::memory_order_acquire) != value) {
+        if (!Alive(thread)) return false;
+        Futex(state.parked, FUTEX_WAIT_PRIVATE, value ^ 1u, &slice);
+    }
+    return true;
+}
+
+int Stop(Pthread thread, UserSuspend& state) {
+    InstallPark();
+    state.contextChanged = false;
+    {
+        std::lock_guard join(thread->_join_mtx);
+        if (!Alive(thread)) return GuestEsrch;
+        const int result = pthread_kill(thread->hostThread, SuspendSignal);
+        if (result == ESRCH) return GuestEsrch;
+        if (result != 0) throw std::system_error(result, std::generic_category(), "pthread_suspend_user_context_np: cannot signal the target thread");
+    }
+    return WaitParked(thread, state, 1) ? 0 : GuestEsrch;
+}
+
+void Start(Pthread thread, UserSuspend& state) {
+    state.release.fetch_add(1, std::memory_order_acq_rel);
+    Futex(state.release, FUTEX_WAKE_PRIVATE, INT32_MAX);
+    WaitParked(thread, state, 0);
+}
+#endif
+
+int Suspend(Pthread thread) {
+    if (thread == nullptr) return GuestEinval;
+    if (thread == scePthreadSelf()) return GuestEdeadlk;
+    if (!Alive(thread)) return GuestEsrch;
+    auto& state = SuspendState(thread);
+    std::lock_guard lock(state.lock);
+    if (state.count > 0) {
+        ++state.count;
+        return 0;
+    }
+    const int result = Stop(thread, state);
+    if (result == 0) state.count = 1;
+    return result;
+}
+
+int Resume(Pthread thread) {
+    if (thread == nullptr) return GuestEinval;
+    auto& state = SuspendState(thread);
+    std::lock_guard lock(state.lock);
+    if (state.count == 0) return GuestEinval;
+    if (--state.count == 0) Start(thread, state);
+    return 0;
+}
+
+}
+
+void FreeUserSuspend(void* state) {
+    delete static_cast<UserSuspend*>(state);
+}
+
 extern "C" {
+
+int APS5_VABI pthread_suspend_user_context_np_nid_postfix(Pthread thread) {
+ return Suspend(thread);
+}
+
+int APS5_VABI pthread_resume_user_context_np_nid_postfix(Pthread thread) {
+ return Resume(thread);
+}
+
+int APS5_VABI pthread_suspend_np_nid_postfix(Pthread thread) {
+ return Suspend(thread);
+}
+
+int APS5_VABI pthread_resume_np_nid_postfix(Pthread thread) {
+ return Resume(thread);
+}
+
+// The registers of a thread this caller suspended, as a guest ucontext.
+int APS5_VABI pthread_get_user_context_np_nid_postfix(Pthread thread, void* ucontext) {
+ if (thread == nullptr || ucontext == nullptr) return GuestEinval;
+ auto& state = SuspendState(thread);
+ std::lock_guard lock(state.lock);
+ if (state.count == 0) return GuestEinval;
+ std::memcpy(ucontext, &state.context, sizeof(GuestUcontext));
+ return 0;
+}
+
+// Replaces the registers a suspended thread resumes with.
+int APS5_VABI pthread_set_user_context_np_nid_postfix(Pthread thread, const void* ucontext) {
+ if (thread == nullptr || ucontext == nullptr) return GuestEinval;
+ auto& state = SuspendState(thread);
+ std::lock_guard lock(state.lock);
+ if (state.count == 0) return GuestEinval;
+ std::memcpy(&state.context, ucontext, sizeof(GuestUcontext));
+ state.contextChanged = true;
+ return 0;
+}
 
 int APS5_VABI sceKernelInstallExceptionHandler(int signum, void* handler) {
  if (!Allowed(signum) || handler == nullptr) return SCE_KERNEL_ERROR_EINVAL;

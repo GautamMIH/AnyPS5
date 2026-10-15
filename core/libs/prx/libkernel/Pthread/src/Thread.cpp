@@ -321,6 +321,7 @@ PthreadPrivate::PthreadPrivate(const PthreadAttrPrivate* attr) : _finished(false
 }
 
 PthreadPrivate::~PthreadPrivate() {
+    FreeUserSuspend(userSuspend.load(std::memory_order_acquire));
     auto& registry = CpuClocks();
     std::lock_guard lock(registry.lock);
     registry.threads.erase(cpuClockThread);

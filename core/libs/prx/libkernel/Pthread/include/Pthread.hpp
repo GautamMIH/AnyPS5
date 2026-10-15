@@ -162,6 +162,8 @@ struct PthreadPrivate {
     TimedWait::Condition* cancelWait = nullptr;
     // Our pthread condition variables (PthreadSync::CondWait) wait on a condition_variable_any.
     std::condition_variable_any* cancelWaitAny = nullptr;
+    // pthread_suspend_user_context_np state (System/src/Exception.cpp), created on first suspend.
+    std::atomic<void*> userSuspend{nullptr};
 
     explicit PthreadPrivate(const PthreadAttrPrivate* attr = nullptr);
     ~PthreadPrivate();
@@ -169,6 +171,8 @@ struct PthreadPrivate {
     PthreadPrivate& operator=(const PthreadPrivate&) = delete;
 };
 
+// Frees a thread's pthread_suspend_user_context_np state (System/src/Exception.cpp).
+void FreeUserSuspend(void* state);
 bool GuestThreadStack(std::uintptr_t address, std::uintptr_t* start, std::uintptr_t* end);
 bool GuestThreadStackHostRangeOverlaps(std::uintptr_t start, std::uintptr_t end);
 void NoteGuestStackProtection(std::uintptr_t start, std::size_t bytes, bool readWrite);
