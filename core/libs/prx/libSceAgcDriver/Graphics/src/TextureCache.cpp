@@ -42,10 +42,54 @@ void TextureCache::erase(Entries::iterator it) {
     entries.erase(it);
 }
 
+// A fixed 1 GiB thrashed once a level's textures outgrew it: Zorro's MontereyHeist keeps ~1.1 GiB
+// in use and fell to 0.3 fps evicting and re-uploading the textures each frame needs. The cache now
+// grows into the device's free memory, keeping a reserve for render targets and buffers, and gives
+// memory back when the free budget falls under the reserve.
+std::uint64_t TextureCache::Budget() {
+    static const std::uint64_t configured = [] {
+        const char* value = std::getenv("APS5_TEXTURE_CACHE_MIB");
+        return value != nullptr ? std::strtoull(value, nullptr, 10) << 20u : 0ull;
+    }();
+    if (configured != 0) return configured;
+    if (context.memoryProperties2 == nullptr) return budget;
+    const auto now = std::chrono::steady_clock::now();
+    if (budgetRead != std::chrono::steady_clock::time_point{} && now - budgetRead < std::chrono::seconds(1)) return budget;
+    budgetRead = now;
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT reported{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &reported};
+    context.memoryProperties2(context.physical, &properties);
+    const auto& heaps = properties.memoryProperties;
+    std::uint32_t heap = heaps.memoryHeapCount;
+    for (std::uint32_t index = 0; index < heaps.memoryHeapCount; ++index) {
+        if ((heaps.memoryHeaps[index].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) continue;
+        if (heap == heaps.memoryHeapCount || heaps.memoryHeaps[index].size > heaps.memoryHeaps[heap].size) heap = index;
+    }
+    if (heap == heaps.memoryHeapCount || reported.heapBudget[heap] == 0) return budget;
+    constexpr std::uint64_t floor = 512ull << 20u;
+    const std::uint64_t heapBudget = reported.heapBudget[heap];
+    const std::uint64_t used = reported.heapUsage[heap];
+    const std::uint64_t reserve = std::max(floor, heapBudget / 8u);
+    const std::uint64_t free = heapBudget > used ? heapBudget - used : 0u;
+    std::uint64_t target = retainedBytes;
+    if (free > reserve) target += free - reserve;
+    else target = target > reserve - free ? target - (reserve - free) : 0u;
+    budget = std::clamp<std::uint64_t>(target, floor, std::max(floor, heapBudget * 6u / 10u));
+    static const bool trace = std::getenv("APS5_TRACE_TEXCACHE") != nullptr;
+    if (trace) std::fprintf(stderr, "[texcache] budget %llu MiB (heap %u: budget %llu MiB, used %llu MiB, cache %llu MiB)\n", static_cast<unsigned long long>(budget >> 20), heap, static_cast<unsigned long long>(heapBudget >> 20), static_cast<unsigned long long>(used >> 20), static_cast<unsigned long long>(retainedBytes >> 20));
+    return budget;
+}
+
 void TextureCache::trim() {
     std::erase_if(retiring, [](const std::shared_ptr<Texture>& texture) { return texture->UploadComplete(); });
     std::erase_if(uploading, [](const std::shared_ptr<Texture>& texture) { return texture->ReleaseUpload(); });
-    for (auto it = entries.begin(); it != entries.end() && (retainedBytes > budget || entries.size() > maxEntries);) {
+    // Debug aid: APS5_TRACE_TEXCACHE=1 prints how many textures were evicted for which limit and the
+    // cache's size: once a second while textures are evicted, otherwise every 5 s.
+    static const bool trace = std::getenv("APS5_TRACE_TEXCACHE") != nullptr;
+    const bool overBytes = retainedBytes > Budget();
+    const bool overEntries = entries.size() > maxEntries;
+    std::size_t evicted = 0;
+    for (auto it = entries.begin(); it != entries.end() && (retainedBytes > Budget() || entries.size() > maxEntries);) {
         if (it->texture.use_count() != 1) {
             ++it;
             continue;
@@ -53,7 +97,22 @@ void TextureCache::trim() {
         const auto next = std::next(it);
         erase(it);
         it = next;
+        ++evicted;
     }
+    if (trace) {
+        static std::size_t byBytes = 0;
+        static std::size_t byEntries = 0;
+        static auto last = std::chrono::steady_clock::now();
+        if (evicted != 0) (overBytes ? byBytes : byEntries) += evicted;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last >= std::chrono::seconds(byBytes + byEntries != 0 ? 1 : 5)) {
+            std::fprintf(stderr, "[texcache] evicted %zu over the byte budget, %zu over the entry limit; now %zu entries, %llu MiB\n", byBytes, byEntries, entries.size(), static_cast<unsigned long long>(retainedBytes >> 20));
+            byBytes = 0;
+            byEntries = 0;
+            last = now;
+        }
+    }
+    (void)overEntries;
 }
 
 // Whether the guest range of a snapshot certainly still holds the snapshot's bytes.

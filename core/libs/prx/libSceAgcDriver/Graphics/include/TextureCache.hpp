@@ -123,7 +123,12 @@ private:
     std::vector<std::uint64_t> renderedColors;
     std::uint64_t renderedDepthCopies = 0;
     bool renderedDepthReadOnly = false;
-    static constexpr std::uint64_t budget = 1024ull * 1024 * 1024;
+    // The byte budget: what the cache holds plus the device-local heap's free budget, less a reserve
+    // (VK_EXT_memory_budget, read once a second), else 1 GiB. APS5_TEXTURE_CACHE_MIB overrides it
+    // (upstream's name for the same knob).
+    std::uint64_t Budget();
+    std::uint64_t budget = 1024ull << 20u;
+    std::chrono::steady_clock::time_point budgetRead{};
     static constexpr std::size_t maxEntries = 8192;
 };
 

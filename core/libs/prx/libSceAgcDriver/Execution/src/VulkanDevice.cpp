@@ -142,6 +142,7 @@ struct VulkanDevice::State {
     // The last presentation submission (renderFence) has not been waited for yet.
     bool renderPending = false;
     VkPhysicalDeviceMemoryProperties memoryProperties{};
+    bool memoryBudget = false;
     VkBuffer uploadBuffer = VK_NULL_HANDLE;
     VkDeviceMemory uploadMemory = VK_NULL_HANDLE;
     void* uploadMapping = nullptr;
@@ -693,6 +694,12 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
     // Vertex-pipeline stages writing the layer or viewport index: core in SPIR-V 1.5 (Vulkan 1.2),
     // available to the 1.3/1.4 modules this device takes through VK_EXT_shader_viewport_index_layer
     // (Balatro's vertex shaders write one).
+    // VK_EXT_memory_budget reports how much of each heap the process may use and uses now; the texture
+    // cache grows into that instead of a fixed size.
+    if (hasExtension(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
+        deviceExtensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+        state->memoryBudget = true;
+    }
     if (hasExtension(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME)) {
         deviceExtensions.push_back(VK_EXT_SHADER_VIEWPORT_INDEX_LAYER_EXTENSION_NAME);
         state->capabilities.push_back(spv::CapabilityShaderViewportIndexLayerEXT);
@@ -1564,6 +1571,7 @@ Graphics::Context VulkanDevice::graphicsContext() const {
         state->samplerCache
     };
     context.submitTimeline = state->submitTimeline;
+    if (state->memoryBudget) context.memoryProperties2 = state->InstanceFunction<PFN_vkGetPhysicalDeviceMemoryProperties2>("vkGetPhysicalDeviceMemoryProperties2");
     context.coarseShading = state->coarseShading;
     context.depthBounds = state->depthBounds;
     context.depthBiasClamp = state->depthBiasClamp;

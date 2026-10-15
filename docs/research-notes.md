@@ -476,6 +476,25 @@ Issues that needed research, with a short answer. Check here before researching;
   - Not applicable (upstream-only code): MSAA targets and FMASK/DCC, layered depth and DepthSurface plane copies, per-slice HTILE, StorageTexture write-back, stencil replay, Recorder/DrawCache/snapshot caches, call-table linking, background registration preparation, compute pipelines outside the GPU lock, stream-copy HLE, vertex layout cache, trace buffers, HDR10 present.
   - Instanced hull patch numbering (30e85a3a2) needs GE_CNTL's PRIM_GRP_SIZE in the request, which our driver does not decode, so the recompiler refuses relative patch indices used as data either way.
 
+## Texture cache thrash: Zorro MontereyHeist at 0.3 fps (2026-10-14)
+
+- **Symptom:** the first area ran at ~60 fps, but MontereyHeist took ~3.5 s per frame. The game printed "Forcing submitDone to avoid TRC R4089 breach" about once a frame.
+- **Where the time went:**
+  - The frame timeline put all of it on the GPU worker's CPU, before execution.
+  - gdb stack samples of the device thread were nearly all in `TextureCache::Get` creating textures (image memory and upload buffers), or in `trim` destroying them.
+- **Cause:**
+  - `APS5_TRACE_TEXCACHE=1` showed 100–250 evictions a second, all over the fixed 1 GiB byte budget, never the 8192-entry limit.
+  - With 4 GiB the cache settled at ~1.1 GiB: the level's working set was just over the budget, so LRU evicted what the next frame needed.
+- **Fix:** the budget now follows VK_EXT_memory_budget, read once a second.
+  - It is the cache's size plus the device-local heap's free budget, minus a reserve of max(512 MiB, budget/8).
+  - It is clamped between 512 MiB and 60% of the heap budget, and drops back when free memory falls under the reserve.
+  - Without the extension it stays at 1 GiB. `APS5_TEXTURE_CACHE_MIB` overrides it (upstream's knob; upstream's 64ffeb8c9 uses a quarter of the budget, ~1.4 GiB here, which is too close to 1.1 GiB).
+- **Result:**
+  - On the RTX 3050 6 GB the budget is 3.4 GiB (heap budget 5.75 GiB), with no evictions.
+  - The hidden reproduction went from 2,221 to 4,417 frames in 120 s. The level-load hitch went from 5.1 s to 1.3 s.
+  - In the level, frames take 35 ms, and that time is CPU work on the worker (a separate problem).
+- **Reproduction:** `zorro_repro.sh` relinks, copies the user's save from compare/run-play-zorro, presses Cross, and reaches the level ~40 s in.
+
 ## Keyboard on native Wayland (2026-10-14, Zorro)
 
 - **What happened:** after the merges, keyboard play in a visible window broke. Only W and F seemed to work.

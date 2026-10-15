@@ -74,6 +74,9 @@ struct Context {
     GraphicsPipelineCache* graphicsPipelines = nullptr;
     mutable std::shared_ptr<DescriptorCache> descriptorCache;
     mutable std::shared_ptr<SamplerCache> samplerCache;
+    // Set when VK_EXT_memory_budget is enabled: reads the heaps' current budget and usage (the texture
+    // cache sizes itself from them).
+    PFN_vkGetPhysicalDeviceMemoryProperties2 memoryProperties2 = nullptr;
     // VK_KHR_timeline_semaphore: every command batch signals its submission number on it, so a
     // thread can wait for a batch without the locks that guard the batch (null without the feature).
     VkSemaphore submitTimeline = VK_NULL_HANDLE;
