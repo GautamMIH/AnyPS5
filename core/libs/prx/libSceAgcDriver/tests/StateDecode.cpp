@@ -207,6 +207,29 @@ void inertPixelStageTests() {
     Require(!DecodeState(queue).hasFragmentShader, "an inert pixel stage must run without its program");
     queue.context[0x203] = 0x840u;
     Require(DecodeState(queue).hasFragmentShader, "KILL_ENABLE must keep the pixel program");
+    // A Z export format retained from an earlier pass exports nothing while DB_SHADER_CONTROL's
+    // export enables are clear (upstream 843f7e96).
+    for (const auto format : {1u, 2u, 3u, 9u}) {
+        queue.context[0x1c4] = format;
+        queue.context[0x203] = 0;
+        Require(!DecodeState(queue).hasFragmentShader, "a retained export format forced an unused pixel program to run");
+        for (const auto control : {1u, 2u, 4u, 0x40u, 0x80u, 0x100u, 0x200u, 0x400u, 0x20000u}) {
+            queue.context[0x203] = control;
+            // Controls this driver refuses elsewhere in the decode are not skipped either.
+            bool runs = true;
+            try {
+                runs = DecodeState(queue).hasFragmentShader;
+            } catch (const std::exception&) {}
+            Require(runs, "an enabled pixel export or execution flag was ignored with a retained Z format");
+        }
+    }
+    queue.context[0x1c4] = 0;
+    queue.context[0x203] = 0;
+    queue.context[0x8e] = 0xf0000000u;
+    queue.context[0x8f] = 0x0f000000u;
+    Require(!DecodeState(queue).hasFragmentShader, "disjoint color masks ran an unused pixel program");
+    queue.context[0x8f] = 0xf0000000u;
+    Require(DecodeState(queue).hasFragmentShader, "an enabled high render target lost its pixel program");
 }
 
 void frontFaceAllBitsTests() {

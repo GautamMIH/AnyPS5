@@ -421,18 +421,23 @@ VkConservativeRasterizationModeEXT decodeConservativeRasterization(const QueueSt
 }
 
 // DB_SHADER_CONTROL bits that make the pixel stage run without colour or depth output: KILL_ENABLE,
-// EXEC_ON_HIER_FAIL, EXEC_ON_NOOP, EXEC_IF_OVERLAPPED and the export enables (upstream 98405e8f).
-constexpr std::uint32_t PixelStageRunsMask = 0x00020747u;
+// EXEC_ON_HIER_FAIL, EXEC_ON_NOOP, EXEC_IF_OVERLAPPED, COVERAGE_TO_MASK_ENABLE and the export enables
+// (upstream 98405e8f, 843f7e96).
+constexpr std::uint32_t PixelStageRunsMask = 0x000207c7u;
 
 // A bound pixel program the hardware never launches: no colour is written, no depth, stencil or mask
-// is exported and nothing forces the stage to run (a depth-only pass with a stale PS address).
+// is exported and nothing forces the stage to run (a depth-only pass with a stale PS address). The
+// exports are the DB_SHADER_CONTROL enables: SPI_SHADER_Z_FORMAT is often left set by an earlier
+// pass and does not export by itself (upstream 843f7e96). Alpha to coverage (DB_ALPHA_TO_MASK) needs
+// the program's alpha.
 bool pixelStageInert(const Registers& cx) {
     const auto targetMask = cx.find(0x8e);
     const auto shaderMask = cx.find(0x8f);
-    const auto zFormat = cx.find(0x1c4);
     const auto shaderControl = cx.find(0x203);
-    if (targetMask == cx.end() || shaderMask == cx.end() || zFormat == cx.end() || shaderControl == cx.end()) return false;
-    return (targetMask->second & shaderMask->second) == 0 && zFormat->second == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
+    if (targetMask == cx.end() || shaderMask == cx.end() || shaderControl == cx.end()) return false;
+    const auto alphaToMask = cx.find(0x2dc);
+    if (alphaToMask != cx.end() && (alphaToMask->second & 1u) != 0) return false;
+    return (targetMask->second & shaderMask->second) == 0 && (shaderControl->second & PixelStageRunsMask) == 0;
 }
 
 }
