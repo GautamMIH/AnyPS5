@@ -360,10 +360,12 @@ void Validate(std::span<const std::uint32_t> packet, std::uint32_t queue) {
         // dispatches also USE_THREAD_DIMENSIONS (0x20: the packet counts threads, Driver::dispatch).
         // FORCE_START_AT_000 (0x4) only resets the start position, which dispatches here never carry
         // (upstream 75638194: RADV's dispatch form).
-        case 0x15: size(5); require((packet[4] & ~0xa024u) == 0x41u, "dispatch modifiers are not implemented"); break;
+        // ORDERED_APPEND_ENBL (bit 3, upstream 46a1cc0f): ds_ordered_count counts on the GDS like
+        // ds_append; waves are not serialized in launch order.
+        case 0x15: size(5); require((packet[4] & ~0xa02cu) == 0x41u, "dispatch modifiers are not implemented"); break;
         case 0x16:
             require(packet.size() == 3 || packet.size() == 4, "invalid indirect dispatch size");
-            require((packet.back() & ~0xa004u) == 0x41u, "indirect dispatch modifiers are not implemented");
+            require((packet.back() & ~0xa00cu) == 0x41u, "indirect dispatch modifiers are not implemented");
             break;
         case 0x42: size(2); require(packet[1] == 0, "unsupported PFP_SYNC_ME payload"); break;
         // CONTEXT_CONTROL with register loading and shadowing off (RADV's graphics preamble).
