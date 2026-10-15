@@ -476,6 +476,24 @@ Issues that needed research, with a short answer. Check here before researching;
   - Not applicable (upstream-only code): MSAA targets and FMASK/DCC, layered depth and DepthSurface plane copies, per-slice HTILE, StorageTexture write-back, stencil replay, Recorder/DrawCache/snapshot caches, call-table linking, background registration preparation, compute pipelines outside the GPU lock, stream-copy HLE, vertex layout cache, trace buffers, HDR10 present.
   - Instanced hull patch numbering (30e85a3a2) needs GE_CNTL's PRIM_GRP_SIZE in the request, which our driver does not decode, so the recompiler refuses relative patch indices used as data either way.
 
+## Hellboy crash after killing an enemy and picking up an item (2026-10-15, open)
+
+- **Not a regression:** the user saw it before the October merges too.
+- **Where it crashes:** the main thread calls address 1 from `DG.Tweening.Tween::DoGoto` (`Il2CppUserAssemblies+0x1194f62`). The full chain is `DOTweenComponent.Update` → `TweenManager.Update` → `Sequence.ApplyInternalCycle` → `TweenManager.Goto` → `DoGoto`.
+- **The object:** the virtual call `ApplyTween` goes through a dead tween object. The object pointer is not 8-aligned and its class word is a valid-looking class address + 1. The callee runs from a mid-function address with an unbalanced stack and returns to 1.
+- **Deterministic:** two crashes in two sessions had the same pointer offsets from the guest base (object at +0x2e0debb4, class at +0x1e60001, r13 at +0x4430cf8), although the guest base itself differed.
+- **Probably:** freed memory that a sequence still references, i.e. the managed heap freed underneath DOTween.
+- **Checked, not the cause:**
+  - The game's only unresolved import was `_Cosh` (now provided).
+  - Thread stacks are registered for `sceKernelIsStack`.
+  - The game imports no thread suspend, signal or exception calls, so the collector stops threads some other way, still unidentified.
+  - Its one find-next `sceKernelVirtualQuery` sweep (at start, `APS5_TRACE_VQUERY=1`) ends with EACCES past the last mapping, as on the console.
+- **Tools:**
+  - `py/il2cpp_names.py <relinked prx> <global-metadata.dat> <addresses>` names IL2CPP methods: metadata v29, code-gen modules found through the module's RELATIVE relocations.
+  - The unhandled-SIGSEGV report now prints memory at each register, because guest memory is missing from core dumps.
+- **Replays don't reproduce it:** a replay diverges and never reaches the fight.
+- **Next:** find how Unity's GC stops threads and collects roots in `eboot.elf` (Ghidra/REA), then check which of our behaviours it depends on.
+
 ## Texture cache thrash: Zorro MontereyHeist at 0.3 fps (2026-10-14)
 
 - **Symptom:** the first area ran at ~60 fps, but MontereyHeist took ~3.5 s per frame. The game printed "Forcing submitDone to avoid TRC R4089 breach" about once a frame.
