@@ -21,6 +21,7 @@ extern "C" int HostStandardError_nid_no_patch();
 extern "C" std::uint64_t APS5_VABI UnresolvedImport_nid_no_patch(const char* nid, const char* library);
 
 extern "C" std::filesystem::path ResolvePath_nid_no_patch(const char* path);
+extern "C" std::filesystem::path ResolvePathOrRelinkedModule_nid_no_patch(const char* path);
 // Serves a top-level guest directory ("/savedata0") from a host directory until unmounted.
 extern "C" void MountGuestPath_nid_no_patch(const char* mountPoint, const std::filesystem::path& host);
 extern "C" void UnmountGuestPath_nid_no_patch(const char* mountPoint);

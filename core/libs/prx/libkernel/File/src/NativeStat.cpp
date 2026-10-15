@@ -168,12 +168,6 @@ void fill(const NativeStat& st, FileStat* sb) {
 
 }
 
-std::filesystem::path PathOrRelinkedModule(const std::filesystem::path& nativePath) {
-    std::error_code error;
-    if (std::filesystem::exists(std::filesystem::symlink_status(nativePath, error))) return nativePath;
-    return RelinkedModulePath_nid_no_patch(nativePath);
-}
-
 bool FillLinkStat(const std::filesystem::path& nativePath, FileStat* sb) {
     NativeStat st{};
     if (DoLstat(nativePath, &st) != 0) return false;

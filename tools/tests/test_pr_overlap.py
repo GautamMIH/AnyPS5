@@ -1,8 +1,10 @@
 import json
 import os
+import re
+import shutil
 import subprocess
-import tempfile
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -136,6 +138,93 @@ class ConflictTests(unittest.TestCase):
             self.assertEqual(pr_overlap.conflicts(first, second), {})
         merge.assert_called_once_with("first-tree", "second-tree")
 
+    def real_pull_requests(self, main_changes, older_changes, current_changes):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name).resolve()
+        self.assertTrue(root.is_relative_to(Path(tempfile.gettempdir()).resolve()))
+        self.addCleanup(os.chdir, os.getcwd())
+        os.chdir(root)
+
+        def git(*args):
+            return subprocess.run(
+                ["git", "-c", "user.name=Overlap Test", "-c", "user.email=test@example.com", *args],
+                capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+
+        git("init", "-q")
+        git("config", "commit.gpgsign", "false")
+        for name in ("shared.cpp", "other.cpp", "unrelated.cpp"):
+            (root / name).write_text("int value = 0;\n", encoding="utf-8")
+        git("add", ".")
+        git("commit", "-qm", "test: create base")
+        base = git("rev-parse", "HEAD")
+
+        def branch(name, parent, changes):
+            git("checkout", "-qb", name, parent)
+            for path, value in changes.items():
+                (root / path).write_text(f"int value = {value};\n", encoding="utf-8")
+            git("add", ".")
+            git("commit", "-qm", "test: change values", "--allow-empty")
+            return git("rev-parse", "HEAD")
+
+        older = branch("older", base, older_changes)
+        main = branch("updated-base", base, main_changes)
+        current = branch("current", main, current_changes)
+        git("update-ref", "refs/pr/base", main)
+        prs = {1: {"ref": current, "author": "current-author", "depends": set()},
+               2: {"ref": older, "author": "older-author", "depends": set()}}
+        for pr in prs.values():
+            pr_overlap.scan(pr)
+        return prs
+
+    def test_reports_shared_files_when_older_pr_conflicts_with_main(self):
+        prs = self.real_pull_requests({"shared.cpp": 2}, {"shared.cpp": 1}, {"shared.cpp": 3})
+        self.assertIsNone(prs[2]["tree"])
+        self.assertIsNotNone(prs[1]["tree"])
+        found = pr_overlap.overlaps(prs, 1, 2)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["uncompared"], {"shared.cpp"})
+        report = pr_overlap.report({2: found}, "https://example.invalid/blob/base")
+        self.assertIn("could not be completed", report)
+        self.assertIn("`shared.cpp`", report)
+        self.assertNotIn("Merging one will break the other", report)
+
+    def test_conflict_in_another_file_does_not_hide_shared_changes(self):
+        prs = self.real_pull_requests({"other.cpp": 2}, {"other.cpp": 1, "shared.cpp": 1}, {"shared.cpp": 3})
+        self.assertIsNone(prs[2]["tree"])
+        found = pr_overlap.overlaps(prs, 1, 2)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["uncompared"], {"shared.cpp"})
+
+    def test_unmergeable_pr_with_no_shared_files_is_not_reported(self):
+        prs = self.real_pull_requests({"other.cpp": 2}, {"other.cpp": 1}, {"unrelated.cpp": 3})
+        self.assertIsNone(prs[2]["tree"])
+        self.assertIsNone(pr_overlap.overlaps(prs, 1, 2))
+
+    def test_mergeable_branches_still_report_confirmed_line_conflicts(self):
+        prs = self.real_pull_requests({}, {"shared.cpp": 1}, {"shared.cpp": 2})
+        self.assertTrue(all(pr["tree"] for pr in prs.values()))
+        found = pr_overlap.overlaps(prs, 1, 2)
+        self.assertEqual(found["conflicts"], {"shared.cpp": [(1, 1)]})
+        self.assertNotIn("uncompared", found)
+
+    def test_mixed_report_keeps_confirmed_and_uncompared_sections(self):
+        rows = {2: {"added": set(), "conflicts": {"other.cpp": [(1, 1)]}},
+                3: {"added": set(), "uncompared": {"shared.cpp"}}}
+        report = pr_overlap.report(rows, "https://example.invalid/blob/base")
+        self.assertIn("[L1]", report)
+        self.assertIn("could not be completed", report)
+        self.assertIn("`shared.cpp`", report)
+        self.assertTrue(report.startswith(pr_overlap.MARKER))
+
+    def test_report_links_pull_requests_without_cross_references(self):
+        rows = {2: {"added": set(), "conflicts": {"other.cpp": [(1, 1)]}},
+                3: {"added": set(), "uncompared": {"shared.cpp"}}}
+        report = pr_overlap.report(rows, "https://github.com/owner/project/blob/base")
+        self.assertIsNone(re.search(r"#\d|https://github\.com/owner/project/(pull|issues)/", report))
+        self.assertIn("[PR 2](https://www.github.com/owner/project/pull/2)", report)
+        self.assertIn("[PR 3](https://www.github.com/owner/project/pull/3)", report)
+
 
 class UnicodePathTests(unittest.TestCase):
     def test_scans_and_reports_conflicts_with_git_path_quoting_enabled(self):
@@ -175,6 +264,63 @@ class UnicodePathTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+
+class CommentStateTests(unittest.TestCase):
+    def setUp(self):
+        if os.name == "nt" or not all(shutil.which(tool) for tool in ("bash", "jq", "sed", "sha256sum")):
+            self.skipTest("the workflow step runs in bash with jq, sed and sha256sum on Linux")
+        lines = (Path(__file__).resolve().parents[2] / ".github/workflows/pr-overlap.yml").read_text(encoding="utf-8").splitlines()
+        start = next(index for index, line in enumerate(lines) if "tools/pr_overlap.py" in line)
+        indent = len(lines[start]) - len(lines[start].lstrip())
+        while start > 0 and len(lines[start - 1]) - len(lines[start - 1].lstrip()) == indent:
+            start -= 1
+        step = []
+        for line in lines[start:]:
+            if line.strip() and len(line) - len(line.lstrip()) < indent:
+                break
+            step.append(line[indent:])
+        self.step = "\n".join(step).replace("${{ github.event.repository.default_branch }}", "main")
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        (self.root / "overlap").mkdir()
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def report(self, commit, lines):
+        found = {7: {"conflicts": {"core/a.cpp": [lines]}, "added": set()}}
+        return pr_overlap.report(found, f"https://github.com/owner/project/blob/{commit}")
+
+    def run_step(self, report, comment):
+        (self.root / "overlap" / "42.md").write_text(report, encoding="utf-8", newline="\n")
+        (self.root / "comment").write_text(json.dumps([5, comment]) + "\n" if comment else "", encoding="utf-8", newline="\n")
+        calls = self.root / "calls"
+        calls.write_text("", encoding="utf-8")
+        script = "\n".join([
+            "set -eo pipefail",
+            "python3() { :; }",
+            'gh() { printf \'%s\\n\' "$*" >> "$RUNNER_TEMP/calls"; case "$*" in "api repos/"*) cat "$RUNNER_TEMP/comment";; esac; }',
+            self.step,
+        ])
+        (self.root / "step.sh").write_text(script, encoding="utf-8", newline="\n")
+        environment = dict(os.environ, RUNNER_TEMP=str(self.root), GH_REPO="owner/project")
+        result = subprocess.run(["bash", "step.sh"], cwd=self.root, env=environment, capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return [call.split(" ")[:3] for call in calls.read_text(encoding="utf-8").splitlines()]
+
+    def test_new_main_commit_alone_makes_no_requests(self):
+        first = self.report("a" * 40, (3, 4))
+        self.assertEqual(self.run_step(first, None), [["api", "repos/owner/project/issues/42/comments", "--paginate"], ["pr", "comment", "42"]])
+        self.assertEqual(self.run_step(self.report("b" * 40, (3, 4)), first), [])
+
+    def test_lost_state_reads_the_comment_without_rewriting_it(self):
+        (self.root / "overlap-state.json").write_text("{}", encoding="utf-8")
+        self.assertEqual(self.run_step(self.report("b" * 40, (3, 4)), self.report("a" * 40, (3, 4))), [["api", "repos/owner/project/issues/42/comments", "--paginate"]])
+
+    def test_changed_lines_still_update_the_comment(self):
+        first = self.report("a" * 40, (3, 4))
+        self.run_step(first, None)
+        self.assertEqual(self.run_step(self.report("b" * 40, (5, 6)), first), [["api", "repos/owner/project/issues/42/comments", "--paginate"], ["api", "-X", "PATCH"]])
 
 if __name__ == "__main__":
     unittest.main()

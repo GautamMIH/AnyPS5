@@ -6,7 +6,6 @@
 
 namespace File {
 
-std::filesystem::path PathOrRelinkedModule(const std::filesystem::path& nativePath);
 // stat/fstat: 0, or the host errno when the path or descriptor cannot be read.
 int FillFileStat(const std::filesystem::path& nativePath, FileStat* sb);
 int FillFileStatFromDescriptor(int descriptor, FileStat* sb);

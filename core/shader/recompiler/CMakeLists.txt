@@ -262,18 +262,22 @@ function(add_shader_recompiler target runtimeTarget)
             MaterializeShader
             RegistrationResult
             ResolveSource
+            ResourceMaterializer::EvaluateNanoseconds
+            ResourceMaterializer::MaterializeNanoseconds
             ResourceMaterializer::SpecializationNanoseconds
             RuntimeAbi::RequireVersion
             RuntimeAbi::HeapCapacity
             SampledTextureNumericClass
             SetDebugProbeActive
             ShaderCacheDirectory
+            ShaderStage
             SpliceGeometryHalves
             SrgbDecodeBit
             SrgbUnormFormat
             FindUserDataTail
             LinkUserDataTail
             ThreadOwned
+            ProgramRole
             UnresolvableSwappcTarget
             ValidateAndOptimizeSpirv
             FindUserDataCalls

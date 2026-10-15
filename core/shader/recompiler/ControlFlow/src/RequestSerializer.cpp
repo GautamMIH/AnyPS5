@@ -340,6 +340,9 @@ void writePixelInfo(Writer& writer, const ShaderPixelStageInfo& info) {
     writer.WriteBool(info.layerExported);
     writer.WriteBool(info.ditheredAlphaToCoverage);
     writer.WriteBool(info.frontFaceAllBits);
+    writer.WriteU8(info.quadPixelMask);
+    for (const std::uint16_t mask : info.quadSampleMask) writer.WriteU32(mask);
+    writer.WriteU32(info.reversedBlend);
 }
 
 ShaderPixelStageInfo readPixelInfo(Reader& reader, std::uint32_t version) {
@@ -393,6 +396,15 @@ ShaderPixelStageInfo readPixelInfo(Reader& reader, std::uint32_t version) {
     if (version >= 23u) info.layerExported = reader.ReadBool();
     if (version >= 25u) info.ditheredAlphaToCoverage = reader.ReadBool();
     if (version >= 27u) info.frontFaceAllBits = reader.ReadBool();
+    if (version >= 28u) info.quadPixelMask = reader.ReadU8();
+    if (version >= 29u) {
+        for (std::uint16_t& mask : info.quadSampleMask) {
+            const auto value = reader.ReadU32();
+            if (value > 0xffffu) throw std::runtime_error("invalid recompile request quad sample mask");
+            mask = static_cast<std::uint16_t>(value);
+        }
+    }
+    if (version >= 30u) info.reversedBlend = reader.ReadU32();
     if (version < 5u) {
         const auto input = [](PixelInput value, bool present) { return present ? PixelInputBit(value) : 0u; };
         info.inputAddr = input(PixelInput::PerspectiveSample, info.hasPerspectiveCenterVgpr && inputAddrOrCenterVgpr == 2u) | input(PixelInput::PerspectiveCenter, info.hasPerspectiveCenterVgpr) |
@@ -770,8 +782,8 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     Writer writer(buffer);
     writer.WriteU32(0x41505335u);
     // This branch's SpirvTarget::hostFloatSemantics travels in the version word's top bit
-    // (HostFloatVersionFlag), so a request without it serializes exactly as upstream's version 27.
-    writer.WriteU32(27u | (request.target.hostFloatSemantics ? HostFloatVersionFlag : 0u));
+    // (HostFloatVersionFlag), so a request without it serializes exactly as upstream's version 30.
+    writer.WriteU32(30u | (request.target.hostFloatSemantics ? HostFloatVersionFlag : 0u));
     writeShaderBinary(writer, request.shader);
     writeGuestContext(writer, request.context);
     writeSpirvTarget(writer, request.target);
@@ -807,7 +819,7 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     const auto versionWord = reader.ReadU32();
     const bool hostFloatSemantics = (versionWord & HostFloatVersionFlag) != 0u;
     const auto version = versionWord & ~HostFloatVersionFlag;
-    if (version < 1u || version > 27u || (hostFloatSemantics && version < 25u)) throw std::runtime_error("unsupported recompile request serialization version");
+    if (version < 1u || version > 30u || (hostFloatSemantics && version < 25u)) throw std::runtime_error("unsupported recompile request serialization version");
     DeserializedRequest result{};
     result.request.shader = readShaderBinary(reader, result.shaderCode, result.shaderHeader);
     result.request.context = readGuestContext(reader, result, version);

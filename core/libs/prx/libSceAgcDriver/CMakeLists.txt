@@ -559,6 +559,10 @@ list(FILTER agcExecutionTestSources EXCLUDE REGEX "/ImageSampleDerivatives\\.cpp
 # DccKeysFirstWrite checks upstream's DCC key stores (Recorder, DccMetadata, GuestArena): this driver
 # keeps surfaces uncompressed and models no DCC keys, so there is nothing of its to test here.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/DccKeysFirstWrite\\.cpp$")
+# New in the 2026-10-15 merge (upstream 311 commits after ab9a47684) and written against upstream's
+# driver: its pipelined draws and DMA, native HTILE and multisampled depth, sample masks, draw write
+# ranges, reversed-order blending, quad pixel masks and queue-0 waits.
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(DepthHtileWrite|DepthSurfaceLastWriter|DrawWriteRanges|ImagePlaneAddressOnCube|NativeMultisampleDepth|PipelinedDma|PipelinedFill|PipelinedPredicationRead|QuadPixelMask|QueueZeroIdleWait|ReversedOrderBlend|SampleMaskDepthStencil|SampleMaskDraw|SampleMaskMultisample|StagedClearSampledRead|StencilRefExportUnused)\\.cpp$")
 # New in the ab9a47684 merge and written against upstream's driver (stencil replay, compute-pipeline
 # counters, GPU mutex, storage write-back and flip-time stores, DescribeSurface-style helpers), none
 # of which this driver has; port each with its driver feature.

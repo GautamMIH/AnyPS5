@@ -82,6 +82,8 @@ public:
 
     bool Evaluate(IrValue* value, std::uint32_t& result);
     bool EvaluateWide(IrValue* value, std::uint64_t& result);
+    // The descriptor walk's node view (evaluateRuntimeSources<IrNode, CompiledEvaluator>).
+    bool Evaluate(const IrNode& value, std::uint32_t& result) { return Evaluate(value.Value(), result); }
     void ReportInaccessibleReads(InaccessibleRead* sink) { _inaccessible = sink; }
     void ReportNullRootReads(std::uint32_t* sink) { _nullRoots = sink; }
 

@@ -824,7 +824,8 @@ void verifyGuardedDescriptorSources() {
     static Texture texture;
     const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture.bytes.data()));
     const std::array<std::uint32_t, 8> valid{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
-    const std::array<std::uint32_t, 8> invalid{0x12345678u, 0xffffffffu, 0xffffffffu, 0u, 0u, 0u, 0u, 0u};
+    // Reserved image type 1: type 0 now reads as a null image (upstream 1749c9802/0e7e149cc).
+    const std::array<std::uint32_t, 8> invalid{0x12345678u, 0xffffffffu, 0xffffffffu, 1u << 28u, 0u, 0u, 0u, 0u};
     const std::array<std::uint32_t, 4> sampler{0u, 0u, 0u, 0u};
     std::array<std::uint32_t, 4> output{};
     const auto outputAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
@@ -2878,7 +2879,7 @@ void verifyPixelRequestSerialization() {
                         value.posZ, value.posW, value.frontFace, value.frontFaceAllBits, value.ancillary, value.sampleShading,
                         value.noPerspective, value.linearCentroid, value.pixelKillEnable, value.depthExportEnable,
                         value.sampleMaskExportEnable, value.earlyZ, value.executeOnNoop, value.conservativeZExport, value.orderedPixelShader,
-                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage, value.stencilRefExportEnable, value.rasterPrimitive, value.layerExported, value.ditheredAlphaToCoverage);
+                        value.targetOutputMode, value.targetExportMapping, value.alphaToCoverage, value.stencilRefExportEnable, value.rasterPrimitive, value.layerExported, value.ditheredAlphaToCoverage, value.reversedBlend);
     };
     const std::array<std::uint32_t, 1> code{0xbf810000u};
     const std::array<std::uint32_t, 3> userData{0x12345678u, 0xabcdef01u, 0x87654321u};
@@ -2925,6 +2926,7 @@ void verifyPixelRequestSerialization() {
     pixel.alphaToCoverage = true;
     pixel.stencilRefExportEnable = true;
     pixel.ditheredAlphaToCoverage = true;
+    pixel.reversedBlend = 0x570001u;
     const std::array<std::array<std::uint8_t, 8>, 3> mappings{{
         {0x00u, 0xe4u, 0xc6u, 0x1bu, 0xffu, 0x80u, 0x55u, 0xaau},
         {0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u},
@@ -2953,6 +2955,10 @@ void verifyPixelRequestSerialization() {
         undithered.context.pixel->ditheredAlphaToCoverage = false;
         RecompileCacheKey::Build(undithered, replayKey);
         require(key != replayKey && RecompileCacheKey::ContextHash(request) != RecompileCacheKey::ContextHash(undithered), "dithered coverage did not change shader identity");
+        auto withoutReversedBlend = request;
+        withoutReversedBlend.context.pixel->reversedBlend = 0u;
+        RecompileCacheKey::Build(withoutReversedBlend, replayKey);
+        require(key == replayKey && RecompileCacheKey::ContextHash(request) == RecompileCacheKey::ContextHash(withoutReversedBlend), "the reversed-order blend code changed the static shader identity");
         auto withoutCoverage = request;
         withoutCoverage.context.pixel->alphaToCoverage = false;
         RecompileCacheKey::Build(withoutCoverage, replayKey);
@@ -2975,7 +2981,7 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel->layerExported = true;
     minimal.context.pixel->ditheredAlphaToCoverage = true;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQRsAAAA=", "new requests did not use serialization version 27");
+    require(requestPrefix(encoded, 8u) == "NVNQQR4AAAA=", "new requests did not use serialization version 30");
     const std::array<std::uint32_t, 2> fallbacks{0x40u, 0x1ac4u};
     auto withFallbacks = minimal;
     withFallbacks.context.linkedCallFallbacks = fallbacks;
@@ -3090,10 +3096,10 @@ void verifyPixelRequestSerialization() {
         require(RecompileCacheKey::ContextHash(legacy19.request) == RecompileCacheKey::ContextHash(upgraded19.request), "upgrading version19 changed shader identity");
     }
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
-    for (std::size_t bytes = 0; bytes < 24u; ++bytes) {
-        expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag, primitive class, layer export, dither or front-face flag was accepted");
+    for (std::size_t bytes = 0; bytes < 45u; ++bytes) {
+        expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag, primitive class, layer export, dither or front-face flag, quad pixel mask or quad sample mask was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRwAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQR8AAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
     static constexpr std::string_view version18Request{
@@ -3104,6 +3110,7 @@ void verifyPixelRequestSerialization() {
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAB0gQAAAE="};
     const auto version18 = serializer.Deserialize(version18Request);
     require(version18.request.context.pixel.has_value() && version18.request.context.pixel->rasterPrimitive == RasterPrimitive::Triangle, "a version 18 request read a primitive class");
+    require(version18.request.context.pixel->reversedBlend == 0u, "a version 18 request read a reversed-order blend code");
     require(version18.request.target.registrationModules && version18.request.target.registrationWordLimit == 1234u && version18.request.target.vertexSubgroups, "a version 18 request trailer was misread");
 }
 
@@ -3207,31 +3214,79 @@ void verifyVertexInfoVersion19() {
     auto exportedPixel = pixel;
     exportedPixel.context.pixel->layerExported = true;
     const auto exportedBytes = decodeBase64(serializer.Serialize(exportedPixel));
-    auto legacyPixel = decodeBase64(encodedPixel);
+    auto blended = pixel;
+    blended.context.pixel->reversedBlend = 0x89abcdefu;
+    const auto plainPixel = decodeBase64(encodedPixel);
+    const auto blendedPixel = decodeBase64(serializer.Serialize(blended));
+    require(plainPixel.size() == blendedPixel.size() && plainPixel.size() == exportedBytes.size(), "the layer export flag or the reversed-order blend code changed the request size");
     std::size_t flagOffset = 0;
-    while (flagOffset < legacyPixel.size() && legacyPixel[flagOffset] == exportedBytes[flagOffset]) ++flagOffset;
-    require(flagOffset < legacyPixel.size(), "the pixel layer export flag is not serialized");
+    while (flagOffset < plainPixel.size() && plainPixel[flagOffset] == exportedBytes[flagOffset]) ++flagOffset;
+    require(flagOffset < plainPixel.size(), "the pixel layer export flag is not serialized");
+    std::size_t blendOffset = 0;
+    while (blendOffset < plainPixel.size() && plainPixel[blendOffset] == blendedPixel[blendOffset]) ++blendOffset;
+    require(blendOffset + 4u <= plainPixel.size() && blendedPixel[blendOffset] == 0xefu && blendedPixel[blendOffset + 1u] == 0xcdu && blendedPixel[blendOffset + 2u] == 0xabu && blendedPixel[blendOffset + 3u] == 0x89u, "the reversed-order blend code is not the four bytes the version 30 pixel info adds");
+    require(std::equal(plainPixel.begin() + static_cast<std::ptrdiff_t>(blendOffset + 4u), plainPixel.end(), blendedPixel.begin() + static_cast<std::ptrdiff_t>(blendOffset + 4u)), "the reversed-order blend code moved the fields after it");
     auto allBitsPixel = pixel;
     allBitsPixel.context.pixel->frontFaceAllBits = true;
     const auto allBitsBytes = decodeBase64(serializer.Serialize(allBitsPixel));
-    auto version26Pixel = decodeBase64(encodedPixel);
     std::size_t allBitsOffset = 0;
-    while (allBitsOffset < version26Pixel.size() && version26Pixel[allBitsOffset] == allBitsBytes[allBitsOffset]) ++allBitsOffset;
+    while (allBitsOffset < plainPixel.size() && plainPixel[allBitsOffset] == allBitsBytes[allBitsOffset]) ++allBitsOffset;
     require(allBitsOffset == flagOffset + 2u, "the front-face all-bits flag does not follow the dithered coverage flag");
-    version26Pixel.erase(version26Pixel.begin() + static_cast<std::ptrdiff_t>(allBitsOffset));
-    version26Pixel[4] = 26u;
-    const auto replay26 = serializer.Deserialize(encodeBase64(version26Pixel));
-    require(replay26.request.context.pixel.has_value() && replay26.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle && !replay26.request.context.pixel->frontFaceAllBits, "a version 26 request lost its pixel primitive class or read a front-face all-bits flag");
+    require(blendOffset == allBitsOffset + 18u, "the reversed-order blend code is not serialized after the front-face all-bits flag, quad pixel mask and quad sample masks");
+    constexpr std::size_t sampleMaskBytes = 16u;
+    auto maskedPixel = pixel;
+    maskedPixel.context.pixel->quadPixelMask = 0x2u;
+    const auto maskedBytes = decodeBase64(serializer.Serialize(maskedPixel));
+    std::size_t maskOffset = 0;
+    while (maskOffset < plainPixel.size() && plainPixel[maskOffset] == maskedBytes[maskOffset]) ++maskOffset;
+    require(maskOffset == allBitsOffset + 1u && maskOffset < plainPixel.size(), "the quad pixel mask is not the byte after the front-face all-bits flag");
+    auto sampledPixel = maskedPixel;
+    sampledPixel.context.pixel->quadSampleMask = {0x1u, 0x2u, 0x4u, 0x8u};
+    const auto sampledBytes = decodeBase64(serializer.Serialize(sampledPixel));
+    require(std::equal(maskedBytes.begin(), maskedBytes.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u), sampledBytes.begin()) && sampledBytes[maskOffset + 1u] == 0x1u && sampledBytes[maskOffset + 5u] == 0x2u && sampledBytes[maskOffset + 9u] == 0x4u && sampledBytes[maskOffset + 13u] == 0x8u, "the quad sample masks are not the four words after the quad pixel mask");
+    auto version29 = sampledBytes;
+    version29.erase(version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes), version29.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u));
+    version29[4] = 29u;
+    const auto replay29 = serializer.Deserialize(encodeBase64(version29));
+    require(replay29.request.context.pixel.has_value() && replay29.request.context.pixel->quadSampleMask == std::array<std::uint16_t, 4>{0x1u, 0x2u, 0x4u, 0x8u} && replay29.request.context.pixel->reversedBlend == 0u && decodeBase64(serializer.Serialize(replay29.request)) == sampledBytes, "a version 29 request read a reversed-order blend code or misread the fields after the quad sample masks");
+    auto version28 = sampledBytes;
+    version28.erase(version28.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u), version28.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u));
+    version28[4] = 28u;
+    const auto replay28 = serializer.Deserialize(encodeBase64(version28));
+    require(replay28.request.context.pixel.has_value() && replay28.request.context.pixel->quadPixelMask == 0x2u && replay28.request.context.pixel->quadSampleMask == std::array<std::uint16_t, 4>{0xffffu, 0xffffu, 0xffffu, 0xffffu} && replay28.request.context.pixel->reversedBlend == 0u && decodeBase64(serializer.Serialize(replay28.request)) == maskedBytes, "a version 28 request read quad sample masks or a reversed-order blend code, or misread the fields after them");
+    auto version27 = maskedBytes;
+    version27.erase(version27.begin() + static_cast<std::ptrdiff_t>(maskOffset), version27.begin() + static_cast<std::ptrdiff_t>(maskOffset + 1u + sampleMaskBytes + 4u));
+    version27[4] = 27u;
+    const auto replay27 = serializer.Deserialize(encodeBase64(version27));
+    require(replay27.request.context.pixel.has_value() && replay27.request.context.pixel->quadPixelMask == 0xfu && replay27.request.context.pixel->reversedBlend == 0u && serializer.Serialize(replay27.request) == encodedPixel, "a version 27 request read a quad pixel mask or reversed-order blend code, or misread the fields after it");
+    auto legacyPixel = plainPixel;
+    legacyPixel.erase(legacyPixel.begin() + static_cast<std::ptrdiff_t>(allBitsOffset), legacyPixel.begin() + static_cast<std::ptrdiff_t>(allBitsOffset + 2u + sampleMaskBytes + 4u));
+    legacyPixel[4] = 26u;
+    const auto replay26 = serializer.Deserialize(encodeBase64(legacyPixel));
+    require(replay26.request.context.pixel.has_value() && replay26.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle && !replay26.request.context.pixel->frontFaceAllBits && replay26.request.context.pixel->reversedBlend == 0u, "a version 26 request lost its pixel primitive class or read a front-face all-bits flag");
     require(serializer.Serialize(replay26.request) == encodedPixel, "a version 26 request misread the fields after its dithered coverage flag");
-    legacyPixel.erase(legacyPixel.begin() + static_cast<std::ptrdiff_t>(flagOffset), legacyPixel.begin() + static_cast<std::ptrdiff_t>(flagOffset + 3u));
     legacyPixel.resize(legacyPixel.size() - sizeof(std::uint64_t));
+    legacyPixel[4] = 25u;
+    const auto replay25 = serializer.Deserialize(encodeBase64(legacyPixel));
+    require(replay25.request.context.pixel.has_value() && !replay25.request.context.pixel->layerExported && !replay25.request.context.pixel->ditheredAlphaToCoverage && replay25.request.context.pixel->reversedBlend == 0u, "a main version 25 request read a reversed-order blend code");
+    require(serializer.Serialize(replay25.request) == encodedPixel, "a main version 25 request misread the fields after its dither flag");
+    legacyPixel.erase(legacyPixel.begin() + static_cast<std::ptrdiff_t>(flagOffset + 1u));
+    for (const auto version : {23u, 24u}) {
+        legacyPixel[4] = static_cast<std::uint8_t>(version);
+        const auto replayPixel = serializer.Deserialize(encodeBase64(legacyPixel));
+        const auto what = "a main version " + std::to_string(version) + " request";
+        require(replayPixel.request.context.pixel.has_value() && !replayPixel.request.context.pixel->layerExported && !replayPixel.request.context.pixel->ditheredAlphaToCoverage && replayPixel.request.context.pixel->reversedBlend == 0u, (what + " read a dither flag or reversed-order blend code").c_str());
+        require(serializer.Serialize(replayPixel.request) == encodedPixel, (what + " misread the fields after its layer export flag").c_str());
+    }
+    legacyPixel.erase(legacyPixel.begin() + static_cast<std::ptrdiff_t>(flagOffset));
     for (const auto version : {19u, 20u, 21u, 22u}) {
         auto versionPixel = legacyPixel;
         versionPixel[4] = static_cast<std::uint8_t>(version);
         if (version < 22u) versionPixel.pop_back();
         const auto replayPixel = serializer.Deserialize(encodeBase64(versionPixel));
-        require(replayPixel.request.context.pixel.has_value() && replayPixel.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle && !replayPixel.request.context.pixel->layerExported && !replayPixel.request.context.pixel->ditheredAlphaToCoverage, "a main version 19 to 22 request lost its pixel primitive class or read a layer export or dither flag");
-        require(serializer.Serialize(replayPixel.request) == encodedPixel, "a main version 19 to 22 request misread the fields after its pixel primitive class");
+        const auto what = "a main version " + std::to_string(version) + " request";
+        require(replayPixel.request.context.pixel.has_value() && replayPixel.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle && !replayPixel.request.context.pixel->layerExported && !replayPixel.request.context.pixel->ditheredAlphaToCoverage && replayPixel.request.context.pixel->reversedBlend == 0u, (what + " lost its pixel primitive class or read a layer export, dither flag or reversed-order blend code").c_str());
+        require(serializer.Serialize(replayPixel.request) == encodedPixel, (what + " misread the fields after its pixel primitive class").c_str());
     }
 }
 

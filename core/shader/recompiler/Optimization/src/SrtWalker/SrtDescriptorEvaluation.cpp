@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -45,11 +46,9 @@ const DescriptorSource* Source(const IrResourcePlan& program, std::uint32_t sour
     return &program.descriptorSources[source];
 }
 
-}
-
-namespace {
-
-template<typename TEvaluator>
+// TNode is the node view the walk hands its evaluator: BasicEvaluator<TNode> (upstream's IR and
+// compact walks), or CompiledEvaluator over IrNode (the fork's compiled plan).
+template<typename TNode, typename TEvaluator = BasicEvaluator<TNode>>
 bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::uint32_t> sources, const SrtRuntime& runtime, std::vector<DescriptorValue>& results, std::vector<std::uint32_t>& flat, bool evaluateFlat, std::span<const std::uint8_t> cleanFlatSlots, std::vector<std::uint8_t>& activeSources, std::vector<SrtReadPoison>* poison, std::uint32_t* nullRootReads) {
     failureReason().clear();
     static const bool debug = std::getenv("APS5_SRT_DEBUG") != nullptr;
@@ -100,8 +99,9 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
                 active[program.descriptorSources.size() + image] = 1u;
             }
             std::uint32_t condition = 0;
+            TNode conditionValue{};
             const auto nullRootsBefore = conditionNullRoots;
-            const bool cleanEvaluable = block.condition != nullptr && runtime.readSpecializationMemory != nullptr && cleanEvaluator.Evaluate(block.condition, condition) && conditionNullRoots == nullRootsBefore;
+            const bool cleanEvaluable = TNode::Condition(program, index, conditionValue) && runtime.readSpecializationMemory != nullptr && cleanEvaluator.Evaluate(conditionValue, condition) && conditionNullRoots == nullRootsBefore;
             if (cleanEvaluable) {
                 pending.push_back(block.successors[condition != 0u ? 0u : 1u]);
             } else {
@@ -134,7 +134,7 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
         if (!evaluateFlat || active[sourceIndex]) {
             for (std::uint32_t index = 0; index < source->dwordCount; index++) {
                 inaccessible = {};
-                if (!evaluator.Evaluate(source->dwords[index], value.dwords[index])) {
+                if (!evaluator.Evaluate(TNode::SourceDword(program, sourceIndex, index), value.dwords[index])) {
                     if (inaccessible.read != nullptr) {
                         if (debug) std::fprintf(stderr, "[srt] descriptor source %u reads inaccessible 0x%llx at pc 0x%x: zero words\n", sourceIndex, static_cast<unsigned long long>(inaccessible.address), inaccessible.read->Flags<MemoryFlags>().pc);
                         value.dwords.fill(0u);
@@ -157,7 +157,8 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
     std::vector<SrtReadPoison> poisoned;
     if (evaluateFlat) {
         flattened.resize(program.srtReads.size());
-        for (const auto& read : program.srtReads) {
+        for (std::uint32_t slot = 0; slot < program.srtReads.size(); ++slot) {
+            const auto& read = program.srtReads[slot];
             const bool clean = read.flatOffset < cleanFlatSlots.size() && cleanFlatSlots[read.flatOffset] != 0u;
             auto& selected = clean ? cleanEvaluator : evaluator;
             // A pure slot's raw read is reachable from no root, so it was not evaluated (nor
@@ -166,11 +167,11 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
             auto* trace = runtime.readTrace;
             const bool pure = trace != nullptr && read.flatOffset < program.pureFlatSlots.size() && program.pureFlatSlots[read.flatOffset] != 0u;
             if (pure) {
-                trace->leaf = read.value->Resolve();
+                trace->leaf = TNode::SrtRead(program, slot).Value();
                 trace->leafSlot = read.flatOffset;
             }
             inaccessible = {};
-            const bool evaluated = read.flatOffset < flattened.size() && selected.Evaluate(read.value, flattened[read.flatOffset]);
+            const bool evaluated = read.flatOffset < flattened.size() && selected.Evaluate(TNode::SrtRead(program, slot), flattened[read.flatOffset]);
             if (pure) trace->leaf = nullptr;
             if (!evaluated && inaccessible.read != nullptr) {
                 if (debug) std::fprintf(stderr, "[srt] flat offset %u reads inaccessible 0x%llx at pc 0x%x: poisoned\n", read.flatOffset, static_cast<unsigned long long>(inaccessible.address), inaccessible.read->Flags<MemoryFlags>().pc);
@@ -206,11 +207,56 @@ bool evaluateRuntimeSources(const IrResourcePlan& program, std::span<const std::
     return true;
 }
 
+void prefetchCompactPlan(const CompactResourcePlan& compact) {
+    const auto prefetch = [](const void* data, std::size_t bytes) {
+        const auto* bytesData = static_cast<const char*>(data);
+        for (std::size_t offset = 0; offset < std::min<std::size_t>(bytes, 16384u); offset += 64) __builtin_prefetch(bytesData + offset);
+    };
+    prefetch(compact.values.data(), compact.values.size() * sizeof(CompactPlanValue));
+    prefetch(compact.arguments.data(), compact.arguments.size() * sizeof(std::uint32_t));
+    prefetch(compact.sourceDwords.data(), compact.sourceDwords.size() * sizeof(std::uint32_t));
+    prefetch(compact.srtReads.data(), compact.srtReads.size() * sizeof(std::uint32_t));
+}
+
+std::string describeDifference(const std::vector<DescriptorValue>& compactResults, const std::vector<DescriptorValue>& irResults, const std::vector<std::uint32_t>& compactFlat, const std::vector<std::uint32_t>& irFlat) {
+    for (std::size_t index = 0; index < std::min(compactResults.size(), irResults.size()); ++index) {
+        for (std::size_t dword = 0; dword < compactResults[index].dwords.size(); ++dword) {
+            if (compactResults[index].dwords[dword] != irResults[index].dwords[dword]) return "source " + std::to_string(index) + " dword " + std::to_string(dword) + ": compact " + std::to_string(compactResults[index].dwords[dword]) + ", IR " + std::to_string(irResults[index].dwords[dword]);
+        }
+    }
+    for (std::size_t index = 0; index < std::min(compactFlat.size(), irFlat.size()); ++index) {
+        if (compactFlat[index] != irFlat[index]) return "flat offset " + std::to_string(index) + ": compact " + std::to_string(compactFlat[index]) + ", IR " + std::to_string(irFlat[index]);
+    }
+    return "sizes " + std::to_string(compactResults.size()) + "/" + std::to_string(irResults.size()) + " sources, " + std::to_string(compactFlat.size()) + "/" + std::to_string(irFlat.size()) + " flat words";
+}
+
+bool interpretRuntimeSources(const IrResourcePlan& program, std::span<const std::uint32_t> sources, const SrtRuntime& runtime, std::vector<DescriptorValue>& results, std::vector<std::uint32_t>& flat, bool evaluateFlat, std::span<const std::uint8_t> cleanFlatSlots, std::vector<std::uint8_t>& activeSources, std::vector<SrtReadPoison>* poison, std::uint32_t* nullRootReads) {
+    if (program.compact.values.empty()) return evaluateRuntimeSources<IrNode>(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
+    prefetchCompactPlan(program.compact);
+    const bool evaluated = evaluateRuntimeSources<CompactNode>(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
+    static const bool verify = std::getenv("APS5_VERIFY_SRT_COMPACT") != nullptr;
+    if (verify) {
+        const auto compactReason = RuntimeSourceFailureReason();
+        SrtRuntime untraced = runtime;
+        untraced.readTrace = nullptr;
+        std::vector<DescriptorValue> irResults;
+        std::vector<std::uint32_t> irFlat = flat;
+        std::vector<std::uint8_t> irActive;
+        std::vector<SrtReadPoison> irPoison;
+        std::uint32_t irNullRoots = 0;
+        const bool irEvaluated = evaluateRuntimeSources<IrNode>(program, sources, untraced, irResults, irFlat, evaluateFlat, cleanFlatSlots, irActive, poison != nullptr ? &irPoison : nullptr, nullRootReads != nullptr ? &irNullRoots : nullptr);
+        if (evaluated != irEvaluated) throw std::runtime_error("SRT compact walk " + std::string(evaluated ? "succeeded" : "failed (" + compactReason + ")") + " where the IR walk " + (irEvaluated ? "succeeded" : "failed (" + RuntimeSourceFailureReason() + ")"));
+        if (evaluated && (results != irResults || (evaluateFlat && flat != irFlat) || activeSources != irActive)) throw std::runtime_error("SRT compact walk differs from the IR walk at " + describeDifference(results, irResults, flat, irFlat));
+        if (!evaluated) failureReason() = compactReason;
+    }
+    return evaluated;
+}
+
 }
 
 bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const std::uint32_t> sources, const SrtRuntime& runtime, std::vector<DescriptorValue>& results, std::vector<std::uint32_t>& flat, bool evaluateFlat, std::span<const std::uint8_t> cleanFlatSlots, std::vector<std::uint8_t>& activeSources, std::vector<SrtReadPoison>* poison, std::uint32_t* nullRootReads) {
-    if (!UseCompiledSrt(program)) return evaluateRuntimeSources<Evaluator>(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
-    const bool evaluated = evaluateRuntimeSources<CompiledEvaluator>(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
+    if (!UseCompiledSrt(program)) return interpretRuntimeSources(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
+    const bool evaluated = evaluateRuntimeSources<IrNode, CompiledEvaluator>(program, sources, runtime, results, flat, evaluateFlat, cleanFlatSlots, activeSources, poison, nullRootReads);
     // Debug aid: ANYPS5_SRT_VERIFY=1 evaluates every walk again with Evaluator (without the read trace)
     // and reports where the results differ.
     static const bool verify = std::getenv("ANYPS5_SRT_VERIFY") != nullptr;
@@ -223,7 +269,7 @@ bool EvaluateRuntimeSourcesImpl(const IrResourcePlan& program, std::span<const s
         std::vector<std::uint8_t> otherActive;
         std::vector<SrtReadPoison> otherPoison;
         std::uint32_t otherNullRoots = 0;
-        const bool other = evaluateRuntimeSources<Evaluator>(program, sources, untraced, otherResults, otherFlat, evaluateFlat, cleanFlatSlots, otherActive, poison != nullptr ? &otherPoison : nullptr, nullRootReads != nullptr ? &otherNullRoots : nullptr);
+        const bool other = evaluateRuntimeSources<IrNode>(program, sources, untraced, otherResults, otherFlat, evaluateFlat, cleanFlatSlots, otherActive, poison != nullptr ? &otherPoison : nullptr, nullRootReads != nullptr ? &otherNullRoots : nullptr);
         const char* differs = nullptr;
         if (other != evaluated) differs = "success";
         else if (evaluated && otherResults != results) differs = "descriptor words";

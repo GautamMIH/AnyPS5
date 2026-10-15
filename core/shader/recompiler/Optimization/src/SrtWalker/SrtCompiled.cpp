@@ -2,6 +2,7 @@
 #include "Optimization/SrtWalker/SrtAddressArithmetic.hpp"
 #include "Optimization/SrtWalker/SrtInstructionPredicates.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <bit>
 #include <cmath>

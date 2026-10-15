@@ -159,7 +159,20 @@ private:
     void _ensure() {
         if (_initialized) return;
         void* reservation = mmap(reinterpret_cast<void*>(kArenaBase), kArenaSize, PROT_NONE, kReservedFlags | MAP_FIXED_NOREPLACE, -1, 0);
-        if (reservation == MAP_FAILED) reservation = mmap(nullptr, kArenaSize, PROT_NONE, kReservedFlags, -1, 0);
+        if (reservation == MAP_FAILED) {
+            const int error = errno;
+            std::fprintf(stderr, "[AnyPS5] guest address space at 0x%llx is taken (errno %d); host mappings inside it:\n", static_cast<unsigned long long>(kArenaBase), error);
+            if (FILE* maps = std::fopen("/proc/self/maps", "r")) {
+                char line[512];
+                while (std::fgets(line, sizeof(line), maps) != nullptr) {
+                    unsigned long long begin = 0;
+                    unsigned long long finish = 0;
+                    if (std::sscanf(line, "%llx-%llx", &begin, &finish) == 2 && begin < kArenaBase + kArenaSize && finish > kArenaBase) std::fprintf(stderr, "    %s", line);
+                }
+                std::fclose(maps);
+            }
+            reservation = mmap(nullptr, kArenaSize, PROT_NONE, kReservedFlags, -1, 0);
+        }
         checkMapping(reservation, "mmap guest address space", kArenaBase, kArenaSize);
         _base = reinterpret_cast<std::uint64_t>(reservation);
         _end = _base + kArenaSize;

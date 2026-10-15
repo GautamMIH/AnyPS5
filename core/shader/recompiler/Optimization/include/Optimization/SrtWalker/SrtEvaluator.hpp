@@ -4,9 +4,9 @@
 #include "IntermediateRepresentation/IrProgram.hpp"
 #include "Optimization/SrtWalker.hpp"
 
-#include <algorithm>
 #include <cstdint>
-#include <cstdlib>
+#include <cstring>
+#include <stdexcept>
 #include <span>
 #include <vector>
 
@@ -14,51 +14,7 @@ namespace ShaderRecompiler::Detail {
 
 class EvaluatedValues {
 public:
-    EvaluatedValues() = default;
-    EvaluatedValues(const EvaluatedValues&) = delete;
-    EvaluatedValues& operator=(const EvaluatedValues&) = delete;
-    ~EvaluatedValues() {
-        if (_dense != nullptr) DensePool().push_back(_dense);
-    }
-
-    // Values with ids below limit (unique in the plan) keep their state in an array from a
-    // per-thread pool, stamped per evaluator instead of cleared: a hash table grown per walk cost
-    // about 1 ms of every heavy frame.
-    void UseDense(std::uint32_t limit) {
-        // ANYPS5_NO_DENSE_SRT=1 keeps every value in the hash table.
-        static const bool hashOnly = std::getenv("ANYPS5_NO_DENSE_SRT") != nullptr;
-        if (limit == 0 || hashOnly) return;
-        auto& pool = DensePool();
-        if (!pool.empty()) {
-            _dense = pool.back();
-            pool.pop_back();
-        } else {
-            _dense = new DenseState;
-        }
-        if (_dense->slots.size() < limit) _dense->slots.resize(limit);
-        if (++_dense->stamp == 0) {
-            std::fill(_dense->slots.begin(), _dense->slots.end(), DenseSlot{});
-            _dense->stamp = 1;
-        }
-        _limit = limit;
-    }
-    // Cycle detection for dense values: false when the value is already being evaluated.
-    bool BeginVisit(const IrValue* key) {
-        auto& slot = _dense->slots[key->Id()];
-        if (slot.visiting == _dense->stamp) return false;
-        slot.visiting = _dense->stamp;
-        return true;
-    }
-    void EndVisit(const IrValue* key) { _dense->slots[key->Id()].visiting = 0; }
-    bool Dense(const IrValue* key) const { return _dense != nullptr && key->Id() < _limit; }
-
     bool Find(const IrValue* key, std::uint64_t& value) const {
-        if (Dense(key)) {
-            const auto& slot = _dense->slots[key->Id()];
-            if (slot.stamp != _dense->stamp) return false;
-            value = slot.value;
-            return true;
-        }
         if (_slots.empty()) {
             return false;
         }
@@ -74,14 +30,6 @@ public:
         }
     }
     void Insert(const IrValue* key, std::uint64_t value) {
-        if (Dense(key)) {
-            auto& slot = _dense->slots[key->Id()];
-            if (slot.stamp != _dense->stamp) {
-                slot.stamp = _dense->stamp;
-                slot.value = value;
-            }
-            return;
-        }
         if ((_count + 1u) * 2u > _slots.size()) {
             Grow();
         }
@@ -118,21 +66,6 @@ private:
     }
     std::vector<Slot> _slots;
     std::size_t _count = 0;
-    struct DenseSlot {
-        std::uint32_t stamp = 0;
-        std::uint32_t visiting = 0;
-        std::uint64_t value = 0;
-    };
-    struct DenseState {
-        std::vector<DenseSlot> slots;
-        std::uint32_t stamp = 0;
-    };
-    static std::vector<DenseState*>& DensePool() {
-        thread_local std::vector<DenseState*> pool;
-        return pool;
-    }
-    DenseState* _dense = nullptr;
-    std::uint32_t _limit = 0;
 };
 
 struct InaccessibleRead {
@@ -140,15 +73,110 @@ struct InaccessibleRead {
     std::uint64_t address = 0;
 };
 
-class Evaluator {
+class DenseValues {
 public:
-    Evaluator(const IrResourcePlan& program, const SrtRuntime& runtime, std::span<const std::uint8_t> cleanFlatSlots = {}, Evaluator* cleanEvaluator = nullptr, IrValue* activeMask = nullptr) : _program(program), _runtime(runtime), _cleanFlatSlots(cleanFlatSlots), _cleanEvaluator(cleanEvaluator), _activeMask(activeMask != nullptr ? activeMask->Resolve() : nullptr) {
-        _cache.UseDense(program.valueIdLimit);
+    struct Slot {
+        std::uint64_t stamp = 0;
+        std::uint64_t value = 0;
+    };
+    explicit DenseValues(std::size_t values);
+    ~DenseValues();
+    DenseValues(const DenseValues&) = delete;
+    DenseValues& operator=(const DenseValues&) = delete;
+    Slot& At(std::uint32_t id) { return _slots[id]; }
+    [[nodiscard]] std::size_t Size() const { return _size; }
+    [[nodiscard]] std::uint64_t Done() const { return _stamp; }
+    [[nodiscard]] std::uint64_t Visiting() const { return _stamp + 1u; }
+
+private:
+    std::vector<Slot>* _array = nullptr;
+    Slot* _slots = nullptr;
+    std::size_t _size = 0;
+    std::uint64_t _stamp = 0;
+};
+
+class IrNode {
+public:
+    IrNode() = default;
+    explicit IrNode(IrValue* value) : _value(value->Resolve()) {}
+    static IrNode From(const IrResourcePlan&, IrValue* value) { return IrNode(value); }
+    static IrNode SrtRead(const IrResourcePlan& program, std::uint32_t slot) { return IrNode(program.srtReads[slot].value); }
+    static IrNode SourceDword(const IrResourcePlan& program, std::uint32_t source, std::uint32_t dword) { return IrNode(program.descriptorSources[source].dwords[dword]); }
+    static bool Condition(const IrResourcePlan& program, std::uint32_t block, IrNode& condition) {
+        if (program.controlFlow[block].condition == nullptr) return false;
+        condition = IrNode(program.controlFlow[block].condition);
+        return true;
     }
+    [[nodiscard]] IrOpcode Opcode() const { return _value->Opcode(); }
+    [[nodiscard]] IrType Type() const { return _value->Type(); }
+    [[nodiscard]] bool HasImmediate() const { return _value->HasImmediate(); }
+    [[nodiscard]] std::uint64_t ImmediateBits() const { return _value->ImmediateU64(); }
+    [[nodiscard]] std::size_t ArgumentCount() const { return _value->ArgumentCount(); }
+    [[nodiscard]] IrNode Argument(std::size_t index) const { return IrNode(_value->Argument(index)); }
+    template<typename TValue>
+    [[nodiscard]] TValue Flags() const { return _value->Flags<TValue>(); }
+    [[nodiscard]] std::uint32_t RegisterIndex() const { return _value->Register().index; }
+    [[nodiscard]] std::uint32_t Id() const { return _value->Id(); }
+    [[nodiscard]] IrValue* Value() const { return _value; }
+    bool operator==(const IrNode& other) const { return _value == other._value; }
+
+private:
+    IrValue* _value = nullptr;
+};
+
+class CompactNode {
+public:
+    CompactNode() = default;
+    CompactNode(const IrResourcePlan& program, std::uint32_t id) : _program(&program), _id(id) {}
+    static CompactNode From(const IrResourcePlan& program, IrValue* value) { return {program, value->Resolve()->Id()}; }
+    static CompactNode SrtRead(const IrResourcePlan& program, std::uint32_t slot) { return {program, program.compact.srtReads[slot]}; }
+    static CompactNode SourceDword(const IrResourcePlan& program, std::uint32_t source, std::uint32_t dword) { return {program, program.compact.sourceDwords[source * 8u + dword]}; }
+    static bool Condition(const IrResourcePlan& program, std::uint32_t block, CompactNode& condition) {
+        if (program.compact.conditions[block] == CompactResourcePlan::NoValue) return false;
+        condition = {program, program.compact.conditions[block]};
+        return true;
+    }
+    [[nodiscard]] IrOpcode Opcode() const { return entry().opcode; }
+    [[nodiscard]] IrType Type() const { return entry().type; }
+    [[nodiscard]] bool HasImmediate() const { return entry().hasImmediate; }
+    [[nodiscard]] std::uint64_t ImmediateBits() const { return entry().immediate; }
+    [[nodiscard]] std::size_t ArgumentCount() const { return entry().argumentCount; }
+    [[nodiscard]] CompactNode Argument(std::size_t index) const {
+        const auto& value = entry();
+        if (index >= value.argumentCount) throw std::out_of_range("IrValue::Argument index is out of range");
+        return {*_program, _program->compact.arguments[value.firstArgument + index]};
+    }
+    template<typename TValue>
+    [[nodiscard]] TValue Flags() const {
+        TValue result{};
+        std::memcpy(&result, &entry().flags, sizeof(result));
+        return result;
+    }
+    [[nodiscard]] std::uint32_t RegisterIndex() const { return entry().registerIndex; }
+    [[nodiscard]] std::uint32_t Id() const { return _id; }
+    [[nodiscard]] IrValue* Value() const { return const_cast<IrValue*>(&_program->valueStorage[_id]); }
+    bool operator==(const CompactNode& other) const { return _id == other._id; }
+
+private:
+    [[nodiscard]] const CompactPlanValue& entry() const { return _program->compact.values[_id]; }
+
+    const IrResourcePlan* _program = nullptr;
+    std::uint32_t _id = 0;
+};
+
+template<typename TNode>
+class BasicEvaluator {
+public:
+    BasicEvaluator(const IrResourcePlan& program, const SrtRuntime& runtime, std::span<const std::uint8_t> cleanFlatSlots = {}, BasicEvaluator* cleanEvaluator = nullptr, const TNode* activeMask = nullptr) : _program(program), _runtime(runtime), _cleanFlatSlots(cleanFlatSlots), _cleanEvaluator(cleanEvaluator), _activeMask(activeMask != nullptr ? *activeMask : TNode{}), _masked(activeMask != nullptr), _dense(program.denseValueIds ? program.valueStorage.Size() : 0u) {}
+    BasicEvaluator(const BasicEvaluator&) = delete;
+    BasicEvaluator& operator=(const BasicEvaluator&) = delete;
 
     static bool MayEvaluate(const IrResourcePlan& program, IrValue* value);
-    bool Evaluate(IrValue* value, std::uint32_t& result);
-    bool EvaluateWide(IrValue* raw, std::uint64_t& result);
+    bool Evaluate(TNode value, std::uint32_t& result);
+    bool EvaluateWide(TNode value, std::uint64_t& result);
+    // A plan value by pointer (CompiledEvaluator's fallback and the fork's callers).
+    bool Evaluate(IrValue* value, std::uint32_t& result) { return Evaluate(TNode::From(_program, value), result); }
+    bool EvaluateWide(IrValue* value, std::uint64_t& result) { return EvaluateWide(TNode::From(_program, value), result); }
     void ReportInaccessibleReads(InaccessibleRead* sink) { _inaccessible = sink; }
     void ReportNullRootReads(std::uint32_t* sink) { _nullRoots = sink; }
 
@@ -156,22 +184,27 @@ private:
     static float Float32(std::uint64_t bits);
     static std::uint64_t Float32Bits(float value);
 
-    bool Arg(IrValue& inst, std::size_t index, std::uint64_t& result);
-    bool EvaluatePhi(IrValue& inst, std::uint64_t& result);
-    bool EvaluateExtract(IrValue& inst, std::uint64_t& result);
-    bool EvaluateRawRead(IrValue& inst, std::uint64_t& result);
-    bool EvaluateInst(IrValue& inst, std::uint64_t& result);
+    bool Arg(const TNode& inst, std::size_t index, std::uint64_t& result);
+    bool EvaluatePhi(const TNode& inst, std::uint64_t& result);
+    bool EvaluateExtract(const TNode& inst, std::uint64_t& result);
+    bool EvaluateRawRead(const TNode& inst, std::uint64_t& result);
+    bool EvaluateInst(const TNode& inst, std::uint64_t& result);
 
     const IrResourcePlan& _program;
     const SrtRuntime& _runtime;
     std::span<const std::uint8_t> _cleanFlatSlots;
-    Evaluator* _cleanEvaluator = nullptr;
-    IrValue* _activeMask = nullptr;
+    BasicEvaluator* _cleanEvaluator = nullptr;
+    TNode _activeMask;
+    bool _masked = false;
     InaccessibleRead* _inaccessible = nullptr;
     std::uint32_t* _nullRoots = nullptr;
     EvaluatedValues _cache;
     std::vector<IrValue*> _visiting;
+    DenseValues _dense;
 };
+
+using Evaluator = BasicEvaluator<IrNode>;
+using CompactEvaluator = BasicEvaluator<CompactNode>;
 
 }
 

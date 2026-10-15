@@ -147,6 +147,8 @@ ShaderStageInputInfo BuildShaderStageInputInfo(ShaderStageKind stage, const Gues
         if (pixel.ditheredAlphaToCoverage && !pixel.alphaToCoverage) throw std::runtime_error("dithered alpha-to-coverage requires enabled coverage");
         pixelStorage.psAlphaToCoverage = pixel.alphaToCoverage;
         pixelStorage.psDitheredAlphaToCoverage = pixel.ditheredAlphaToCoverage;
+        pixelStorage.quadPixelMask = pixel.quadPixelMask;
+        pixelStorage.quadSampleMask = pixel.quadSampleMask;
         ShaderStageInputInfo result;
         result.pixel = &pixelStorage;
         return result;

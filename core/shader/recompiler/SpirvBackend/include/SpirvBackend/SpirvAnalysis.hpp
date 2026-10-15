@@ -15,6 +15,7 @@ struct SpirvRequirements {
     bool subgroupShuffle = false;
     bool subgroupLocalInvocationId = false;
     bool computeDerivatives = false;
+    bool neighbourLaneReads = false;
     bool imageGatherExtended = false;
     // A sample with an LOD clamp (the _cl opcodes): the MinLod capability.
     bool minLod = false;
