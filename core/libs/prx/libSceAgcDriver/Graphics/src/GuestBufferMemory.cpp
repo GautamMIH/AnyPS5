@@ -126,6 +126,8 @@ void GuestBufferMemory::Upload(bool addressable) {
             // Checked as a whole only if both parts were, the same way (a read-only part joining a
             // writable region still needs the write check).
             previous.checked = previous.checked && region.checked && previous.writable == region.writable;
+            // Registered pieces never overlap each other: joined with another range they are used.
+            previous.flags &= region.flags;
             Require(captured || previous.live || region.live || previous.writable == region.writable, "writable guest memory overlaps an immutable snapshot");
             if (captured) {
                 const auto offset = static_cast<std::size_t>(region.begin - previous.begin);
@@ -161,6 +163,11 @@ void GuestBufferMemory::Upload(bool addressable) {
         // Debug aid: APS5_TRACE_BUFFER_VIEWS=1 logs every region a draw or dispatch binds.
         static const bool traceViews = std::getenv("APS5_TRACE_BUFFER_VIEWS") != nullptr;
         if (traceViews) std::fprintf(stderr, "[buffer-view] 0x%llx+0x%llx %s\n", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes), region.writable ? "writable" : region.live ? "live" : "snapshot");
+        // Registered memory not imported: the table marks it Absent; nothing is read or written.
+        if ((region.flags & ShaderRecompiler::BdaAbi::Absent) != 0) {
+            if (traceViews) std::fprintf(stderr, "[buffer-view] 0x%llx+0x%llx absent\n", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes));
+            continue;
+        }
         if (context.guestGpuMemory != nullptr && (region.writable || region.live)) {
             // Resident render targets over the range reach guest memory first, as a read would.
             // Ranges checked when added need only the alignment padding below them checked
@@ -173,7 +180,7 @@ void GuestBufferMemory::Upload(bool addressable) {
                 else if (padding != 0) GuestMemory::CheckRange(reinterpret_cast<const void*>(region.begin), static_cast<std::size_t>(padding), 1, false);
             }
             // Read-only regions read the device-local mirror (stale pages copied first, in queue order).
-            region.view = region.writable || context.drawQueue == nullptr || !context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->Resolve(region.begin, bytes) : context.guestGpuMemory->ResolveRead(region.begin, bytes, context.drawQueue);
+            region.view = region.writable || context.drawQueue == nullptr || !context.guestGpuMemory->Mirrors() ? context.guestGpuMemory->Resolve(region.begin, bytes, gpuLease()) : context.guestGpuMemory->ResolveRead(region.begin, bytes, context.drawQueue);
             if (!region.view && !region.writable && region.image && region.begin == region.image->address && bytes == region.image->bytes) region.view = context.guestGpuMemory->ResolveImage(region.image);
             if (region.view && region.view->bytes == bytes) {
                 // Shaders write writable regions straight into guest memory.
@@ -236,13 +243,17 @@ std::vector<ShaderRecompiler::BdaAbi::Range> GuestBufferMemory::AddressRanges() 
     Require(uploaded && !committed, "guest GPU address ranges are not available");
     std::vector<ShaderRecompiler::BdaAbi::Range> result;
     for (const auto& region : regions) {
+        if ((region.flags & ShaderRecompiler::BdaAbi::Absent) != 0) {
+            result.push_back({region.begin, region.end, 0, ShaderRecompiler::BdaAbi::Absent, 0});
+            continue;
+        }
         Require(region.buffer != nullptr || region.view, "incomplete guest GPU upload");
         const auto address = region.view ? region.view->address : region.buffer->DeviceAddress();
         Require(region.end - region.begin <= std::numeric_limits<std::uint64_t>::max() - address, "GPU address range overflow");
         // Stores through the table (GPU-selected V#s) land in guest memory only where the range is the
         // allocation itself: a writable one served in place by its import. Copies would drop them, so
         // a store there faults.
-        const auto permissions = ShaderRecompiler::BdaAbi::Read | (region.view && region.writable ? ShaderRecompiler::BdaAbi::Write : 0u);
+        const auto permissions = ShaderRecompiler::BdaAbi::Read | (region.view && region.writable ? ShaderRecompiler::BdaAbi::Write : 0u) | (region.flags & ShaderRecompiler::BdaAbi::Tracked);
         result.push_back({region.begin, region.end, address, permissions, 0});
     }
     return result;

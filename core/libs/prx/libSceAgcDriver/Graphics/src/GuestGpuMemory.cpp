@@ -11,6 +11,8 @@
 #include <execinfo.h>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
+#include "BdaAbi.hpp"
 
 namespace AgcDriver::Graphics {
 namespace {
@@ -61,6 +63,14 @@ GuestGpuMemory::GuestGpuMemory(const Context& context, std::uint32_t memoryTypeM
             if ((memory.memoryHeaps[heap].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) != 0) mirrorBudget = std::max<std::uint64_t>(mirrorBudget, memory.memoryHeaps[heap].size / 4);
         mirrorBudget = std::min<std::uint64_t>(mirrorBudget, 1ull << 30);
         std::fprintf(stderr, "[AnyPS5] GPU reads of guest memory use a device-local mirror (up to %llu MiB)\n", static_cast<unsigned long long>(mirrorBudget >> 20));
+    }
+    // Pinned budget for fault-driven registered memory (see FaultDriven).
+    if (const char* value = std::getenv("ANYPS5_GPU_PINNED_BUDGET_MB"); value != nullptr) {
+        pinnedBudget = static_cast<std::uint64_t>(std::strtoull(value, nullptr, 10)) << 20;
+    } else {
+        const auto pages = sysconf(_SC_PHYS_PAGES);
+        const auto pageBytes = sysconf(_SC_PAGESIZE);
+        pinnedBudget = pages > 0 && pageBytes > 0 ? static_cast<std::uint64_t>(pages) * static_cast<std::uint64_t>(pageBytes) / 10 * 4 : 4ull << 30;
     }
     // Mirrors and image copies follow every write the tracker learns of.
     listening = WriteTracker::Available();
@@ -130,7 +140,13 @@ std::optional<GuestGpuMemory::View> GuestGpuMemory::ResolveRead(std::uint64_t ad
     std::lock_guard lock(mutex);
     const auto first = begin & ~(kChunkBytes - 1u);
     const auto last = std::min((end + kChunkBytes - 1u) & ~(kChunkBytes - 1u), translation.segmentBytes);
-    auto& import = const_cast<Import&>(importRange(translation.segment, translation.segmentAlias, translation.segmentBytes, first, last));
+    auto& import = importRange(translation.segment, translation.segmentAlias, translation.segmentBytes, first, last);
+    // Mirrored imports are kept: the mirror's copies read them in queue order.
+    if (import.evictable) {
+        import.evictable = false;
+        import.state = ChunkState::Present;
+        ++generation;
+    }
     const auto size = import.end - first;
     if (!import.mirror) {
         if (mirrorBytes + size > mirrorBudget) return View{import.buffer, begin - first, import.address + (begin - first), translation.bytes};
@@ -234,7 +250,7 @@ GuestGpuMemory::~GuestGpuMemory() {
     for (auto& [segment, import] : retired) release(import);
 }
 
-std::optional<GuestGpuMemory::View> GuestGpuMemory::Resolve(std::uint64_t address, std::uint64_t bytes) {
+std::optional<GuestGpuMemory::View> GuestGpuMemory::Resolve(std::uint64_t address, std::uint64_t bytes, std::uint64_t lease) {
     GuestMemoryBacking::Translation translation{};
     if (!GuestMemoryBacking::GuestVirtualTranslate_nid_postfix(address, bytes, &translation)) return std::nullopt;
     const auto begin = translation.offset;
@@ -242,11 +258,24 @@ std::optional<GuestGpuMemory::View> GuestGpuMemory::Resolve(std::uint64_t addres
     std::lock_guard lock(mutex);
     const auto first = begin & ~(kChunkBytes - 1u);
     const auto last = std::min((end + kChunkBytes - 1u) & ~(kChunkBytes - 1u), translation.segmentBytes);
-    const auto& import = importRange(translation.segment, translation.segmentAlias, translation.segmentBytes, first, last);
+    auto& import = importRange(translation.segment, translation.segmentAlias, translation.segmentBytes, first, last);
+    if (import.evictable) {
+        // Without a lease nothing reports when the GPU is done with the view: kept for good. A lease
+        // using a chunk on its way out keeps it.
+        if (lease == 0) {
+            import.evictable = false;
+            import.state = ChunkState::Present;
+            ++generation;
+        } else if (import.state == ChunkState::Evicting) {
+            import.state = ChunkState::Present;
+            import.lastUseMs = nowMs();
+            ++generation;
+        }
+    }
     return View{import.buffer, begin - first, import.address + (begin - first), translation.bytes};
 }
 
-const GuestGpuMemory::Import& GuestGpuMemory::importRange(std::uint64_t segment, void* alias, std::uint64_t segmentBytes, std::uint64_t first, std::uint64_t last) {
+GuestGpuMemory::Import& GuestGpuMemory::importRange(std::uint64_t segment, void* alias, std::uint64_t segmentBytes, std::uint64_t first, std::uint64_t last) {
     const auto found = imports.find({segment, first});
     if (found != imports.end() && found->second.end >= last) return found->second;
     // A longer range from the same chunk replaces the key's import; the shorter one stays alive, as
@@ -257,6 +286,8 @@ const GuestGpuMemory::Import& GuestGpuMemory::importRange(std::uint64_t segment,
     }
     Import import;
     import.end = last;
+    import.bytes = last - first;
+    import.lastUseMs = nowMs();
     auto* pointer = static_cast<std::byte*>(alias) + first;
     const auto bytes = last - first;
     try {
@@ -296,9 +327,12 @@ const GuestGpuMemory::Import& GuestGpuMemory::importRange(std::uint64_t segment,
             Dl_info info{};
             if (dladdr(frames[index], &info) != 0 && info.dli_fname != nullptr) std::fprintf(stderr, "[guest-gpu-memory]   %s+0x%llx\n", info.dli_fname, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[index]) - reinterpret_cast<std::uintptr_t>(info.dli_fbase)));
         }
+        import.bytes = 0;
         release(import);
         throw;
     }
+    pinnedBytes += import.bytes;
+    ++generation;
     return imports.insert_or_assign({segment, first}, import).first->second;
 }
 
@@ -311,6 +345,7 @@ void GuestGpuMemory::Collect() {
         }
         release(it->second);
         it = imports.erase(it);
+        ++generation;
     }
     std::erase_if(retired, [this](auto& entry) {
         if (GuestMemoryBacking::GuestSegmentAlive_nid_postfix(entry.first)) return false;
@@ -320,10 +355,226 @@ void GuestGpuMemory::Collect() {
 }
 
 void GuestGpuMemory::release(Import& import) noexcept {
+    if (import.memory != VK_NULL_HANDLE) pinnedBytes -= std::min(pinnedBytes, import.bytes);
     if (import.buffer != VK_NULL_HANDLE) context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")(context.device, import.buffer, nullptr);
     if (import.memory != VK_NULL_HANDLE) context.Function<PFN_vkFreeMemory>("vkFreeMemory")(context.device, import.memory, nullptr);
     import.buffer = VK_NULL_HANDLE;
     import.memory = VK_NULL_HANDLE;
+}
+
+
+namespace {
+
+// A Tracked chunk no shader used for this long is left out of new tables.
+constexpr std::uint32_t kProbationMs = 1000;
+// Budget upkeep runs at most this often (and after every fault-driven import).
+constexpr std::uint32_t kMaintainMs = 50;
+
+struct SegmentRun {
+    std::uint64_t address;
+    GuestMemoryBacking::Translation translation;
+};
+
+// The segment runs of a guest range, or false when part of it is not segment memory.
+bool TranslateRuns(std::uint64_t address, std::uint64_t bytes, std::vector<SegmentRun>& runs) {
+    auto cursor = address;
+    const auto end = address + bytes;
+    while (cursor < end) {
+        GuestMemoryBacking::Translation translation{};
+        if (!GuestMemoryBacking::GuestVirtualTranslate_nid_postfix(cursor, end - cursor, &translation) || translation.bytes == 0) return false;
+        runs.push_back({cursor, translation});
+        cursor += translation.bytes;
+    }
+    return true;
+}
+
+bool TraceRegistered() {
+    static const bool trace = std::getenv("APS5_TRACE_REGISTERED_FAULTS") != nullptr;
+    return trace;
+}
+
+}
+
+bool GuestGpuMemory::FaultDriven(std::uint64_t registeredBytes) {
+    static const bool leaseAll = std::getenv("ANYPS5_LEASE_ALL_REGISTERED") != nullptr;
+    static const bool forced = std::getenv("ANYPS5_REGISTERED_FAULT_IN") != nullptr;
+    if (leaseAll) return false;
+    // The common answers without the lock (every address-table draw asks).
+    if (faultDriven.load(std::memory_order_relaxed)) return true;
+    if (faultDrivenReported.load(std::memory_order_relaxed) && !forced && registeredBytes <= pinnedBudgetSeen.load(std::memory_order_relaxed)) return false;
+    std::lock_guard lock(mutex);
+    pinnedBudgetSeen.store(pinnedBudget, std::memory_order_relaxed);
+    if (!faultDriven && (forced || registeredBytes > pinnedBudget)) {
+        faultDriven.store(true);
+        std::fprintf(stderr, "[AnyPS5] registered guest memory (%llu MiB) is imported for the GPU where shaders reach it (pinned budget %llu MiB)\n", static_cast<unsigned long long>(registeredBytes >> 20), static_cast<unsigned long long>(pinnedBudget >> 20));
+    } else if (!faultDriven && !faultDrivenReported) {
+        faultDrivenReported.store(true);
+        std::fprintf(stderr, "[AnyPS5] registered guest memory (%llu MiB) fits the pinned budget (%llu MiB): leased whole\n", static_cast<unsigned long long>(registeredBytes >> 20), static_cast<unsigned long long>(pinnedBudget >> 20));
+    }
+    return faultDriven.load();
+}
+
+bool GuestGpuMemory::RegisteredPieces(std::uint64_t address, std::uint64_t bytes, std::vector<RegisteredPiece>& pieces) {
+    // Mappings change the translation, imports the flags.
+    const auto mappings = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+    {
+        std::lock_guard lock(mutex);
+        const auto found = pieceCache.find(address);
+        if (found != pieceCache.end() && found->second.bytes == bytes && found->second.generation == generation && found->second.mappings == mappings) {
+            pieces.insert(pieces.end(), found->second.pieces.begin(), found->second.pieces.end());
+            return !found->second.pieces.empty();
+        }
+    }
+    // Translated outside the lock (the backing has its own).
+    std::vector<SegmentRun> runs;
+    const bool segment = TranslateRuns(address, bytes, runs);
+    std::lock_guard lock(mutex);
+    CachedPieces cached;
+    cached.bytes = bytes;
+    cached.generation = generation;
+    cached.mappings = mappings;
+    if (segment) {
+        for (const auto& [base, translation] : runs) {
+            auto offset = translation.offset;
+            const auto runEnd = translation.offset + translation.bytes;
+            while (offset < runEnd) {
+                const auto first = offset & ~(kChunkBytes - 1u);
+                const auto stop = std::min(first + kChunkBytes, runEnd);
+                const auto last = std::min(first + kChunkBytes, translation.segmentBytes);
+                std::uint32_t flags = ShaderRecompiler::BdaAbi::Absent;
+                const auto found = imports.find({translation.segment, first});
+                if (found != imports.end() && found->second.end >= last) {
+                    const auto state = found->second.evictable ? found->second.state : ChunkState::Present;
+                    flags = state == ChunkState::Present ? 0u : state == ChunkState::Tracked ? ShaderRecompiler::BdaAbi::Tracked : ShaderRecompiler::BdaAbi::Absent;
+                }
+                cached.pieces.push_back({base + (offset - translation.offset), base + (stop - translation.offset), flags});
+                offset = stop;
+            }
+        }
+    }
+    pieces.insert(pieces.end(), cached.pieces.begin(), cached.pieces.end());
+    const bool result = !cached.pieces.empty();
+    pieceCache.insert_or_assign(address, std::move(cached));
+    return result;
+}
+
+std::uint64_t GuestGpuMemory::BeginLease() {
+    std::lock_guard lock(mutex);
+    const auto lease = nextLease++;
+    liveLeases.insert(lease);
+    maintain(nowMs(), false);
+    return lease;
+}
+
+void GuestGpuMemory::EndLease(std::uint64_t lease) noexcept {
+    std::lock_guard lock(mutex);
+    liveLeases.erase(lease);
+}
+
+bool GuestGpuMemory::FaultIn(std::uint64_t address, std::uint64_t bytes) {
+    std::vector<SegmentRun> runs;
+    if (bytes == 0 || !TranslateRuns(address, bytes, runs)) return false;
+    std::lock_guard lock(mutex);
+    const auto now = nowMs();
+    bool changed = false;
+    for (const auto& [base, translation] : runs) {
+        auto offset = translation.offset;
+        const auto runEnd = translation.offset + translation.bytes;
+        while (offset < runEnd) {
+            const auto first = offset & ~(kChunkBytes - 1u);
+            const auto last = std::min(first + kChunkBytes, translation.segmentBytes);
+            offset = std::min(first + kChunkBytes, runEnd);
+            const auto found = imports.find({translation.segment, first});
+            if (found != imports.end() && found->second.end >= last) {
+                auto& import = found->second;
+                if (import.evictable && import.state != ChunkState::Present) {
+                    import.state = ChunkState::Present;
+                    import.lastUseMs = now;
+                    ++generation;
+                    changed = true;
+                }
+                continue;
+            }
+            try {
+                auto& import = importRange(translation.segment, translation.segmentAlias, translation.segmentBytes, first, last);
+                import.evictable = true;
+                import.state = ChunkState::Present;
+                import.lastUseMs = now;
+                changed = true;
+                if (TraceRegistered()) std::fprintf(stderr, "[guest-gpu-memory] fault-in: segment 0x%llx offset 0x%llx (guest 0x%llx); %llu MiB pinned\n", static_cast<unsigned long long>(translation.segment), static_cast<unsigned long long>(first), static_cast<unsigned long long>(base + (first > translation.offset ? first - translation.offset : 0)), static_cast<unsigned long long>(pinnedBytes >> 20));
+            } catch (const std::exception& error) {
+                std::fprintf(stderr, "[guest-gpu-memory] fault-driven import failed (%s); %llu MiB pinned\n", error.what(), static_cast<unsigned long long>(pinnedBytes >> 20));
+                maintain(now, true);
+                return changed;
+            }
+        }
+    }
+    maintain(now, true);
+    return changed;
+}
+
+void GuestGpuMemory::Touch(std::uint64_t address) {
+    GuestMemoryBacking::Translation translation{};
+    if (!GuestMemoryBacking::GuestVirtualTranslate_nid_postfix(address, 1, &translation)) return;
+    std::lock_guard lock(mutex);
+    const auto found = imports.find({translation.segment, translation.offset & ~(kChunkBytes - 1u)});
+    if (found == imports.end() || !found->second.evictable || found->second.state != ChunkState::Tracked) return;
+    found->second.state = ChunkState::Present;
+    found->second.lastUseMs = nowMs();
+    ++generation;
+}
+
+void GuestGpuMemory::SetPinnedBudget(std::uint64_t bytes) {
+    std::lock_guard lock(mutex);
+    pinnedBudget = bytes;
+    pinnedBudgetSeen.store(0);
+}
+
+std::uint64_t GuestGpuMemory::PinnedBytes() {
+    std::lock_guard lock(mutex);
+    return pinnedBytes;
+}
+
+void GuestGpuMemory::maintain(std::uint32_t now, bool force) {
+    if (!faultDriven.load(std::memory_order_relaxed) || (!force && now - lastMaintainMs < kMaintainMs)) return;
+    lastMaintainMs = now;
+    const auto oldestLive = liveLeases.empty() ? nextLease : *liveLeases.begin();
+    std::uint64_t leaving = 0;
+    for (auto it = imports.begin(); it != imports.end();) {
+        auto& import = it->second;
+        if (!import.evictable) {
+            ++it;
+            continue;
+        }
+        if (import.state == ChunkState::Evicting && import.evictLease <= oldestLive) {
+            // No work that may use it is in flight: every lease from evictLease on left it out.
+            if (TraceRegistered()) std::fprintf(stderr, "[guest-gpu-memory] released chunk: segment 0x%llx offset 0x%llx\n", static_cast<unsigned long long>(it->first.first), static_cast<unsigned long long>(it->first.second));
+            release(import);
+            it = imports.erase(it);
+            ++generation;
+            continue;
+        }
+        if (import.state == ChunkState::Tracked && now - import.trackedMs > kProbationMs) {
+            import.state = ChunkState::Evicting;
+            import.evictLease = nextLease;
+            ++generation;
+        }
+        if (import.state != ChunkState::Present) leaving += import.bytes;
+        ++it;
+    }
+    if (pinnedBytes <= pinnedBudget + leaving) return;
+    // Least recently used chunks go on probation until the rest fits the budget.
+    std::vector<std::pair<std::uint32_t, Import*>> candidates;
+    for (auto& [key, import] : imports)
+        if (import.evictable && import.state == ChunkState::Present) candidates.emplace_back(now - import.lastUseMs, &import);
+    std::sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) { return left.first > right.first; });
+    for (auto& [age, import] : candidates) {
+        if (pinnedBytes <= pinnedBudget + leaving) break;
+        import->state = ChunkState::Tracked;
+        import->trackedMs = now;
+        leaving += import->bytes;
+        ++generation;
+    }
 }
 
 }

@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <atomic>
+#include <cstdlib>
 #include <limits>
 #include <cinttypes>
 #include <cstdio>
@@ -31,6 +33,11 @@ BdaResources::BdaResources(const Context& context, const GuestBufferMemory& memo
     const ShaderRecompiler::BdaAbi::Header header{ShaderRecompiler::BdaAbi::Version, static_cast<std::uint32_t>(ranges.size()), sizeof(ShaderRecompiler::BdaAbi::Range), 0};
     std::memcpy(table->Bytes().data(), &header, sizeof(header));
     if (!ranges.empty()) std::memcpy(table->Bytes().data() + sizeof(header), ranges.data(), ranges.size() * sizeof(ranges.front()));
+    constexpr auto flagged = ShaderRecompiler::BdaAbi::Absent | ShaderRecompiler::BdaAbi::Tracked;
+    if (context.guestGpuMemory != nullptr && std::any_of(ranges.begin(), ranges.end(), [](const auto& range) { return (range.permissions & flagged) != 0; })) {
+        noted = ranges;
+        gpuMemory = context.guestGpuMemory;
+    }
 }
 
 VkDescriptorBufferInfo BdaResources::Table() const {
@@ -46,6 +53,7 @@ void BdaResources::CheckFault() const {
     markWrittenPages();
     ShaderRecompiler::BdaAbi::Fault report{};
     std::memcpy(&report, fault->Bytes().data(), sizeof(report));
+    if (!noted.empty() && notedEntries(report)) return;
     if (report.state == ShaderRecompiler::BdaAbi::FaultState::Empty) {
         Require(static_cast<std::uint32_t>(report.reason) == 0 && report.address == 0 && report.bytes == 0 && report.stage == 0 && report.instruction == 0 && report.reserved == 0, "BDA fault record has data without publication");
         return;
@@ -147,6 +155,63 @@ void BdaResources::markWrittenPages() const {
         any = true;
     }
     if (any) std::memset(words + Abi::WrittenSlotsWord, 0, Abi::WrittenPageSlots * sizeof(std::uint32_t));
+}
+
+
+bool BdaResources::notedEntries(const ShaderRecompiler::BdaAbi::Fault& report) const {
+    namespace Abi = ShaderRecompiler::BdaAbi;
+    auto* words = reinterpret_cast<std::uint32_t*>(fault->Bytes().data());
+    static const bool trace = std::getenv("APS5_TRACE_REGISTERED_FAULTS") != nullptr;
+    const auto count = words[Abi::NotedCountWord];
+    const bool dropped = words[Abi::NotedWriteWord] != 0;
+    std::vector<std::uint32_t> entries;
+    if (count > Abi::NotedListSlots) {
+        for (std::uint32_t word = 0; word < Abi::NotedEntries / 32; ++word) {
+            auto bits = words[Abi::NotedBitsWord + word];
+            while (bits != 0) {
+                entries.push_back(word * 32u + static_cast<std::uint32_t>(std::countr_zero(bits)));
+                bits &= bits - 1u;
+            }
+        }
+    } else {
+        entries.assign(words + Abi::NotedListWord, words + Abi::NotedListWord + count);
+    }
+    for (const auto entry : entries) {
+        if (entry >= noted.size()) continue;
+        const auto& range = noted[entry];
+        if ((range.permissions & Abi::Absent) != 0) {
+            const bool imported = gpuMemory->FaultIn(range.begin, range.end - range.begin);
+            if (trace) std::fprintf(stderr, "[bda] absent registered memory 0x%llx+0x%llx reached%s%s\n", static_cast<unsigned long long>(range.begin), static_cast<unsigned long long>(range.end - range.begin), imported ? "; imported for later work" : "", dropped ? " (stores of the work to absent memory were dropped)" : "");
+        } else if ((range.permissions & Abi::Tracked) != 0) {
+            gpuMemory->Touch(range.begin);
+        }
+    }
+    if (dropped && !trace) {
+        static std::atomic<bool> reported{false};
+        if (!reported.exchange(true)) std::fprintf(stderr, "[AnyPS5] a shader stored to registered memory not yet imported for the GPU; the store was dropped (imported for later work; APS5_TRACE_REGISTERED_FAULTS=1 lists them)\n");
+    }
+    if (count != 0 || dropped) {
+        words[Abi::NotedWriteWord] = 0;
+        words[Abi::NotedCountWord] = 0;
+        std::memset(words + Abi::NotedBitsWord, 0, Abi::NotedEntries / 8);
+    }
+    // An access the shader could not note reaching Absent memory: imported, not an error. Past the
+    // noted entries it faults Permission (an Absent entry grants nothing); a lookup that records its
+    // own faults (a probe's caller), or one reaching from an imported entry into an Absent one,
+    // faults Unmapped.
+    if (report.state != Abi::FaultState::Ready || (report.reason != Abi::FaultReason::Unmapped && report.reason != Abi::FaultReason::Permission)) return false;
+    const auto begin = report.address;
+    const auto end = report.address + std::max<std::uint64_t>(report.bytes, 1u);
+    bool absent = false;
+    for (const auto& range : noted) {
+        if ((range.permissions & Abi::Absent) == 0 || range.end <= begin || end <= range.begin) continue;
+        absent = true;
+        gpuMemory->FaultIn(range.begin, range.end - range.begin);
+    }
+    if (!absent) return false;
+    if (trace) std::fprintf(stderr, "[bda] fault %u at 0x%llx (%u bytes, pc 0x%x) reached absent registered memory; imported for later work\n", static_cast<std::uint32_t>(report.reason), static_cast<unsigned long long>(report.address), report.bytes, report.instruction);
+    std::memset(words, 0, sizeof(Abi::Fault));
+    return true;
 }
 
 }

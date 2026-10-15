@@ -11,6 +11,11 @@ namespace ShaderRecompiler::BdaAbi {
 inline constexpr std::uint32_t Version = 1;
 inline constexpr std::uint32_t Read = 1;
 inline constexpr std::uint32_t Write = 2;
+// Registered memory the host has not imported for the GPU: an access notes the entry (below) and
+// reads nothing (stores are dropped) instead of faulting; the host imports it for later work.
+inline constexpr std::uint32_t Absent = 4;
+// An imported entry the host considers releasing: an access notes the entry, which keeps it.
+inline constexpr std::uint32_t Tracked = 8;
 
 struct Header {
     std::uint32_t version;
@@ -60,7 +65,19 @@ inline constexpr std::uint32_t WrittenOverflowWord = sizeof(Fault) / sizeof(std:
 inline constexpr std::uint32_t WrittenCountWord = WrittenOverflowWord + 1;
 inline constexpr std::uint32_t WrittenSlotsWord = WrittenCountWord + 1;
 inline constexpr std::uint32_t WrittenListWord = WrittenSlotsWord + 2 * WrittenPageSlots;
-inline constexpr std::size_t FaultBufferBytes = (WrittenListWord + WrittenPageSlots) * sizeof(std::uint32_t);
+// After the written set: the table entries with Absent or Tracked accessed by the work. A bitmap of
+// entry indices (entries from NotedEntries on are not noted: an Absent one faults Unmapped), and
+// the list of indices in the order their bits were set, NotedCountWord counting them (more than
+// NotedListSlots: the host scans the bitmap). NotedWriteWord is set by a store or atomic to an
+// Absent entry (the store was dropped).
+inline constexpr std::uint32_t NotedEntries = 4096;
+inline constexpr std::uint32_t NotedListSlots = 1024;
+inline constexpr std::uint32_t NotedWriteWord = WrittenListWord + WrittenPageSlots;
+inline constexpr std::uint32_t NotedCountWord = NotedWriteWord + 1;
+inline constexpr std::uint32_t NotedBitsWord = NotedCountWord + 1;
+inline constexpr std::uint32_t NotedListWord = NotedBitsWord + NotedEntries / 32;
+inline constexpr std::size_t FaultBufferBytes = (NotedListWord + NotedListSlots) * sizeof(std::uint32_t);
+static_assert(NotedEntries % 32 == 0);
 static_assert((WrittenPageSlots & (WrittenPageSlots - 1)) == 0);
 static_assert(WrittenChunkPages == 32);
 

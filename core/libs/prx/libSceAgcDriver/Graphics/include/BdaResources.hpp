@@ -31,6 +31,13 @@ private:
     // The pages stores through the table noted in the fault buffer (BdaAbi::WrittenPageSlots) are
     // marked GPU-written, and the set emptied; CheckFault does it first.
     void markWrittenPages() const;
+    // Fault-driven registered memory: imports the Absent entries the work reached and keeps the
+    // Tracked ones it used (BdaAbi::NotedEntries); returns whether a fault record of an access to
+    // Absent memory (Unmapped) was such a request, so not an error.
+    bool notedEntries(const ShaderRecompiler::BdaAbi::Fault& report) const;
+    // The table's entries when some are Absent or Tracked (else empty), and who imports them.
+    std::vector<ShaderRecompiler::BdaAbi::Range> noted;
+    GuestGpuMemory* gpuMemory = nullptr;
     std::unique_ptr<Buffer> table;
     std::unique_ptr<Buffer> fault;
     std::size_t tableBytes = 0;

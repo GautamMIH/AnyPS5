@@ -22,7 +22,8 @@ class GuestBufferMemory {
 public:
     explicit GuestBufferMemory(const Context& context);
     // Leases the registered allocations for BDA access; writes false exposes them read-only (no
-    // shader of the work stores through the table).
+    // shader of the work stores through the table). With fault-driven registered memory
+    // (GuestGpuMemory::FaultDriven) they are leased in import chunks, those not imported Absent.
     void AcquireRegistered(bool writes = true);
     // leading: bytes before address the region also covers for a view's alignment; they are
     // uploaded but never written back.
@@ -60,10 +61,37 @@ private:
         std::shared_ptr<const GuestAllocations::Range> image;
         // Its whole range was checked (with resolves) when it was added, as `writable` says.
         bool checked = false;
+        // A piece of fault-driven registered memory: BdaAbi::Absent (not imported; no view) or
+        // BdaAbi::Tracked.
+        std::uint32_t flags = 0;
     };
 
     void validate(std::uint64_t address, std::size_t bytes) const;
+    std::uint64_t gpuLease();
+    // The GuestGpuMemory lease of the work (fault-driven registered memory), ended with it.
+    struct LeaseToken {
+        GuestGpuMemory* memory = nullptr;
+        std::uint64_t serial = 0;
+        LeaseToken() = default;
+        LeaseToken(const LeaseToken&) = delete;
+        LeaseToken& operator=(const LeaseToken&) = delete;
+        LeaseToken(LeaseToken&& other) noexcept : memory(other.memory), serial(other.serial) { other.serial = 0; }
+        LeaseToken& operator=(LeaseToken&& other) noexcept {
+            if (this != &other) {
+                if (serial != 0) memory->EndLease(serial);
+                memory = other.memory;
+                serial = other.serial;
+                other.serial = 0;
+            }
+            return *this;
+        }
+        ~LeaseToken() {
+            if (serial != 0) memory->EndLease(serial);
+        }
+    };
     Context context;
+    LeaseToken gpuLeaseToken;
+    bool faultDriven = false;
     GuestAllocations::Lease lease;
     std::vector<Region> regions;
     // Detached views (see AddDetached); snapshot keeps the uploaded bytes, so only the bytes the
