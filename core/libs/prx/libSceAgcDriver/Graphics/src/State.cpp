@@ -499,7 +499,9 @@ ShaderStages DecodeShaderStages(const QueueState& queue) {
     if (path == ShaderPath::Vertex) {
         validate((value & 0x2000u) != 0, "legacy vertex routing without PRIMGEN_EN is unsupported");
         // MAX_PRIMGRP_IN_WAVE (bits 15-18) only tunes wave packing (upstream 831ba5d2).
-        validate((value & ~0x0247a010u) == 0, "unsupported vertex routing, scheduling or wave-ID state");
+        // 0x02002008 (ES_EN 1 with PRIMGEN_EN and bit 25) is reported vertex-path state that draws as
+        // the usual vertex routing (upstream 632331d1).
+        validate((value & ~0x0247a010u) == 0 || value == 0x02002008u, "unsupported vertex routing, scheduling or wave-ID state");
     } else if (path == ShaderPath::Tessellation) {
         validate((value & 0x00600020u) == 0, "wave32 tessellation or geometry amplification is unsupported");
         validate((value & ~0x0007ed0du) == 0 && (value & 3u) == 1u && ((value >> 3u) & 3u) == 1u, "unsupported tessellation routing");

@@ -262,6 +262,21 @@ void tessellationPartitioningTests() {
     Reject([&] { DecodeShaderStages(queue); }, "fractional-odd or fractional-even");
 }
 
+void reportedVertexStageTests() {
+    // The reported vertex-routing state 0x02002008 decodes as the vertex path (upstream 632331d1);
+    // its neighbours stay refused.
+    auto vertex = makeState();
+    vertex.context[0x2d5] = 0x02002008u;
+    const auto stages = DecodeShaderStages(vertex);
+    Require(stages.path == ShaderPath::Vertex && stages.registerValue == 0x02002008u, "the reported vertex-routing state did not decode as vertex");
+    vertex.context[0x2d5] = 0x02002008u | 0x10u;
+    Reject([&] { DecodeShaderStages(vertex); }, "reserved LS_EN, ES_EN or VS_EN");
+    vertex.context[0x2d5] = 0x02002008u | 0x800000u;
+    Reject([&] { DecodeShaderStages(vertex); }, "unsupported vertex routing");
+    vertex.context[0x2d5] = 0x2008u;
+    Reject([&] { DecodeShaderStages(vertex); }, "unsupported vertex routing");
+}
+
 void standard64KBTests() {
     // SW_64KB_S colour targets (upstream 6aa8e58d): a 64 KiB block of distinct element offsets.
     for (const std::uint32_t elementBytes : {1u, 2u, 4u, 8u, 16u}) {
@@ -296,6 +311,7 @@ int main() {
         inertPixelStageTests();
         frontFaceAllBitsTests();
         tessellationPartitioningTests();
+        reportedVertexStageTests();
         standard64KBTests();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "state decode test failed: %s\n", error.what());
