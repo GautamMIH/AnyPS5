@@ -716,3 +716,41 @@ Issues that needed research, with a short answer. Check here before researching;
     - Hazard-tracked barriers: one batched global barrier only on real read-after-write.
     - Raw typed buffer arrays with bounds left to robustBufferAccess2, no in-shader checks.
     - Fast clears as loadOp, compute clears and copies replaced by vkCmd equivalents.
+
+## Other PS5 emulators surveyed (2026-10-15)
+
+Shallow clones in the job tmp (`emu-survey/`), read only. AnyPS5 is GPL-2.0-only: Kyty (GPL-2.0), shadPS4 (GPL-2.0-or-later) and RPCSX (GPL-2.0) code can be reused; ProsperoEden, ProsperoLight and Jelly5 are GPL-3.0-or-later, so take facts from them, not code.
+
+- **ProsperoEden, ProsperoLight, Jelly5 (blackbearreloaded, 02dnot) are not PS5 emulators.** They are native homebrew apps that run on a jailbroken PS5 (FSELF type 0xFE10, Payload SDK, a clean-room `libc.prx` shim). ProsperoEden is the Eden (Switch) emulator ported to the PS5, ProsperoLight a Moonlight client, Jelly5 a Jellyfin client. They call the real Sony libraries (Agc, AgcDriver, VideoOut, Videodec2, AudioOut, Pad), so they record how the console behaves:
+  - The VideoOut tiled scanout uses 128x128-pixel tiles of 64 KiB each, and its base must be 2 MiB aligned (a misaligned base shuffles the image). The tile table is in Jelly5 `app/engine/SDL_ps5tilemap.inc`; the rules are in `app/engine/media/src/evo_agc_runtime.c:49-64,2429-2450`.
+  - Attribute words (`evo_agc_runtime.c:131-160`): Bgra8Srgb 0x8000000000000000, Rgba8Srgb 0x8000000022000000 (that bit is the channel order, not tiling), Bgr10A2 BT.2100 PQ 0x8100070400000000. `sceVideoOutGetFlipStatus` status[3] holds the flipArg of the last completed flip (`:2285-2310`). Our VideoOut tests already cover these formats (tests/Flip.cpp:214, tests/HdrPresent.cpp:28).
+  - A process that goes too long without calling `sceAgcSuspendPoint` after `sceAgcDriverSubmitDcb` is killed with GPU_FAULT_SUSPENDPOINT_TIMEOUT_IN_RUN_ASYNC (`evo_agc_runtime.c:2230-2250`).
+  - Direct memory is handed out lowest-fit from the bottom of the pool (ProsperoEden `src/direct_memory.c` header). WB_ONION is type 12 with prot 0x33, and CPU writes need clflush before the GPU reads them.
+  - Mihawk's PS5 Mesa RADV runs Vulkan on the console with only seven AgcDriver imports: SubmitDcb, WaitUntilSafeForRendering, GetWaitRenderingPacketSizeInDwords, Set/GetTFRing and Set/GetHsOffchipParam (ProsperoEden `tools/stubs/libSceAgcDriver.c`). It writes its own PM4.
+  - Two ProsperoEden ideas carry over to us:
+    - **Frame-stamped input replay** (`headless/gameplay_test.h`): each recorded pad state is stamped with the emulator's frame number, not wall time, so a replay drives the same frames whatever the host's speed.
+    - **Adaptive guest clock** (`headless/guest_clock.h`): when frames arrive later than the interval the game asked for, the clock the guest reads slows by up to 15%, so games that time their own frames don't drop from 30 to 20 fps. Only guest-read counters stretch; kernel timeouts, display and audio keep real time.
+- **RPCSX:** HEAD is still e8ae148, the commit checked on 2026-10-14 (see Other projects). Nothing new.
+- **KytyPS5** (GPL-2.0; Windows and Linux, experimental macOS; boots UE4/5, Unity and custom-engine titles; compatibility list at kytyps5.github.io). Not yet in these notes:
+  - **Unity GC stop-the-world goes through guest exceptions.**
+    - `sceKernelInstallExceptionHandler`, `sceKernelRemoveExceptionHandler` and `sceKernelRaiseException` (WkwEd3N7w0Y, Qhv5ARAoOEc, il03nluKfMk) are exported twice: once from libkernel and once from a separate library named `libkernel_unity` (src/libs/libKernel.cpp:3349-3452).
+    - RaiseException accepts only signal 30 (FreeBSD SIGUSR1). The comment at src/common/hostException.cpp:306-309 calls it the stop-the-world request.
+    - Delivery (libKernel.cpp:960-1180): a target thread blocked in HLE code is woken (PthreadWakeForSignal). A context taken outside guest code is sanitized: volatile registers are zeroed, and rsp/rbp fall back to the guest stack if they are outside it (`SanitizeNonGuestSignalUcontext`, :769-800).
+    - A fault being resolved blocks SIGUSR1, so a GC request can't preempt the fault fix.
+  - Unity's time/date path calls `sceKernelGettimezone` and `sceKernelConvert{Utc,Local}...` often; Kyty marks them as hot paths (src/kernel/pthread.cpp:3722-3800).
+  - Its API surface is now a subset of ours: every AgcDriver/Agc NID it exports is present here, as are AudioOut2, BVH ray intersection and SyncOnAddress.
+- **shadPS4** (GPL-2.0-or-later, PS4; the most mature of these projects). Not yet in these notes:
+  - PS4-era Unity/Mono stop threads with `pthread_suspend_user_context_np`, `pthread_get_user_context_np` and `pthread_resume_user_context_np` (cfjAjVTFG6A, YkGOXpJEtO8, QRdE7dBfNks; core/libraries/kernel/threads/pthread.cpp:1201-1505; on Linux via a SIGSLEEP handler). AnyPS5 implements none of the three.
+  - Shader replacement by hash: `<shader dir>/patch/<hash>.spv` is loaded instead of the recompiled module (video_core/renderer_vulkan/vk_pipeline_cache.cpp:637-652, 766). There is also an ImGui devtools layer with PM4 command-list, register, frame-dump, shader and memory-map views (core/devtools/widget/).
+- **Possible gaps in ours:**
+  - **Hellboy crash (open lead):** its static imports have no suspend or exception calls, but Kyty shows PS5 Unity's GC uses `sceKernelRaiseException` from `libkernel_unity`. Check whether `UnityPlayer`/`Il2Cpp` modules get it some other way: through `sceKernelDlsym` (ours returns ESRCH (0x80020003) and logs nothing on a miss, Module.cpp:326), or as an import of a module loaded later. If the GC cannot stop a thread, the heap would be freed under a running tween, which is the shape of the crash.
+  - **Timezone cost:** our `sceKernelConvertLocaltimeToUtc` runs `tzset()` + `localtime_r` up to 26 times per call through `HostDaylightAmount` (Time.cpp:722-756). glibc's tzset stats /etc/localtime on each call. Hellboy is CPU-bound, so count these calls per frame.
+  - **Wall-clock replays:** our input replay is timed by the wall clock (PadInput.cpp:59, 310-320), which is why replays diverge and title presses get lost (see Hellboy replays).
+- **Ideas, ranked (compatibility first):**
+  1. Log `sceKernelDlsym` misses and every exception install/raise in Hellboy, then follow the GC path (small).
+  2. Implement the three `pthread_*_user_context_np` calls on top of our existing RaiseException suspend machinery (medium; Unity/Mono compatibility).
+  3. Frame-stamped replays (stamp with the flip count) for deterministic Hellboy runs and steadier A/Bs (small; libSceVideoOut PadInput).
+  4. Cache host timezone results, recomputing on the hour or when the TZ setting changes (small; libkernel Time).
+  5. Make APS5_TIME_SCALE adaptive, ProsperoEden-style. It only reaches clocks read through HLE, not rdtsc in guest code. Check first that a test title steps its frame rate down (medium).
+  6. Load shader replacements by hash from the shader cache dir (small-medium; debugging aid).
+  7. Back off zero-timeout poll loops (Zorro's Wwise thread: 88M `sceKernelWaitEventFlag` calls a run). Neither Kyty nor shadPS4 does this, so measure first and keep it opt-in (small).
