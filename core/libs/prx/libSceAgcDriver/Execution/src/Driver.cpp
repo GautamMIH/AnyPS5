@@ -2193,6 +2193,7 @@ private:
                     timing.Mark("flip_prepare");
                 } else if (opcode == 0x15) {
                     withContext([&] { dispatch(queue, packet, submission); });
+                    Pm4::NoteDispatchRegisters(packet, queue);
                 } else if (opcode == 0x16) {
                     std::array<std::uint32_t, 5> direct;
                     {
@@ -2203,6 +2204,7 @@ private:
                         direct = Pm4::ResolveDispatch(packet, queue);
                     }
                     withContext([&] { dispatch(queue, direct, submission); });
+                    Pm4::NoteDispatchRegisters(packet, queue);
                 } else if (opcode == 0x35 || opcode == 0x27 || opcode == 0x2d) {
                     Pm4::DrawParameters parameters;
                     {

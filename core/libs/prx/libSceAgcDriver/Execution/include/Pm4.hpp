@@ -84,6 +84,9 @@ std::string DescribeWait(std::span<const std::uint32_t> packet);
 // GPU reference clock used for timestamp writes, in 100 MHz ticks.
 std::uint64_t GpuClock();
 bool UsesGpuCacheBarrier(std::span<const std::uint32_t> packet);
+// A dispatch leaves its initiator (COMPUTE_DISPATCH_INITIATOR) and, for DISPATCH_DIRECT, its group
+// counts (COMPUTE_DIM_X/Y/Z) in the shader registers, where the CP puts them (COPY_DATA reads them).
+void NoteDispatchRegisters(std::span<const std::uint32_t> packet, QueueState& queue);
 std::array<std::uint32_t, 5> ResolveDispatch(std::span<const std::uint32_t> packet, const QueueState& queue);
 DrawParameters ResolveDraw(std::span<const std::uint32_t> packet, const QueueState& queue);
 // Reads the arguments of DRAW_INDIRECT, DRAW_INDEX_INDIRECT and their MULTI forms from guest memory.
