@@ -51,6 +51,10 @@ constexpr auto actions = std::array{
     InputAction{"RightStickDown", Pad::InputControl::RightStickDown, Pad::PadButton::None},
     InputAction{"TouchLeft", Pad::InputControl::TouchLeft, Pad::PadButton::None},
     InputAction{"TouchRight", Pad::InputControl::TouchRight, Pad::PadButton::None},
+    InputAction{"SwipeLeft", Pad::InputControl::SwipeLeft, Pad::PadButton::None},
+    InputAction{"SwipeRight", Pad::InputControl::SwipeRight, Pad::PadButton::None},
+    InputAction{"SwipeUp", Pad::InputControl::SwipeUp, Pad::PadButton::None},
+    InputAction{"SwipeDown", Pad::InputControl::SwipeDown, Pad::PadButton::None},
     InputAction{"ToggleMouse", Pad::InputControl::ToggleMouse, Pad::PadButton::None},
     InputAction{"ToggleFullscreen", Pad::InputControl::ToggleFullscreen, Pad::PadButton::None}
 };

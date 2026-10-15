@@ -19,6 +19,10 @@ enum class InputControl {
     RightStickDown,
     TouchLeft,
     TouchRight,
+    SwipeLeft,
+    SwipeRight,
+    SwipeUp,
+    SwipeDown,
     ToggleMouse,
     ToggleFullscreen
 };

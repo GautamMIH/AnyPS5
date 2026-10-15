@@ -90,6 +90,11 @@ bool Pad::KeyboardMouse::Advance(Clock::time_point now) {
         if (mouseMode) mouse.Advance(seconds);
     }
     bool released = false;
+    // A running swipe changes the touch point every frame; its end publishes the lifted finger once.
+    if (swipeControl != InputControl::Button) {
+        if (now - swipeStart >= SwipeDuration) swipeControl = InputControl::Button;
+        released = true;
+    }
     for (std::size_t index = 0; index < configuration.bindings.size(); ++index) {
         if (configuration.bindings[index].wheelDirection == 0 || !pressed[index] || now < wheelReleaseTimes[index]) continue;
         pressed[index] = false;
@@ -105,6 +110,7 @@ void Pad::KeyboardMouse::SetMouseMode(bool enabled) {
 }
 
 void Pad::KeyboardMouse::Release() {
+    swipeControl = InputControl::Button;
     std::fill(pressed.begin(), pressed.end(), false);
     std::fill(wheelReleaseTimes.begin(), wheelReleaseTimes.end(), Clock::time_point{});
 }
@@ -147,6 +153,12 @@ Pad::InputRequests Pad::KeyboardMouse::HandleEvent(const SDL_Event& event, Clock
         if (!matches) continue;
         if (binding.control == InputControl::ToggleFullscreen && keyboard && down && !pressed[index]) requests.toggleFullscreen = true;
         if (binding.control == InputControl::ToggleMouse && down && !pressed[index]) requests.toggleMouse = true;
+        const bool swipe = binding.control == InputControl::SwipeLeft || binding.control == InputControl::SwipeRight ||
+            binding.control == InputControl::SwipeUp || binding.control == InputControl::SwipeDown;
+        if (swipe && down && !pressed[index]) {
+            swipeControl = binding.control;
+            swipeStart = now;
+        }
         pressed[index] = down;
     }
     return requests;
@@ -175,6 +187,10 @@ PadInputState Pad::KeyboardMouse::Compose(const PadInputState& controller) const
             case InputControl::RightStickDown: positive[3] = true; break;
             case InputControl::TouchLeft: state.touchLeft = true; break;
             case InputControl::TouchRight: state.touchRight = true; break;
+            case InputControl::SwipeLeft:
+            case InputControl::SwipeRight:
+            case InputControl::SwipeUp:
+            case InputControl::SwipeDown: break;
             case InputControl::ToggleMouse: break;
             case InputControl::ToggleFullscreen: break;
         }
@@ -186,6 +202,20 @@ PadInputState Pad::KeyboardMouse::Compose(const PadInputState& controller) const
         const auto deflection = mouse.Deflection();
         state.sticks[2] = StickByte(deflection[0]);
         state.sticks[3] = StickByte(deflection[1]);
+    }
+    // A keyboard swipe drives the first touch point unless the controller's own touchpad is in use:
+    // across 1120 of the pad's 1920 units horizontally, or 600 of its 943 vertically, through the
+    // centre (960, 471).
+    if (swipeControl != InputControl::Button && !state.touch[0].active && !state.touch[1].active) {
+        const double progress = std::clamp(std::chrono::duration<double>(lastAdvance - swipeStart) / SwipeDuration, 0.0, 1.0);
+        const double travel = 2.0 * progress - 1.0;
+        double x = 960.0;
+        double y = 471.0;
+        if (swipeControl == InputControl::SwipeLeft) x -= 560.0 * travel;
+        if (swipeControl == InputControl::SwipeRight) x += 560.0 * travel;
+        if (swipeControl == InputControl::SwipeUp) y -= 300.0 * travel;
+        if (swipeControl == InputControl::SwipeDown) y += 300.0 * travel;
+        state.touch[0] = {true, static_cast<std::uint16_t>(std::lround(x)), static_cast<std::uint16_t>(std::lround(y)), 0};
     }
     if (state.analogButtonsL2 != 0) state.buttons |= static_cast<std::uint32_t>(PadButton::L2);
     if (state.analogButtonsR2 != 0) state.buttons |= static_cast<std::uint32_t>(PadButton::R2);

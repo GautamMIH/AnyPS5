@@ -61,7 +61,13 @@ private:
     Clock::time_point lastAdvance{};
     bool advanced = false;
     bool mouseMode = false;
+    // A swipe action moves one finger across the touchpad (no click) for SwipeDuration, then lifts it;
+    // swipeControl is None-like (Button) while no swipe runs.
+    InputControl swipeControl = InputControl::Button;
+    Clock::time_point swipeStart{};
 };
+
+inline constexpr std::chrono::milliseconds SwipeDuration{150};
 
 std::uint8_t StickByte(double deflection);
 

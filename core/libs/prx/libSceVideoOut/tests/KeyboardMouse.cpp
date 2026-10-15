@@ -254,6 +254,27 @@ void testKeyboardSticksUnchanged() {
     check(samples[44].state.sticks[0] == 128, "released keys center the stick");
 }
 
+void testSwipes() {
+    // J swipes left: one finger from x 1520 through the centre to 400 over 150 ms, then lifted.
+    const auto left = Simulate(defaults(), {At(0.0, KeyEvent(SDL_SCANCODE_J, true)), At(20.0, KeyEvent(SDL_SCANCODE_J, false))}, 1.0, 250.0);
+    check(left[2].state.touch[0].active && left[2].state.touch[0].x > 1400 && left[2].state.touch[0].y == 471, "a left swipe starts at the right of the pad");
+    check(left[75].state.touch[0].active && std::abs(static_cast<int>(left[75].state.touch[0].x) - 960) < 30, "a left swipe passes the centre half way");
+    check(left[140].state.touch[0].x < left[75].state.touch[0].x && left[140].state.touch[0].x < 520, "a left swipe keeps moving left");
+    check(!left[200].state.touch[0].active, "the finger lifts after the swipe");
+    check(!left[75].state.touchLeft && !left[75].state.touchRight, "a swipe does not click the touchpad");
+    // U swipes up: y falls from 771 to 171.
+    const auto up = Simulate(defaults(), {At(0.0, KeyEvent(SDL_SCANCODE_U, true)), At(20.0, KeyEvent(SDL_SCANCODE_U, false))}, 1.0, 250.0);
+    check(up[2].state.touch[0].y > 700 && up[140].state.touch[0].y < 230 && up[140].state.touch[0].x == 960, "an up swipe moves the finger up");
+    // A controller's own touch wins over a keyboard swipe.
+    Pad::KeyboardMouse keyboard(defaults());
+    const auto now = Pad::KeyboardMouse::Clock::now();
+    keyboard.HandleEvent(KeyEvent(SDL_SCANCODE_L, true), now);
+    keyboard.Advance(now + std::chrono::milliseconds(50));
+    PadInputState controller;
+    controller.touch[0] = {true, 100, 100, 3};
+    check(keyboard.Compose(controller).touch[0].x == 100, "a controller touch is kept during a keyboard swipe");
+}
+
 void testWheelPress() {
     const auto samples = Simulate(defaults(), {At(0.0, PadSimulation::WheelEvent(1))}, 1.0, 200.0);
     const auto up = static_cast<std::uint32_t>(Pad::PadButton::Up);
@@ -301,6 +322,7 @@ int main() {
             {"vertical scale", testVerticalScale},
             {"mouse mode off", testMouseModeOff},
             {"keyboard sticks unchanged", testKeyboardSticksUnchanged},
+            {"touchpad swipes", testSwipes},
             {"wheel press", testWheelPress},
             {"wheel and keys on focus loss", testWheelFocusLoss},
             {"focus loss releases the mouse", testFocusLossReleasesMouse},
