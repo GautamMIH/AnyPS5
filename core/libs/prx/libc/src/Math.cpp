@@ -545,6 +545,23 @@ double APS5_VABI _Cosh_nid_postfix(double x, double y) {
     return SonyCosh(x, y);
 }
 
+// Dinkumware's _Exp / _FExp (the expf and sinh/cosh helpers): *px = y * e^(*px) * 2^eoff, returning
+// 0 for a zero result, _INFCODE (1) on overflow and _FINITE (-1) otherwise. Astro's Playroom's eboot
+// imports _FExp (-3pU5y1utmI).
+short APS5_VABI _Exp_nid_postfix(double* px, double y, short eoff) {
+    const double result = std::ldexp(y * std::exp(*px), eoff);
+    *px = result;
+    if (result == 0.0) return 0;
+    return std::isinf(result) ? 1 : -1;
+}
+
+short APS5_VABI _FExp_nid_postfix(float* px, float y, short eoff) {
+    const auto result = static_cast<float>(std::ldexp(static_cast<double>(y) * std::exp(static_cast<double>(*px)), eoff));
+    *px = result;
+    if (result == 0.0f) return 0;
+    return std::isinf(result) ? 1 : -1;
+}
+
 int APS5_VABI _Fltrounds_nid_postfix(void) {
     return SonyFltrounds();
 }
