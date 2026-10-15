@@ -298,7 +298,31 @@ int APS5_VABI sceKernelReserveVirtualRange(void** addr, size_t len, int flags, s
  return DoReserveVirtual(addr, len, flags, alignment);
 }
 
+int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size);
+
+namespace {
+int virtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size);
+}
+
+// Debug aid: APS5_TRACE_VQUERY=1 prints every query and its answer (a garbage collector that sweeps
+// the address space for roots shows up as runs of find-next queries).
 int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
+ const int result = virtualQuery(addr, flags, info, info_size);
+ static const bool trace = std::getenv("APS5_TRACE_VQUERY") != nullptr;
+ if (trace) {
+  if (result == 0 && info != nullptr) {
+   std::fprintf(stderr, "[vquery] %p flags %d -> %llx-%llx prot %x direct %d flexible %d committed %d name '%.32s'\n", addr, flags,
+    static_cast<unsigned long long>(info->start), static_cast<unsigned long long>(info->end), info->protection, static_cast<int>(info->is_direct),
+    static_cast<int>(info->is_flexible), static_cast<int>(info->is_committed), info->name);
+  } else {
+   std::fprintf(stderr, "[vquery] %p flags %d -> error %x\n", addr, flags, static_cast<unsigned>(result));
+  }
+ }
+ return result;
+}
+
+namespace {
+int virtualQuery(const void* addr, int flags, VirtualQueryInfo* info, uint64_t info_size) {
  constexpr int kFindNext = 1;
  constexpr int kProtectionCpuRead = 0x1;
  constexpr int kProtectionCpuWrite = 0x2;
@@ -371,6 +395,7 @@ int APS5_VABI sceKernelVirtualQuery(const void* addr, int flags, VirtualQueryInf
   info->end = end;
  }
  return 0;
+}
 }
 
 // ---------------------------------------------------------------------------
