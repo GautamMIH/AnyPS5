@@ -85,6 +85,27 @@ void reportUnhandledFault(const siginfo_t* info, const ucontext_t* native) {
         static_cast<unsigned long long>(g[REG_R8]), static_cast<unsigned long long>(g[REG_R9]), static_cast<unsigned long long>(g[REG_R10]), static_cast<unsigned long long>(g[REG_R11]),
         static_cast<unsigned long long>(g[REG_R12]), static_cast<unsigned long long>(g[REG_R13]), static_cast<unsigned long long>(g[REG_R14]), static_cast<unsigned long long>(g[REG_R15]));
     if (registerLength > 0) static_cast<void>(write(STDERR_FILENO, registers, static_cast<std::size_t>(std::min<int>(registerLength, sizeof(registers) - 1))));
+    // The memory registers point at: guest memory is left out of core dumps (shared mappings), so a
+    // crash through a corrupt object (Hellboy's call to address 1) is diagnosed from these words.
+    // rdi's first word is followed too (an object's class or vtable pointer).
+    const auto dumpWords = [](const char* label, std::uint64_t address) {
+        const auto aligned = static_cast<std::uintptr_t>(address & ~std::uint64_t{7});
+        std::uint64_t words[6]{};
+        if (aligned < 0x10000 || !readSafely(aligned, words, sizeof(words))) return std::uint64_t{0};
+        char line[256];
+        const int lineLength = std::snprintf(line, sizeof(line), "    [%s] %llx: %llx %llx %llx %llx %llx %llx\n", label, static_cast<unsigned long long>(aligned),
+            static_cast<unsigned long long>(words[0]), static_cast<unsigned long long>(words[1]), static_cast<unsigned long long>(words[2]),
+            static_cast<unsigned long long>(words[3]), static_cast<unsigned long long>(words[4]), static_cast<unsigned long long>(words[5]));
+        if (lineLength > 0) static_cast<void>(write(STDERR_FILENO, line, static_cast<std::size_t>(std::min<int>(lineLength, sizeof(line) - 1))));
+        return words[0];
+    };
+    static constexpr std::pair<const char*, int> named[] = {{"rax", REG_RAX}, {"rbx", REG_RBX}, {"rcx", REG_RCX}, {"rdx", REG_RDX}, {"rsi", REG_RSI}, {"rdi", REG_RDI},
+        {"rbp", REG_RBP}, {"r8", REG_R8}, {"r9", REG_R9}, {"r10", REG_R10}, {"r11", REG_R11}, {"r12", REG_R12}, {"r13", REG_R13}, {"r14", REG_R14}, {"r15", REG_R15}};
+    for (const auto& [label, index] : named) {
+        const auto first = dumpWords(label, static_cast<std::uint64_t>(g[index]));
+        if (index == REG_RDI && first != 0) dumpWords("*rdi", first);
+    }
+    dumpWords("rsp-0x30", static_cast<std::uint64_t>(g[REG_RSP]) - 0x30);
     ReportCallers(static_cast<std::uintptr_t>(native->uc_mcontext.gregs[REG_RSP]));
 }
 
