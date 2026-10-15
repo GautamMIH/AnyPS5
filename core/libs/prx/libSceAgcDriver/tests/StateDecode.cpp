@@ -3,6 +3,7 @@
 // passes, render-backend tuning fields, inert pixel stages and 64 KiB standard colour targets.
 #include "prx/libSceAgcDriver/Graphics/include/State.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/ColorTargetLayout.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/ShaderInputState.hpp"
 #include "prx/libSceAgcDriver/Execution/include/QueueState.hpp"
 #include <array>
 #include <bit>
@@ -208,6 +209,20 @@ void inertPixelStageTests() {
     Require(DecodeState(queue).hasFragmentShader, "KILL_ENABLE must keep the pixel program");
 }
 
+void frontFaceAllBitsTests() {
+    // SPI_BARYC_CNTL.FRONT_FACE_ALL_BITS (bit 24) reaches the pixel stage info only while FRONT_FACE
+    // is a loaded input (upstream 8dbf0679).
+    auto queue = makeState();
+    queue.context[0x1b3] = queue.context[0x1b4] = 0x1002u;
+    queue.context[0x203] = 0;
+    const std::array<std::uint8_t, 8> mappings{0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u, 0xe4u};
+    Require(DecodePixelStageInfo(queue.context, mappings).frontFace && !DecodePixelStageInfo(queue.context, mappings).frontFaceAllBits, "an unset SPI_BARYC_CNTL must keep the +1.0 / -1.0 front face");
+    queue.context[0x1b8] = 1u << 24u;
+    Require(DecodePixelStageInfo(queue.context, mappings).frontFaceAllBits, "FRONT_FACE_ALL_BITS must reach the pixel stage info");
+    queue.context[0x1b3] = queue.context[0x1b4] = 0x2u;
+    Require(!DecodePixelStageInfo(queue.context, mappings).frontFaceAllBits, "FRONT_FACE_ALL_BITS without a front-face input must not change the pixel stage info");
+}
+
 void standard64KBTests() {
     // SW_64KB_S colour targets (upstream 6aa8e58d): a 64 KiB block of distinct element offsets.
     for (const std::uint32_t elementBytes : {1u, 2u, 4u, 8u, 16u}) {
@@ -240,6 +255,7 @@ int main() {
         blendTests();
         rasterTests();
         inertPixelStageTests();
+        frontFaceAllBitsTests();
         standard64KBTests();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "state decode test failed: %s\n", error.what());

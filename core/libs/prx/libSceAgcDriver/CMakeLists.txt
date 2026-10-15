@@ -545,7 +545,7 @@ list(FILTER agcExecutionTestSources EXCLUDE REGEX "/DccKeysFirstWrite\\.cpp$")
 # New in the ab9a47684 merge and written against upstream's driver (stencil replay, compute-pipeline
 # counters, GPU mutex, storage write-back and flip-time stores, DescribeSurface-style helpers), none
 # of which this driver has; port each with its driver feature.
-list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ComputePipelineOutsideGpuMutex|ComputeTableCalls|DepthSurfaceFromStorage|DrawUnsupportedBufferType|FlipStoresSmallResults|FrontFaceAllBits|GlobalLoads|ImagePlaneBiasOnSingleLevelVolume|ImagePlaneCompareOnLine|ImageVolumeAddressOnLine|PreparationScopeSettle|SampleMultisampleTarget|StencilReplay|StorageWriteBackOverhang|StreamCopy)\\.cpp$")
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ComputePipelineOutsideGpuMutex|ComputeTableCalls|DepthSurfaceFromStorage|DrawUnsupportedBufferType|FlipStoresSmallResults|GlobalLoads|ImagePlaneBiasOnSingleLevelVolume|ImagePlaneCompareOnLine|ImageVolumeAddressOnLine|PreparationScopeSettle|SampleMultisampleTarget|StencilReplay|StorageWriteBackOverhang|StreamCopy)\\.cpp$")
 # Image and sampler tables are ported (ShaderResources: ImageTable, ImageTableCache and
 # BindlessImages run). These two test upstream caches this driver does not keep: ImageTableCacheBounds
 # the table-element budget of its ResourceCache and the captured-word budget of its dispatch cache

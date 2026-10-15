@@ -24,6 +24,9 @@ constexpr std::uint32_t spiPsInputAddr = 0x1B4;
 constexpr std::uint32_t spiPsInControl = 0x1B6;
 constexpr std::uint32_t dbShaderControl = 0x203;
 constexpr std::uint32_t spiShaderColFormat = 0x1C5;
+// SPI_BARYC_CNTL: FRONT_FACE_ALL_BITS (bit 24) makes the front-face VGPR all ones for a front face
+// and 0 for a back face, instead of +1.0 / -1.0 (upstream 8dbf0679). Unset reads as its reset 0.
+constexpr std::uint32_t spiBarycCntl = 0x1B8;
 
 std::uint32_t read(const Registers& registers, std::uint32_t offset) {
     const auto it = registers.find(offset);
@@ -147,6 +150,7 @@ ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers& con
         .posZ = loaded(10),
         .posW = loaded(11),
         .frontFace = loaded(12),
+        .frontFaceAllBits = loaded(12) && context.contains(spiBarycCntl) && ((context.at(spiBarycCntl) >> 24u) & 0x1u) != 0,
         .ancillary = loaded(13),
         .sampleShading = loaded(0) && loaded(4),
         .noPerspective = loaded(5),

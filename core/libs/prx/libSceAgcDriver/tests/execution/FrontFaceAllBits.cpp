@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "Recompiler.hpp"
 #include "VulkanTestDevice.hpp"
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <iostream>
@@ -20,7 +21,8 @@ constexpr std::uint32_t Width = 64;
 constexpr std::uint32_t Height = 16;
 constexpr std::uint32_t WaveSize = 64;
 constexpr std::uint32_t Kept = 0x12345678u;
-alignas(256) std::array<std::uint32_t, Width * Height> Pixels{};
+// The render target lives in guest memory (this driver resolves render targets only there).
+std::span<std::uint32_t> Pixels;
 
 alignas(256) constexpr std::array<std::uint32_t, 6> VertexCode{
     0xe0382000, 0x80000005, 0xbf8c3f70, 0xf80008cf, 0x03020100, 0xbf810000,
@@ -43,7 +45,7 @@ std::array<std::uint32_t, 4> BufferDescriptor(const void* data, std::uint32_t st
 }
 
 void Draw(AgcDriver::VulkanDevice& device, bool allBits) {
-    Pixels.fill(Kept);
+    std::fill(Pixels.begin(), Pixels.end(), Kept);
     for (std::size_t index = 0; index < Corners.size(); ++index) {
         Vertices[index] = {Corners[index][0] * 2.0f / Width - 1.0f, 1.0f - Corners[index][1] * 2.0f / Height, 0.5f, 1.0f};
     }
@@ -86,9 +88,8 @@ void Draw(AgcDriver::VulkanDevice& device, bool allBits) {
 
     AgcDriver::Graphics::State state{};
     state.stages = {AgcDriver::Graphics::ShaderPath::Vertex, 0u, WaveSize, WaveSize, std::nullopt, std::nullopt};
-    state.color = {reinterpret_cast<std::uintptr_t>(Pixels.data()), {Width, Height}, VK_FORMAT_R32_UINT, sizeof(Pixels), 0xe4u};
-    state.colors = {state.color};
-    state.hasColorTarget = true;
+    state.colors[0] = {reinterpret_cast<std::uintptr_t>(Pixels.data()), {Width, Height}, VK_FORMAT_R32_UINT, Pixels.size_bytes(), 0xe4u};
+    state.colorTargetMask = 1;
     state.renderExtent = {Width, Height};
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     state.viewport = {0, static_cast<float>(Height), static_cast<float>(Width), -static_cast<float>(Height), 0, 1};
@@ -96,8 +97,7 @@ void Draw(AgcDriver::VulkanDevice& device, bool allBits) {
     state.scissor = {{0, 0}, {Width, Height}};
     state.cullMode = VK_CULL_MODE_NONE;
     state.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-    state.blend.colorWriteMask = 15;
-    state.blends = {state.blend};
+    state.blends[0].colorWriteMask = 15;
     state.blendConstants = {};
     const AgcDriver::Pm4::DrawParameters draw{0, static_cast<std::uint32_t>(Vertices.size()), 0, 1, 0, false};
     device.Draw(state, draw, shaders);
@@ -119,6 +119,8 @@ void Check(std::uint32_t front, std::uint32_t back, std::string_view what) {
 int main() {
     try {
         const auto device = OpenVulkanTestDevice();
+        const GuestTestMemory pixelMemory(Width * Height * 4);
+        Pixels = std::span(pixelMemory.As<std::uint32_t>(), Width * Height);
         if (!device) return VulkanTestSkipped;
         Draw(*device, false);
         Check(0x3f800000u, 0xbf800000u, "without FRONT_FACE_ALL_BITS");
