@@ -34,9 +34,21 @@ using GuestMemoryBacking::Kind;
 using GuestMemoryBacking::Status;
 
 // Debug aid: ANYPS5_TRACE_MEMORY=1 logs every guest mapping operation.
-void TraceMemory(const char* operation, const void* addr, size_t len, int prot, int flags, int result) {
+// A direct mapping also names its physical offset, so overlapping uses of the same physical memory
+// can be found in the log.
+void TraceMemory(const char* operation, const void* addr, size_t len, int prot, int flags, int result, int64_t physical) {
     static const bool enabled = std::getenv("ANYPS5_TRACE_MEMORY") != nullptr;
-    if (enabled) std::fprintf(stderr, "[memory] %s 0x%llx+0x%zx prot=0x%x flags=0x%x -> 0x%x\n", operation, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(addr)), len, prot, flags, static_cast<unsigned>(result));
+    if (!enabled) return;
+    if (physical >= 0) {
+        std::fprintf(stderr, "[memory] %s 0x%llx+0x%zx phys=0x%llx prot=0x%x flags=0x%x -> 0x%x\n", operation, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(addr)), len,
+            static_cast<unsigned long long>(physical), prot, flags, static_cast<unsigned>(result));
+    } else {
+        std::fprintf(stderr, "[memory] %s 0x%llx+0x%zx prot=0x%x flags=0x%x -> 0x%x\n", operation, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(addr)), len, prot, flags, static_cast<unsigned>(result));
+    }
+}
+
+void TraceMemory(const char* operation, const void* addr, size_t len, int prot, int flags, int result) {
+    TraceMemory(operation, addr, len, prot, flags, result, -1);
 }
 
 int SceResult(Status status) {
@@ -53,7 +65,7 @@ int Map(const char* operation, void** addr, size_t len, size_t alignment, Kind k
     if (addr == nullptr) return SCE_KERNEL_ERROR_EINVAL;
     const void* requested = *addr;
     const auto result = SceResult(GuestMemoryBacking::GuestVirtualMap_nid_postfix(addr, len, alignment, kind, prot, flags, physical));
-    TraceMemory(operation, result == 0 ? *addr : requested, len, prot, flags, result);
+    TraceMemory(operation, result == 0 ? *addr : requested, len, prot, flags, result, physical);
     // A new mapping starts unnamed: a name set on an earlier mapping of the same addresses (since
     // unmapped or released) does not carry over and split sceKernelVirtualQuery's extents.
     if (result == 0) sceKernelClearVirtualRangeName(*addr, len);

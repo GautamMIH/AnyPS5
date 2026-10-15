@@ -1,5 +1,7 @@
 #include "prx/libkernel/DirectMemory/MemoryPool.hpp"
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
+#include <cstdio>
+#include <cstdlib>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -269,15 +271,25 @@ private:
 
 }
 
+// ANYPS5_TRACE_MEMORY=1 also logs physical allocations and frees (see TraceMemory).
+static bool traceMemory() {
+    static const bool enabled = std::getenv("ANYPS5_TRACE_MEMORY") != nullptr;
+    return enabled;
+}
+
 int DirectMemoryAlloc(int64_t searchStart, int64_t searchEnd, size_t len, size_t alignment, int memoryType, int64_t* physOut) {
+    int result = 0;
     try {
-        return PhysicalMemoryPool::Instance().Alloc(searchStart, searchEnd, len, alignment, memoryType, physOut);
+        result = PhysicalMemoryPool::Instance().Alloc(searchStart, searchEnd, len, alignment, memoryType, physOut);
     } catch (const std::bad_alloc&) {
-        return SCE_KERNEL_ERROR_ENOMEM;
+        result = SCE_KERNEL_ERROR_ENOMEM;
     }
+    if (traceMemory()) std::fprintf(stderr, "[memory] alloc-direct phys=0x%llx+0x%zx type=%d -> 0x%x\n", result == 0 && physOut ? static_cast<unsigned long long>(*physOut) : 0ull, len, memoryType, static_cast<unsigned>(result));
+    return result;
 }
 
 void DirectMemoryFree(int64_t start, size_t len) {
+    if (traceMemory()) std::fprintf(stderr, "[memory] free-direct phys=0x%llx+0x%zx\n", static_cast<unsigned long long>(start), len);
     (void)PhysicalMemoryPool::Instance().Free(static_cast<uint64_t>(start), len);
 }
 
