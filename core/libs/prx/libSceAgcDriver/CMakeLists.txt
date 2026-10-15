@@ -424,6 +424,23 @@ target_link_libraries(agc_driver_state_decode_tests PRIVATE
 set_target_properties(agc_driver_state_decode_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_driver_state_decode_tests)
 
+# The on-disk pipeline cache file shared by several caches of one process (upstream 8c8cd86c).
+add_executable(agc_driver_pipeline_cache_file_tests EXCLUDE_FROM_ALL
+        tests/PipelineCacheFile.cpp
+)
+target_include_directories(agc_driver_pipeline_cache_file_tests PRIVATE
+        ${LIBS_INCLUDE_DIR}
+        ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+        ${CMAKE_SOURCE_DIR}/3rdparty/Vulkan-Headers/include
+)
+target_link_libraries(agc_driver_pipeline_cache_file_tests PRIVATE
+        libSceAgcDriver
+        SDL2-static
+        libc
+)
+set_target_properties(agc_driver_pipeline_cache_file_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_driver_pipeline_cache_file_tests)
+
 add_executable(agc_driver_color_transfer_device_tests EXCLUDE_FROM_ALL
         tests/ColorTransferDevice.cpp
 )
@@ -641,7 +658,7 @@ if(BUILD_TESTING)
     # this branch covers state decoding in agc_driver_state_decode_tests),
     # agc_driver_bda_device_tests (BdaDevice.cpp includes upstream's Recorder) and
     # agc_driver_mesh_tests (Mesh.cpp drives upstream's Execution/Driver draw decoding, not kept here).
-    foreach(agcTest IN ITEMS agc_fma_mix_once_tests agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_spirv_module_tests agc_dpp_write_tests agc_masked_select_tests agc_vop1_control_decode_tests agc_shader_disk_cache_tests agc_shader_device_profile_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_color_exports_tests agc_driver_texture_layout_tests agc_driver_resource_decode_tests agc_driver_state_decode_tests agc_driver_color_transfer_device_tests agc_tessellation_factor_ring_tests agc_fragment_barycentric_tests ${agcRecompilerUnitTests} ${agcExecutionTests})
+    foreach(agcTest IN ITEMS agc_fma_mix_once_tests agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_spirv_module_tests agc_dpp_write_tests agc_masked_select_tests agc_vop1_control_decode_tests agc_shader_disk_cache_tests agc_shader_device_profile_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_color_exports_tests agc_driver_texture_layout_tests agc_driver_resource_decode_tests agc_driver_state_decode_tests agc_driver_color_transfer_device_tests agc_driver_pipeline_cache_file_tests agc_tessellation_factor_ring_tests agc_fragment_barycentric_tests ${agcRecompilerUnitTests} ${agcExecutionTests})
         if(agcTest STREQUAL "agc_driver_constant_store_tests")
             continue()
         endif()
