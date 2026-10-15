@@ -2,6 +2,7 @@
 // border colour tables; texture formats 6 and 30, sRGB shader decode and storage image formats),
 // checked without a device.
 #include "prx/libSceAgcDriver/Graphics/include/GuestSamplerResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include <array>
 #include <cstdint>
@@ -158,8 +159,24 @@ void textureFormatTests() {
 
 }
 
+// A T# with no base address or TYPE 0 is null (upstream c280018b): a TYPE 0 descriptor with a base
+// is not decoded as an image type.
+void nullTextureTests() {
+    // A 16x16 2D (TYPE 9) 8_8_8_8 texture at 0x12345600.
+    const std::array<std::uint32_t, 8> texture{0x123456u, 56u << 20u, (15u) | (15u << 14u), 9u << 28u, 0, 0, 0, 0};
+    Require(!IsNullTextureResource(texture), "a nonzero 2D texture was classified as null");
+    auto noBase = texture;
+    noBase[0] = 0;
+    noBase[1] &= ~0xffu;
+    Require(IsNullTextureResource(noBase), "a zero-base texture was not classified as null");
+    auto typeZero = texture;
+    typeZero[3] &= 0x0fffffffu;
+    Require(IsNullTextureResource(typeZero), "a type-0 texture with a nonzero base was not classified as null");
+}
+
 int main() {
     try {
+        nullTextureTests();
         reductionTests();
         unnormalizedTests();
         samplerOverrideTests();

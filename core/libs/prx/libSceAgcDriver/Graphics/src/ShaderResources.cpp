@@ -526,15 +526,15 @@ std::uint64_t NullTextureMemory() {
 }
 
 ShaderResources::SampledLookup ShaderResources::lookupSampledTexture(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool depthCompare, bool unnormalized) {
-    // A null base address (BASE_ADDRESS, the low 40 bits of the first two dwords): a 1x1, one
-    // level, one layer texture over zeroed guest memory, keyed by the patched descriptor.
+    // A null T# (no base address, or TYPE 0; IsNullTextureResource): a 1x1, one level, one layer
+    // texture over zeroed guest memory, keyed by the patched descriptor.
     std::array<std::uint32_t, 8> nullWords{};
-    const bool nullBase = words[0] == 0 && (words[1] & 0xffu) == 0;
+    const bool nullBase = IsNullTextureResource(words);
     if (nullBase) {
         std::copy(words.begin(), words.end(), nullWords.begin());
         const auto base = NullTextureMemory() >> 8u;
-        // An all-zero descriptor (no texture bound) has no type or format either: a linear
-        // 8_8_8_8 UNORM image of the shader's declared shape whose selects read zero.
+        // An all-zero descriptor (no texture bound) or a TYPE 0 one has no usable type or format: a
+        // linear 8_8_8_8 UNORM image of the shader's declared shape whose selects read zero.
         const auto type = (nullWords[3] >> 28u) & 0xfu;
         const auto format = (nullWords[1] >> 20u) & 0x1ffu;
         if (type < 8u || format == 0u) {
@@ -604,9 +604,9 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
         Binding item{{binding.binding, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, binding.count, flags, nullptr}, {}, {}};
         for (std::uint32_t element = 0; element < binding.count; ++element) {
             const auto words = descriptorWords.subspan(static_cast<std::size_t>(element) * 8, 8);
-            // A null T# (no base address) in a typed heap: with nullDescriptor the element binds no
-            // view, so its loads read zero and its stores are dropped, as on the hardware.
-            if (words[0] == 0u && (words[1] & 0xffu) == 0u && context.nullDescriptors) {
+            // A null T# (no base address, or TYPE 0) in a typed heap: with nullDescriptor the element
+            // binds no view, so its loads read zero and its stores are dropped, as on the hardware.
+            if (IsNullTextureResource(words) && context.nullDescriptors) {
                 item.imageAllocations.push_back(NullStorageImage);
                 continue;
             }
