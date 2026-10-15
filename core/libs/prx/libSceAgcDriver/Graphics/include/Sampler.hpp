@@ -26,6 +26,9 @@ public:
     bool ForcesDegamma() const { return forcesDegamma; }
     bool ReadsOpaqueBlackBorder() const { return opaqueBlackBorder; }
     bool RequiresNonSeamlessCube() const { return requiresNonSeamlessCube; }
+    // The checks the constructor makes, without creating a sampler (per image table entry).
+    static void Validate(const Context& context, const GuestSamplerResource& descriptor);
+    static bool ReadsOpaqueBlackBorder(const GuestSamplerResource& descriptor);
 
 private:
     void release() noexcept;

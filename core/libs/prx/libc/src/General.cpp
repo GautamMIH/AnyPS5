@@ -50,8 +50,8 @@ struct PathAliases {
 };
 
 PathAliases& Aliases() {
-    static PathAliases aliases;
-    return aliases;
+    static auto* aliases = new PathAliases;
+    return *aliases;
 }
 
 std::string TrimSlashes(const char* path) {
@@ -130,7 +130,10 @@ struct WorkingDirectory {
     // Guest mount points ("/savedata0") backed by host directories outside the root.
     std::map<std::string, std::filesystem::path> mounts;
 };
-WorkingDirectory& Directories() { static WorkingDirectory state; return state; }
+WorkingDirectory& Directories() {
+    static auto* state = new WorkingDirectory;
+    return *state;
+}
 std::filesystem::path HostPath(WorkingDirectory& state, const std::filesystem::path& guest) {
     const auto normalised = guest.generic_string();
     for (const auto& [mountPoint, host] : state.mounts) {

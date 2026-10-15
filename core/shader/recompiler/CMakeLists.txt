@@ -35,7 +35,9 @@ function(add_shader_recompiler target runtimeTarget)
 
     add_library(${target} STATIC EXCLUDE_FROM_ALL
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Recompiler.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/StencilReplay.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ShaderDiskCache.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ShaderCachePack.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/SpirvBackend/src/RectListShaders.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/SpirvBackend/src/BarycentricGeometryShader.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/RdnaDecoder/src/RdnaOpcode.cpp
@@ -168,7 +170,7 @@ function(add_shader_recompiler target runtimeTarget)
     target_compile_features(${target} PUBLIC cxx_std_20)
 
     set(shaderCacheGeneratedDir "${CMAKE_CURRENT_BINARY_DIR}/${target}_generated")
-    set(shaderCacheVersionHeader "${shaderCacheGeneratedDir}/ShaderCacheVersion.hpp")
+    set(shaderCacheVersionSource "${shaderCacheGeneratedDir}/ShaderCacheVersion.cpp")
     file(GLOB_RECURSE shaderCacheRecompilerSources CONFIGURE_DEPENDS
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.cpp"
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.hpp"
@@ -240,6 +242,9 @@ function(add_shader_recompiler target runtimeTarget)
             DebugProbeActive
             DepthBitsTextureWidth
             HashBytes
+            ImageTableAbi::PoisonCode
+            ImageTableAbi::PoisonReasonName
+            ImageTableAbi::TableHeader
             PixelInput
             PixelInputBit
             RayTracingStrict
@@ -260,6 +265,7 @@ function(add_shader_recompiler target runtimeTarget)
             ResourceMaterializer::SpecializationNanoseconds
             RuntimeAbi::RequireVersion
             RuntimeAbi::HeapCapacity
+            SampledTextureNumericClass
             SetDebugProbeActive
             ShaderCacheDirectory
             SpliceGeometryHalves
@@ -273,6 +279,8 @@ function(add_shader_recompiler target runtimeTarget)
             FindUserDataCalls
             UserDataCalleeLength
             LinkUserDataCalls
+            FindTableCalls
+            LinkCalls
             WriteFileAtomically
     )
     set(shaderCacheManifest)
@@ -295,21 +303,20 @@ function(add_shader_recompiler target runtimeTarget)
     set(shaderCacheListFile "${shaderCacheGeneratedDir}/sources.txt")
     file(CONFIGURE OUTPUT "${shaderCacheListFile}" CONTENT "${shaderCacheManifest}" @ONLY)
     add_custom_command(
-            OUTPUT "${shaderCacheVersionHeader}"
+            OUTPUT "${shaderCacheVersionSource}"
             COMMAND ${CMAKE_COMMAND}
             "-DROOT=${PROJECT_SOURCE_DIR}"
             "-DLIST_FILE=${shaderCacheListFile}"
             "-DRECOMPILER_DIR=${CMAKE_CURRENT_FUNCTION_LIST_DIR}"
             "-DGIT=${GIT_EXECUTABLE}"
             "-DEXTRA=${shaderCacheExtra}"
-            "-DOUTPUT=${shaderCacheVersionHeader}"
+            "-DOUTPUT=${shaderCacheVersionSource}"
             -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ShaderCacheVersion.cmake"
             DEPENDS ${shaderCacheRecompilerSources} ${shaderCacheGuardSources} ${shaderCacheSubmoduleStamps} "${shaderCacheListFile}" "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/ShaderCacheVersion.cmake"
             COMMENT "Hashing the shader recompiler sources for the shader disk cache"
             VERBATIM
     )
-    target_sources(${target} PRIVATE "${shaderCacheVersionHeader}")
-    target_include_directories(${target} PRIVATE "${shaderCacheGeneratedDir}")
+    target_sources(${target} PRIVATE "${shaderCacheVersionSource}")
 
     set_target_properties(${target} PROPERTIES
             POSITION_INDEPENDENT_CODE ON

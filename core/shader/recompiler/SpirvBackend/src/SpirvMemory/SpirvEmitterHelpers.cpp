@@ -1,6 +1,7 @@
 #include "Optimization/ResourceMaterializer.hpp"
 #include "BdaAbi.hpp"
 #include "PipelineSpecialization.hpp"
+#include "StencilReplay.hpp"
 #include "SpirvBackend/SpirvEmitterHelpers.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvTypes.hpp"
 #include "SpirvBackend/SpirvMemory/SpirvConstants.hpp"
@@ -57,6 +58,12 @@ namespace {
 
 constexpr std::uint32_t NoBuiltIn = std::numeric_limits<std::uint32_t>::max();
 
+void RequireTableIndexing(SpirvEmitterState& state) {
+    if (state.spirvVersion < 0x00010500u) state.module.EmitExtension("SPV_EXT_descriptor_indexing");
+    state.module.EmitCapability(spv::CapabilityRuntimeDescriptorArray);
+    state.module.EmitCapability(spv::CapabilitySampledImageArrayDynamicIndexing);
+}
+
 std::uint32_t BuiltInForInput(StageInputKind kind) {
     switch (kind) {
     case StageInputKind::VertexIndex: return spv::BuiltInVertexIndex;
@@ -64,6 +71,7 @@ std::uint32_t BuiltInForInput(StageInputKind kind) {
     case StageInputKind::PrimitiveId: return spv::BuiltInPrimitiveId;
     case StageInputKind::TessCoord: return spv::BuiltInTessCoord;
     case StageInputKind::InstanceIndex: return spv::BuiltInInstanceIndex;
+    case StageInputKind::BaseInstance: return spv::BuiltInBaseInstance;
     case StageInputKind::FragCoord: return spv::BuiltInFragCoord;
     case StageInputKind::FrontFacing: return spv::BuiltInFrontFacing;
     case StageInputKind::HelperInvocation: return spv::BuiltInHelperInvocation;
@@ -214,6 +222,7 @@ void DefineInputs(SpirvEmitterState& state) {
         case StageInputKind::InvocationId:
         case StageInputKind::PrimitiveId:
         case StageInputKind::InstanceIndex:
+        case StageInputKind::BaseInstance:
         case StageInputKind::Layer:
         case StageInputKind::SampleId:
             type = TypeI32(state);
@@ -363,7 +372,18 @@ void DefineOutputs(SpirvEmitterState& state) {
             binding.variableId = BuiltIn(state.sampleMaskVariable, SampleMaskArrayType(state), "gl_SampleMask", spv::BuiltInSampleMask);
             break;
         case StageOutputKind::StencilRef:
-            binding.variableId = BuiltIn(state.stencilRefVariable, TypeI32(state), "gl_FragStencilRefARB", spv::BuiltInFragStencilRefEXT);
+            if (std::ranges::find(state.supportedCapabilities, static_cast<std::uint32_t>(spv::CapabilityStencilExportEXT)) == state.supportedCapabilities.end()) {
+                const auto values = StencilReferenceValues(state.program);
+                if (values.empty()) throw std::runtime_error("stencil reference export emulation requires a proven set of at most 16 values");
+                if (!StencilReferenceDefinedForKeptInvocations(state.program)) throw std::runtime_error("stencil reference export emulation requires a stencil export on every kept path");
+                if (PixelInfo(state).psEarlyZ || PixelInfo(state).psOrderedPixelShader || !StencilReplaySafe(state.program)) throw std::runtime_error("stencil reference export emulation requires a replay-safe pixel shader with late tests");
+                state.stencilReplay = true;
+                state.stencilRefVariable = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassPrivate, TypeI32(state)), spv::StorageClassPrivate);
+                if (state.spirvVersion >= 0x00010400u) state.interfaceVariables.push_back(state.stencilRefVariable);
+                binding.variableId = state.stencilRefVariable;
+            } else {
+                binding.variableId = BuiltIn(state.stencilRefVariable, TypeI32(state), "gl_FragStencilRefARB", spv::BuiltInFragStencilRefEXT);
+            }
             break;
         case StageOutputKind::Parameter:
         case StageOutputKind::Mrt: {
@@ -388,8 +408,8 @@ void DefineDescriptors(SpirvEmitterState& state) {
     const IrBindingLayout& layout = state.program.Metadata().bindings;
     const IrShaderStage stage = state.program.Resources().stage;
     // A mesh program reads its draw parameters (MeshDrawParameter) from the push block even when
-    // its own data does not fit there.
-    if (layout.UsesPushData() || stage == IrShaderStage::Mesh || stage == IrShaderStage::TessellationControl) {
+    // its own data does not fit there; a stencil replay reads its reference from it too.
+    if (layout.UsesPushData() || state.stencilReplay || stage == IrShaderStage::Mesh || stage == IrShaderStage::TessellationControl) {
         const auto type = PushConstantBlockType(state);
         state.pushConstantVariable = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassPushConstant, type), spv::StorageClassPushConstant);
         state.module.AddName(type, "BufferResource");
@@ -445,6 +465,28 @@ void DefineDescriptors(SpirvEmitterState& state) {
         case DescriptorBindingKind::Gds:
             state.gdsVariable = Define(StorageBufferBlockType(state), "gds");
             state.module.AddAnnotation(spv::OpDecorate, state.gdsVariable, spv::DecorationCoherent);
+            break;
+        case DescriptorBindingKind::ImageTable:
+            RequireTableIndexing(state);
+            for (std::uint32_t resource = 0; resource < state.program.Info().images.size(); ++resource) {
+                const auto& image = state.program.Info().images[resource];
+                if (image.table == NoTable) continue;
+                for (const auto& mode : state.program.Info().runtimeImageModes.at(resource)) {
+                    if (!TableModeEmitted(mode)) continue;
+                    const auto kind = DescriptorBindingForImage(mode);
+                    if (std::any_of(state.tableImageVariables.begin(), state.tableImageVariables.end(), [&](const SpirvTableImageVariable& variable) { return variable.kind == kind; })) continue;
+                    const auto name = "table_images_" + std::to_string(static_cast<std::uint32_t>(kind));
+                    state.tableImageVariables.push_back({kind, Define(state.module.Type(spv::OpTypeRuntimeArray, ImageType(state, mode)), name.c_str(), spv::StorageClassUniformConstant)});
+                    if (mode.dimension == RdnaImageDimension::Dim1D || mode.dimension == RdnaImageDimension::Dim1DArray) state.module.EmitCapability(spv::CapabilitySampled1D);
+                }
+            }
+            break;
+        case DescriptorBindingKind::SamplerTable:
+            RequireTableIndexing(state);
+            state.tableSamplerVariable = Define(state.module.Type(spv::OpTypeRuntimeArray, state.module.Type(spv::OpTypeSampler)), "table_samplers", spv::StorageClassUniformConstant);
+            break;
+        case DescriptorBindingKind::ImageTableMap:
+            state.tableMapVariable = Define(StorageBufferBlockType(state), "table_map");
             break;
         default: {
             if (ImageBindingResourceClass(binding.kind) == ImageResourceClass::None) {

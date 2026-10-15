@@ -65,15 +65,11 @@ public:
             _outside.emplace(address, address + bytes);
             return address;
         }
+        // The address is only a hint, as FreeBSD's vm_map_find_min: at or above it first, then from
+        // the start of the guest range when nothing fits above it (upstream a016b4f2b).
         const auto start = address < _base ? _base : address;
-        for (auto it = _free.upper_bound(start) == _free.begin() ? _free.begin() : std::prev(_free.upper_bound(start)); it != _free.end(); ++it) {
-            const auto first = it->first < start ? start : it->first;
-            const auto aligned = (first + alignment - 1) & ~(static_cast<std::uint64_t>(alignment) - 1);
-            if (aligned < first || aligned >= it->second || it->second - aligned < bytes) continue;
-            _takeFree(aligned, bytes);
-            return aligned;
-        }
-        return 0;
+        if (const auto placed = _claimFrom(start, bytes, alignment); placed != 0 || start == _base) return placed;
+        return _claimFrom(_base, bytes, alignment);
     }
 
     bool Free(std::uint64_t address, std::size_t bytes) {
@@ -122,6 +118,17 @@ private:
     std::uint64_t _end = 0;
     std::map<std::uint64_t, std::uint64_t> _free;
     std::map<std::uint64_t, std::uint64_t> _outside;
+
+    std::uint64_t _claimFrom(std::uint64_t start, std::size_t bytes, std::size_t alignment) {
+        for (auto it = _free.upper_bound(start) == _free.begin() ? _free.begin() : std::prev(_free.upper_bound(start)); it != _free.end(); ++it) {
+            const auto first = it->first < start ? start : it->first;
+            const auto aligned = (first + alignment - 1) & ~(static_cast<std::uint64_t>(alignment) - 1);
+            if (aligned < first || aligned >= it->second || it->second - aligned < bytes) continue;
+            _takeFree(aligned, bytes);
+            return aligned;
+        }
+        return 0;
+    }
 
     bool _takeFree(std::uint64_t address, std::size_t bytes) {
         auto it = _free.upper_bound(address);

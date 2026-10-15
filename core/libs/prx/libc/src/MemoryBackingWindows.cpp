@@ -60,6 +60,12 @@ std::uint64_t ClaimRange(std::uint64_t address, std::size_t bytes, std::size_t a
     parameter.Type = MemExtendedParameterAddressRequirements;
     parameter.Pointer = &requirements;
     void* result = VirtualAlloc2(nullptr, nullptr, bytes, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, &parameter, 1);
+    // The address is only a hint (FreeBSD's vm_map_find_min, upstream a016b4f2b): without room at or
+    // above it, the range comes from anywhere.
+    if (result == nullptr && address != 0) {
+        requirements.LowestStartingAddress = nullptr;
+        result = VirtualAlloc2(nullptr, nullptr, bytes, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER, PAGE_NOACCESS, &parameter, 1);
+    }
     return reinterpret_cast<std::uint64_t>(result);
 }
 

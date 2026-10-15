@@ -15,14 +15,17 @@
 #include "SDL.h"
 #include "SceTypes.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
+#include "prx/libc/include/Shutdown.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libSceAudioOut/include/AudioOutSdl.hpp"
+#include "AudioOutShutdown.hpp"
 
 static constexpr int PORT_TYPE_MAIN = 0;
 static constexpr int PORT_TYPE_BGM = 1;
 static constexpr int PORT_TYPE_VOICE = 2;
 static constexpr int PORT_TYPE_PERSONAL = 3;
 static constexpr int PORT_TYPE_PADSPK = 4;
+static constexpr int PORT_TYPE_EX = 6;
 static constexpr int PORT_TYPE_VIBRATION = 10;
 static constexpr int PORT_TYPE_AUDIO3D = 126;
 static constexpr int PORT_TYPE_AUX = 127;
@@ -37,6 +40,12 @@ static constexpr std::uint64_t DRAIN_SLEEP_US = 1000;
 static constexpr int MONITOR_TYPE_HDMI = 1;
 static constexpr std::uint32_t HDMI_MONITOR_INFO_SIZE = 0x180;
 static constexpr std::uint32_t EX_MONITOR_INFO_MIN_SIZE = 0xA0;
+static constexpr std::uint32_t EX_OPEN_MODE_MAX = 10;
+static constexpr std::uint32_t EX_OPEN_MODES = 0x61F;
+static constexpr std::uint32_t EX_CONFIGURE_MODE_DEFAULT = 0xFF;
+static constexpr std::uint32_t EX_CONFIGURE_TARGET_DEFAULT = 0xFF;
+static constexpr int ERROR_EX_INVALID_MODE = -2144993259;
+static constexpr int ERROR_EX_INVALID_CONTROL = -2144960503;
 
 enum class Format {
     Unknown,
@@ -299,6 +308,35 @@ static Port* getPort(int handle) {
     return &g_ports[idx];
 }
 
+static int allocatePort(int type, std::uint32_t len, std::uint32_t freq, Format format) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    for (int i = 0; i < PORTS_MAX; i++) {
+        if (!g_ports[i].used) {
+            Port& port = g_ports[i];
+            port.used = true;
+            port.type = type;
+            port.samplesNum = len;
+            port.freq = freq;
+            port.format = format;
+            port.channels = channelsForFormat(format);
+            port.lastDataOutputTime = 0;
+            port.virtualQueueEnd = sceKernelGetProcessTime();
+            port.mixLevel = type == PORT_TYPE_PADSPK ? DEFAULT_PADSPK_MIX_LEVEL : DEFAULT_VOLUME;
+            for (int c = 0; c < port.channels; c++) {
+                port.volume[c] = DEFAULT_VOLUME;
+            }
+            if (type != PORT_TYPE_VIBRATION && type != PORT_TYPE_EX) {
+                openDevice(port);
+            }
+            // APS5_TRACE_AUDIOOUT=1 reports the ports a title opens.
+            static const bool trace = std::getenv("APS5_TRACE_AUDIOOUT") != nullptr;
+            if (trace) std::fprintf(stderr, "[audioout] port %d: type %d, %u samples at %u Hz, format %d, device %u\n", i + 1, type, len, freq, static_cast<int>(format), static_cast<unsigned>(port.device));
+            return i + 1;
+        }
+    }
+    return -2144993275;
+}
+
 extern "C" {
 
 int APS5_VABI sceAudioOutInit() {
@@ -335,32 +373,7 @@ int APS5_VABI sceAudioOutOpen(int userId, int type, int index, std::uint32_t len
             throw std::runtime_error("sceAudioOutOpen: unknown format param");
     }
 
-    std::lock_guard<std::mutex> lock(g_mutex);
-    for (int i = 0; i < PORTS_MAX; i++) {
-        if (!g_ports[i].used) {
-            Port& port = g_ports[i];
-            port.used = true;
-            port.type = type;
-            port.samplesNum = len;
-            port.freq = freq;
-            port.format = format;
-            port.channels = channelsForFormat(format);
-            port.lastDataOutputTime = 0;
-            port.virtualQueueEnd = sceKernelGetProcessTime();
-            port.mixLevel = type == PORT_TYPE_PADSPK ? DEFAULT_PADSPK_MIX_LEVEL : DEFAULT_VOLUME;
-            for (int c = 0; c < port.channels; c++) {
-                port.volume[c] = DEFAULT_VOLUME;
-            }
-            if (type != PORT_TYPE_VIBRATION) {
-                openDevice(port);
-            }
-            // APS5_TRACE_AUDIOOUT=1 reports the ports a title opens.
-            static const bool trace = std::getenv("APS5_TRACE_AUDIOOUT") != nullptr;
-            if (trace) std::fprintf(stderr, "[audioout] port %d: type %d, %u samples at %u Hz, format %d, device %u\n", i + 1, type, len, freq, static_cast<int>(format), static_cast<unsigned>(port.device));
-            return i + 1;
-        }
-    }
-    return -2144993275;
+    return allocatePort(type, len, freq, format);
 }
 
 int APS5_VABI sceAudioOutClose(int handle) {
@@ -377,9 +390,11 @@ int APS5_VABI sceAudioOutClose(int handle) {
     return 0;
 }
 
-int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
+int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) try {
     const int index = handle - 1;
     if (index < 0 || index >= PORTS_MAX) return -2144993277;
+    // Parks the thread once exit starts, before the port tables are destroyed (upstream e7219e4bc).
+    const AudioOutCall call;
     std::lock_guard<std::mutex> output(g_outputMutex[index]);
     Port port;
     {
@@ -404,12 +419,16 @@ int APS5_VABI sceAudioOutOutput(int handle, const void* ptr) {
         }
     }
     return static_cast<int>(port.samplesNum);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) {
+int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) try {
     if (param == nullptr || num == 0) {
         return -2144993276;
     }
+
+    const AudioOutCall call;
 
     // The ports' output mutexes in index order (a port may appear twice).
     std::vector<int> indices;
@@ -456,6 +475,8 @@ int APS5_VABI sceAudioOutOutputs(AudioOutOutputParam* param, std::uint32_t num) 
     }
 
     return static_cast<int>(first.samplesNum);
+} catch (const ProcessShutdown&) {
+    LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceAudioOutSetVolume(int handle, std::uint32_t flag, int* vol) {
@@ -591,13 +612,34 @@ int APS5_VABI sceAudioOutSetMixLevelPadSpk(int handle, int mixLevel) {
     return 0;
 }
 
-int APS5_VABI sceAudioOutExClose() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceAudioOutExClose(int handle) {
+    const int index = handle - 1;
+    if (index < 0 || index >= PORTS_MAX) {
+        throw std::runtime_error("sceAudioOutExClose: handle " + std::to_string(handle) + " is not an open Ex port");
+    }
+    std::lock_guard<std::mutex> outputLock(g_outputMutex[index]);
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Port* port = getPort(handle);
+    if (port == nullptr || port->type != PORT_TYPE_EX) {
+        throw std::runtime_error("sceAudioOutExClose: handle " + std::to_string(handle) + " is not an open Ex port");
+    }
+    *port = Port{};
     return 0;
 }
 
-int APS5_VABI sceAudioOutExConfigureOutput() {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceAudioOutExConfigureOutput(int control, std::uint64_t flags, std::uint32_t mode, std::uint32_t target, std::uint64_t option) {
+    if (control != 0) {
+        return ERROR_EX_INVALID_CONTROL;
+    }
+    if (flags != 0 || option != 0) {
+        throw std::runtime_error("sceAudioOutExConfigureOutput: flags " + std::to_string(flags) + " and option " + std::to_string(option) + " not supported");
+    }
+    if (mode > EX_OPEN_MODE_MAX && mode != EX_CONFIGURE_MODE_DEFAULT) {
+        throw std::runtime_error("sceAudioOutExConfigureOutput: mode " + std::to_string(mode) + " not supported");
+    }
+    if ((target < 1 || target > 3) && target != EX_CONFIGURE_TARGET_DEFAULT) {
+        throw std::runtime_error("sceAudioOutExConfigureOutput: target " + std::to_string(target) + " not supported");
+    }
     return 0;
 }
 
@@ -615,9 +657,13 @@ int APS5_VABI sceAudioOutExGetMonitorInfo(int type, int index, void* info, std::
     return 0;
 }
 
-int APS5_VABI sceAudioOutExOpen() {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+int APS5_VABI sceAudioOutExOpen(int userId, std::uint32_t mode) {
+    (void)userId;
+    if (mode > EX_OPEN_MODE_MAX || ((EX_OPEN_MODES >> mode) & 1) == 0) {
+        return ERROR_EX_INVALID_MODE;
+    }
+    const bool highRate = mode == 3 || mode == 4 || mode == 10;
+    return allocatePort(PORT_TYPE_EX, highRate ? 1024 : 256, highRate ? 192000 : 48000, Format::S16Stereo);
 }
 
 }

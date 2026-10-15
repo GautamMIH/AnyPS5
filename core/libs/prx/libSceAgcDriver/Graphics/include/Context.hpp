@@ -129,6 +129,14 @@ struct Context {
     // tables); descriptorIndexing: non-uniformly (VK_EXT_descriptor_indexing).
     bool imageArrayDynamicIndexing = false;
     bool descriptorIndexing = false;
+    // Image and sampler tables (ShaderRecompiler::DescriptorRole::ImageTable/SamplerTable): runtime
+    // descriptor arrays, partially bound, the image table with a variable descriptor count. The
+    // capacities are the table bindings' layout counts (0: the device cannot bind tables).
+    bool runtimeDescriptorArray = false;
+    bool partiallyBound = false;
+    bool variableDescriptorCount = false;
+    std::uint32_t imageTableCapacity = 0;
+    std::uint32_t samplerTableCapacity = 0;
     // VK_EXT_robustness2 nullDescriptor: null guest storage images bind no view.
     bool nullDescriptors = false;
     // shaderFloat64: the Float64 capability.
@@ -179,6 +187,11 @@ struct Context {
     mutable std::shared_ptr<GpuTimestamps> gpuTimestamps;
     mutable std::shared_ptr<DrawProfiler> drawProfiler;
 };
+
+// The layout counts of the image and sampler table bindings this device can afford next to the
+// typed heaps (0 without the descriptor indexing features tables need).
+std::uint32_t ImageTableCapacity(const Context& context);
+std::uint32_t SamplerTableCapacity(const Context& context);
 
 }
 

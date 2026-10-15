@@ -127,6 +127,7 @@ struct SidebandResampleInfo {
 
 struct Resampler {
     float ratio = 1.0f;
+    float change = 0.0f;
     std::vector<double> frames;
     double position = 1.0;
 };
@@ -151,13 +152,13 @@ struct Instance {
     std::uint32_t mp3Channels = 0;
     std::uint32_t mp3SampleRate = 0;
     std::uint32_t mp3Bitrate = 0;
-    // Resample ratio change per sample (sceAjmBatchJobSetResampleParametersEx): recorded, not applied;
-    // the resampler applies the starting ratio.
-    float resampleRatioChange = 0.0f;
     // Opus: the FFmpeg decoder for the initialized channel count (always 48 kHz).
     AVCodecContext* opus = nullptr;
     std::uint32_t opusChannels = 0;
     std::uint32_t opusMappingFamily = 0;
+    std::uint32_t opusStreams = 0;
+    std::uint32_t opusCoupled = 0;
+    bool opusLayoutPending = false;
     std::uint32_t opusSampleRate = 0;
     AVCodecContext* aac = nullptr;
     std::uint32_t aacConfig = 0;
@@ -528,7 +529,7 @@ void StorePcm(double value, std::uint8_t* out, std::uint32_t encoding) {
 }
 
 bool Resampling(const Instance& instance) {
-    return instance.resampler.ratio != 1.0f || !instance.resampler.frames.empty();
+    return instance.resampler.ratio != 1.0f || instance.resampler.change != 0.0f || !instance.resampler.frames.empty();
 }
 
 std::size_t ResamplerHeld(const Instance& instance, std::size_t channels) {
@@ -566,6 +567,9 @@ void ResamplerProduce(Instance& instance, PcmOutputs& outputs, std::size_t chann
         }
         outputs.Emit(frame.data(), frameBytes);
         resampler.position += resampler.ratio;
+        if (resampler.change != 0.0f) {
+            resampler.ratio = std::max(0.0f, resampler.ratio + resampler.change);
+        }
     }
     const auto index = std::min(static_cast<std::size_t>(resampler.position), available);
     if (index > 1) {
@@ -955,31 +959,31 @@ void RunMp3(Instance& instance, const JobHeader& job, const AjmBuffer* inputs, c
     WriteRunSideband(job, instance, result, consumed, pcmOutputs.produced, frames, CurrentFormat(instance));
 }
 // AjmDecOpusInitializeParameters (KytyPS5): 1-8 channels at 48 kHz; channel mapping family 0 (mono or
-// stereo), 1 (Vorbis order) or a mono stream's 255. The mapping family word is optional (titles may
-// pass only the first two words).
+// stereo), 1 (Vorbis order) or 255. The mapping family word is optional (titles may pass only the
+// first two words).
 struct OpusInitializeParameters {
     std::uint32_t channels;
     std::uint32_t sampleRate;
     std::uint32_t mappingFamily;
 };
 
-std::int32_t InitializeOpus(Instance& instance, const std::uint8_t* parameters, std::uint64_t size) {
-    OpusInitializeParameters values{};
-    if (size < offsetof(OpusInitializeParameters, mappingFamily)) return AJM_RESULT_INVALID_PARAMETER;
-    std::memcpy(&values, parameters, std::min<std::uint64_t>(size, sizeof(values)));
-    if (values.channels < 1 || values.channels > 8 || values.sampleRate != 48000) return AJM_RESULT_INVALID_PARAMETER;
-    if (values.mappingFamily > 1 && (values.mappingFamily != 255 || values.channels != 1)) NotImplemented_nid_no_patch("sceAjmBatchJobInitialize (Opus mapping family other than 0, 1 or a mono stream's 255)");
-    if (values.mappingFamily == 0 && values.channels > 2) return AJM_RESULT_INVALID_PARAMETER;
+// Opens the FFmpeg Opus decoder for the instance's channels and mapping family (a family 255
+// instance with several channels needs its stream layout first); false when FFmpeg cannot.
+bool OpenOpus(Instance& instance) {
     static const bool quiet = (av_log_set_level(TraceEnabled() ? AV_LOG_WARNING : AV_LOG_QUIET), true);
     (void)quiet;
     const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_OPUS);
     if (instance.opus) avcodec_free_context(&instance.opus);
     instance.opus = codec ? avcodec_alloc_context3(codec) : nullptr;
-    if (!instance.opus) return AJM_RESULT_CODEC_ERROR;
+    if (!instance.opus) return false;
     instance.opus->sample_rate = 48000;
-    av_channel_layout_default(&instance.opus->ch_layout, static_cast<int>(values.channels));
-    if (values.mappingFamily == 1) {
-        // Channel mapping family 1 (Vorbis order): FFmpeg reads the stream layout from an OpusHead.
+    const auto channels = instance.opusChannels;
+    av_channel_layout_default(&instance.opus->ch_layout, static_cast<int>(channels));
+    const bool family1 = instance.opusMappingFamily == 1;
+    const bool family255 = instance.opusMappingFamily == 255 && channels > 1;
+    if (family1 || family255) {
+        // FFmpeg reads the stream layout from an OpusHead. Family 1 uses the Vorbis order; family
+        // 255 the counted streams with the channels in order.
         static constexpr std::uint8_t streams[8] = {1, 1, 2, 2, 3, 4, 4, 5};
         static constexpr std::uint8_t coupled[8] = {0, 1, 1, 2, 2, 2, 3, 3};
         static constexpr std::uint8_t mapping[8][8] = {
@@ -987,31 +991,57 @@ std::int32_t InitializeOpus(Instance& instance, const std::uint8_t* parameters, 
             {0, 4, 1, 2, 3}, {0, 4, 1, 2, 3, 5},
             {0, 4, 1, 2, 3, 5, 6}, {0, 6, 1, 2, 3, 4, 5, 7}
         };
-        const std::size_t index = values.channels - 1;
-        instance.opus->extradata_size = static_cast<int>(21 + values.channels);
+        const std::size_t index = channels - 1;
+        instance.opus->extradata_size = static_cast<int>(21 + channels);
         instance.opus->extradata = static_cast<std::uint8_t*>(av_mallocz(instance.opus->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE));
         if (!instance.opus->extradata) {
             avcodec_free_context(&instance.opus);
-            return AJM_RESULT_CODEC_ERROR;
+            return false;
         }
         auto* header = instance.opus->extradata;
         std::memcpy(header, "OpusHead", 8);
         header[8] = 1;
-        header[9] = static_cast<std::uint8_t>(values.channels);
+        header[9] = static_cast<std::uint8_t>(channels);
         header[12] = 0x80;
         header[13] = 0xbb;
-        header[18] = 1;
-        header[19] = streams[index];
-        header[20] = coupled[index];
-        std::memcpy(header + 21, mapping[index], values.channels);
+        if (family1) {
+            header[18] = 1;
+            header[19] = streams[index];
+            header[20] = coupled[index];
+            std::memcpy(header + 21, mapping[index], channels);
+        } else {
+            header[18] = 255;
+            header[19] = static_cast<std::uint8_t>(instance.opusStreams);
+            header[20] = static_cast<std::uint8_t>(instance.opusCoupled);
+            for (std::uint32_t channel = 0; channel < channels; ++channel) header[21 + channel] = static_cast<std::uint8_t>(channel);
+        }
     }
     if (avcodec_open2(instance.opus, codec, nullptr) < 0) {
         avcodec_free_context(&instance.opus);
-        return AJM_RESULT_CODEC_ERROR;
+        return false;
     }
+    return true;
+}
+
+std::int32_t InitializeOpus(Instance& instance, const std::uint8_t* parameters, std::uint64_t size) {
+    OpusInitializeParameters values{};
+    if (size < offsetof(OpusInitializeParameters, mappingFamily)) return AJM_RESULT_INVALID_PARAMETER;
+    std::memcpy(&values, parameters, std::min<std::uint64_t>(size, sizeof(values)));
+    if (values.channels < 1 || values.channels > 8 || values.sampleRate != 48000) return AJM_RESULT_INVALID_PARAMETER;
+    if (values.mappingFamily > 1 && values.mappingFamily != 255) NotImplemented_nid_no_patch("sceAjmBatchJobInitialize (Opus mapping family other than 0, 1 or 255)");
+    if (values.mappingFamily == 0 && values.channels > 2) return AJM_RESULT_INVALID_PARAMETER;
     instance.opusChannels = values.channels;
     instance.opusMappingFamily = values.mappingFamily;
     instance.opusSampleRate = values.sampleRate;
+    instance.opusStreams = 0;
+    instance.opusCoupled = 0;
+    // A family 255 decoder with several channels opens on its first packet (OpenOpusFromPacket).
+    instance.opusLayoutPending = values.mappingFamily == 255 && values.channels > 1;
+    if (instance.opusLayoutPending) {
+        if (instance.opus) avcodec_free_context(&instance.opus);
+    } else if (!OpenOpus(instance)) {
+        return AJM_RESULT_CODEC_ERROR;
+    }
     instance.initialized = true;
     instance.totalDecodedSamples = 0;
     instance.segmentSamples = 0;
@@ -1036,6 +1066,84 @@ std::uint32_t OpusPacketSamples(const std::uint8_t* packet, std::size_t size) {
     }
     const auto samples = frames * frameSamples;
     return frames == 0 || samples > 5760 ? 0 : samples;
+}
+
+// The length of an Opus frame (RFC 6716 3.2.1) at data[at], advancing at; SIZE_MAX when truncated.
+std::size_t OpusLength(const std::uint8_t* data, std::size_t size, std::size_t& at) {
+    if (at >= size) return SIZE_MAX;
+    const std::size_t first = data[at++];
+    if (first < 252) return first;
+    if (at >= size) return SIZE_MAX;
+    return first + 4u * data[at++];
+}
+
+// The bytes of a self-delimited Opus packet (RFC 6716 appendix B), SIZE_MAX when malformed.
+std::size_t OpusSelfDelimitedBytes(const std::uint8_t* data, std::size_t size) {
+    if (size < 1) return SIZE_MAX;
+    const std::uint32_t code = data[0] & 3u;
+    std::size_t at = 1;
+    if (code == 0) {
+        const std::size_t frame = OpusLength(data, size, at);
+        return frame == SIZE_MAX ? SIZE_MAX : at + frame;
+    }
+    if (code == 1) {
+        const std::size_t frame = OpusLength(data, size, at);
+        return frame == SIZE_MAX ? SIZE_MAX : at + 2 * frame;
+    }
+    if (code == 2) {
+        const std::size_t first = OpusLength(data, size, at);
+        const std::size_t second = OpusLength(data, size, at);
+        return first == SIZE_MAX || second == SIZE_MAX ? SIZE_MAX : at + first + second;
+    }
+    if (at >= size) return SIZE_MAX;
+    const std::uint8_t count = data[at++];
+    const std::size_t frames = count & 0x3fu;
+    if (frames == 0) return SIZE_MAX;
+    std::size_t padding = 0;
+    if ((count & 0x40u) != 0) {
+        for (;;) {
+            if (at >= size) return SIZE_MAX;
+            const std::uint8_t value = data[at++];
+            padding += value == 255 ? 254 : value;
+            if (value != 255) break;
+        }
+    }
+    std::size_t total = 0;
+    if ((count & 0x80u) != 0) {
+        for (std::size_t frame = 0; frame < frames; ++frame) {
+            const std::size_t bytes = OpusLength(data, size, at);
+            if (bytes == SIZE_MAX) return SIZE_MAX;
+            total += bytes;
+        }
+    } else {
+        const std::size_t bytes = OpusLength(data, size, at);
+        if (bytes == SIZE_MAX) return SIZE_MAX;
+        total = bytes * frames;
+    }
+    return at + total + padding;
+}
+
+// A mapping family 255 instance with several channels has no stream layout in its initialization
+// words (upstream 911e6c83b): the first multistream packet's self-delimited streams are counted, each
+// stream's TOC stereo flag marks it as coupled, and the channels map in order.
+void OpenOpusFromPacket(Instance& instance, const std::uint8_t* data, std::size_t size) {
+    std::uint32_t streams = 0;
+    std::uint32_t coupled = 0;
+    std::size_t offset = 0;
+    while (offset < size) {
+        if ((data[offset] & 0x04u) != 0) ++coupled;
+        ++streams;
+        const std::uint32_t channels = coupled * 2 + (streams - coupled);
+        if (channels >= instance.opusChannels) break;
+        const std::size_t bytes = OpusSelfDelimitedBytes(data + offset, size - offset);
+        if (bytes == SIZE_MAX || bytes >= size - offset) break;
+        offset += bytes;
+    }
+    if (coupled * 2 + (streams - coupled) != instance.opusChannels) throw std::runtime_error("AJM Opus: a mapping family 255 packet's " + std::to_string(streams) + " streams (" + std::to_string(coupled) + " stereo) do not make its " + std::to_string(instance.opusChannels) + " channels");
+    instance.opusStreams = streams;
+    instance.opusCoupled = coupled;
+    if (!OpenOpus(instance)) throw std::runtime_error("AJM Opus: cannot open the FFmpeg Opus decoder for a mapping family 255 layout of " + std::to_string(streams) + " streams");
+    instance.opusLayoutPending = false;
 }
 
 // One decoded FFmpeg frame of float or 16-bit samples (planar or interleaved; FFmpeg builds without
@@ -1116,6 +1224,7 @@ void RunOpus(Instance& instance, const JobHeader& job, const AjmBuffer* inputs, 
             if (frames == 0 && pcmOutputs.produced == 0) result |= AJM_RESULT_NOT_ENOUGH_ROOM;
             break;
         }
+        if (instance.opusLayoutPending) OpenOpusFromPacket(instance, data, bytes);
         // Not reference counted: the decoder copies the packet into a padded buffer of its own.
         packet->data = const_cast<std::uint8_t*>(data);
         packet->size = static_cast<int>(bytes);
@@ -1427,14 +1536,11 @@ void Execute(const JobHeader& job, const AjmBuffer* inputs, const AjmBuffer* out
         Control(*instance, job, inputs);
         break;
     case JobKind::SetResampleParameters: {
-        float ratio = 1.0f;
-        float change = 0.0f;
-        std::memcpy(&ratio, job.parameters, sizeof(ratio));
-        std::memcpy(&change, job.parameters + sizeof(ratio), sizeof(change));
-        AJM_TRACE("[ajm] instance %u set resample: ratio %g, change %g per sample, flags 0x%llx\n", job.instance, ratio, change, static_cast<unsigned long long>(job.flags));
-        // The resampler applies the ratio; a per-sample ratio change is recorded only.
-        instance->resampler.ratio = ratio;
-        instance->resampleRatioChange = change;
+        float params[2] = {1.0f, 0.0f};
+        std::memcpy(params, job.parameters, std::min<std::size_t>(job.parameterSize, sizeof(params)));
+        instance->resampler.ratio = params[0];
+        instance->resampler.change = job.parameterSize >= sizeof(float) * 2 ? params[1] : 0.0f;
+        AJM_TRACE("[ajm] instance %u set resample ratio %f change %f\n", job.instance, static_cast<double>(instance->resampler.ratio), static_cast<double>(instance->resampler.change));
         WriteResult(job.sideband, job.sidebandSize, 0);
         break;
     }

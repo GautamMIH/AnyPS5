@@ -9,6 +9,9 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceUserService/UserService.hpp"
 
+static std::atomic<bool> initialized{false};
+static std::atomic<bool> loginReported{false};
+
 static int ReportAccessibilitySetting(int user_id, int32_t* setting, int32_t value) {
  if (user_id != USER_SERVICE_INITIAL_USER_ID) {
   return USER_SERVICE_ERROR_NOT_LOGGED_IN;
@@ -58,12 +61,19 @@ int APS5_VABI sceUserServiceGetAgeLevel(int user_id, uint32_t* age_level) {
  return USER_SERVICE_OK;
 }
 
-// The initial user is logged in at boot, which queues one login event; games that track players
-// through events rather than the login list depend on it (shadPS4 UserManager::LoginUser).
+// The initial user is logged in at boot, which queues one login event per initialization; games that
+// track players through events rather than the login list depend on it (shadPS4 UserManager::LoginUser).
+// Before initialization (and after termination) the poll reports NOT_INITIALIZED, as on a console.
 int APS5_VABI sceUserServiceGetEvent(SceUserServiceEvent* event) {
- if (!event) return USER_SERVICE_ERROR_INVALID_ARGUMENT;
- static std::atomic<bool> loginDelivered{false};
- if (loginDelivered.exchange(true)) return USER_SERVICE_ERROR_NO_EVENT;
+ if (!initialized.load()) {
+  return USER_SERVICE_ERROR_NOT_INITIALIZED;
+ }
+ if (event == nullptr) {
+  return USER_SERVICE_ERROR_INVALID_ARGUMENT;
+ }
+ if (loginReported.exchange(true)) {
+  return USER_SERVICE_ERROR_NO_EVENT;
+ }
  event->event_type = USER_SERVICE_EVENT_LOGIN;
  event->user_id = USER_SERVICE_INITIAL_USER_ID;
  return USER_SERVICE_OK;
@@ -86,6 +96,9 @@ int APS5_VABI sceUserServiceGetInitialUser(int* user_id) {
 }
 
 int APS5_VABI sceUserServiceGetLoginUserIdList(UserServiceLoginUserIdList* user_id_list) {
+ if (!initialized.load()) {
+  return USER_SERVICE_ERROR_NOT_INITIALIZED;
+ }
  if (user_id_list == nullptr) {
   return USER_SERVICE_ERROR_INVALID_ARGUMENT;
  }
@@ -126,14 +139,24 @@ int APS5_VABI sceUserServiceGetUserNumber(int user_id, int32_t* number) {
 
 int APS5_VABI sceUserServiceInitialize(const void* params) {
  (void)params;
+ if (initialized.exchange(true)) {
+  return USER_SERVICE_ERROR_ALREADY_INITIALIZED;
+ }
+ loginReported.store(false);
  return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceInitialize2(void) {
+ if (!initialized.exchange(true)) {
+  loginReported.store(false);
+ }
  return USER_SERVICE_OK;
 }
 
 int APS5_VABI sceUserServiceTerminate(void) {
+ if (!initialized.exchange(false)) {
+  return USER_SERVICE_ERROR_NOT_INITIALIZED;
+ }
  return USER_SERVICE_OK;
 }
 

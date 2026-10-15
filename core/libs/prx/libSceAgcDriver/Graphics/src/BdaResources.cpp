@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/BdaResources.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WriteTracker.hpp"
+#include "ImageTableAbi.hpp"
+#include <iomanip>
 #include <algorithm>
 #include <bit>
 #include <cstring>
@@ -50,6 +52,27 @@ void BdaResources::CheckFault() const {
     }
     Require(report.state == ShaderRecompiler::BdaAbi::FaultState::Ready && report.reserved == 0, "incomplete or invalid BDA fault record");
     Require(report.reason != ShaderRecompiler::BdaAbi::FaultReason::InvalidRectangle, "rect-list requires finite nondegenerate axis-aligned positions with equal positive W");
+    if (report.reason == ShaderRecompiler::BdaAbi::FaultReason::ImageTable) {
+        // The shader selected a table entry the recompiler or this driver poisoned: report.bytes is
+        // the poison entry's index.
+        const auto found = std::find_if(imageTables.begin(), imageTables.end(), [&](const ImageTableFaults& candidate) { return candidate.stage == report.stage; });
+        const auto* tables = found != imageTables.end() ? &*found : imageTables.size() == 1 ? &imageTables.front() : nullptr;
+        std::ostringstream message;
+        message << "image table: shader 0x" << std::hex << (tables != nullptr ? tables->shader : 0u) << std::dec << " stage " << report.stage << " pc 0x" << std::hex << report.instruction << " selected the descriptor at 0x" << report.address << std::dec;
+        if (tables != nullptr && report.bytes < tables->poison.size()) {
+            const auto& poison = tables->poison[report.bytes];
+            if (poison.dwordCount != 0) {
+                message << " (words";
+                for (std::uint32_t index = 0; index < poison.dwordCount && index < poison.words.size(); ++index) message << ' ' << std::hex << std::setw(8) << std::setfill('0') << poison.words[index];
+                message << std::dec << ")";
+            }
+            message << ": " << ShaderRecompiler::ImageTableAbi::PoisonReasonName(static_cast<ShaderRecompiler::ImageTableAbi::PoisonReason>(poison.reason));
+            if (report.bytes < tables->messages.size() && !tables->messages[report.bytes].empty()) message << ": " << tables->messages[report.bytes];
+        } else {
+            message << ": poison entry " << report.bytes;
+        }
+        throw std::runtime_error(message.str());
+    }
     std::ostringstream message;
     message << "BDA access failed: address=0x" << std::hex << report.address << " instruction=0x" << report.instruction << std::dec << " bytes=" << report.bytes << " stage=" << report.stage << " reason=" << static_cast<std::uint32_t>(report.reason);
     // Name the host mapping holding the address, to tell unregistered guest memory from garbage.
@@ -90,6 +113,11 @@ namespace AgcDriver::Graphics {
 // capture or texture upload of later work in the same batch) is not made to wait for the stores,
 // as descriptor-bound writes are (Recorder::NotePendingWrites); note the V#s' ranges at record
 // time if that shows up.
+void BdaResources::SetImageTables(std::vector<ImageTableFaults> tables, std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges) {
+    imageTables = std::move(tables);
+    imageTableRanges = std::move(ranges);
+}
+
 void BdaResources::markWrittenPages() const {
     namespace Abi = ShaderRecompiler::BdaAbi;
     auto* words = reinterpret_cast<std::uint32_t*>(fault->Bytes().data());
@@ -98,6 +126,16 @@ void BdaResources::markWrittenPages() const {
     for (std::uint32_t slot = 0; slot < Abi::WrittenPageSlots; ++slot) {
         const auto page = words[Abi::WrittenSlotsWord + slot];
         if (page == 0) continue;
+        const auto begin = static_cast<std::uint64_t>(page - 1u) << Abi::WrittenPageShift;
+        const auto end = begin + (std::uint64_t{1} << Abi::WrittenPageShift);
+        // A table the work selects descriptors from was resolved before it ran: a store to it would
+        // change what the hardware selects mid-dispatch.
+        for (const auto& [base, size] : imageTableRanges) {
+            if (size == 0 || begin >= base + size || base >= end) continue;
+            std::ostringstream message;
+            message << "image table at 0x" << std::hex << base << " is written by its own dispatch";
+            Require(false, message.str());
+        }
         WriteTracker::NoteGpuWrite(static_cast<std::uint64_t>(page - 1u) << Abi::WrittenPageShift, std::uint64_t{1} << Abi::WrittenPageShift);
         any = true;
     }

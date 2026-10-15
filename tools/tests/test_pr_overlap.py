@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import tempfile
 import sys
 import unittest
 from pathlib import Path
@@ -77,6 +80,23 @@ class OpenPullRequestsTests(unittest.TestCase):
                 pr_overlap.open_prs("main")
 
 
+class TopInsertTests(unittest.TestCase):
+    def test_top_of_file_insertions_clash_on_line_one(self):
+        pr = {"tree": "t", "files": {"f.cpp"}, "added": set()}
+        with patch.object(pr_overlap, "git", return_value="@@ -0,0 +1 @@\n+x\n"):
+            self.assertEqual(pr_overlap.hunks(pr, "f.cpp"), [(1, 1)])
+            self.assertEqual(pr_overlap.clashes(pr, pr, "f.cpp"), [(1, 1)])
+
+    def test_top_of_file_span_links_to_line_one(self):
+        self.assertEqual(pr_overlap.spans({"f.cpp": [(1, 1)]}, "https://x/blob/sha"),
+                         "`f.cpp` [L1](https://x/blob/sha/f.cpp#L1)")
+
+    def test_ordinary_hunk_is_unchanged(self):
+        pr = {"tree": "t"}
+        with patch.object(pr_overlap, "git", return_value="@@ -3,2 +3,2 @@\n-a\n-b\n+c\n+d\n"):
+            self.assertEqual(pr_overlap.hunks(pr, "f.cpp"), [(3, 4)])
+
+
 class FetchTests(unittest.TestCase):
     def test_fetches_each_head_commit_the_api_reported(self):
         prs = {
@@ -115,6 +135,45 @@ class ConflictTests(unittest.TestCase):
         with patch.object(pr_overlap, "merge", return_value=("merged-tree", set())) as merge:
             self.assertEqual(pr_overlap.conflicts(first, second), {})
         merge.assert_called_once_with("first-tree", "second-tree")
+
+
+class UnicodePathTests(unittest.TestCase):
+    def test_scans_and_reports_conflicts_with_git_path_quoting_enabled(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def git(*args):
+                return subprocess.run(
+                    ["git", "-c", "user.name=Overlap Test", "-c", "user.email=test@example.com",
+                     "-c", "commit.gpgsign=false", *args], cwd=root,
+                    capture_output=True, text=True, encoding="utf-8", check=True).stdout.strip()
+
+            filename = "core/libs/prx/libSceExample/caf\u00e9.cpp"
+            source = root / filename
+            source.parent.mkdir(parents=True)
+            source.write_text("int value = 0;\n", encoding="utf-8")
+            git("init", "-q")
+            git("config", "core.quotePath", "true")
+            git("add", ".")
+            git("commit", "-qm", "test: create base")
+            base = git("rev-parse", "HEAD")
+            git("update-ref", "refs/pr/base", base)
+            for branch, value in (("left", 1), ("right", 2)):
+                git("checkout", "-qb", branch, base)
+                source.write_text(f"int value = {value};\n", encoding="utf-8")
+                git("add", ".")
+                git("commit", "-qm", "fix: change value")
+            try:
+                os.chdir(root)
+                left, right = {"ref": "left"}, {"ref": "right"}
+                pr_overlap.scan(left)
+                pr_overlap.scan(right)
+                self.assertEqual(left["files"], {filename})
+                self.assertEqual(right["files"], {filename})
+                self.assertEqual(pr_overlap.conflicts(left, right), {filename: [(1, 1)]})
+            finally:
+                os.chdir(previous)
 
 
 if __name__ == "__main__":

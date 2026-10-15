@@ -146,6 +146,7 @@ public:
         _cache.UseDense(program.valueIdLimit);
     }
 
+    static bool MayEvaluate(const IrResourcePlan& program, IrValue* value);
     bool Evaluate(IrValue* value, std::uint32_t& result);
     bool EvaluateWide(IrValue* raw, std::uint64_t& result);
     void ReportInaccessibleReads(InaccessibleRead* sink) { _inaccessible = sink; }

@@ -60,6 +60,9 @@ public:
         }
         // Attached data travels with its packet to the picture it produces.
         context->flags |= AV_CODEC_FLAG_COPY_OPAQUE;
+        // The console reports and writes the coded picture (upstream 6fd0e3343); the cropping goes
+        // to the picture information instead.
+        context->apply_cropping = 0;
         if (const auto error = avcodec_open2(context, decoder, nullptr); error < 0) {
             release();
             throw std::runtime_error("cannot open the video decoder: " + errorText(error));
@@ -132,6 +135,10 @@ private:
             std::memcpy(&picture.dts, frame->opaque_ref->data, sizeof(picture.dts));
         picture.profile = context->profile;
         picture.level = context->level;
+        picture.cropLeft = static_cast<std::uint32_t>(frame->crop_left);
+        picture.cropRight = static_cast<std::uint32_t>(frame->crop_right);
+        picture.cropTop = static_cast<std::uint32_t>(frame->crop_top);
+        picture.cropBottom = static_cast<std::uint32_t>(frame->crop_bottom);
         if (Nv12Bytes(width, height) > output.size()) {
             av_frame_unref(frame);
             throw std::length_error("decoded picture exceeds the frame buffer");

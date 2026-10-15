@@ -421,6 +421,39 @@ Issues that needed research, with a short answer. Check here before researching;
   - Hellboy replay: merged 57.6 and 57.9 ms, base 57.8 and 57.5 ms (alternating runs), unchanged. GPU busy fell from 46 to 43 ms, while submit-to-execute rose from 37 to 43 ms.
   - Spirit and Zorro reach their menus and render correctly.
 
+## Upstream merge (2026-10-14, upstream ab9a47684, 466 commits)
+
+- **Same split as the previous merge:**
+  - Driver conflicts take ours, and upstream-driver-only files stay deleted.
+  - Recompiler and runtime conflicts are combined. Our ShaderDraw, compiled SRT walker, memory model, Videodec2 and Ajm Opus path are kept.
+  - Versions: RuntimeAbi is now 13 (both sides had made 12). The request serializer is upstream's 27 plus our host-float flag.
+- **Image and sampler tables (upstream d9e47d1e9):**
+  - Upstream's recompiler replaced its indirect image modes with descriptor tables, so our driver had to bind them. Without that, every runtime-selected image failed with "unknown descriptor role" (agc_driver_bindless_images).
+  - Ported into our driver (ShaderResources.cpp):
+    - One variable-count, partially bound image-table binding (260), shared by all stages, with a per-stage element base in the map.
+    - Per-stage sampler tables.
+    - Bad elements become poison entries with fault codes, not draw failures.
+    - Descriptor writes are skipped for elements a reused set already holds (`ANYPS5_NO_TABLE_WRITE_SKIP=1` turns that off).
+  - Not ported: upstream's epoch-validated whole-table reuse. Each element still costs one texture-cache lookup per draw.
+  - Device features needed: runtimeDescriptorArray, descriptorBindingPartiallyBound and descriptorBindingVariableDescriptorCount.
+- **HostHdr (host HDR detection) is taken from upstream:**
+  - Used by SystemService and VideoOut; compiled into our driver library along with its PqToSdr and ToneMapLuminance headers.
+  - HDR10 presentation is not ported: HdrPresent is excluded and Linux reports SDR.
+  - `ShaderPreparationScope` takes upstream's shader list and ignores it.
+- **New upstream tests that assumed upstream's driver** (test-side fixes only):
+  - Our ShaderMemory captures whole 64-byte lines, so exact-capture checks look past the shared line.
+  - Host-heap BDA stores move to GuestTestMemory.
+  - An invalid-format fault throws from our dispatch, where upstream logs it.
+  - 19 execution tests written for upstream's driver internals are excluded, with a list in CMake.
+- **Results:** tests 883/883. Zorro hidden runs alternating with main (7006200f9): 17.0 ms frames for both (the hidden cap); first submit to execute was 8.8 and 9.3 ms merged, 9.5 and 9.3 ms base. No errors, and character select renders correctly.
+- **Behaviour changes from upstream:**
+  - PlayGo throws for unknown chunk IDs when a dump has no PlayGo files.
+  - Videodec2 frames hold the coded rows (1088), with the crop reported, and Vdecsw follows.
+  - Inheriting threads take their creator's priority.
+  - mprotect starting in an unmapped page is EINVAL.
+  - A mapping hint with no room above falls back lower.
+  - UserService lifecycle.
+
 ## Link-time and profile-guided optimization (2026-10-12)
 
 - **PGO** (`tools/pgo.sh generate`, then a 150 s Zorro gameplay run relinked with `build-pgo`'s relinker and a warm cache, then `tools/pgo.sh use`). Zorro A/B, 2 rounds of 90 s:

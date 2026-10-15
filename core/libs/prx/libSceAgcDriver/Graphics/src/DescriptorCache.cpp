@@ -5,9 +5,14 @@
 
 namespace AgcDriver::Graphics {
 
-DescriptorAllocation::DescriptorAllocation(const Context& context, std::span<const std::uint32_t> key, std::span<const VkDescriptorSetLayoutBinding> bindings, std::span<const VkDescriptorPoolSize> sizes) : device(context.device), destroyPool(context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool")), destroyLayout(context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")), key(key.begin(), key.end()) {
+DescriptorAllocation::DescriptorAllocation(const Context& context, std::span<const std::uint32_t> key, std::span<const VkDescriptorSetLayoutBinding> bindings, std::span<const VkDescriptorPoolSize> sizes, std::span<const VkDescriptorBindingFlags> flags, std::optional<std::uint32_t> variableCount) : device(context.device), destroyPool(context.Function<PFN_vkDestroyDescriptorPool>("vkDestroyDescriptorPool")), destroyLayout(context.Function<PFN_vkDestroyDescriptorSetLayout>("vkDestroyDescriptorSetLayout")), key(key.begin(), key.end()) {
     try {
+        Require(flags.empty() || flags.size() == bindings.size(), "descriptor binding flags disagree with the bindings");
+        VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO};
+        bindingFlags.bindingCount = static_cast<std::uint32_t>(flags.size());
+        bindingFlags.pBindingFlags = flags.data();
         VkDescriptorSetLayoutCreateInfo info{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        if (!flags.empty()) info.pNext = &bindingFlags;
         info.bindingCount = static_cast<std::uint32_t>(bindings.size());
         info.pBindings = bindings.data();
         Check(context.Function<PFN_vkCreateDescriptorSetLayout>("vkCreateDescriptorSetLayout")(device, &info, nullptr, &layout), "vkCreateDescriptorSetLayout");
@@ -17,7 +22,12 @@ DescriptorAllocation::DescriptorAllocation(const Context& context, std::span<con
         poolInfo.poolSizeCount = static_cast<std::uint32_t>(sizes.size());
         poolInfo.pPoolSizes = sizes.data();
         Check(context.Function<PFN_vkCreateDescriptorPool>("vkCreateDescriptorPool")(device, &poolInfo, nullptr, &pool), "vkCreateDescriptorPool");
+        const std::uint32_t variable = variableCount.value_or(0u);
+        VkDescriptorSetVariableDescriptorCountAllocateInfo variableInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO};
+        variableInfo.descriptorSetCount = 1;
+        variableInfo.pDescriptorCounts = &variable;
         VkDescriptorSetAllocateInfo allocation{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        if (variableCount.has_value()) allocation.pNext = &variableInfo;
         allocation.descriptorPool = pool;
         allocation.descriptorSetCount = 1;
         allocation.pSetLayouts = &layout;
@@ -35,6 +45,13 @@ DescriptorAllocation::~DescriptorAllocation() {
 void DescriptorAllocation::release() noexcept {
     if (pool) destroyPool(device, pool, nullptr);
     if (layout) destroyLayout(device, layout, nullptr);
+}
+
+std::vector<DescriptorAllocation::WrittenElement>& DescriptorAllocation::Written(std::uint32_t binding) {
+    for (auto& [number, elements] : written) {
+        if (number == binding) return elements;
+    }
+    return written.emplace_back(binding, std::vector<WrittenElement>{}).second;
 }
 
 bool DescriptorAllocation::Matches(std::span<const std::uint32_t> candidate) const {

@@ -238,6 +238,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     (features.float64 && capability == spv::CapabilityFloat64) ||
                     (features.imageArrayDynamicIndexing && (capability == spv::CapabilitySampledImageArrayDynamicIndexing || capability == spv::CapabilityStorageImageArrayDynamicIndexing)) ||
                     (features.descriptorIndexing && (capability == spv::CapabilityShaderNonUniform || capability == spv::CapabilitySampledImageArrayNonUniformIndexing || capability == spv::CapabilityStorageImageArrayNonUniformIndexing)) ||
+                    (features.runtimeDescriptorArray && capability == spv::CapabilityRuntimeDescriptorArray) ||
                     (features.imageGatherExtended && capability == spv::CapabilityImageGatherExtended) ||
                     (features.minLod && capability == spv::CapabilityMinLod) ||
                     (features.storageImageReadWithoutFormat && capability == spv::CapabilityStorageImageReadWithoutFormat) ||
@@ -313,7 +314,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     Require(fragment && fragmentShaderBarycentric, "SPV_KHR_fragment_shader_barycentric requires enabled fragmentShaderBarycentric in a fragment shader");
                     break;
                 }
-                Require(extension == "SPV_KHR_float_controls" || (features.descriptorIndexing && extension == "SPV_EXT_descriptor_indexing") || (features.imageInt64Atomics && extension == "SPV_EXT_shader_image_int64") || (mesh && extension == "SPV_EXT_mesh_shader") || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (extension == "SPV_KHR_physical_storage_buffer" || extension == "SPV_KHR_8bit_storage")), "unsupported SPIR-V extension");
+                Require(extension == "SPV_KHR_float_controls" || ((features.descriptorIndexing || features.runtimeDescriptorArray) && extension == "SPV_EXT_descriptor_indexing") || (features.imageInt64Atomics && extension == "SPV_EXT_shader_image_int64") || (mesh && extension == "SPV_EXT_mesh_shader") || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (extension == "SPV_KHR_physical_storage_buffer" || extension == "SPV_KHR_8bit_storage")), "unsupported SPIR-V extension");
                 break;
             }
             case spv::OpDecorateId:
@@ -329,8 +330,11 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                 const auto addressingModel = shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && !rectListControl
                     ? spv::AddressingModelPhysicalStorageBuffer64
                     : spv::AddressingModelLogical;
+                // A program with the fault buffer but no BDA table (image tables report their faults
+                // there) accesses no address: it may be Logical.
+                const bool faultOnly = std::none_of(shader.bindings.begin(), shader.bindings.end(), [](const ShaderRecompiler::DescriptorBinding& binding) { return binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable; });
                 Require(count == 3, "invalid SPIR-V OpMemoryModel word count: " + std::to_string(count));
-                Require(instruction[1] == addressingModel, "unsupported SPIR-V addressing model: " + std::to_string(instruction[1]));
+                Require(instruction[1] == addressingModel || (faultOnly && instruction[1] == spv::AddressingModelLogical), "unsupported SPIR-V addressing model: " + std::to_string(instruction[1]));
                 Require(instruction[2] == spv::MemoryModelGLSL450, "unsupported SPIR-V memory model: " + std::to_string(instruction[2]));
                 ++memoryModels;
                 break;
@@ -517,10 +521,12 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
         } else if (variable.storage == spv::StorageClassUniformConstant) {
             Require(decoration.set && decoration.binding, "unbound shader resource");
             const auto key = std::make_pair(*decoration.set, *decoration.binding);
-            Require(descriptors.insert(key).second, "duplicate SPIR-V resource binding");
             const auto binding = std::find_if(shader.bindings.begin(), shader.bindings.end(), [&](const auto& item) { return item.descriptorSet == key.first && item.binding == key.second; });
+            // An image table declares one runtime array per image type over its binding.
+            Require(descriptors.insert(key).second || (binding != shader.bindings.end() && binding->role == ShaderRecompiler::DescriptorRole::ImageTable), "duplicate SPIR-V resource binding");
             Require(binding != shader.bindings.end(), "SPIR-V resource is absent from recompiler binding metadata");
             Require(binding->kind == ShaderRecompiler::DescriptorKind::Sampler || binding->kind == ShaderRecompiler::DescriptorKind::SampledImage || binding->kind == ShaderRecompiler::DescriptorKind::StorageImage, "SPIR-V descriptor type disagrees with recompiler binding metadata");
+            if (binding->role == ShaderRecompiler::DescriptorRole::ImageTable || binding->role == ShaderRecompiler::DescriptorRole::SamplerTable) Require(type.size() == 3 && (type[0] & 0xffffu) == spv::OpTypeRuntimeArray, "image and sampler tables must be declared as runtime descriptor arrays");
         } else {
             Require(variable.storage == spv::StorageClassStorageBuffer && decoration.set && decoration.binding, "unsupported or unbound shader resource");
             const auto key = std::make_pair(*decoration.set, *decoration.binding);
@@ -530,7 +536,7 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
             Require(binding->kind == ShaderRecompiler::DescriptorKind::StorageBuffer, "SPIR-V descriptor type disagrees with recompiler binding metadata");
             Require(!binding->readOnly, "read-only descriptor metadata is unsupported because the recompiler emits no NonWritable decoration");
             const bool array = binding->role == ShaderRecompiler::DescriptorRole::GuestBuffers;
-            Require(array || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (binding->role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding->role == ShaderRecompiler::DescriptorRole::FaultBuffer)) || binding->role == ShaderRecompiler::DescriptorRole::ShaderData || binding->role == ShaderRecompiler::DescriptorRole::FlattenedSrt || binding->role == ShaderRecompiler::DescriptorRole::Gds, "SPIR-V descriptor role is unsupported");
+            Require(array || (shader.bdaAbiVersion == ShaderRecompiler::BdaAbi::Version && (binding->role == ShaderRecompiler::DescriptorRole::BdaPagetable || binding->role == ShaderRecompiler::DescriptorRole::FaultBuffer)) || binding->role == ShaderRecompiler::DescriptorRole::ShaderData || binding->role == ShaderRecompiler::DescriptorRole::FlattenedSrt || binding->role == ShaderRecompiler::DescriptorRole::ImageTableMap || binding->role == ShaderRecompiler::DescriptorRole::Gds, "SPIR-V descriptor role is unsupported");
             auto blockId = typeId;
             if (array) {
                 Require(type.size() == 4 && (type[0] & 0xffffu) == spv::OpTypeArray, "guest buffer descriptors must be declared as a descriptor array");
@@ -613,6 +619,7 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
     append(features.sampleRateShading);
     append(features.bufferInt64Atomics);
     append(features.float16Rte);
+    append(features.runtimeDescriptorArray);
     append(state.dualSourceBlend);
     append(shader.bdaAbiVersion);
     append(shader.pushConstants.empty());
@@ -623,7 +630,9 @@ std::shared_ptr<const ValidatedInterface> inspectCached(const CompiledShader& co
         append(binding.role);
         append(binding.descriptorSet);
         append(binding.binding);
-        append(binding.count);
+        // A table's count is its draw's (the elements it resolved), not part of the interface.
+        const bool table = binding.role == ShaderRecompiler::DescriptorRole::ImageTable || binding.role == ShaderRecompiler::DescriptorRole::SamplerTable;
+        append(table ? 0u : binding.count);
         append(binding.readOnly);
         append(compiled.Words(index).empty());
     }
@@ -693,7 +702,7 @@ void ValidateShaders(std::span<const CompiledShader> shaders, const State& state
     }
     key.push_back(subgroup.subgroupSize | (static_cast<std::uint64_t>(subgroup.supportedStages) << 32u));
     key.push_back(subgroup.supportedOperations | (static_cast<std::uint64_t>(subgroup.quadOperationsInAllStages) << 32u));
-    key.push_back(static_cast<std::uint64_t>(fragmentShaderBarycentric) | (static_cast<std::uint64_t>(features.imageGatherExtended) << 1u) | (static_cast<std::uint64_t>(features.storageImageReadWithoutFormat) << 2u) | (static_cast<std::uint64_t>(features.storageImageWriteWithoutFormat) << 3u) | (static_cast<std::uint64_t>(features.geometryShader) << 4u) | (static_cast<std::uint64_t>(features.minLod) << 5u) | (static_cast<std::uint64_t>(features.clipDistance) << 6u) | (static_cast<std::uint64_t>(features.cullDistance) << 7u) | (static_cast<std::uint64_t>(features.sampleRateShading) << 8u) | (static_cast<std::uint64_t>(features.bufferInt64Atomics) << 9u) | (static_cast<std::uint64_t>(features.float16Rte) << 11u) | (static_cast<std::uint64_t>(state.dualSourceBlend) << 10u));
+    key.push_back(static_cast<std::uint64_t>(fragmentShaderBarycentric) | (static_cast<std::uint64_t>(features.imageGatherExtended) << 1u) | (static_cast<std::uint64_t>(features.storageImageReadWithoutFormat) << 2u) | (static_cast<std::uint64_t>(features.storageImageWriteWithoutFormat) << 3u) | (static_cast<std::uint64_t>(features.geometryShader) << 4u) | (static_cast<std::uint64_t>(features.minLod) << 5u) | (static_cast<std::uint64_t>(features.clipDistance) << 6u) | (static_cast<std::uint64_t>(features.cullDistance) << 7u) | (static_cast<std::uint64_t>(features.sampleRateShading) << 8u) | (static_cast<std::uint64_t>(features.bufferInt64Atomics) << 9u) | (static_cast<std::uint64_t>(features.float16Rte) << 11u) | (static_cast<std::uint64_t>(state.dualSourceBlend) << 10u) | (static_cast<std::uint64_t>(features.runtimeDescriptorArray) << 12u));
     struct KeyHash {
         std::size_t operator()(const std::vector<std::uint64_t>& value) const {
             std::uint64_t hash = 0xcbf29ce484222325ull;

@@ -1,6 +1,7 @@
 #include <atomic>
 #include <algorithm>
 #include <cstdlib>
+#include <exception>
 #include "prx/libSceAgcDriver/Graphics/include/DrawQueue.hpp"
 #include "prx/libSceAgcDriver/Execution/include/MemoryAccessScope.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
@@ -12,8 +13,17 @@ void DrawQueue::retire(Batch batch) {
     const GuestMemory::MemoryAccessScope suspended(nullptr, nullptr);
     Require(drawCount >= batch.entries.size(), "draw queue completion count underflow");
     drawCount -= batch.entries.size();
-    for (auto& entry : batch.entries)
-        if (entry.resources) entry.resources->WriteBack();
+    // A fault one entry reports (WriteBack throws it) is rethrown once the whole batch retired: the
+    // other entries' results still reach guest memory and the queue's bookkeeping stays whole.
+    std::exception_ptr failure;
+    for (auto& entry : batch.entries) {
+        if (!entry.resources) continue;
+        try {
+            entry.resources->WriteBack();
+        } catch (...) {
+            if (!failure) failure = std::current_exception();
+        }
+    }
     timing.Mark("resources_writeback");
     if (batch.query >= 0) {
         // The batch completed, so its query result is available.
@@ -31,6 +41,7 @@ void DrawQueue::retire(Batch batch) {
     if (batch.marker != 0) retiredMarker = std::max(retiredMarker, batch.marker);
     available.push_back(std::move(batch.commands));
     timing.Mark("resources_release");
+    if (failure) std::rethrow_exception(failure);
 }
 
 void DrawQueue::Collect() {

@@ -10,7 +10,10 @@
 #include "Recompiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Shaders.hpp"
 #include <array>
+#include <limits>
 #include <memory>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace AgcDriver::Graphics {
@@ -61,7 +64,47 @@ private:
         VkDescriptorSetLayoutBinding layout;
         std::vector<std::size_t> allocations;
         std::vector<std::size_t> imageAllocations;
+        // Table bindings (partially bound; the image table with a variable count): their elements
+        // are written in runs, skipping the unbound ones (NoElement).
+        VkDescriptorBindingFlags flags = 0;
     };
+    static constexpr std::size_t NoElement = std::numeric_limits<std::size_t>::max();
+
+    // A stage's image and sampler tables (DescriptorRole::ImageTable, SamplerTable, ImageTableMap):
+    // the map the shader reads (its element base and the driver's per-entry fault codes filled
+    // here) and the poison entries a table fault names.
+    struct TableStage {
+        ShaderRecompiler::ShaderStage stage = ShaderRecompiler::ShaderStage::Compute;
+        const ShaderRecompiler::RecompileResult* program = nullptr;
+        const ShaderRecompiler::DescriptorBinding* images = nullptr;
+        std::span<const std::uint32_t> imageWords;
+        std::size_t mapBinding = NoElement;
+        std::vector<std::uint32_t> map;
+        std::vector<ShaderRecompiler::ImageTableEntryPoison> poison;
+        std::vector<std::string> messages;
+        std::vector<std::pair<std::uint32_t, std::uint32_t>> samplerRejections;
+    };
+    TableStage& tableStage(const CompiledShader& shader);
+    std::uint32_t rejectTableEntry(TableStage& table, std::span<const std::uint32_t> words, const std::string& message);
+    void addSamplerTable(const ShaderRecompiler::DescriptorBinding& binding, std::span<const std::uint32_t> words, VkShaderStageFlags flags, TableStage& table, std::vector<Binding>& bindings);
+    void resolveImageTable(TableStage& table, std::size_t firstSampler);
+    void finishImageTables(std::vector<Binding>& bindings);
+    std::vector<TableStage> tableStages;
+    // The image table binding's elements (every stage's table at its element base): texture indices.
+    std::vector<std::size_t> tableTextures;
+    VkShaderStageFlags tableStageFlags = 0;
+    std::uint32_t tableElements = 0;
+
+    // A sampled texture looked up for a T# as a shader of the given image shape reads it, with what
+    // the sampler pairing checks need.
+    struct SampledLookup {
+        std::shared_ptr<Texture> texture;
+        bool singleLevel;
+        bool cube;
+        std::uint32_t bcSwizzle;
+        std::uint32_t format;
+    };
+    SampledLookup lookupSampledTexture(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool depthCompare, bool unnormalized);
 
     void build(std::span<const CompiledShader> shaders, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes);
     std::size_t addGuestBuffer(std::span<const std::uint32_t> words, std::span<const ColorTarget> targets, std::uint64_t indexAddress, std::size_t indexBytes, bool written);
@@ -100,9 +143,13 @@ private:
         std::array<std::uint32_t, 4> words;
         bool compareEnable;
         bool unnormalized;
+        // DescriptorBinding::samplerIntegerBorder: its border color is read as an integer.
+        bool integerBorder = false;
     };
     std::vector<SamplerInput> samplerInputs;
     std::vector<std::unique_ptr<StorageImage>> storageImages;
+    // Whether the shader may store to each storage image (DescriptorBinding::imageWritten).
+    std::vector<bool> storageWritten;
 };
 
 }

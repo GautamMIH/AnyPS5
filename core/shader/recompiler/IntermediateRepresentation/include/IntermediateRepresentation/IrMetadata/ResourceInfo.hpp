@@ -55,6 +55,7 @@ struct MemoryInfo {
     // so no binding can hold it: the shader decodes the V# and goes through the BDA page table.
     bool gpuDescriptor = false;
     bool flushDenormals = false;
+    bool flushDenormalResults = false;
 
     bool operator==(const MemoryInfo& other) const = default;
 };

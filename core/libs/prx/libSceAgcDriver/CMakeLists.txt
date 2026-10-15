@@ -80,6 +80,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/BdaFeatures.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubgroupClock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderDeviceProfile.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/HostHdr.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/VulkanDevice.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SwapchainState.cpp
@@ -281,6 +282,11 @@ add_test_executable(agc_masked_select_tests EXCLUDE_FROM_ALL tests/MaskedSelect.
 target_link_libraries(agc_masked_select_tests PRIVATE shader_recompiler_agc_driver libc)
 set_target_properties(agc_masked_select_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_masked_select_tests)
+
+add_test_executable(agc_fma_mix_once_tests EXCLUDE_FROM_ALL tests/FmaMixOnce.cpp)
+target_link_libraries(agc_fma_mix_once_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_fma_mix_once_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_fma_mix_once_tests)
 
 add_test_executable(agc_wave_control_decode_tests EXCLUDE_FROM_ALL tests/WaveControlDecode.cpp)
 target_include_directories(agc_wave_control_decode_tests PRIVATE ${LIBS_INCLUDE_DIR})
@@ -536,6 +542,18 @@ list(FILTER agcExecutionTestSources EXCLUDE REGEX "/ImageSampleDerivatives\\.cpp
 # DccKeysFirstWrite checks upstream's DCC key stores (Recorder, DccMetadata, GuestArena): this driver
 # keeps surfaces uncompressed and models no DCC keys, so there is nothing of its to test here.
 list(FILTER agcExecutionTestSources EXCLUDE REGEX "/DccKeysFirstWrite\\.cpp$")
+# New in the ab9a47684 merge and written against upstream's driver (stencil replay, compute-pipeline
+# counters, GPU mutex, storage write-back and flip-time stores, DescribeSurface-style helpers), none
+# of which this driver has; port each with its driver feature.
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ComputePipelineOutsideGpuMutex|ComputeTableCalls|DepthSurfaceFromStorage|DrawUnsupportedBufferType|FlipStoresSmallResults|FrontFaceAllBits|GlobalLoads|ImagePlaneBiasOnSingleLevelVolume|ImagePlaneCompareOnLine|ImageVolumeAddressOnLine|PreparationScopeSettle|SampleMultisampleTarget|StencilReplay|StorageWriteBackOverhang|StreamCopy)\\.cpp$")
+# Image and sampler tables are ported (ShaderResources: ImageTable, ImageTableCache and
+# BindlessImages run). These two test upstream caches this driver does not keep: ImageTableCacheBounds
+# the table-element budget of its ResourceCache and the captured-word budget of its dispatch cache
+# (SharedResourceCache, Driver::DispatchCacheSize), ImageTableReuse its epoch-validated reuse of
+# resolved tables (ImageTableReuses counters, StorageTexture::FlushPending, ClearCachedTextures).
+# Here every draw resolves its table elements through the TextureCache, whose own validation
+# covers what that reuse proves.
+list(FILTER agcExecutionTestSources EXCLUDE REGEX "/(ImageTableCacheBounds|ImageTableReuse)\\.cpp$")
 # Upstream driver internals this driver does not have: HostImportTeardown (Context::hostImportAlignment
 # and its host-import registry; guest memory imports here are GuestGpuMemory's, released before the
 # device), OversizedDescriptorSets (upstream's chained DescriptorCache pools; every set here has its
@@ -578,6 +596,8 @@ endforeach()
 
 target_link_libraries(agc_driver_interpolation_modes_tests PRIVATE shader_recompiler_agc_driver)
 target_link_libraries(agc_driver_runtime_user_data_tests PRIVATE shader_recompiler_agc_driver)
+# ShaderMemory captures (Optimization/SrtWalker.hpp) without a device.
+target_link_libraries(agc_driver_image_table_cache_tests PRIVATE shader_recompiler_agc_driver)
 
 
 # Upstream's standalone decode and recompiler tests (no device, or skipping without one).
@@ -621,7 +641,7 @@ if(BUILD_TESTING)
     # this branch covers state decoding in agc_driver_state_decode_tests),
     # agc_driver_bda_device_tests (BdaDevice.cpp includes upstream's Recorder) and
     # agc_driver_mesh_tests (Mesh.cpp drives upstream's Execution/Driver draw decoding, not kept here).
-    foreach(agcTest IN ITEMS agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_spirv_module_tests agc_dpp_write_tests agc_masked_select_tests agc_vop1_control_decode_tests agc_shader_disk_cache_tests agc_shader_device_profile_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_color_exports_tests agc_driver_texture_layout_tests agc_driver_resource_decode_tests agc_driver_state_decode_tests agc_driver_color_transfer_device_tests agc_tessellation_factor_ring_tests agc_fragment_barycentric_tests ${agcRecompilerUnitTests} ${agcExecutionTests})
+    foreach(agcTest IN ITEMS agc_fma_mix_once_tests agc_driver_tests agc_shader_memory_tests agc_structurizer_tests agc_spirv_module_tests agc_dpp_write_tests agc_masked_select_tests agc_vop1_control_decode_tests agc_shader_disk_cache_tests agc_shader_device_profile_tests agc_shader_control_flow_tests agc_driver_flip_tests agc_driver_pm4_tests agc_driver_color_exports_tests agc_driver_texture_layout_tests agc_driver_resource_decode_tests agc_driver_state_decode_tests agc_driver_color_transfer_device_tests agc_tessellation_factor_ring_tests agc_fragment_barycentric_tests ${agcRecompilerUnitTests} ${agcExecutionTests})
         if(agcTest STREQUAL "agc_driver_constant_store_tests")
             continue()
         endif()

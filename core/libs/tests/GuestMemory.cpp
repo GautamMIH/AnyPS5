@@ -43,6 +43,7 @@ int APS5_VABI munmap_nid_postfix(void*, std::size_t) noexcept;
 int APS5_VABI sceKernelMmap(void*, std::size_t, int, int, int, std::int64_t, void**);
 int APS5_VABI mprotect_nid_postfix(void*, std::size_t, int) noexcept;
 int APS5_VABI madvise_nid_postfix(void*, std::size_t, int);
+int APS5_VABI mincore_nid_postfix(const void*, std::size_t, char*);
 int* APS5_VABI __error_nid_postfix();
 int APS5_VABI sceKernelAllocateMainDirectMemory(std::size_t, std::size_t, int, std::int64_t*);
 int APS5_VABI sceKernelMapDirectMemory(void**, std::size_t, int, int, std::int64_t, std::size_t);
@@ -644,6 +645,18 @@ static void CheckNoOverwriteRefusesLiveMapping() {
     Require(info.is_direct && info.offset == static_cast<std::uint64_t>(phys));
     Require(Unmap(mapped, page) == 0);
     Require(sceKernelReleaseDirectMemory(phys, page * 2) == 0);
+}
+
+// Upstream a016b4f2b, adapted: upstream reads its GuestArena bounds, which our memory model does not
+// have. A hint near the top of user space has no room above it in the guest map, so the range falls
+// back below the hint instead of failing.
+static void CheckReservationHintWithoutRoomAbove() {
+    constexpr std::size_t page = 0x4000;
+    void* const top = reinterpret_cast<void*>(0x7ffffff00000);
+    void* placed = top;
+    Require(sceKernelReserveVirtualRange(&placed, page * 2, 0, 0) == 0);
+    Require(placed != nullptr && placed < top);
+    Require(Unmap(placed, page * 2) == 0);
 }
 
 static void CheckFixedReservationReplacesMappings() {
@@ -1377,6 +1390,7 @@ int main(int argc, char** argv) {
     CheckFixedMappingReplacesPartialOverlap();
     CheckFixedMappingOverHoleInsideAllocation();
     CheckGpuAccessFollowsProtection();
+    CheckReservationHintWithoutRoomAbove();
     CheckReservedRangeIsNotCommitted();
     CheckMlock();
     CheckSharedDirectMemoryLifecycle();
@@ -1450,11 +1464,35 @@ int main(int argc, char** argv) {
     *__error_nid_postfix() = 0;
     Require(madvise_nid_postfix(reinterpret_cast<void*>(0x800000000000), 1, 0) == -1 && *__error_nid_postfix() == 22);
     Require(madvise_nid_postfix(reinterpret_cast<void*>(0x7fffffffc000), 0x4000, 4) == 0);
+    char mincoreVec[4] = {};
+    Require(mincore_nid_postfix(memory, page * 3, mincoreVec) == 0);
+    Require(mincoreVec[0] == 1 && mincoreVec[1] == 1 && mincoreVec[2] == 1);
+    mincoreVec[0] = mincoreVec[1] = 0x55;
+    Require(mincore_nid_postfix(memory + 1, page, mincoreVec) == 0 && mincoreVec[0] == 1 && mincoreVec[1] == 0x55);
+    Require(mincore_nid_postfix(memory, 0, nullptr) == 0);
+    Require(mincore_nid_postfix(reinterpret_cast<void*>(0x800000000000), 0, nullptr) == -1 && *__error_nid_postfix() == 12);
+    *__error_nid_postfix() = 0;
+    Require(mincore_nid_postfix(memory, page, nullptr) == -1 && *__error_nid_postfix() == 14);
+    *__error_nid_postfix() = 0;
+    Require(mincore_nid_postfix(reinterpret_cast<void*>(0x800000000000), page, nullptr) == -1 && *__error_nid_postfix() == 12);
+    *__error_nid_postfix() = 0;
+    Require(mincore_nid_postfix(reinterpret_cast<void*>(0x800000000000), page, mincoreVec) == -1 && *__error_nid_postfix() == 12);
+    *__error_nid_postfix() = 0;
+    Require(mincore_nid_postfix(memory, std::numeric_limits<std::size_t>::max(), mincoreVec) == -1 && *__error_nid_postfix() == 12);
+    *__error_nid_postfix() = 0;
+    void* mincoreReserved = nullptr;
+    Require(sceKernelReserveVirtualRange(&mincoreReserved, page, 0, 0) == 0);
+    mincoreVec[0] = 0x55;
+    Require(mincore_nid_postfix(mincoreReserved, page, mincoreVec) == 0 && mincoreVec[0] == 0);
+    Require(Unmap(mincoreReserved, page) == 0);
     Require(munmap_nid_postfix(memory + 1, page) == -1 && *__error_nid_postfix() == 22);
     Require(munmap_nid_postfix(memory, 0) == -1 && *__error_nid_postfix() == 22);
     Require(memory[0] == 42);
     Require(munmap_nid_postfix(memory + page, 1) == 0); // round to one guest page
     Require(memory[0] == 42 && memory[page * 2] == 73);
+    Require(mincore_nid_postfix(memory, page, mincoreVec) == 0 && mincoreVec[0] == 1);
+    Require(mincore_nid_postfix(memory, page * 3, mincoreVec) == -1 && *__error_nid_postfix() == 12);
+    *__error_nid_postfix() = 0;
     Require(munmap_nid_postfix(memory, page) == 0);
     Require(memory[page * 2] == 73);
     Require(munmap_nid_postfix(memory + page * 2, page) == 0);
@@ -1463,6 +1501,7 @@ int main(int argc, char** argv) {
     // Flexible memory cannot be executable.
     reject(page, 5, 0x1002, -1, 0, 13);
     Require(madvise_nid_postfix(memory, page, 4) == 0);
+    Require(mincore_nid_postfix(memory, page, mincoreVec) == -1 && *__error_nid_postfix() == 12);
     *__error_nid_postfix() = 0;
     Require(mprotect_nid_postfix(memory, std::numeric_limits<std::size_t>::max(), 1) == -1 &&
             *__error_nid_postfix() == 22);

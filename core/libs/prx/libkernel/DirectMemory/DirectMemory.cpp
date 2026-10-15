@@ -175,7 +175,11 @@ int DoMprotect(const void* addr, size_t len, int prot) {
         TraceMemory("protect-host-stack", reinterpret_cast<const void*>(inside), static_cast<std::size_t>(insideEnd - inside), prot, 0, 0);
         return 0;
     }
-    const auto result = status == Status::Invalid ? ProtectImage(pointer, bytes, prot) : SceResult(status);
+    // A range in the guest map that GuestMemoryBacking refused (its first page is unmapped) is EINVAL
+    // and changes nothing (upstream 05ffb4516); only a range outside the guest map can be an image.
+    GuestMemoryBacking::Area guest{};
+    const bool inGuestMap = status == Status::Invalid && GuestMemoryBacking::GuestVirtualQuery_nid_postfix(pointer, true, &guest) && guest.address < end;
+    const auto result = inGuestMap ? SCE_KERNEL_ERROR_EINVAL : status == Status::Invalid ? ProtectImage(pointer, bytes, prot) : SceResult(status);
     TraceMemory("protect", pointer, bytes, prot, 0, result);
     return result;
 }

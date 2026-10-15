@@ -103,8 +103,10 @@ void ValidateValueReferences(const IrProgram& program, ShaderStageInputInfo inpu
                         !component->HasImmediate() || component->Type() != IrType::U32 || !mode->HasImmediate() || mode->Type() != IrType::U32) {
                         return Fail("interpolation parameter reference is invalid");
                     }
+                    // Parameters past NUM_INTERP read zero (see the pixel input check above), so only
+                    // the hardware's 32 parameters bound the reference.
                     if (input->ImmediateU32() >= 32u || component->ImmediateU32() >= 4u || mode->ImmediateU32() >= 3u) {
-                        return Fail("interpolation parameter reference is out of range");
+                        return Fail("interpolation parameter reference is out of range (attribute " + std::to_string(input->ImmediateU32()) + " component " + std::to_string(component->ImmediateU32()) + " mode " + std::to_string(mode->ImmediateU32()) + ", " + std::to_string(inputInfo.pixel->inputNum) + " inputs)");
                     }
                     break;
                 }
@@ -153,6 +155,7 @@ void ValidateValueReferences(const IrProgram& program, ShaderStageInputInfo inpu
                             break;
                         case StageInputKind::VertexIndex:
                         case StageInputKind::InstanceIndex:
+                        case StageInputKind::BaseInstance:
                         case StageInputKind::InvocationId:
                         case StageInputKind::PrimitiveId:
                         case StageInputKind::FrontFacing:
@@ -344,6 +347,9 @@ void CollectBuiltinInputs(const IrProgram& program, ShaderInfo& info) {
                     break;
                 case StageInputKind::InstanceIndex:
                     AddInput(info, kind, 0, 1, "gl_InstanceIndex");
+                    break;
+                case StageInputKind::BaseInstance:
+                    AddInput(info, kind, 0, 1, "gl_BaseInstance");
                     break;
                 case StageInputKind::InvocationId:
                     AddInput(info, kind, 0, 1, "gl_InvocationID");

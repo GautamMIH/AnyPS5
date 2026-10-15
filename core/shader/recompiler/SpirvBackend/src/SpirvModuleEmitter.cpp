@@ -87,7 +87,7 @@ std::uint32_t EmitBuiltinU32(SpirvEmitterState& state, StageInputKind kind, std:
         state.module.AddFunction(spv::OpSelect, TypeU32(state), bits, value, ConstantU32(state, 1u), ConstantU32(state, 0u));
         return bits;
     }
-    if (kind == StageInputKind::VertexIndex || kind == StageInputKind::InstanceIndex || kind == StageInputKind::InvocationId || kind == StageInputKind::PrimitiveId || kind == StageInputKind::Layer || kind == StageInputKind::SampleId) {
+    if (kind == StageInputKind::VertexIndex || kind == StageInputKind::InstanceIndex || kind == StageInputKind::BaseInstance || kind == StageInputKind::InvocationId || kind == StageInputKind::PrimitiveId || kind == StageInputKind::Layer || kind == StageInputKind::SampleId) {
         const auto value = state.module.AllocateId();
         const auto bits = state.module.AllocateId();
         state.module.AddFunction(spv::OpLoad, TypeI32(state), value, variable);
@@ -583,9 +583,16 @@ std::uint32_t TessellationPointer(SpirvValueEmitContext& ctx, const IrValue& ins
     if (variable == 0u) {
         throw std::runtime_error("tessellation attribute has no interface variable");
     }
-    const bool input = kind == TessellationAttribute::ControlInput || kind == TessellationAttribute::EvaluationInput || kind == TessellationAttribute::PatchInput;
+    const bool input = kind == TessellationAttribute::ControlInput || kind == TessellationAttribute::EvaluationInput || kind == TessellationAttribute::PatchInput || kind == TessellationAttribute::InstanceInput;
     const auto storage = input ? spv::StorageClassInput : spv::StorageClassOutput;
+    if (kind == TessellationAttribute::InstanceOutput) {
+        return variable;
+    }
     const auto pointer = state.module.AllocateId();
+    if (kind == TessellationAttribute::InstanceInput) {
+        state.module.AddFunction(spv::OpAccessChain, TypePointer(state, storage, TypeU32(state)), pointer, variable, ConstantU32(state, 0u));
+        return pointer;
+    }
     if (kind == TessellationAttribute::Factor) {
         if (!inst.Argument(1)->HasImmediate()) {
             throw std::runtime_error("tessellation factor index must be immediate");
@@ -633,7 +640,7 @@ std::uint32_t TessellationPointer(SpirvValueEmitContext& ctx, const IrValue& ins
 }
 
 void DefineTessellationInterfaces(SpirvEmitterState& state) {
-    std::array<bool, 7> used {};
+    std::array<bool, 9> used {};
     for (const IrBlock* block : state.program.BlockOrder()) {
         for (const IrValue* inst : block->Instructions()) {
             if (inst->Opcode() != IrOpcode::GetTessellationAttribute && inst->Opcode() != IrOpcode::SetTessellationAttribute) {
@@ -654,12 +661,15 @@ void DefineTessellationInterfaces(SpirvEmitterState& state) {
             continue;
         }
         const auto kind = static_cast<TessellationAttribute>(index);
-        const bool input = kind == TessellationAttribute::ControlInput || kind == TessellationAttribute::EvaluationInput || kind == TessellationAttribute::PatchInput;
+        const bool input = kind == TessellationAttribute::ControlInput || kind == TessellationAttribute::EvaluationInput || kind == TessellationAttribute::PatchInput || kind == TessellationAttribute::InstanceInput;
         const bool patch = kind == TessellationAttribute::PatchOutput || kind == TessellationAttribute::PatchInput;
         const auto storage = input ? spv::StorageClassInput : spv::StorageClassOutput;
+        const bool instance = kind == TessellationAttribute::InstanceOutput || kind == TessellationAttribute::InstanceInput;
         std::uint32_t type;
         if (kind == TessellationAttribute::Factor) {
             type = array(TypeF32(state), 4u);
+        } else if (instance) {
+            type = kind == TessellationAttribute::InstanceInput ? array(TypeU32(state), tess.inputControlPoints) : TypeU32(state);
         } else if (patch) {
             type = array(TypeU32Vector(state, 4u), (state.program.Metadata().tessellationPatchStride + 15u) / 16u);
         } else {
@@ -671,8 +681,10 @@ void DefineTessellationInterfaces(SpirvEmitterState& state) {
             }
         }
         auto& variable = state.tessVariables.at(index);
-        variable = DefineInterfaceVariable(state, type, storage, "tess_attributes");
-        if (kind == TessellationAttribute::Factor) {
+        variable = DefineInterfaceVariable(state, type, storage, instance ? "tess_instance" : "tess_attributes");
+        if (instance) {
+            state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationLocation, (state.program.Metadata().tessellationLocalStride + 15u) / 16u);
+        } else if (kind == TessellationAttribute::Factor) {
             state.module.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn, spv::BuiltInTessLevelOuter);
             state.tessInnerVariable = DefineInterfaceVariable(state, array(TypeF32(state), 2u), storage, "tess_inner");
             state.module.AddAnnotation(spv::OpDecorate, state.tessInnerVariable, spv::DecorationBuiltIn, spv::BuiltInTessLevelInner);
@@ -688,7 +700,7 @@ void DefineTessellationInterfaces(SpirvEmitterState& state) {
 
 void DefineTessellationExecutionModes(SpirvEmitterState& state) {
     const auto& tess = state.inputInfo.vertex->tess;
-    if ((tess.domain != 1u && tess.domain != 2u) || (tess.partitioning != 0u && tess.partitioning != 2u) || (tess.outputTopology != 2u && tess.outputTopology != 3u)) {
+    if ((tess.domain != 1u && tess.domain != 2u) || (tess.partitioning != 0u && tess.partitioning != 2u && tess.partitioning != 3u) || (tess.outputTopology != 2u && tess.outputTopology != 3u)) {
         throw std::runtime_error("unsupported tessellation domain, partitioning, or output topology");
     }
     state.module.EmitCapability(spv::CapabilityTessellation);
@@ -696,7 +708,7 @@ void DefineTessellationExecutionModes(SpirvEmitterState& state) {
         state.module.AddExecutionMode(state.mainFunc, spv::ExecutionModeOutputVertices, tess.outputControlPoints);
     } else {
         state.module.AddExecutionMode(state.mainFunc, tess.domain == 2u ? spv::ExecutionModeQuads : spv::ExecutionModeTriangles);
-        state.module.AddExecutionMode(state.mainFunc, tess.partitioning == 0u ? spv::ExecutionModeSpacingEqual : spv::ExecutionModeSpacingFractionalOdd);
+        state.module.AddExecutionMode(state.mainFunc, tess.partitioning == 0u ? spv::ExecutionModeSpacingEqual : tess.partitioning == 3u ? spv::ExecutionModeSpacingFractionalEven : spv::ExecutionModeSpacingFractionalOdd);
         state.module.AddExecutionMode(state.mainFunc, tess.outputTopology == 3u ? spv::ExecutionModeVertexOrderCcw : spv::ExecutionModeVertexOrderCw);
     }
 }
@@ -1349,7 +1361,7 @@ void EmitSetTessellationAttribute(SpirvValueEmitContext& ctx, const IrValue& ins
             const auto raised = state.module.AllocateId();
             state.module.AddFunction(spv::OpExtInst, TypeF32(state), raised, GlslStd450(state), GLSLstd450FMax, floating, lowest);
             const auto clamped = state.module.AllocateId();
-            state.module.AddFunction(spv::OpExtInst, TypeF32(state), clamped, GlslStd450(state), GLSLstd450FMin, raised, TessellationLevelBound(state, TessellationLevel(state, 1u), GLSLstd450FMin, state.inputInfo.vertex->tess.partitioning == 0u ? 64.0f : 63.0f));
+            state.module.AddFunction(spv::OpExtInst, TypeF32(state), clamped, GlslStd450(state), GLSLstd450FMin, raised, TessellationLevelBound(state, TessellationLevel(state, 1u), GLSLstd450FMin, state.inputInfo.vertex->tess.partitioning == 2u ? 63.0f : 64.0f));
             value = state.module.AllocateId();
             state.module.AddFunction(spv::OpSelect, TypeF32(state), value, inside, clamped, outer ? floating : lowest);
         }

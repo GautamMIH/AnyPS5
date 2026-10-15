@@ -119,9 +119,11 @@ struct ShaderDeviceFeatures {
     bool bufferInt64Atomics = false;
     // Native 16-bit float conversion: Float16, RoundingModeRTE and DenormPreserve.
     bool float16Rte = false;
+    // runtimeDescriptorArray: RuntimeDescriptorArray, for image and sampler tables.
+    bool runtimeDescriptorArray = false;
 
     static ShaderDeviceFeatures Of(const Context& context) {
-        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance, context.viewportIndexLayer, context.imageInt64Atomics, context.sampleRateShading, context.imageArrayDynamicIndexing, context.descriptorIndexing, context.float64, context.bufferInt64Atomics, context.float16Rte};
+        return {context.imageGatherExtended, context.storageImageReadWithoutFormat, context.storageImageWriteWithoutFormat, context.geometryShader, context.shaderResourceMinLod, context.clipDistance, context.cullDistance, context.viewportIndexLayer, context.imageInt64Atomics, context.sampleRateShading, context.imageArrayDynamicIndexing, context.descriptorIndexing, context.float64, context.bufferInt64Atomics, context.float16Rte, context.runtimeDescriptorArray};
     }
 };
 

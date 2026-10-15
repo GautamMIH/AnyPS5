@@ -3,6 +3,7 @@
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libkernel/File/include/SharedMemory.hpp"
+#include <algorithm>
 #include <limits>
 #include <cerrno>
 #include <new>
@@ -24,6 +25,7 @@ namespace {
 constexpr int GuestInvalid = 22;
 constexpr int GuestNoMemory = 12;
 constexpr int GuestAccess = 13;
+constexpr int GuestFault = 14;
 constexpr int GuestNotSupported = 45;
 constexpr int GuestBadDescriptor = 9;
 constexpr int GuestShared = 0x1;
@@ -277,6 +279,30 @@ int APS5_VABI madvise_nid_postfix(void* address, std::size_t length, int advice)
     if (advice < 0 || advice > GuestAdviceCore || start > GuestUserAddressEnd || length > GuestUserAddressEnd - start) {
         SetError(GuestInvalid);
         return -1;
+    }
+    return 0;
+}
+
+int APS5_VABI mincore_nid_postfix(const void* address, std::size_t length, char* vec) {
+    const auto failed = [](int error) {
+        SetError(error);
+        return -1;
+    };
+    constexpr std::uintptr_t mask = PS5_PAGE_SIZE - 1;
+    const auto first = reinterpret_cast<std::uintptr_t>(address) & ~mask;
+    if (length > std::numeric_limits<std::uintptr_t>::max() - mask) return failed(GuestNoMemory);
+    const auto size = (length + mask) & ~mask;
+    if (size > std::numeric_limits<std::uintptr_t>::max() - first) return failed(GuestNoMemory);
+    const auto end = first + size;
+    if (size == 0 ? !Mapped(first) : !GuestRangeMapped(first, end)) return failed(GuestNoMemory);
+    if (size == 0) return 0;
+    if (vec == nullptr) return failed(GuestFault);
+    for (auto cursor = first; cursor < end;) {
+        VirtualQueryInfo info{};
+        sceKernelVirtualQuery(reinterpret_cast<const void*>(cursor), 0, &info, sizeof(info));
+        const auto extentEnd = std::min<std::uintptr_t>(info.end, end);
+        std::fill_n(vec + (cursor - first) / PS5_PAGE_SIZE, (extentEnd - cursor) / PS5_PAGE_SIZE, static_cast<char>(info.is_committed != 0 ? 1 : 0));
+        cursor = extentEnd;
     }
     return 0;
 }

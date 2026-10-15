@@ -107,9 +107,13 @@ const ChunkTable& chunkTable() {
     return chunks;
 }
 
+// Without a chunk table or scenario file only chunk 0 is known; any other id cannot be checked, so
+// it throws naming the missing files (upstream a44689c48).
 bool isValidChunk(uint16_t chunkId) {
     const auto& chunks = chunkTable();
-    return chunks.defined ? chunks.ids.contains(chunkId) : chunks.scenario || chunkId == 0;
+    if (chunks.defined) return chunks.ids.contains(chunkId);
+    if (chunks.scenario || chunkId == 0) return true;
+    throw std::runtime_error("scePlayGo: sce_sys/playgo-chunk.dat and sce_sys/playgo-scenario.json are missing, so chunk ID " + std::to_string(chunkId) + " cannot be checked");
 }
 
 int checkChunks(const uint16_t* chunkIds, uint32_t count) {
@@ -282,7 +286,7 @@ int APS5_VABI scePlayGoGetOptionalChunk(int handle, int32_t type, PlayGoOptional
     std::lock_guard lock(stateMutex);
     if (const int error = checkHandle(handle)) return error;
     if (option == nullptr) return PLAYGO_ERROR_BAD_POINTER;
-    option->bitmask = 0;
+    option->bitmask = ~0ull; // every optional chunk (language pack) supported and installed
     return PLAYGO_OK;
 }
 
@@ -291,7 +295,7 @@ int APS5_VABI scePlayGoGetSupportedOptionalChunk(int handle, int32_t type, PlayG
     std::lock_guard lock(stateMutex);
     if (const int error = checkHandle(handle)) return error;
     if (option == nullptr) return PLAYGO_ERROR_BAD_POINTER;
-    option->bitmask = 0;
+    option->bitmask = ~0ull; // every optional chunk (language pack) supported and installed
     return PLAYGO_OK;
 }
 

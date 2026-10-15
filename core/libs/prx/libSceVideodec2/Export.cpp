@@ -516,8 +516,13 @@ void publish(Decoder& decoder, const Videodec2::Picture& picture, FrameBuffer& f
         output.framePitchInBytes = picture.pitch;
     }
     auto* info = static_cast<std::byte*>(frameBuffer.frameBuffer) + output.frameBufferSize;
-    const auto cropRight = picture.pitch - picture.width;
-    const auto cropBottom = picture.alignedHeight - picture.height;
+    // Cropping from the frame (pitch x aligned height, as shadPS4) to the display picture: the
+    // padding past the coded picture plus the stream's own cropping of the coded picture.
+    const auto cropLeft = picture.cropLeft;
+    const auto cropTop = picture.cropTop;
+    const auto cropRight = picture.pitch - picture.width + picture.cropRight;
+    const auto cropBottom = picture.alignedHeight - picture.height + picture.cropBottom;
+    const bool cropping = cropLeft != 0 || cropTop != 0 || cropRight != 0 || cropBottom != 0;
     if (decoder.codec == kCodecAvc) {
         auto& avc = *reinterpret_cast<AvcPictureInfo*>(info);
         avc = {};
@@ -531,8 +536,10 @@ void publish(Decoder& decoder, const Videodec2::Picture& picture, FrameBuffer& f
         avc.idr_pictureflag = picture.keyFrame ? 1 : 0;
         avc.profile_idc = static_cast<std::uint8_t>(picture.profile > 0 ? picture.profile & 0xff : 0);
         avc.level_idc = static_cast<std::uint8_t>(picture.level > 0 ? picture.level : 0);
-        avc.frame_cropping_flag = cropRight != 0 || cropBottom != 0;
+        avc.frame_cropping_flag = cropping;
+        avc.frame_crop_left_offset = cropLeft;
         avc.frame_crop_right_offset = cropRight;
+        avc.frame_crop_top_offset = cropTop;
         avc.frame_crop_bottom_offset = cropBottom;
     } else if (decoder.codec == kCodecHevc) {
         auto& hevc = *reinterpret_cast<HevcPictureInfo*>(info);
@@ -542,8 +549,10 @@ void publish(Decoder& decoder, const Videodec2::Picture& picture, FrameBuffer& f
         hevc.pts_data = picture.pts;
         hevc.dts_data = picture.dts;
         hevc.attached_data = picture.attachedData;
-        hevc.frame_cropping_flag = cropRight != 0 || cropBottom != 0;
+        hevc.frame_cropping_flag = cropping;
+        hevc.frame_crop_left_offset = cropLeft;
         hevc.frame_crop_right_offset = cropRight;
+        hevc.frame_crop_top_offset = cropTop;
         hevc.frame_crop_bottom_offset = cropBottom;
     } else if (decoder.codec == kCodecVp9) {
         auto& vp9 = *reinterpret_cast<Vp9PictureInfo*>(info);

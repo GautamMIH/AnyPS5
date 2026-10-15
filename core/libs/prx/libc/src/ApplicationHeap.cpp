@@ -153,20 +153,19 @@ void registerDefaultHeap() {
     ApplicationHeapRegister_nid_no_patch(api.data());
 }
 
-void ensureInitialized() {
-    bool registered;
-    {
-        std::lock_guard lock(heapMutex);
-        registered = heapApi[0] != nullptr;
-    }
-    if (!registered)
-        ApplicationHeapInitialize_nid_no_patch(ApplicationProcessParameters_nid_no_patch());
+// The heap initializes on first use (upstream cee2006d1), unless initialization already failed or the
+// heap was finalized: those report through the callers' checks.
+void ensureInitialized(std::unique_lock<std::mutex>& lock) {
+    if (heapApi[0] != nullptr || heapFailure || heapFinalized) return;
+    lock.unlock();
+    ApplicationHeapInitialize_nid_no_patch(ApplicationProcessParameters_nid_no_patch());
+    lock.lock();
 }
 
 template<typename TCallback>
 TCallback callback(std::size_t index) {
-    ensureInitialized();
-    std::lock_guard lock(heapMutex);
+    std::unique_lock lock(heapMutex);
+    ensureInitialized(lock);
     if (heapFailure) std::rethrow_exception(heapFailure);
     if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
     if (heapApi[index] == nullptr) throw std::runtime_error("application heap: allocator API is not registered");

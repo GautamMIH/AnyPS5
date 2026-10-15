@@ -88,7 +88,7 @@ public:
 
     void Run() {
         for (const auto& stored : _plan.valueStorage) {
-            const IrValue* value = stored->Resolve();
+            const IrValue* value = stored.Resolve();
             if (_compiled.byPointer.emplace(value, static_cast<std::uint32_t>(_compiled.nodes.size())).second) {
                 _compiled.nodes.emplace_back();
                 _compiled.nodes.back().value = value;

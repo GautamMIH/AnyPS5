@@ -13,6 +13,8 @@ enum class Codec { Avc, Hevc, Vp9 };
 
 // A decoded picture, already stored as NV12 in the caller's buffer: a luma plane of pitch x
 // alignedHeight bytes followed by interleaved chroma of pitch x alignedHeight / 2 bytes.
+// width and height are the coded picture's (FFmpeg does not crop, as the console writes the coded
+// picture: 1920x1088 for 1080p H.264); crop* is the stream's cropping to the display picture.
 struct Picture {
     std::uint32_t width;
     std::uint32_t height;
@@ -25,6 +27,10 @@ struct Picture {
     bool keyFrame = false;
     int profile = 0;
     int level = 0;
+    std::uint32_t cropLeft = 0;
+    std::uint32_t cropRight = 0;
+    std::uint32_t cropTop = 0;
+    std::uint32_t cropBottom = 0;
 };
 
 // Bytes of the NV12 layout for a picture: height aligned to 16 (shadPS4) and the pitch to 256 bytes,

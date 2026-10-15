@@ -3,7 +3,9 @@
 
 #include "prx/libSceAgcDriver/Graphics/include/Context.hpp"
 #include <array>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <unordered_map>
 #include <vector>
@@ -12,7 +14,9 @@ namespace AgcDriver::Graphics {
 
 class DescriptorAllocation {
 public:
-    DescriptorAllocation(const Context& context, std::span<const std::uint32_t> key, std::span<const VkDescriptorSetLayoutBinding> bindings, std::span<const VkDescriptorPoolSize> sizes);
+    // flags: per binding (empty: none); variableCount: the set's count of its variable-count binding
+    // (the image table), part of the key the allocation is cached under.
+    DescriptorAllocation(const Context& context, std::span<const std::uint32_t> key, std::span<const VkDescriptorSetLayoutBinding> bindings, std::span<const VkDescriptorPoolSize> sizes, std::span<const VkDescriptorBindingFlags> flags = {}, std::optional<std::uint32_t> variableCount = std::nullopt);
     ~DescriptorAllocation();
     DescriptorAllocation(const DescriptorAllocation&) = delete;
     DescriptorAllocation& operator=(const DescriptorAllocation&) = delete;
@@ -20,6 +24,20 @@ public:
     VkDescriptorSet Set() const { return set; }
     bool Matches(std::span<const std::uint32_t> candidate) const;
     std::span<const std::uint32_t> Key() const { return key; }
+    // What a table binding's elements of the set hold (written by an earlier user of a cached
+    // allocation): an element still holding the same object's view or sampler in the same layout
+    // need not be written again. The owner is held weakly, so an element whose object was destroyed
+    // (and whose handle may have been reused) never matches.
+    struct WrittenElement {
+        std::weak_ptr<const void> owner;
+        const void* object = nullptr;
+        std::uint64_t handle = 0;
+        VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        [[nodiscard]] bool Holds(const void* candidate, std::uint64_t candidateHandle, VkImageLayout candidateLayout) const {
+            return object == candidate && handle == candidateHandle && layout == candidateLayout && !owner.expired();
+        }
+    };
+    std::vector<WrittenElement>& Written(std::uint32_t binding);
 
 private:
     void release() noexcept;
@@ -30,6 +48,7 @@ private:
     VkDescriptorSetLayout layout = VK_NULL_HANDLE;
     VkDescriptorSet set = VK_NULL_HANDLE;
     VkDescriptorPool pool = VK_NULL_HANDLE;
+    std::vector<std::pair<std::uint32_t, std::vector<WrittenElement>>> written;
 };
 
 // Retired descriptor allocations by layout key, for draws with the same layout. A draw's set returns

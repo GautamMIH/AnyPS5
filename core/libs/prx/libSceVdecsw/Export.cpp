@@ -105,6 +105,13 @@ struct Videodec2OutputInfo {
 };
 
 
+struct Videodec2Crop {
+    std::uint32_t left;
+    std::uint32_t right;
+    std::uint32_t top;
+    std::uint32_t bottom;
+};
+
 struct DecoderMemoryInfo {
     std::uint64_t thisSize;
     std::uint64_t cpuMemorySize;
@@ -221,26 +228,21 @@ std::shared_ptr<Decoder> findDecoder(std::uint64_t handle) {
     return found->second;
 }
 
-// Our Videodec2 reports the frame's 16-aligned height and its pitch, with the cropping that
-// recovers the picture (as shadPS4: right = pitch - width, bottom = aligned height - height), in the
-// picture information it keeps in the console's layout, which Vdecsw shares. Vdecsw reports the
-// picture's own size, with the chroma plane right after the picture's rows; the output and the
-// pixels are corrected here before the picture information is derived.
-AvcPictureInfo pictureInfo(Videodec2OutputInfo& output, std::vector<std::uint8_t>& pixels) {
+// Our Videodec2 writes the coded picture (upstream 6fd0e3343: 1920x1088 for 1080p) and reports it in
+// the frame's 16-aligned size and its pitch, with the cropping from that frame to the display
+// picture (as shadPS4: right includes pitch - width, bottom includes aligned height - coded height)
+// in the picture information it keeps in the console's layout, which Vdecsw shares. Vdecsw reports
+// the coded picture too, with the stream's cropping in SPS units (2 pixels for 4:2:0); the cropping
+// relative to the coded picture is recovered here.
+AvcPictureInfo pictureInfo(const Videodec2OutputInfo& output) {
     AvcPictureInfo source{sizeof(AvcPictureInfo)};
     sceVideodec2GetAvcPictureInfo(&output, &source, nullptr);
     if (!source.isValid) throw std::runtime_error("Vdecsw: decoded picture has no picture info");
+    Videodec2Crop crop{};
     if (source.frameCroppingFlag) {
-        output.frameWidth = output.framePitch - source.frameCropRightOffset;
-        const std::uint64_t alignedHeight = output.frameHeight;
-        output.frameHeight -= source.frameCropBottomOffset;
-        if (output.frameHeight != alignedHeight) {
-            const std::uint64_t pitch = output.framePitch;
-            const std::uint64_t chromaBytes = pitch * ((output.frameHeight + 1u) / 2u);
-            if (pitch * alignedHeight + chromaBytes > pixels.size()) throw std::runtime_error("Vdecsw: decoded picture exceeds its buffer");
-            std::memmove(pixels.data() + pitch * output.frameHeight, pixels.data() + pitch * alignedHeight, chromaBytes);
-            output.frameBufferSize = pitch * output.frameHeight + chromaBytes;
-        }
+        const std::uint32_t padding = output.framePitch - output.frameWidth;
+        if (source.frameCropRightOffset < padding) throw std::runtime_error("Vdecsw: picture cropping is smaller than the frame padding");
+        crop = {source.frameCropLeftOffset, source.frameCropRightOffset - padding, source.frameCropTopOffset, source.frameCropBottomOffset};
     }
     const auto widthInMbs = (output.frameWidth + 15u) / 16u;
     const auto heightInMbs = (output.frameHeight + 15u) / 16u;
@@ -256,9 +258,11 @@ AvcPictureInfo pictureInfo(Videodec2OutputInfo& output, std::vector<std::uint8_t
     info.picWidthInMbsMinus1 = widthInMbs - 1u;
     info.picHeightInMapUnitsMinus1 = heightInMbs - 1u;
     info.frameMbsOnlyFlag = 1;
-    info.frameCroppingFlag = widthInMbs * 16u != output.frameWidth || heightInMbs * 16u != output.frameHeight;
-    info.frameCropRightOffset = (widthInMbs * 16u - output.frameWidth) / 2u;
-    info.frameCropBottomOffset = (heightInMbs * 16u - output.frameHeight) / 2u;
+    info.frameCroppingFlag = crop.left != 0 || crop.right != 0 || crop.top != 0 || crop.bottom != 0;
+    info.frameCropLeftOffset = crop.left / 2u;
+    info.frameCropRightOffset = crop.right / 2u;
+    info.frameCropTopOffset = crop.top / 2u;
+    info.frameCropBottomOffset = crop.bottom / 2u;
     return info;
 }
 
@@ -281,7 +285,7 @@ void advance(std::uint64_t handle, Decoder& decoder) {
             return;
         }
         if (output.isValid) {
-            const auto info = pictureInfo(output, pixels);
+            const auto info = pictureInfo(output);
             decoder.pictures.push_back({std::move(pixels), output, info});
         }
     }

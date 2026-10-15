@@ -307,8 +307,13 @@ PthreadPrivate::PthreadPrivate(const PthreadAttrPrivate* attr) : _finished(false
     const KernelCpumask inherited = parent ? parent->affinity.load(std::memory_order_relaxed) : registry.processAffinity;
     affinity.store(attr && attr->affinityExplicit ? attr->affinity : inherited, std::memory_order_relaxed);
     constexpr int ExplicitSched = 0;
+    const bool explicitSched = attr && attr->_inheritsched == ExplicitSched;
     const int inheritedPolicy = parent ? parent->policy.load(std::memory_order_relaxed) : policy.load(std::memory_order_relaxed);
-    policy.store(attr && attr->_inheritsched == ExplicitSched ? attr->_schedpolicy : inheritedPolicy, std::memory_order_relaxed);
+    policy.store(explicitSched ? attr->_schedpolicy : inheritedPolicy, std::memory_order_relaxed);
+    // An inheriting thread (PTHREAD_INHERIT_SCHED, a null or a default attribute) runs at its creator's
+    // priority; explicit scheduling takes the attribute's (measured on a PS5, upstream 143eb6aae).
+    const int attrPriority = attr ? attr->_schedpriority : kDefaultThreadPriority;
+    priority.store(explicitSched || !parent ? attrPriority : parent->priority.load(std::memory_order_relaxed), std::memory_order_relaxed);
     if (registry.nextThread > static_cast<int>(CPU_CLOCK_ID_MASK))
         throw std::runtime_error("Guest thread CPU clock identifiers are exhausted");
     cpuClockThread = registry.nextThread++;
@@ -718,7 +723,6 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     // Affinity and scheduling policy are set by the PthreadPrivate constructor (explicit attributes
     // or inherited from the creating thread).
     if (attr) {
-        p->priority.store((*attr)->_schedpriority, std::memory_order_relaxed);
         if ((*attr)->_inheritsched != GUEST_INHERIT_SCHED)
             p->scope = (*attr)->scope;
         else if (CurrentGuestState().current)

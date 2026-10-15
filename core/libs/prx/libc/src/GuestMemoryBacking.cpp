@@ -434,6 +434,12 @@ Status GuestVirtualProtect_nid_postfix(const void* pointer, std::size_t bytes, i
     const AreaWrite areaWrite;
     const auto last = address + bytes;
     if (!anyOverlap(address, last)) return Status::Invalid;
+    // A range whose first page is unmapped is refused before anything changes (upstream 05ffb4516);
+    // gaps after it are skipped below.
+    {
+        const auto containing = areas().upper_bound(address);
+        if (containing == areas().begin() || std::prev(containing)->second.end <= address) return Status::Invalid;
+    }
     // A shared view of a host object opened without write access cannot become writable (EACCES).
     if (hostWritable(protection)) {
         for (const auto begin : overlapping(address, last)) {

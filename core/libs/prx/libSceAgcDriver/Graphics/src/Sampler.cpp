@@ -4,18 +4,30 @@
 
 namespace AgcDriver::Graphics {
 
-    Sampler::Sampler(const Context& context, const GuestSamplerResource& descriptor) : device(context.device), destroySampler(context.Function<PFN_vkDestroySampler>("vkDestroySampler")) {
+    // What the constructor checks before creating the sampler, without creating it: image table
+    // entries are checked per entry (a rejected entry faults when the shader selects it).
+    void Sampler::Validate(const Context& context, const GuestSamplerResource& descriptor) {
         Require(!descriptor.anisotropyEnable || context.samplerAnisotropy, "guest sampler descriptor requests anisotropic filtering which the device does not support");
         Require(descriptor.maxAnisotropy <= context.limits.maxSamplerAnisotropy, "guest sampler descriptor requests an anisotropy ratio beyond the device limit");
         Require(descriptor.lodBias >= -context.limits.maxSamplerLodBias && descriptor.lodBias <= context.limits.maxSamplerLodBias, "guest sampler descriptor requests a LOD bias beyond the device limit");
-
         Require(!(descriptor.unnormalizedCoordinates && descriptor.compareEnable), "guest sampler descriptor with unnormalized coordinates enables depth comparison, which is not implemented");
+        if (descriptor.reductionMode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT) {
+            Require(context.samplerFilterMinmax, "guest sampler descriptor uses a min or max reduction which the device does not support");
+            Require(!descriptor.compareEnable, "guest sampler descriptor combines a min or max reduction with depth comparison, which is not implemented");
+        }
+    }
+
+    bool Sampler::ReadsOpaqueBlackBorder(const GuestSamplerResource& descriptor) {
+        const bool clampsToBorder = descriptor.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER || descriptor.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER || descriptor.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+        return clampsToBorder && (descriptor.borderColor == VK_BORDER_COLOR_INT_OPAQUE_BLACK || descriptor.borderColor == VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
+    }
+
+    Sampler::Sampler(const Context& context, const GuestSamplerResource& descriptor) : device(context.device), destroySampler(context.Function<PFN_vkDestroySampler>("vkDestroySampler")) {
+        Validate(context, descriptor);
 
         VkSamplerCreateInfo info{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
         VkSamplerReductionModeCreateInfoEXT reduction{VK_STRUCTURE_TYPE_SAMPLER_REDUCTION_MODE_CREATE_INFO_EXT, nullptr, descriptor.reductionMode};
         if (descriptor.reductionMode != VK_SAMPLER_REDUCTION_MODE_WEIGHTED_AVERAGE_EXT) {
-            Require(context.samplerFilterMinmax, "guest sampler descriptor uses a min or max reduction which the device does not support");
-            Require(!descriptor.compareEnable, "guest sampler descriptor combines a min or max reduction with depth comparison, which is not implemented");
             info.pNext = &reduction;
             requiresFilterMinmax = descriptor.magFilter == VK_FILTER_LINEAR || descriptor.minFilter == VK_FILTER_LINEAR;
         }
@@ -35,8 +47,7 @@ namespace AgcDriver::Graphics {
         info.borderColor = descriptor.borderColor;
         info.unnormalizedCoordinates = descriptor.unnormalizedCoordinates ? VK_TRUE : VK_FALSE;
         forcesDegamma = descriptor.forceDegamma;
-        const bool clampsToBorder = descriptor.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER || descriptor.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER || descriptor.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
-        opaqueBlackBorder = clampsToBorder && (descriptor.borderColor == VK_BORDER_COLOR_INT_OPAQUE_BLACK || descriptor.borderColor == VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);
+        opaqueBlackBorder = ReadsOpaqueBlackBorder(descriptor);
         if (descriptor.nonSeamlessCube) {
             if (context.nonSeamlessCubeMap) info.flags |= VK_SAMPLER_CREATE_NON_SEAMLESS_CUBE_MAP_BIT_EXT;
             else requiresNonSeamlessCube = true;

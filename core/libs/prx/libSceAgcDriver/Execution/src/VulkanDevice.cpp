@@ -210,6 +210,10 @@ struct VulkanDevice::State {
     // typed heaps), non-uniformly with VK_EXT_descriptor_indexing.
     bool imageArrayDynamicIndexing = false;
     bool descriptorIndexing = false;
+    // Image and sampler tables: runtime descriptor arrays, partially bound, variable count.
+    bool runtimeDescriptorArray = false;
+    bool descriptorBindingPartiallyBound = false;
+    bool descriptorBindingVariableDescriptorCount = false;
     // VK_EXT_robustness2 nullDescriptor: a null guest storage image binds no view.
     bool nullDescriptors = false;
     bool float64 = false;
@@ -966,11 +970,20 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : state(std::make_u
         VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &descriptorIndexingFeatures};
         state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
         state->descriptorIndexing = descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing == VK_TRUE && descriptorIndexingFeatures.shaderStorageImageArrayNonUniformIndexing == VK_TRUE;
+        // Image and sampler tables (upstream d9e47d1e): runtime-sized, partially bound arrays, the
+        // image table with a variable descriptor count.
+        state->runtimeDescriptorArray = state->descriptorIndexing && descriptorIndexingFeatures.runtimeDescriptorArray == VK_TRUE;
+        state->descriptorBindingPartiallyBound = state->descriptorIndexing && descriptorIndexingFeatures.descriptorBindingPartiallyBound == VK_TRUE;
+        state->descriptorBindingVariableDescriptorCount = state->descriptorIndexing && descriptorIndexingFeatures.descriptorBindingVariableDescriptorCount == VK_TRUE;
     }
     descriptorIndexingFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES_EXT};
     if (state->descriptorIndexing) {
         descriptorIndexingFeatures.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
         descriptorIndexingFeatures.shaderStorageImageArrayNonUniformIndexing = VK_TRUE;
+        descriptorIndexingFeatures.runtimeDescriptorArray = state->runtimeDescriptorArray ? VK_TRUE : VK_FALSE;
+        descriptorIndexingFeatures.descriptorBindingPartiallyBound = state->descriptorBindingPartiallyBound ? VK_TRUE : VK_FALSE;
+        descriptorIndexingFeatures.descriptorBindingVariableDescriptorCount = state->descriptorBindingVariableDescriptorCount ? VK_TRUE : VK_FALSE;
+        if (state->runtimeDescriptorArray) state->capabilities.push_back(spv::CapabilityRuntimeDescriptorArray);
         deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
         state->capabilities.push_back(spv::CapabilityShaderNonUniform);
         state->capabilities.push_back(spv::CapabilitySampledImageArrayNonUniformIndexing);
@@ -1580,6 +1593,11 @@ Graphics::Context VulkanDevice::graphicsContext() const {
     context.viewportIndexLayer = state->viewportIndexLayer;
     context.imageArrayDynamicIndexing = state->imageArrayDynamicIndexing;
     context.descriptorIndexing = state->descriptorIndexing;
+    context.runtimeDescriptorArray = state->runtimeDescriptorArray;
+    context.partiallyBound = state->descriptorBindingPartiallyBound;
+    context.variableDescriptorCount = state->descriptorBindingVariableDescriptorCount;
+    context.imageTableCapacity = Graphics::ImageTableCapacity(context);
+    context.samplerTableCapacity = Graphics::SamplerTableCapacity(context);
     context.nullDescriptors = state->nullDescriptors;
     context.float64 = state->float64;
     context.externalMemoryHost = state->externalMemoryHost;
