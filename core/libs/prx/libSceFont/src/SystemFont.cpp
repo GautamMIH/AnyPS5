@@ -129,14 +129,31 @@ std::filesystem::path Font::SystemFontDirectory() {
     return directory;
 }
 
+// Without the console's fonts (anyps5-fonts) or ANYPS5_SYSTEM_FONTS, the Noto stand-ins listed in the
+// candidates are looked up in the host's usual font directories. A title whose system font sets all
+// failed to open sized a glyph surface from the failure: Astro's Playroom asserted "Out of Global
+// Heap Memory" for a font surface of 4294967291 bytes ("font surface width is too big").
 std::optional<Font::SystemFontFile> Font::FindSystemFontFile(std::uint32_t fontSetType) {
     const std::vector<SystemFontFile> candidates = SystemFontCandidates(fontSetType);
     if (candidates.empty()) return std::nullopt;
-    const std::filesystem::path directory = SystemFontDirectory();
-    for (const SystemFontFile& candidate : candidates) {
-        std::error_code error;
-        const std::filesystem::path path = directory / candidate.path;
-        if (std::filesystem::is_regular_file(path, error)) return SystemFontFile{path, candidate.subFontIndex};
+    std::vector<std::filesystem::path> directories{SystemFontDirectory()};
+    const char* configured = std::getenv("ANYPS5_SYSTEM_FONTS");
+#ifndef _WIN32
+    if (!configured || configured[0] == '\0') {
+        for (const char* host : {"/usr/share/fonts/google-noto", "/usr/share/fonts/google-noto-cjk", "/usr/share/fonts/google-noto-sans-cjk-fonts", "/usr/share/fonts/noto",
+                 "/usr/share/fonts/noto-cjk", "/usr/share/fonts/truetype/noto", "/usr/share/fonts/opentype/noto"}) {
+            directories.emplace_back(host);
+        }
+    }
+#else
+    (void)configured;
+#endif
+    for (const std::filesystem::path& directory : directories) {
+        for (const SystemFontFile& candidate : candidates) {
+            std::error_code error;
+            const std::filesystem::path path = directory / candidate.path;
+            if (std::filesystem::is_regular_file(path, error)) return SystemFontFile{path, candidate.subFontIndex};
+        }
     }
     return std::nullopt;
 }
