@@ -171,6 +171,11 @@ inline double SonySinh(double x, double y) {
     return y * std::sinh(x);
 }
 
+// Dinkumware's _Cosh(x, y): y * cosh(x), the cosh helper of its complex functions.
+inline double SonyCosh(double x, double y) {
+    return y * std::cosh(x);
+}
+
 inline int SonyFltrounds(void) {
     switch (std::fegetround()) {
     case FE_TONEAREST: return 1;
