@@ -246,6 +246,22 @@ void frontFaceAllBitsTests() {
     Require(!DecodePixelStageInfo(queue.context, mappings).frontFaceAllBits, "FRONT_FACE_ALL_BITS without a front-face input must not change the pixel stage info");
 }
 
+void tessellationPartitioningTests() {
+    // A triangle-domain patch draw (LS, HS, ES as VS, PRIMGEN): fractional-odd and fractional-even
+    // partitioning decode (upstream f8e8aca5); integer partitioning is still refused here.
+    auto queue = makeState();
+    queue.userConfig[0x242] = 9;
+    queue.context[0x2d5] = 0x2000u | 0x1u | 0x4u | (1u << 3u);
+    queue.context[0x2d6] = (3u << 8u) | (3u << 14u);
+    for (const auto partitioning : {2u, 3u}) {
+        queue.context[0x2db] = 1u | (partitioning << 2u) | (2u << 5u);
+        const auto stages = DecodeShaderStages(queue);
+        Require(stages.tessellation.has_value() && stages.tessellation->partitioning == partitioning, "partitioning " + std::to_string(partitioning) + " did not decode");
+    }
+    queue.context[0x2db] = 1u | (2u << 5u);
+    Reject([&] { DecodeShaderStages(queue); }, "fractional-odd or fractional-even");
+}
+
 void standard64KBTests() {
     // SW_64KB_S colour targets (upstream 6aa8e58d): a 64 KiB block of distinct element offsets.
     for (const std::uint32_t elementBytes : {1u, 2u, 4u, 8u, 16u}) {
@@ -279,6 +295,7 @@ int main() {
         rasterTests();
         inertPixelStageTests();
         frontFaceAllBitsTests();
+        tessellationPartitioningTests();
         standard64KBTests();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "state decode test failed: %s\n", error.what());

@@ -507,7 +507,9 @@ ShaderStages DecodeShaderStages(const QueueState& queue) {
         const auto parameters = read(queue.context, 0x2db);
         ShaderRecompiler::TessellationConfiguration tess{(config >> 8u) & 0x3fu, (config >> 14u) & 0x3fu, parameters & 3u, (parameters >> 2u) & 3u, (parameters >> 5u) & 3u};
         validate(tess.inputControlPoints != 0 && tess.inputControlPoints <= 32 && tess.outputControlPoints != 0 && tess.outputControlPoints <= 32, "invalid tessellation control-point counts");
-        validate(tess.domain == 1 && tess.partitioning == 2 && tess.outputTopology == 2, "only triangular, fractional-odd, clockwise tessellation is supported by the reference path");
+        // PARTITIONING 3 is fractional-even (radeonsi's PART_FRAC_EVEN; upstream f8e8aca5): the
+        // recompiler emits SpacingFractionalEven and bounds its factors at 64.
+        validate(tess.domain == 1 && (tess.partitioning == 2 || tess.partitioning == 3) && tess.outputTopology == 2, "only triangular, fractional-odd or fractional-even, clockwise tessellation is supported by the reference path");
         result.tessellation = tess;
     } else {
         validate((value & ~0x0047ec30u) == 0, "unsupported geometry routing, fast launch or wave-ID state");
