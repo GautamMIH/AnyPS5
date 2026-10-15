@@ -476,6 +476,17 @@ Issues that needed research, with a short answer. Check here before researching;
   - Not applicable (upstream-only code): MSAA targets and FMASK/DCC, layered depth and DepthSurface plane copies, per-slice HTILE, StorageTexture write-back, stencil replay, Recorder/DrawCache/snapshot caches, call-table linking, background registration preparation, compute pipelines outside the GPU lock, stream-copy HLE, vertex layout cache, trace buffers, HDR10 present.
   - Instanced hull patch numbering (30e85a3a2) needs GE_CNTL's PRIM_GRP_SIZE in the request, which our driver does not decode, so the recompiler refuses relative patch indices used as data either way.
 
+## Keyboard on native Wayland (2026-10-14, Zorro)
+
+- **What happened:** after the merges, keyboard play in a visible window broke. Only W and F seemed to work.
+- **The recording** (`ANYPS5_RECORD_INPUT`) showed:
+  - Enter, Esc and the arrows held normally.
+  - Every stick key, and E, published a press followed by a release within the same millisecond.
+- **Cause:** upstream's 040873f9d asks SDL for "wayland,x11" on Linux. Under native Wayland, SDL 2 delivered letter keys as an immediate key-down/key-up pair.
+- **Check:** with `SDL_VIDEODRIVER=x11`, WASD worked.
+- **Fix:** Linux keeps SDL's default driver (X11, through XWayland). `SDL_VIDEODRIVER=wayland` still opts in.
+- Hidden test runs never showed this, because they always used the default driver.
+
 ## Link-time and profile-guided optimization (2026-10-12)
 
 - **PGO** (`tools/pgo.sh generate`, then a 150 s Zorro gameplay run relinked with `build-pgo`'s relinker and a warm cache, then `tools/pgo.sh use`). Zorro A/B, 2 rounds of 90 s:

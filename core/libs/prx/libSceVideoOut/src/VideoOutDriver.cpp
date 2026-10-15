@@ -274,11 +274,11 @@ VideoOutDriver::VideoOutDriver() {
 #ifdef _WIN32
     SDL_SetHintWithPriority(SDL_HINT_DIRECTINPUT_ENABLED, "0", SDL_HINT_DEFAULT);
 #endif
-#ifdef __linux__
-    // ANYPS5_BACKGROUND_WINDOW runs keep SDL's default driver: their hidden-window presentation
-    // pacing was measured there (a never-mapped Wayland surface may not present at all).
-    if (std::getenv("ANYPS5_BACKGROUND_WINDOW") == nullptr) SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
-#endif
+    // Linux keeps SDL's default video driver (X11, through XWayland under a Wayland session) instead
+    // of upstream's "wayland,x11" preference (040873f9d): under native Wayland, SDL 2 delivered most
+    // letter keys as a key-down followed at once by a key-up (recorded in Zorro: WASD and the other
+    // stick keys released within the same millisecond), so keyboard play broke. SDL_VIDEODRIVER=wayland
+    // still selects Wayland.
     if (SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) < 0) {
         throw std::runtime_error(std::string("SDL_InitSubSystem(VIDEO | GAMECONTROLLER) failed: ") + SDL_GetError());
     }
